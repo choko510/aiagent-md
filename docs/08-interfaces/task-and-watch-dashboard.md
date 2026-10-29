@@ -82,9 +82,9 @@ type RunRow = {
   // leaseEpoch/leaseOwner are never client authority or editable UI.
 };
 type WatchRow = {
-  id:string; recordVersion:string; state:string;
+  id:string; recordVersion:string; definitionRevision:string; state:string;
   conditionSummary:string; scheduleTimezone:string;
-  nextCheckAt:string|null; lastObservedAt:string|null;
+  nextCheckAt:string|null; lastCheckedAt:string|null; lastValidObservedAt:string|null;
   lastAcquisition:"ok"|"error"|"not_run"|"unknown";
   notificationDestinationSummary:string; lastDelivery:"sent"|"queued"|"failed"|"unknown"|null;
 };
@@ -233,3 +233,5 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 | DASH-010 | DASH-T10 | SC-04, SC-06, SC-08 |
 
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
+
+**CHAT_07 PR #16 harmonization:** Dashboard WatchDetail shows recordVersion (CAS) and definitionRevision (semantically changed definition), nextCheckAt mapped from nextDueUtc, lastCheckedAt for an attempted run, and lastValidObservedAt for a verified observation. Watch terminal control is `retire`; `cancel` belongs to Task only. DASH-T03/T08 now also distinguish failure checking from verified last price, and concurrent definition change from a simple status update.
