@@ -265,8 +265,11 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
       if (decision === "WAIT") return;
       if (decision === "STALE") return suspendAs("REPLAN_REQUIRED");
     } else if (s.phase === "TOOL_EXECUTE" || s.phase === "WAITING_RECONCILIATION") {
-      const settled = await reconcileAllUnfinishedCallsWithoutBlindRetry(s, identity);
-      if (!settled) return suspendAs("WAITING_RECONCILIATION");
+      // Reconstruct from ledger. COMPLETED/FAILED: reuse receipt; NOT_STARTED:
+      // dispatch later; IN_FLIGHT/UNKNOWN effect: reconcile, NEVER blind retry.
+      const calls = await classifyCallsFromGatewayLedger(s, identity);
+      if (calls.hasUnknownEffect && !await reconcileUnknownEffectsWithoutReexecution(calls))
+        return suspendAs("WAITING_RECONCILIATION");
     } else if (!s.hasCommittedModelResponse) {
       await ports.budget.reserveBeforeModel(identity);
       const request = await buildBoundedTrustedContext(s, identity);
@@ -298,9 +301,10 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
     }
     const prepared = [];
     for (const p of fresh.proposals) {
+      if (await gatewayHasTerminalReceipt(p.logicalCallId)) continue;
       await ports.runManager.assertCurrent(identity);
       await ports.budget.assertToolAllowance(identity);
-      prepared.push(await ports.tools.prepare(identity, p));
+      prepared.push(await ports.tools.prepare(identity, p)); // idempotent intent
     }
     if (prepared.some(p => p.needsHumanApproval)) {
       await ports.runManager.suspend(identity, "WAITING_APPROVAL");
@@ -310,7 +314,7 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
       await persistSafeToolErrorsAndAdvance(identity, prepared);
       continue;
     }
-    for (const group of planBoundedExecutions(prepared)) { // reads parallel, effects sequential
+    for (const group of planBoundedExecutions(prepared)) { // NOT_STARTED only; reads parallel, effects sequential
       await ports.runManager.assertCurrent(identity);
       if (await isCancelledOrRevisionChanged(identity)) return suspendAs("INTERRUPTED");
       const outcomes = await executeWithGatewayFenceAndTimeout(group, ports.tools, identity);
@@ -327,7 +331,7 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
 }
 ```
 
-**擬似コードの依存上の留保:** `suspendAs`、`commitOutcomeWithCAS`、`executeWithGatewayFenceAndTimeout`、`persistVerifierFeedbackAndAdvanceStep`、`deadlineOrFiniteLimitReached` は本書のアルゴリズム上の処理単位を示すもので、存在するSDK APIを意味しない。実コードではCHAT_01のState Machine/CHAT_03のLedger/CHAT_10のtransaction APIに実装・マッピングする。モデル料金reserveとsettle間でWorkerが死ぬ場合、reservedを即時返金せずUsage照会・保守的推定・明示的会計状態とする。
+**擬似コードの依存上の留保:** `suspendAs`、`commitOutcomeWithCAS`、`executeWithGatewayFenceAndTimeout`、`persistVerifierFeedbackAndAdvanceStep`、`deadlineOrFiniteLimitReached` は本書のアルゴリズム上の処理単位を示すもので、存在するSDK APIを意味しない。実コードではCHAT_01のState Machine/CHAT_03のLedger/CHAT_10のtransaction APIに実装・マッピングする。モデル料金reserveとsettle間でWorkerが死ぬ場合、reservedを即時返金せずUsage照会・保守的推定・明示的会計状態とする。T2で保存したUsageReceiptは一意なattemptIdで会計に反映し、再開でsettleを再実行しても二重計上しない。NOT_STARTEDはGatewayが初回dispatchできるが、UNKNOWN_EFFECTは結果照会のみ許可する。
 
 ### Tool groupの決定
 - `read`: 副作用なし・同一Sessionの書換競合なし・Gatewayがreadonlyと判定したToolだけ並列（初期最大4）。
@@ -382,7 +386,7 @@ CHAT_10へ要求するlogical transaction boundaries:
 - **T1 run claim**: run lease/generation/fenceの原子的claim; 同一runに複数active ownerを許さない。
 - **T2 model step commit**: full raw response artifact参照、normalized proposal一覧、step cursor、token/費用receipt、durable event/outboxを一貫して保存。CAS/fence failure時の破棄。
 - **T3 gateway prepare**: logicalCallId一意のintent、args hash、分類、承認参照、policy versionをcommitしてからexecutorを起動。
-- **T4 tool completion**: ledger terminal outcome、artifact/evidence refs、outboxの原子commit。外部APIそのものとは原子transactionにならない。
+- **T4 tool completion**: ledger terminal outcome、artifact/evidence refs、outboxの原子commit。外部APIそのものとは原子transactionにならない。Executor発火直前にはGatewayが現行fenceとcancel/control版を検査し、dispatch claimの線形化ポイントを定義する。
 - **T5 next step/terminal**: Tool feedbackとcursor、revised constraintsの整合性を確保。terminalと成果物/eventを一緒に保存。
 - **T6 outbox**: ack/replay可能なイベントを配信。SSE/Telegram配信成功とDB commitを混同しない。
 
@@ -492,7 +496,7 @@ SHOULD LOOP-017 → TEST-006/029、LOOP-018 → TEST-020/029。LATER/EXPERIMENT�
 
 調査日はいずれも **2026-10-30**。原則コミットSHA固定URL。 `Code verified` = 参照OSSのコード/テストを実際に読んだこと、**当Harness実装やテスト実行の意味ではない**。
 
-- [S1] **Code verified** LangGraph `PregelLoop.tick/put_writes/_put_checkpoint`, `PregelRunner.tick`, main commit `ffc3336367e8139668d11e5f0b0e6def57e7c762`: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py#L461-L665 / https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_runner.py#L132-L220
+- [S1] **Code verified** LangGraph `PregelLoop.tick/put_writes/_put_checkpoint`, `PregelRunner.tick`, main commit `ffc3336367e8139668d11e5f0b0e6def57e7c762`: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py#L461-L665 / https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py#L1237-L1300 / https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_runner.py#L132-L220
 - [S2] **Code verified (test definition, not run)** LangGraph `test_interrupt_multiple`, `test_interrupt_loop`: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/tests/test_pregel.py#L4904-L4986
 - [S3] **Code verified** PydanticAI `process_tool_calls` classification, `_ToolCallProcessor`: https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/_tool_execution.py#L321-L452
 - [S4] **Code verified (test definition, not run)** PydanticAI `test_tool_cancels_run_and_history_is_resumable`, `test_cancel_during_only_tool_call_is_resumable`: https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/tests/test_run_cancellation.py#L499-L715 ; official deferred tools docs **Docs verified** https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/
