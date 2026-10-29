@@ -51,7 +51,7 @@ Task.conversationId null可（Watch/Event）。Run.leaseEpochはsafe integer/DB 
 ~~~ts
 type MicroUsd = string; // unsigned decimal integer, no JS float math
 interface BudgetEnvelope {
- taskId:string;runId:string;goalRevision:number;
+ taskId:string;runId:string;goalRevision:string;
  costLimitMicroUsd:MicroUsd; tokensMax:number;
  stepsMax:number;toolsMax:number;wallDeadlineUtc:string;
  readConcurrencyMax:number;effectConcurrencyMax:1;
@@ -176,3 +176,7 @@ Contract ownersの合意と実試験を経るまではDraft。実コード未実
 - [S4] Test verified https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/tests/test_max_turns.py
 - [S5] Test verified https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/durable/__tests__/durable-agent-step-budget-recovery.test.ts
 Evidence: Code verified = precise source function inspection; Test definition verified = tests read not run. License MIT for OpenAI Agents Python/PydanticAI; Mastra @mastra/core Apache-2.0 declared. External issues cited only as reports if any.
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
