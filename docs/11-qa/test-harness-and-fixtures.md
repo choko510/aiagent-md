@@ -1,6 +1,6 @@
 # Test Harness and Fixtures — Detailed Implementation Specification
 
-> Owner: CHAT_11 | Canonical path: docs/11-qa/test-harness-and-fixtures.md | Status: **Draft / provisional (not Implemented or Verified)** | Revision: 0.1 | Research date: 2026-10-30 JST | Base main: 92b5827ed16a7d4ae61e8146ce382795398293cb
+> Owner: CHAT_11 | Canonical path: docs/11-qa/test-harness-and-fixtures.md | Status: **Draft / provisional (not Implemented or Verified)** | Revision: 0.2 | Research date: 2026-10-30 JST | Base main: 92b5827ed16a7d4ae61e8146ce382795398293cb
 >
 > Primary dependencies: project-brief.md, architecture-rules.md, acceptance-scenarios.md, CHAT_01 shared contracts, CHAT_02 runtime/checkpoint, CHAT_03 Tool Gateway, CHAT_04 browser, CHAT_05 provider adapters, CHAT_07 watch, CHAT_09 security, CHAT_10 DB/jobs. **本書は試験用Harness/Fixtureの正本のみを定義し、本番Domain型・イベント・DDL・認可ルールを再定義しない。**
 
@@ -418,6 +418,63 @@ Fixture IDの具体例：ec-exact-sku-coupon-01、watch-threshold-crash-01、x-p
 - Semantic oracleの採点重み・金額rounding・freshness threshold。owner判断後に変更する。
 
 **レビュー時の反証ポイント**：(a) HAR miss以外からlive egressする経路はあるか、(b) tenant/queue/Browser isolationはプロセス境界まで成立するか、(c) synthetic fixtureだけで本番の意味論欠陥を見逃す部分は何か、(d) cancellation直後のTool実行を誤検出しないか、(e) trace redactionの漏洩をscanner自身が見逃さないか。P0のQA-PROP-07が合意・試験されるまでDraftを維持。
+
+
+## 16A. Round 2: SC-10〜16と共有契約ドリフトの検証 (Revision 0.2)
+
+> 初稿に対する追加仕様。下表は試験**設計**であり未実装・未実行。公開Draft PR #1/#2/#8/#9/#10/#11を2026-10-30に再読して、所有者ごとの矛盾をQAの検出条件として固定。契約の正本は変更しない。
+
+### 新MUST要件と全件追跡（QA内の独立要件）
+
+| REQ-ID | Priority | 要件・測定可能な条件 | TEST-ID | SC-ID |
+|---|---|---|---|---|
+| QA-FIX-021 | MUST | Fixture manifestがSC-10〜16を許容し、version/hash/schemaを検証 | QA-T-029〜036,044 | SC-10〜16 |
+| QA-FIX-022 | MUST | Entity/Opportunity false mergeの負例と不確定観測を作る | QA-T-029 | SC-10 |
+| QA-FIX-023 | MUST | X特定actor/再配信/停止/権限制限を模擬 | QA-T-030 | SC-11 |
+| QA-FIX-024 | MUST | HTML差分の意味上の変化・ノイズの区別 | QA-T-031 | SC-12 |
+| QA-FIX-025 | MUST | Browser recipeのsession/DOM/rights変更でfail closed | QA-T-032 | SC-13 |
+| QA-FIX-026 | MUST | 複数ソースの相関・欠測・鮮度を模擬 | QA-T-033 | SC-14 |
+| QA-FIX-027 | MUST | PNG/PDF/XLSX合成fixtureにpage/cell provenanceと危険入力を用意 | QA-T-034 | SC-15 |
+| QA-FIX-028 | MUST | User-scoped feedback/Undo/通知quiet hoursを検証 | QA-T-035,036 | SC-16 |
+| QA-FIX-029 | MUST | UUID/FK/Version/Fence/Tenant/Outboxの現行Owner間drift検出 | QA-T-037〜043 | SC-02/06/07/08/11 |
+
+### 個別テストの Setup → Action → Expected（すべてoffline・未実行）
+
+| TEST-ID | SC | Fixture・操作・期待結果 | Provisional owner |
+|---|---|---|---|
+| QA-T-029 | SC-10/01 | 20商品、同一JANかつ容量/色一致と不一致を混在、重複既知候補→誤統合0、不確実な期待利益を確定しない | CHAT_12 |
+| QA-T-030 | SC-11/03/07 | X同一postを5回配送、actor安定ID/handle変更、429、購読停止→Task起動最大1、停止後0、命令注入無効 | CHAT_13/05/07 |
+| QA-T-031 | SC-12/02 | 2HTML snapshotで広告ID/時刻のみ変動、次に価格のみ変動→ノイズ抑止、価格差分1件、失敗は不変と誤認しない | CHAT_13 |
+| QA-T-032 | SC-13/06/08 | learned recipe再生前にDOM/Origin/tenant/session/policyEpoch変更→旧操作実行0、fresh planに戻る | CHAT_14/04 |
+| QA-T-033 | SC-14/03 | 転載SNS2件、独立価格データ、欠測/古い情報→相関票の二重計上0、confidenceとsource timestamp保持 | CHAT_12 |
+| QA-T-034 | SC-15/05/08 | 合成PNG/PDF画像表/XLSX価格セル/式注入→page/cell provenance、読取不能unknown、マクロ実行0 | CHAT_15 |
+| QA-T-035 | SC-16/08 | ユーザーAの除外希望とUndo、並行ユーザーB→Evidence不変、Aのみに反映、Undo可能 | CHAT_14/06 |
+| QA-T-036 | SC-16/02 | 高優先通知とquiet hours・再送→設定優先度順守、outbox dedup、未確認送達を確認済にしない | CHAT_13/07 |
+| QA-T-037 | SC-07/08 | CHAT_10 DEFAULT gen_random_uuid生成IDをCHAT_01 UUIDv7 validatorに入力→型不一致を契約エラーとして検出 | CHAT_01/10 |
+| QA-T-038 | SC-02/11 | conversationなしWatch/Event Taskを作成/再取得→CHAT_01のnullable、CHAT_10 DB NOT NULL、CHAT_08必須DTO差異を検出 | CHAT_01/08/10 |
+| QA-T-039 | SC-07/08 | recordVersion初期値1とDB revision初期値0、並行CAS2件→同一概念への誤写像を拒否し成功更新1件 | CHAT_01/08/10 |
+| QA-T-040 | SC-07 | Run leaseEpoch A→B更新後に旧Aが結果を書込→旧fenceによるDB変更0、int64/JS safe integer境界を検査 | CHAT_01/02/10 |
+| QA-T-041 | SC-07/04 | Steer goalRevision+1、旧Approval/Tool attemptとactiveRunId入替競合→旧世代副作用開始0 | CHAT_01/02/03 |
+| QA-T-042 | SC-06/08 | tenantId/ownerUserIdとworkspace_id mappingを故意にずらしてSSE/Task/Browser取得→越境漏出0 | CHAT_01/09/10/08 |
+| QA-T-043 | SC-07/11 | Tool intent/outbox/event commit直前/直後kill、ACK喪失→UNKNOWNのblind retry0、重複不可逆操作0 | CHAT_01/03/07/10 |
+| QA-T-044 | SC-10〜16 | 旧Schema・未知SC・署名/Hash違反のmanifestを投入→開始前fail、無審査自動rewrite禁止 | CHAT_11 |
+
+### 相互契約の実見結果と提案（いずれも未Locked）
+
+| Conflict | 現在の相違 | 提案 Owner / 契約試験 |
+|---|---|---|
+| QA-CON-01 | [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2): 公開ID UUIDv7。一方[CHAT_10 PR #10](https://github.com/choko510/aiagent-md/pull/10): DEFAULT gen_random_uuid() | CHAT_01/10: DB生成の有効性またはServerでの一元生成を選択。QA-T-037 |
+| QA-CON-02 | CHAT_01 Task.conversationId nullable、CHAT_10 tasks.conversation_id NOT NULL、[CHAT_08 PR #8](https://github.com/choko510/aiagent-md/pull/8) TaskView required | CHAT_01/08/10: WatchやEvent起点のconversationなしTaskを許容するmapping/DDL。QA-T-038 |
+| QA-CON-03 | CHAT_01 recordVersion starts 1; CHAT_10 revision default 0 | CHAT_01/10/08: 同一概念/別概念の定義、CASとIf-Matchの契約。QA-T-039 |
+| QA-CON-04 | CHAT_01 Run.leaseEpoch / Task.goalRevision / activeRunId、[CHAT_02 PR #1](https://github.com/choko510/aiagent-md/pull/1) fence/token使用、DB保存先・integer境界未統合 | CHAT_01/02/10: fence比較の単一TXとBigInt/number安全性。QA-T-040/041 |
+| QA-CON-05 | CHAT_01 tenantId+ownerUserId、[CHAT_09 PR #9](https://github.com/choko510/aiagent-md/pull/9)認可、CHAT_10 workspace_id | CHAT_01/09/10/08: Principal→Tenant→Workspace一貫mapping。QA-T-042 |
+| QA-CON-06 | [CHAT_07 PR #11](https://github.com/choko510/aiagent-md/pull/11) schedule revision・occurrence dedup、DB queue/outbox連携未統合 | CHAT_03/07/10: intent/event/ack lostのTX境界と不確定副作用。QA-T-043 |
+
+**契約判定**：提案中の相違をFixtureが黙って変換してPASSにしてはならない。QA-T-037〜043は、各Ownerが合意したVersion/DDL/APIを読み込み、意図した互換アダプタ以外の変換を全件failにする。[PROVISIONAL: CHAT_01/02/03/08/09/10]。既存のQA-owned FixtureManifestV1.scenarios unionはSC-01〜09のみの初稿であり、実装時に追加SCを許可するためmanifest schemaを適切に版更新すること。未知versionは拒否し、従来fixtureはmigration policyに従い読み込む。今回の追補は既存型を黙って変更する承認ではない。
+
+**新しい境界**：XイベントはCHAT_13、Opportunity/Entity/TrendはCHAT_12、Browser learned replay/FeedbackはCHAT_14、MultimodalはCHAT_15が意味論のOwner。CHAT_11はその正本の契約をimportしてOracleを作る。Event text/HTML/PDF/XLSXは非信頼であり、購買/予約/投稿は承認なし実行0。Live API/送信テストは自動起動せず別承認lane。
+
+**未決**：SC-10〜16の新Owner型/正式Data migration、UUIDとDB default、nullable Task、fencing欄、Tenant/Workspace mapping、アウトボックス原子性、Round2拡張のManifest Schema version。P0のSecurity egress/secret境界が未VerifiedならPRはDraftに維持。実施済みは資料・PR本文/実コードの閲覧のみで、当Harnessの動作テストではない。
 
 ## 17. Sources（一次資料、確認日2026-10-30 JST）
 
