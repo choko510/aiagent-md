@@ -84,7 +84,7 @@ type ObservationResult = {
   watchId:string; definitionRevision:string;
   origin:"scheduled"|"external-event"|"manual";
   sourceRef:string; evidenceRef:string|null; providerEventRef?:string;
-  entityRef:string; entityMappingRevision:number|null;
+  entityRef:string; entityMappingRevision:string|null;
   scheduledForUtc:string|null;
   fetchedAtUtc:string; observedAtUtc:string|null; sourceAtUtc:string|null;
   outcome:"valid"|"not_modified"|"unavailable"|"extraction_failed"|"access_denied"|"unknown";
@@ -305,3 +305,8 @@ OBS-PR1: exact money/time/unit validators + baseline pure evaluator + fixture。
 - **[S11] PR report**, changedetection.io #3824: タグごとのrestock settingsをAPIから設定する変更提案。正式な型や現在の動作保証ではなく設定世代とgroupingの考慮事項。https://github.com/dgtlmoon/changedetection.io/pull/3824
 
 **追加要件 OBS-020 MUST**: 正規化された構造化値が等しいのに、HTML広告/日時/DOM差分だけの理由でprice threshold triggerを発火しない。**OBS-T20 → SC-02/12**: fixture A/BでHTML timestamp/rotating adだけ変更しprice=45,000を維持→meaningful price change=false、episode中の再通知0。なお「毎日同条件なら知らせる」といったユーザー明示ルールは07-04/13のpolicy別評価。テスト未実施。
+
+
+## 18. Round 4 — Versioned Change baseline and exact identity scope
+A Watch observation enters a comparable baseline series only when all identity dimensions match: `(tenant,watchId,definitionRevision,scopeDigest,entityId,mappingRevision,fieldPath,locale,cookieScope,sourceProfileRevision)`. For price comparison, currency, tax conditions, purchase quantity, member status and offer validity also match; otherwise result `UNKNOWN` or `NEEDS_REVIEW` rather than a triggered price change. First complete observation seeds a baseline without notifying. `304` is unchanged only when original ETag scope, source, extraction version and cached original Artifact remain valid; failed fetch/timeout/forbidden/unknown must never advance baseline or be coerced to 0.
+Database proposal CHAT_10 `change_baselines` with monotonic rowVersion/acceptedEvidenceId and immutable previous snapshot. Transaction: lock Watch definitionRevision and baseline, validate source/owner/Entity mapping fresh, CAS update accepted baseline, commit corresponding DomainEvent/Outbox only for meaningful accepted transition, release. Out-of-order stale observation does not override newest baseline. Tests OBS-R4-T01 rotating ad/noise unchanged; T02 stale cache/HTTP304 mismatched scope→unknown; T03 concurrent observations version CAS winner only; T04 entity mapping split invalidates baseline; T05 denied provider response does not notify. SC-02,12,14. Draft pending cross-owner review.
