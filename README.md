@@ -57,11 +57,11 @@ mainへ直接pushしたり、他担当のMDを変更したり、無断マージ�
 ## References
 前バージョンの大きな統合マスターv0.2は会話で作成した歴史的な設計案。**このrepoへ未転記の内容を、AIが読んだことにしてはいけない。** 現時点では本repoのProject Brief・Architecture Rules・Individual Specsを正式な作業起点とし、必要な情報は一次資料で再検証する。
 
-## Optional audit chats (separate from the 12 authors)
-- [COORDINATOR — 12チャット横断の契約照合・PR統合監査](prompts/COORDINATOR.md)
+## Optional audit chats (separate from the 16 authors)
+- [COORDINATOR — 16チャット横断の契約照合・PR統合監査](prompts/COORDINATOR.md)
 - [INDEPENDENT_REVIEWER — 1 PRずつの詳細監査](prompts/INDEPENDENT_REVIEWER.md)
 
-**推奨：16執筆チャット + 1統合コーディネータ**。74件のMDが全て揃っても、横断レビューで契約を整合させるまでは仕様確定としない。
+**推奨：16執筆チャット + 1統合コーディネータ**。85件のMDが全て揃っても、横断レビューで契約を整合させるまでは仕様確定としない。
 
 ## Approved expansion: Autonomous Discovery & Events (2026-10-30)
 The user additionally selected 11 functions, including "start an agent when a specified X account posts". Read **[feature-expansion-2026-10.md](docs/00-foundation/feature-expansion-2026-10.md)** before new functionality planning. Four newly assigned chats are CHAT_12–15 (5+3+2+1 specs). All specs are investigation/draft until reviewed; no agent code exists here. The existing authors' open PRs are not overwritten.
@@ -73,3 +73,8 @@ The user additionally selected 11 functions, including "start an agent when a sp
 - [CHAT_00 Foundation専用開始指示](prompts/ROUND2_CHAT_00_FOUNDATION.md)
 
 **必ずmainだけでなく各担当ブランチ/Draft PRを確認**。11初回PRの提出は全85仕様完成ではない。各カテゴリの全MDを1〜2件ずつDraft PRで継続し、他Ownerの契約は提案で協調する。マージ・Locked化はreview gatesを通過してから。
+
+## Round 2: CHAT_12–15 expansion authors
+- [拡張機能の全件完成・ソース調査・横断契約ルール](prompts/ROUND2_EXPANSION_AUTHOR.md)
+- [CHAT_12](prompts/CHAT_12.md) / [CHAT_13](prompts/CHAT_13.md) / [CHAT_14](prompts/CHAT_14.md) / [CHAT_15](prompts/CHAT_15.md) の担当別プロンプトを更新済み。
+- 最初の1件だけで停止せず、**5 + 3 + 2 + 1 = 11件をDraft PRで提出**する。既存のCOMMON/ROUND2_AUTHOR_CONTINUE/Contract reconciliationも必読。
