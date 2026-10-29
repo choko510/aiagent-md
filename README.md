@@ -1,37 +1,54 @@
-# Universal Personal Agent Harness — Specification Workspace
+# Universal Personal Agent Harness — Parallel Specification Program
 
-このリポジトリは **セルフホスト可能な完全汎用パーソナルAIエージェント** の実装仕様を、独立した複数のAIチャットで並行調査・執筆・相互レビューするための仕様書専用ワークスペースです。**実装コードのリポジトリではありません。**
+**セルフホストの汎用パーソナルAIエージェント**を、既存ハーネスを横断研究しながら実装可能な詳細仕様へ分解して設計するためのGitHubワークスペースです。スクレイピング専用・Amazon専用・コーディング専用ではありません。自然言語によるWeb調査、商品比較、SNS調査、ホテル調査、定期監視、通知を、同じAgent Runtimeとツール基盤で扱います。
 
-## 何を作るか
+> **重要：74個の詳細仕様MDはこれから作るものです。** 本repoにAgent本体のコードはありません。各担当AIはDraft PRに仕様を提出し、人間が横断レビューして確定します。
 
-自然言語で依頼されたWeb調査、商品比較、価格監視・通知、Xの情報整理、ホテル検索、一般的な情報収集を、自律的な検索・API・ブラウザ操作・分析・証拠検証を組み合わせて行うAgent Harnessを設計する。Ubuntu / Docker、ホストOSへの任意操作権限なし、購入・予約・投稿・送金は明示的承認制。Amazonやスクレイピング専用ではない。
+## Start here — AIチャットが必ず読む文書
 
-## 複数チャットで進める手順
+1. **[Project Brief — ユーザーが本当に作りたいもの](docs/00-foundation/project-brief.md)**
+2. **[Architecture Rules — 変更不可の境界・担当分担](docs/00-foundation/architecture-rules.md)**
+3. **[Acceptance Scenarios — 実際の使用例と合格条件](docs/00-foundation/acceptance-scenarios.md)**
+4. [Research Targets — 参考OSSマップ](docs/00-foundation/research-targets.md)
+5. [AGENTS.md — 全チャットの作業ルール](AGENTS.md)
+6. [COMMON — 詳細調査・納品プロンプト](prompts/COMMON.md)
+7. [Specification Inventory — 全74MDの担当一覧](docs/00-foundation/spec-index.md)
+8. [Research Protocol](docs/00-foundation/research-protocol.md) · [Review Gates](docs/00-foundation/review-gates.md) · [Module Template](templates/MODULE_SPEC.md)
 
-1. [AGENTS.md](AGENTS.md) と [共通調査・執筆プロンプト](prompts/COMMON.md) を読む。
-2. [チャット別プロンプト](prompts/) から **CHAT_00〜CHAT_11を1チャットにつき1担当** で割り当てる。
-3. 各チャットに「`prompts/CHAT_XX.md` を読んで担当を進めて。専用ブランチへMarkdownを書き、Draft PRを作って」と伝える。
-4. 担当外のファイルは直接編集しない。共通契約の変更は「提案」としてPR本文に記載し、契約担当が統合する。
-5. **1〜2仕様MDごとにDraft PR** を出す。資料リンク・バージョン・調査日・未検証項目を残す。マージはレビュー後に人間が判断する。
-6. すべての作業は [仕様インデックス](docs/00-foundation/spec-index.md) を基準にする。
+## 12 parallel chats
 
-## 重要なリンク
+| 担当 | 仕様カテゴリ | 開始プロンプト |
+|---|---|---|
+| CHAT_00 | `docs/00-foundation/` (5MD) | [CHAT_00](prompts/CHAT_00.md) |
+| CHAT_01 | `docs/01-contracts/` (6MD) | [CHAT_01](prompts/CHAT_01.md) |
+| CHAT_02 | `docs/02-runtime/` (12MD) | [CHAT_02](prompts/CHAT_02.md) |
+| CHAT_03 | `docs/03-tools/` (6MD) | [CHAT_03](prompts/CHAT_03.md) |
+| CHAT_04 | `docs/04-web-browser/` (9MD) | [CHAT_04](prompts/CHAT_04.md) |
+| CHAT_05 | `docs/05-connectors/` (5MD) | [CHAT_05](prompts/CHAT_05.md) |
+| CHAT_06 | `docs/06-memory-skills/` (5MD) | [CHAT_06](prompts/CHAT_06.md) |
+| CHAT_07 | `docs/07-automation/` (5MD) | [CHAT_07](prompts/CHAT_07.md) |
+| CHAT_08 | `docs/08-interfaces/` (6MD) | [CHAT_08](prompts/CHAT_08.md) |
+| CHAT_09 | `docs/09-security/` (6MD) | [CHAT_09](prompts/CHAT_09.md) |
+| CHAT_10 | `docs/10-infrastructure/` (5MD) | [CHAT_10](prompts/CHAT_10.md) |
+| CHAT_11 | `docs/11-qa/` (4MD) | [CHAT_11](prompts/CHAT_11.md) |
 
-- [設計方針と基準](docs/00-foundation/architecture-baseline.md)
-- [74仕様MDの担当・パス](docs/00-foundation/spec-index.md)
-- [並列開発と境界のルール](docs/00-foundation/coordination.md)
-- [仕様書テンプレート](templates/MODULE_SPEC.md)
-- [調査手順・品質ゲート](docs/00-foundation/research-protocol.md)
+## 新しいチャットへ渡す最小限の開始メッセージ
+```text
+https://github.com/choko510/aiagent-md の CHAT_XX を担当してください。
+必ず最新mainの prompts/CHAT_XX.md と prompts/COMMON.md を全文読み、
+指定された project-brief・architecture-rules・acceptance-scenarios・
+spec-index・review-gates・template・AGENTS.md も実際に確認してください。
+担当の最優先MDを一次資料・OSSの実コード・テストまで調査し、
+実装可能な詳細仕様を書いて専用ブランチのDraft PRに提出してください。
+mainへ直接pushしたり、他担当のMDを変更したり、無断マージしないでください。
+完了後にPR URL、調査根拠、未決事項を報告してください。
+```
 
-## 同時並行のルール
+## 協調手順
+- CHAT_00/CHAT_01を最初に起動し、残りの10チャットも並列で調査開始可能。共通型が未決なら[PROVISIONAL]を使う。
+- 各チャットは自分の担当1〜2件の詳細仕様MDを専用ブランチでDraft PRとして提出する。重要な変更は他担当の契約Ownerに提案する。
+- 仕様のDraftは「完成・確定」ではない。レビュー・契約照合・合格テスト設計を通してLockedにする。
+- [Coordination](docs/00-foundation/coordination.md) と [Review Gates](docs/00-foundation/review-gates.md) が統合の規律を定義する。
 
-- 初期状態は全ファイル **Draft / 未調査**。ファイルがあることと仕様確定は同義ではない。
-- 00（設計方針）と01（共通契約）は最初に着手。他担当も調査とDraftは並走可能。ただし共通契約が未承認の間は互換性に関わる内容を **Provisional** と明記。
-- AIが自分の判断で`main`へ直接Pushしたり、PRを自動マージしたりしない。
-- 仕様の正式な正本は`docs/`。本README・プロンプト・検討用の過去案は要約や索引として扱う。
-
-## 完了の定義
-
-詳細MDごとに、責務・非責務、既存OSSの一次資料に基づく比較、内部型・アルゴリズム・状態遷移、障害時の挙動、セキュリティ、DB/API変更、実装順序、単体/統合/E2E・障害注入テスト、受け入れ条件、未決事項が具体的に埋まっていること。
-
-> 「完璧」「確認済み」「動作する」等の自己評価だけを完了根拠にしない。証拠と試験可能な基準で判断する。
+## References
+前バージョンの大きな統合マスターv0.2は会話で作成した歴史的な設計案。**このrepoへ未転記の内容を、AIが読んだことにしてはいけない。** 現時点では本repoのProject Brief・Architecture Rules・Individual Specsを正式な作業起点とし、必要な情報は一次資料で再検証する。

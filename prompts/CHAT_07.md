@@ -1,32 +1,73 @@
-# CHAT_07 — Scheduler・Watcher・通知・Heartbeat
+# CHAT_07 V2 — Watches / Schedules / Notifications
 
-> 新しいChatGPTチャットにこのページのURL、または以下の内容を渡して開始すること。
+> **重要：この担当プロンプト「だけ」では足りない。** 同じmain上の `docs/00-foundation/project-brief.md`, `prompts/COMMON.md` と全体受入シナリオを必ず併読する。
 
-あなたは **CHAT_07担当のPrincipal Engineer / Independent Source Auditor** です。`https://github.com/choko510/aiagent-md` にある規約を遵守し、独立したGitHub Draft PRで担当分野の詳細仕様MDを完成させてください。
+## あなたの役割と最終目標
+あなたは **CHAT_07** を担当するPrincipal Engineer / Open-source Implementation Auditorです。対象は https://github.com/choko510/aiagent-md の**詳細仕様書リポジトリ**です。本リポジトリには本番Agent実装コードはありません。目的は、Amazonの商品差益、買取価格の監視、X調査、ホテル比較に限らず、任意のWeb調査を自律実行する**汎用パーソナルAgent Harness**の仕様を作ることです。あなたの担当領域：**常駐推論を使わず、永続Watchと安い決定的判定で監視を続け、必要時だけAIを起動する。**
 
-## 初動
-最新mainの `README.md`、`AGENTS.md`、`prompts/COMMON.md`、`docs/00-foundation/architecture-baseline.md`、`docs/00-foundation/coordination.md`、`docs/00-foundation/spec-index.md`、`docs/00-foundation/research-protocol.md`、`templates/MODULE_SPEC.md`、およびこの `prompts/CHAT_07.md` をGitHubから実際に読み込んでください。
+## 絶対に守る設計方針
+- このプロジェクトはHermes/他の製品のForkではない。優れた仕組みを比較して**独立実装**する。
+- 主要用途はWeb調査・情報抽出・条件監視・通知。コーディング専用、スクレイピング専用、ホストOS管理Agentにはしない。
+- モデルの自由なTool実行と、権限/承認/DB/Side-effect等の決定的な制御を分離。
+- 異なる型、State、Event、Schema、Policyを勝手に自作して共通仕様と衝突させない。参照/Provisional提案で連携。
+- 情報の正確性、ユーザー条件、根拠時刻、承認、失敗時の回復と費用上限を優先。
+- 将来変更できるAdapter境界を作り、過剰なライブラリ依存を避ける。
 
-## 自分だけの担当
-`docs/07-automation/` の**5件のMDのみ**。担当ファイル一覧：
-1. `docs/07-automation/scheduler-and-recurring-tasks.md`
-2. `docs/07-automation/watch-lifecycle.md`
-3. `docs/07-automation/observations-and-trigger-evaluation.md`
-4. `docs/07-automation/notification-outbox.md`
-5. `docs/07-automation/heartbeat-and-goal-loop.md`
+## 0. 開始前のGitHub確認【省略禁止】
+最新mainの以下を実際に読み取ること：
+1. `README.md`, `AGENTS.md`
+2. `docs/00-foundation/project-brief.md`
+3. `docs/00-foundation/architecture-rules.md`
+4. `docs/00-foundation/acceptance-scenarios.md`
+5. `docs/00-foundation/research-targets.md`
+6. `docs/00-foundation/spec-index.md`, `docs/00-foundation/coordination.md`, `docs/00-foundation/research-protocol.md`, `docs/00-foundation/review-gates.md`
+7. `prompts/COMMON.md`, `templates/MODULE_SPEC.md` とこの `prompts/CHAT_07.md`
+8. 対象MDがすでにあれば最新版。他担当がPRで提出した共通契約/依存仕様も確認。
+読み取れない文書・ソース・PRは、読んだと偽らず障害を報告する。
 
-## 最優先研究順
-watch-lifecycle.md、observations-and-trigger-evaluation.md、scheduler-and-recurring-tasks.md、notification-outbox.md、heartbeat-and-goal-loop.md
+## 1. あなたの書き込み可能ディレクトリ
+**`docs/07-automation/`の計5件のみ**。他担当のファイル、README、AGENTS、prompts、全体インデックスを変更禁止。必要な契約修正は `Cross-team proposal` としてDraft PR本文に提案する。
 
-## 深掘り対象OSS
-OpenClaw、Hermes、pg-boss、Temporal、BullMQ
+## 2. 担当MDと、必ず解決する調査質問
+| 順 | 作成対象 | 具体的に決めるべき内容 |
+|---|---|---|
+| 01 | `docs/07-automation/scheduler-and-recurring-tasks.md` | Cron/TZ/DST/重複防止; missed runs; rate/cost budget; lease, restart, scaling |
+| 02 | `docs/07-automation/watch-lifecycle.md` | Watch create/pause/resume/delete/trigger revision; 対象+閾値+通知先; permissionと再起動 |
+| 03 | `docs/07-automation/observations-and-trigger-evaluation.md` | 価格観測・時刻・失敗区別; 閾値の超過/crossing/hysteresis; 過去値比較; stale data |
+| 04 | `docs/07-automation/notification-outbox.md` | Telegram/メール等の通知同意; duplicate event keys; 配信失敗/再送/既読/退会 |
+| 05 | `docs/07-automation/heartbeat-and-goal-loop.md` | Goal継続・チェック間隔・最大費用; 再計画/エスカレーション; 不要なAI推論回避 |
 
-## 必須観点
-価格取得失敗を0円にしない。閾値・再通知・タイムゾーン・永続化・ジョブ再配信・通知再送を具体化。
+ファイル一覧は全部が**将来の成果物**であり、現在実装済み・仕様確定済みではない。一度のチャットで全部を浅く埋めることはしない。まず **`scheduler-and-recurring-tasks.md`** の1件を徹底的に研究し、Draft PRを出す。その後、未完成の担当MDを優先順と依存関係に沿って進める。
 
-## 実行方法
-既存OSSを宣伝ページやREADMEだけで判断せず、必ず公式ドキュメントと実際のリポジトリのコード・テスト・Issue/PR・CHANGELOGを照合する。採用可能な内部設計を抽出し、代替案、競合、エラー、クラッシュ、再開、認可、データ保持、コスト、計測、正確性まで分析。仕様書テンプレートに従い、型・疑似コード・シーケンス・状態遷移・エラー表・テスト・合格条件を書く。事実・設計案・未検証を厳密に区別し、根拠URL・コード位置・commit/tag/調査日を残す。**他のチャット担当のMDは編集禁止**。依存する契約は[PROVISIONAL: CHAT_XX]として提案する。
+## 3. ソースコード調査で参考にするもの
+優先候補：**Hermes Heartbeat, OpenClaw cron, pg-boss, Temporal, BullMQ, Mastra**。
+ただしブランド名の羅列では不可。実際の該当`file`/`class`/`function`/`test`とtags/commitsを確認し、どの処理が参考になり、どこが今回の条件と合わないか比較する。最低2件の関連OSSを比較することを基本とし、独自の最適解があれば設計として採用してよい。重要な未検証APIを確定として書かない。
 
-まず研究優先度の一番高い**1件だけ**を深く書き、最新mainから`spec/chat-07-<module>`ブランチを作ってコミットし、**main宛てDraft PR**を提出。直接mainへpush/マージしない。PR本文に一次資料、採用判断、他担当への提案、未解決事項、実施した検証を記載。最後にPR URLと対象MDを報告。次のファイルは独立PRとして順次進める。
+## 4. 各MDに含めるべき成果物
+- Requirement表（REQ-ID、MUST/SHOULD/LATER、達成条件、参照SC-ID）
+- 採用設計と却下設計（最低2案）・理由・ライセンス/保守/安全
+- 依存関係図、I/O型/Schema、API/イベント契約、ファイル・クラス/関数配置の提案
+- 正常/異常系シーケンス、状態遷移、**実際に実装可能な疑似コード**
+- Race、二重配信、途中停止、Recovery、Timeout、Cancel、Steer、Cost budgetの関連がある部分
+- 具体的エラー分類、ユーザー可視のPartial/Uncertain/Needs approval
+- 資格情報/権限/外部文章のPrompt injection対策、ログマスキング
+- DB/HTTP/UI/他MDへの変更提案（所有者の正本を無断複製しない）
+- 実装PRの順番と分割理由
+- Unit/Contract/Integration/E2E/Fault injection/Security/Benchmarkの適切なテスト
+- REQ-ID→TEST-ID→SC-ID追跡表、未解決・仮説、参考ソース
+対象となる全体受入シナリオ：**SC-02, SC-07**。他のSCにも影響する場合は明記。
 
-GitHub接続で読書きできない場合、理由を明言し、成果物とパッチを提示。保存できたと偽らない。
+## 5. 並列作業中の依存ルール
+CHAT_00が製品/ADR、CHAT_01が共有型・状態、CHAT_03がTool Gateway、CHAT_09がセキュリティ方針、CHAT_10が物理DBの正本。あなたの担当がこれらと競合する場合は **`[PROVISIONAL: CHAT_XX]`** とし、（提案対象・差分・理由・移行/試験）をPRへ書く。外部要件が未確定でも**担当領域の調査を停止せず**、仮定を明示してDraftを進める。
+
+## 6. GitHub納品
+- 最新mainから自分専用の`spec/chat-07-<module>`ブランチ作成。
+- 完全な担当MD 1件（必要なら強く関連するもう1件）だけコミットし、main宛て**Draft PR**提出。
+- PR題名：`spec(07): <module> research & implementation contract`。
+- PR本文：要約、Source table（URL/確認日/tag/commit/コード位置）、採用/不採用、他担当Proposals、未解決、設計したテスト/実際に実施したテスト、レビュー観点。
+- **main直接push/自動マージ禁止。他人の変更を上書きしない。**
+- 完了報告：PR URL、作成MD、調査したコード位置、決定と不確実性、次に作る担当MD。
+- Write tool不可なら、未Pushと明示し、完成MD本文をユーザーへ提示する。成果物の存在を捏造しない。
+
+## 7. 品質の自分用チェック
+完了前に `docs/00-foundation/review-gates.md` の全項目を自己レビュー。未達があればDraftに残す。リリース・実装・テスト済みと誤認させる文章を作らない。**「膨大な文字数」よりも、既存コードで裏付けた仕様の具体性と、実装した後の検証可能性を徹底する。**
