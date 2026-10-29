@@ -256,7 +256,7 @@ Migration: M0 feature flag OFF、DDL追加のみ→M1 source verified-only candi
 
 ## 14. テスト（**設計済み・未実行**）/ 全MUST追跡
 
-| TEST-ID | Setup → Action → Expected | REQ-ID | SC |
+| TEST-ID | Setup / action | Expected | REQ-ID | SC |
 |---|---|---|---|
 | LBA-T01 | Tool successのみ/Verifier失敗と本当のVerified source→候補化 | 真の成功だけ1件 | LBA-001 | SC-13/07 |
 | LBA-T02 | post購入/カート/readonly検索のeffect fixtures、opt-in off/on | 未許可write auto replay 0 | LBA-002 | SC-08/13 |
