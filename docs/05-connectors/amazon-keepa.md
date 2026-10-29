@@ -186,18 +186,18 @@ source capability, region, query kind, token reserved/consumed/unknown, item cou
 ## 14. Traceability
 | MUST REQ | TEST | SC |
 |---|---|---|
-| AMK-001 | T01,T02 | SC-01,08 |
-| AMK-002 | T02,T12 | SC-01,05 |
-| AMK-003 | T03 | SC-01,10 |
-| AMK-004 | T04,T13 | SC-07,09 |
-| AMK-005 | T05,T12 | SC-01,12 |
-| AMK-006 | T06 | SC-01,10 |
-| AMK-007 | T07 | SC-01 |
-| AMK-008 | T08 | SC-08 |
-| AMK-009 | T09 | SC-07 |
-| AMK-010 | T10 | SC-02 |
-| AMK-011 | T11 | SC-07,09 |
-| AMK-012 | T12 | SC-01,14 |
+| AMK-001 | AMK-T01,AMK-T02 | SC-01, SC-08 |
+| AMK-002 | AMK-T02,AMK-T12 | SC-01, SC-05 |
+| AMK-003 | AMK-T03 | SC-01, SC-10 |
+| AMK-004 | AMK-T04,AMK-T13 | SC-07, SC-09 |
+| AMK-005 | AMK-T05,AMK-T12 | SC-01, SC-12 |
+| AMK-006 | AMK-T06 | SC-01, SC-10 |
+| AMK-007 | AMK-T07 | SC-01 |
+| AMK-008 | AMK-T08 | SC-08 |
+| AMK-009 | AMK-T09 | SC-07 |
+| AMK-010 | AMK-T10 | SC-02 |
+| AMK-011 | AMK-T11 | SC-07, SC-09 |
+| AMK-012 | AMK-T12 | SC-01, SC-14 |
 
 ## 15. Open issues
 - **P0 / CHAT_09/03** API credential and URL query secret masking, rights verification, entitlement plan check; no active provider until implemented.
