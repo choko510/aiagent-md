@@ -240,3 +240,9 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 [S7] **Code verified**, durable approval: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/durable/durable-agent.ts  
 [S8] **Code verified test inspected** conflict 409: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/server/src/server/handlers/error.test.ts  
 **Unverified:** Browser relay implementation/compatibility, token protocol, real AuthProvider, production browser isolation and human UI visual/a11y behavior. Numeric TTLs and file layout are design proposals. Source tests have not been executed and no application exists here.
+
+## 15. 公開Issueの故障仮説と回帰対象
+
+**[I-HITL-01]** [Mastra issue #28224](https://github.com/mastra-ai/mastra/issues/28224)（2026-10-30、Open、Issue report）はRun作業後terminal publish時のlease喪失を報告。HITL-T06/T08に「human takeover解放→Run resume→terminal event直前にowner lease失効」を追加し、UIはcompletedを偽装せずGETから確定状態/uncertainを復元すること。Tool Gateway/Browser Workerのfencing実装はCHAT_02/03/04所有。
+
+**[I-HITL-02]** [OpenClaw issue #169176](https://github.com/openclaw/openclaw/issues/169176)（2026-10-30、Open、Issue report）では失効したTelegram callbackを永続的にretryして後続更新が滞留するという報告がある。HITL-T09に`expired callback → terminal reject → no repeat decision/reply → later message proceeds`という境界を追加する。こうした非再試行エラーの分類はTG adapterとCHAT_07/10との合同契約。
