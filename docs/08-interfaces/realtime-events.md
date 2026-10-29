@@ -38,7 +38,7 @@ Runtime / Watch / Tool Gateway
                                                  reconnect Last-Event-ID
 ~~~
 
-Canonical event の \`eventId,taskId,runId,sequence,schemaVersion,occurredAt,committedAt\` は CHAT_01の event-envelope-and-stream.md 待ちで**[PROVISIONAL]**。SequenceはTask内で単調な正整数、commit順を厳密に決める。異Taskの全順序は提供しない。Workerの発行時計は順序を決定しない。ブラウザ/外部providerのtimestampは\`observedAt\`でありDB commit timestampとは分離。TaskごとのEvent履歴権限は存在確認だけでなく current resource visibilityで判定。
+CHAT_01 [PR #23](https://github.com/choko510/aiagent-md/pull/23) のDomain Eventは各aggregate内の `aggregateSequence` とtenant全体の `deliveryOffset`（いずれもint64 decimal string）を区別する。Run/Tool/Approval/Evidenceなど別aggregateのTask関連Eventはtenant `deliveryOffset`昇順でSSE配送する。Raw offsetは署名cursorへ封印し、公開JSONに含めない。発行時計やUUID timestampで順序を決めない。ブラウザ外部日時はobservedAtで区別。
 
 ## 4. Requirements
 
@@ -46,7 +46,7 @@ Canonical event の \`eventId,taskId,runId,sequence,schemaVersion,occurredAt,com
 |---|---|---|---|
 | SSE-001 | MUST | Taskごとの認可SSE endpoint。認証・tenant違反で内容を1byteも送らない | 06,08 |
 | SSE-002 | MUST | snapshot high-water とEvent replayでGET→subscribe raceの0欠落を保証（retention内） | 05,07 |
-| SSE-003 | MUST | seq順配信、同seq duplicateでもclient投影は1回、異Runの再実行を新Taskと混同しない | 07 |
+| SSE-003 | MUST | tenant deliveryOffset昇順でTask関連Eventを安全に配送し、eventIdで重複排除。異aggregateのaggregateSequenceを比較しない | 07 |
 | SSE-004 | MUST | Last-Event-IDの正当性、別task/tenant/revocation、expiryを検査しinvalid/replay impossibleを安全に処理 | 07,08 |
 | SSE-005 | MUST | heartbeatはcursorを進めず、stream/backpressure/idle/connection上限を有限に保つ | 09 |
 | SSE-006 | MUST | user/role revoke・Task visibility変更を配信中も検知して閉じる | 06,08 |
@@ -67,20 +67,21 @@ type SafeEventV1 = { // public DTO, NOT canonical CHAT_01 envelope
   projectionVersion: 1;
   taskId: string; // canonical UUIDv7 checked, principal tenant bound
   runId: string | null;
-  sequence: string; // decimal positive integer; no JS bigint precision loss
+  eventId: string; // canonical UUIDv7 event identity; client dedup
+  aggregateSequence: string; // canonical int64 decimal, per aggregate only
   kind: "state"|"step"|"evidence"|"usage"|"approval"|"watch"|"warning"|"cursor";
   committedAt: string; // UTC RFC3339
   data: Record<string, unknown>; // approved per-kind Zod strict schema, finite size
   source?: { evidenceId: string; observedAt: string|null };
 };
-type StreamCursor = string; // signed base64url of {v,tenantScopeHash,taskId,seq,projectionVersion,issuedAt,expiresAt}
+type StreamCursor = string; // opaque authenticated cursor: tenant, viewer, taskFilter, lastDeliveryOffset, expiry
 type SubscribeOptions = {
   taskId: string; lastEventId?: StreamCursor;
   // for a fresh stream, server returns "snapshot-required" when no baseline supplied
 };
 ~~~
 
-\`sequence\`はNUMERIC decimal string。連番に穴がある場合、visibility filtering後も安全な\`kind:cursor\` markerで進める設計候補だが**存在自体が秘密のeventはmarkerでも漏れ得る**ためVisibility semanticsはCHAT_01/09と合意。第一案はTenant+Task actorが見られる全Eventを安全な共通projectionにして原本の可視性違いをprojection作成時に隔離。映像/Tool raw resultはEvent対象外。
+Canonical aggregateSequenceとdeliveryOffsetは64bit整数の正規十進文字列で、内部比較はBigInt。公開SafeEventはeventIdとaggregateSequenceだけを示し、tenant deliveryOffsetはSSE id（署名cursor）に封印する。異aggregateで同じaggregateSequenceは正常であり重複と見なさない。可視対象外のEvent offsetを公開しない。
 
 **Wire example（非実行mock）**:
 
@@ -92,7 +93,7 @@ X-Accel-Buffering: no
 
 event: progress
 id: <server-signed-task-scoped-cursor>
-data: {"projectionVersion":1,"taskId":"<valid-uuidv7>","runId":null,"sequence":"12","kind":"step","committedAt":"2026-10-30T00:00:00.000Z","data":{"phase":"search","status":"ongoing"}}
+data: {"projectionVersion":1,"taskId":"<valid-uuidv7>","runId":null,"eventId":"019a2bc3-4d5e-7abc-8def-123456789abc","aggregateSequence":"3","kind":"step","committedAt":"2026-10-30T00:00:00.000Z","data":{"phase":"search","status":"ongoing"}}
 
 : heartbeat
 
@@ -102,13 +103,13 @@ data: {"projectionVersion":1,"taskId":"<valid-uuidv7>","runId":null,"sequence":"
 
 **HTTP pre-stream:** bad ID=400、unauth=401、other tenant/not visible=404、cursor checksum/task mismatch=400（他tenantへ具体的ヒント不可）、retention expiry/replay gap=410 \`STREAM_CURSOR_EXPIRED\`＋ safe snapshot URL、rate=429、service unavailable=503。Header送信後はHTTP statusを変えられないので safe \`event:error\` + close。401/403をSSE dataとして継続配信してしまわない。
 
-## 6. Snapshot-consistent sequence
+## 6. Snapshot-consistent tenant delivery cursor
 
-1. Clientは GET /tasks/{id}（Cache-Control:no-store）で \`recordVersion\`,\`lastEventSequence\`,\`state\` を取得。 \`lastEventSequence\`の提供は [PROVISIONAL: CHAT_01/08 REST]。Task.conversationId=nullでも成立。
-2. ClientがGET結果をレンダリングし、SSEへcursor（last sequenceに紐づくsigned cursor）を渡す。**Snapshot high-waterのcursorをGETレスポンスが発行する**ようREST契約に追加提案（Raw numberをそのままLast-Event-IDとして渡さない）。
-3. SSEサーバはcursorのscope/task/version/expiryをチェックし、snapshotより後のEventをSEQ ASCでDBからreplayする。
+1. ClientはGET /tasks/{id}から `recordVersion`（int64 decimal string）、`snapshotCursor`（最終反映済みtenant deliveryOffsetを封印）、Task stateを取得する。Task.conversationId=nullも正規ケース。
+2. クライアントはGETで得た`snapshotCursor`をfetch streamingの初回`Last-Event-ID`ヘッダーで渡す。[REST §5.6.1](rest-api.md)のTask state/projectionと同じoffset barrierを用いる。Raw numberをcursorとしない。
+3. SSEサーバはcursorのtenant/viewer/task filter/version/expiryを検証し、対象Taskに紐づく複数aggregateのEventをtenant deliveryOffset昇順でreplayする。
 4. DB query後にSubscriptionを追加してもraceを閉じるため、**subscribe wakeupを先にセット → replay query → wakeup/poll trigger → DB high-water再読込**をループする。LISTEN/NOTIFYだけに頼らず、finite pollingでgapを補う。読出し中に新Eventがcommitしたら必ず次回queryに入る。
-5. Serverは最後に「送出した」seqを更新するが、client ACKはない。再接続で同じEventが再配信されてもclientはlastAppliedSeqより小さい/同じseqを無視する。**配信exactly-onceは主張しない**。
+5. Serverは最後に送出を許可したtenant deliveryOffsetを署名cursorへ記録するが、client ACKはない。再接続で同じEventが再配信されてもclientはeventId既出を無視、absolute GET stateで再整合する。異aggregateのsequence比較は禁止。**配送exactly-onceは主張しない**。
 6. Snapshotとstreamの重複: stream再生により進捗を二度加算しない。ステップと費用の表示はabsolute latest projection + monotonic versionを使い、tokenデルタの再加算は禁止。
 7. Run終了/Cancel/Steerは接続継続の有無と無関係。UIでstatus settled時も最新GETを再照会してEvidence/Usageの確定値を表示する。
 
@@ -119,21 +120,21 @@ async function serveTaskEvents(ctx, taskId, headerCursor) {
   const after = await cursorService.verify(headerCursor, principal, taskId);
   const stream = openBoundedSse(ctx, {maxBufferedBytes:256*1024});       // provisional cap
   const wake = eventBus.subscribeHint(taskId);                           // never authoritative
-  let cursorSeq = after.sequence;
+  let cursorOffset = BigInt(after.lastDeliveryOffset);
   try {
     while (!stream.closed) {
       await auth.revalidateIdentityAndTask(principal, taskId);           // revocation
       const events = await eventStore.readTaskAfter({
-        tenantScope:principal.tenantId, taskId, afterSeq:cursorSeq,
+        tenantScope:principal.tenantId, taskId, afterDeliveryOffset:cursorOffset,
         limit:100, consistentSnapshot:true
       });
       for (const e of events) {
-        if (e.sequence <= cursorSeq) continue;
+        if (BigInt(e.deliveryOffset) <= cursorOffset) continue;
         await auth.revalidateIdentityAndTask(principal, taskId);
         const safe = schemaProjector.toPublicDtoOrFail(e, principal);
-        const nextCursor = cursorService.sign(taskId, principal, e.sequence);
+        const nextCursor = cursorService.sign(taskId, principal, e.deliveryOffset);
         if (!stream.writeBounded(safe, nextCursor)) throw new BackpressureError();
-        cursorSeq = e.sequence;
+        cursorOffset = BigInt(e.deliveryOffset);
       }
       if (events.length === 100) continue;
       await waitForHintOrBoundedPollOrAbort(wake, ctx.signal, 2000);
@@ -150,8 +151,8 @@ Use a **bounded 2s poll interval**, 15s heartbeat, 100 events read batch, 256KiB
 | Scenario | Server handling | Client handling |
 |---|---|---|
 | Event commit between GET snapshot and SSE subscribe | replay seq > snapshot high-water | monotonic apply once |
-| Duplicate event/old cursor | DB seq and cursor de-dup | ignore equal/older seq, no duplicate cost |
-| Out-of-order worker event production | DB sequence assigned transactionally; no ordering by worker clock | per-Task seq only |
+| Duplicate event/old cursor | DB deliveryOffset/eventId, signed cursor replay | duplicate eventId ignored; no duplicate cost |
+| Out-of-order worker event production | DB tenant deliveryOffset assigned transactionally, not worker clock | aggregateSequence per source, delivery order cross source |
 | SSE closed before drain | do not cancel task; close buffers/subscriptions | retry same cursor, exponential jitter |
 | API crash/restart or proxy buffering | DB replay source; no stream-memory truth | GET snapshot then reopen on replay impossible |
 | Tenant auth revoked mid-stream | bounded revalidation and immediate close on revoke event | show reauthenticate; clear private cached read model |
@@ -185,7 +186,7 @@ SSE-P1 core projection schemas + redaction + unit schema tests; SSE-P2 durable r
 |---|---|---|---|
 | SSE-T01 | Contract: unauthorized and other-tenant task subscribe | 401/404 and 0 private event bytes | 06,08 |
 | SSE-T02 | Fault: commit event at each boundary GET→subscribe→first read | no gap, stable task seq ordering | 05,07 |
-| SSE-T03 | Contract: same event twice/reconnect after partial write | lastAppliedSeq exactly once, usage not double billed | 07 |
+| SSE-T03 | Contract: duplicated eventId, colliding aggregateSequence across Task/Run, replay after partial write | every visible event once, usage not double billed | 07 |
 | SSE-T04 | Security: tamper cursor/task/scope/expired/cross-workspace | 400/410/404, no existence leak or false replay | 07,08 |
 | SSE-T05 | Load: 5 streams, 256KiB backlog, 10k events | memory bounded; slow stream disconnects and resumes | 09 |
 | SSE-T06 | Integration: revoke user/tenant while open; reuse cookie | connection closes, next request unauthorized, secret=0 | 06,08 |
@@ -231,3 +232,5 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 ## 15. OSS PR差分による追加リスク確認
 
 **[PR-SSE-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、Merged）はtransport wrapperがreplayフラグを失う問題を修正、React regression testを追加。UI側のtransportがsnapshot replayかdelta continuationかの**識別は必須**。本設計はTaskEvent sequenceに基づくreplayであり、全量Snapshotは既存状態を置換、delta Eventはsequenceでskipする。SSE-T03/T09でこの2経路を明示的に分ける。
+
+**SSE-T13 (designed / SC-07,08):** interleave Task aggregateSequence=2, Run aggregateSequence=2 and Tool aggregateSequence=2 with an unrelated user's Event between tenant deliveryOffsets 41..44; assert all three authorized distinct eventIds delivered, none skipped due to colliding aggregateSequence, no other user's event content or raw deliveryOffset in public payload. Owner: CHAT_01 event envelope; CHAT_10 SQL replay. Source: [PR #23](https://github.com/choko510/aiagent-md/pull/23). Source status Draft, no integration tests run.
