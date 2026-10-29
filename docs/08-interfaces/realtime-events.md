@@ -166,7 +166,7 @@ Use a **bounded 2s poll interval**, 15s heartbeat, 100 events read batch, 256KiB
 
 ## 8. Security / privacy
 
-Never copy credentials, browser storage state, raw prompts, model private reasoning, access token, full source HTML into event JSON. \`kind:usage\` returns confirmed/estimated, currency, UTC measurement time; \`kind:approval\` returns only server-produced action summary/expiry and a permission-checked link. Approval decision remains POST with If-Match/Idempotency-Key in rest-api.md. Unknown external observations cannot become trusted Tool commands. Origin allowlist; EventSource cookie constraints verified against CHAT_09; no cache to shared proxy; no wildcard CORS with credentials. Shutdown unsubscribes from all wake hints and DB read loops. SLO/limits to be re-evaluated with actual hardware.
+Never copy credentials, browser storage state, raw prompts, model private reasoning, access token, full source HTML into event JSON. \`kind:usage\` returns confirmed/estimated, currency, UTC measurement time; \`kind:approval\` returns only server-produced action summary/expiry and a permission-checked link. Approval decision remains POST with If-Match/Idempotency-Key in rest-api.md. Unknown external observations cannot become trusted Tool commands. Origin allowlist; fetch streaming with cookie/CSRF policy verified against CHAT_09; no cache to shared proxy; no wildcard CORS with credentials. Shutdown unsubscribes from all wake hints and DB read loops. SLO/limits to be re-evaluated with actual hardware.
 
 ## 9. Persistence and API/DB cross-team proposals
 
