@@ -266,7 +266,7 @@ SM-PR1 canonical enums+pure transition reducer and tests; SM-PR2 DB CAS/FK/lease
 - SM-P04 P0 CHAT_09: owner/tenant mapping, service capability, revoked user and sensitive Tool gate.
 - SM-P05 P1 CHAT_08: terminal task retry creates new task, nullable Conversation, conflict errors.
 - SM-P06 P1 CHAT_07/13: schedule external triggers may not bypass normal Task/Run transitions.
-- SM-P07 P1 CHAT_01 core-domain: retryOfTaskId needed only if UI product decision approves; no undeclared current entity field used in code.
+- SM-P07 RESOLVED DESIGN (still Draft): CHAT_01 core-domain now declares retryOfTaskId for new Task created from explicitly retried terminal Task. CHAT_02/08/10 implement corresponding new-Task branch; existing terminal Task immutable. Owner acceptance and executable contract tests remain pending.
 Proposed state names require codegen/migration once approved. Keep Draft until agreements; avoid dual canonical state enums.
 
 ## 17. References 2026-10-30
