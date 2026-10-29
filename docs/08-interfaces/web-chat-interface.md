@@ -256,3 +256,21 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 **[PR-CHAT-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、**Merged**）の実diffを調査した。`packages/react/src/use-chat.ts` のstable transport wrapperに `get resumeStreamIsReplay() { return getTransport().resumeStreamIsReplay; }` が追加され、`use-chat.ui.test.tsx` に `Hello` 部分表示→network disconnect→`Hello world`全量replay時の重複を防ぐ実テストが追加された。これは [issue #22358](https://github.com/vercel/ai/issues/22358) に対応する修正で、**旧バージョンで起こり得る不具合であり最新mainで未修正とは主張しない**。本Harnessではライブラリ側の修正の有無に依存せず、独自`TaskEvent.sequence`で冪等投影を検証する（CHATUI-T02）。
 
 **Round2 canonical serialization correction:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) defines recordVersion/goalRevision/leaseEpoch as canonical int64 decimal **strings**, not JSON numbers. [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) defines tenant deliveryOffset separate from aggregateSequence; clients use signed snapshotCursor and eventId dedupe, never numeric cross-aggregate comparison. Earlier locally used `lastEventSequence` or numeric recordVersion must not survive generated client. CHATUI-T02/T11 test this contract.
+
+## Formal Round 2 MUST Traceability (full stable IDs; designed tests only)
+
+| MUST REQ-ID | TEST-ID(s) | SC-ID(s) |
+|---|---|---|
+| CHATUI-001 | CHATUI-T01, CHATUI-T12 | SC-01, SC-04, SC-05, SC-07 |
+| CHATUI-002 | CHATUI-T02 | SC-05, SC-07 |
+| CHATUI-003 | CHATUI-T03 | SC-02, SC-06, SC-07 |
+| CHATUI-004 | CHATUI-T04 | SC-01, SC-03, SC-04, SC-05 |
+| CHATUI-005 | CHATUI-T05 | SC-01, SC-09 |
+| CHATUI-006 | CHATUI-T06 | SC-07 |
+| CHATUI-007 | CHATUI-T07 | SC-04, SC-06, SC-08 |
+| CHATUI-008 | CHATUI-T08 | SC-03, SC-08, SC-15 |
+| CHATUI-009 | CHATUI-T09 | SC-02, SC-11 |
+| CHATUI-010 | CHATUI-T10, CHATUI-T12 | SC-07, SC-09 |
+| CHATUI-011 | CHATUI-T11 | SC-09 |
+
+**Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
