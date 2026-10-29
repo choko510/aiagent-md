@@ -24,7 +24,7 @@ PostgreSQLを業務データの**唯一のトランザクション正本**とし
 
 **非責務:** 認証方式、ユーザーRole、Task/Run状態遷移の合法性、AgentLoopのcheckpoint意味論、Side-effect Policy、Watch predicate、Notification retry数、Browser cookie暗号化、実ジョブconsumerの実装、バックアップ手順。これらは各Ownerの正本に委譲する。
 
-**前提/仮定:** PostgreSQL >=16を導入候補、PG18公式ドキュメントを今回のSQL確認根拠に使用。初期実装のPostgreSQL**正確なmajor versionは未Lock**。提案SQLは`gen_random_uuid()`が使えるサポート版に依存するためCIでターゲット版実行確認必須。Timeは`timestamptz`で保持し、ユーザーTZは別文字列で保持、DBセッションTZはUTCに固定する。大きなメディア/HTMLはArtifact Storeへ退避。
+**前提/仮定:** PostgreSQL >=16を導入候補、PG18公式ドキュメントを今回のSQL確認根拠に使用。初期実装のPostgreSQL**正確なmajor versionは未Lock**。UUIDv7はtrusted server側で生成し、DBにUUIDv4を生成する既定値を置かない。採用するPostgreSQL majorへのDDL実行試験が必須。Timeは`timestamptz`で保持し、ユーザーTZは別文字列で保持、DBセッションTZはUTCに固定する。大きなメディア/HTMLはArtifact Storeへ退避。
 
 ## 2. 既存OSS横断調査（2026-10-30、実ソース/テストを読んだもの）
 
@@ -502,6 +502,10 @@ CREATE TABLE agent.outbox_messages (
   dispatched_at timestamptz,
   dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
+  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9007199254740991),
+  relay_owner_ref text,
+  relay_lease_until timestamptz,
+  last_error_code text,
   PRIMARY KEY(tenant_id,id),
   UNIQUE(tenant_id,topic,dedupe_key),
   FOREIGN KEY(tenant_id,event_id) REFERENCES agent.task_events(tenant_id,id),
@@ -548,8 +552,21 @@ CREATE TABLE agent.cost_usage_records (
   usage_key text NOT NULL,
   metering_kind_code text NOT NULL,
   pricing_snapshot_ref text,
-  input_units bigint NOT NULL DEFAULT 0 CHECK (input_units >= 0),
-  output_units bigint NOT NULL DEFAULT 0 CHECK (output_units >= 0),
+  input_units bigint CHECK (input_units >= 0),
+  output_units bigint CHECK (output_units >= 0),
+  cached_input_units bigint CHECK (cached_input_units >= 0),
+  cached_write_units bigint CHECK (cached_write_units >= 0),
+  reasoning_output_units bigint CHECK (reasoning_output_units >= 0),
+  usage_kind text NOT NULL,
+  provider_key text,
+  provider_attempt_id text,
+  logical_call_id text,
+  source_receipt_sha256 char(64),
+  price_snapshot_ref text,
+  currency_code char(3),
+  amount_minor_units numeric(38,0),
+  amount_scale smallint CHECK (amount_scale BETWEEN 0 AND 18),
+  measured_at_source timestamptz,
   estimated_cost_micro_usd bigint CHECK (estimated_cost_micro_usd >= 0),
   measured_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -584,7 +601,7 @@ UPDATE agent.schema_control
 COMMIT;
 ```
 
-**Important implementation note:** `repeat('0',64)` は**説明用の非本番placeholder**。実装時には実際のmigrationファイルSHA-256に置換してから1回だけ適用し、hash不一致なら起動を拒否する。したがって上記SQLは**そのまま本番投入禁止**であり、テスト可能な設計の提示。物理列もProvisional contractsに従う。上記の`watches_due`はscope列を含まない全体scheduler用の索引だが、アプリによる無条件全scope列挙は許可せずscheduler roleのみのアクセスとする。Cross-tenantの読み出し禁止はCHAT_09のpolicyで実施。
+**Important implementation note:** `:'migration_checksum_sha256'` はpsql専用の例示で、通常のSQL driverではそのまま実行できない。実装runnerが実際のmigrationファイルのSHA-256を計算し、適用後の別SQL statementにbindしてchecksumを記録する。したがって上記SQLは**そのまま本番投入禁止**であり、テスト可能な設計の提示。物理列もProvisional contractsに従う。上記の`watches_due`はscope列を含まない全体scheduler用の索引だが、アプリによる無条件全scope列挙は許可せずscheduler roleのみのアクセスとする。Cross-tenantの読み出し禁止はCHAT_09のpolicyで実施。
 
 ### 5.3 所有権別の対応表 / 意味論の侵食禁止
 
@@ -608,7 +625,7 @@ COMMIT;
 
 1. APIはCHAT_09の認証で`tenant_id`を確定し、CHAT_01のSchemaでrequestを検証。
 2. `api_idempotency`を同一transaction内で占有。Key既存でrequest hash一致なら既存結果参照。相違なら`409 conflict`。
-3. `conversations`既存IDを同scopeで検証し`tasks`をinsert。
+3. `conversation_id`が指定された場合だけ同tenant/ownerのConversation・origin Threadを照合。Watch/API直起動のConversationなしTaskは合法として`tasks`をinsert。
 4. `next_event_sequence`で連番を確保して`task_events`をappend。
 5. 対応`outbox_messages`を同一transactionでinsert。
 6. commitが成功してからAPIへTask IDを返す。レスポンス途絶時でもKeyで結果を再照会できる。
@@ -954,3 +971,14 @@ UPDATE agent.runs SET lease_epoch=lease_epoch+1,
 | DB-T034 | paused Watch旧definition revision occurrence→Tool開始0 | 02,11,16 |
 
 **未確定P0:** Task/Run status enumとEvent envelope（CHAT_01）、Steer safe boundary（CHAT_02）、Tool Ledger（CHAT_03）、principal/owner SQL authorization（CHAT_09）。SC-10..16の新設物理表は当該Ownerの設計提案待ち。DB-T025 SQL実行は未実施。
+
+
+## 19. Round 2 category integration (Job/Observability/Recovery)
+
+This is the **CHAT_10-owned physical integration** with the new module specifications. Reviewer should treat all as provisional pending canonical contracts and DDL tests.
+
+- **JQ-10-02 (PR #22):** Added `outbox_messages.relay_lease_epoch`, `relay_owner_ref`, `relay_lease_until`, `last_error_code`. The relay may mark a row dispatched only after a confirmed queue write and on successful lease epoch CAS. If publish response is lost it retries the *pointer*, never the external action. The extra lease is not Run.leaseEpoch. DB-T035: kill/claim with two relays, stale ack must affect 0 rows; queued logical action applies once.
+- **OBS-10-04 (PR #36):** Changed `cost_usage_records.input_units/output_units` to nullable, no default 0: **unknown !== observed zero**. Added optional cache read/write, reasoning, usage kind, provider attempt/logical call, source hash, pricing version, currency/amount minor units and scale. `usage_key` is the stable dedup key, but canonical generation/charge/reconciliation is CHAT_02's decision. Backfill for existing rows with default 0 MUST NOT claim the amount is measured; migration should preserve `usage_kind=estimated` and unknownness, or quarantine ambiguous old records. DB-T036: unknown usage inputs remain NULL, received 0 is explicit 0, conflicting provider receipt not double-billed.
+- **REC-10-05 (PR #45):** Backup and recovery controller requests physical `backup_restore_points` and `recovery_gates`; these are **operator-only future migration** because recovery incarnation and operator authority remain P0 with CHAT_01/02/09. Do not put restore control into AI Tool registry. A backup snapshot that rewinds Run leaseEpoch does not alone fence a pre-restore worker. DB-T037: restoration with still-live old Worker must remain quarantined.
+- **Migration safety:** All modifications to a previously deployed base schema must be separately numbered additive migrations; the revised 0001 sketch here is only the clean-install target, NOT an instruction to mutate an already-applied migration hash. Existing production deployments require expand/dual-read/backfill/contract. No project SQL has yet been executed.
+- **Review request:** CHAT_01 decides recordVersion/CAS, CHAT_02 budget usage, CHAT_03 side effects, CHAT_07 notifications, CHAT_09 owner and secrets, CHAT_11 DDL/restore fixture and benchmarks. P0 unresolved keeps Draft.
