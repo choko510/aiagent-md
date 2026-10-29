@@ -508,3 +508,7 @@ async function subscribeEvents(principal, requestedTaskId, stream) {
 - [ ] Better Auth導入スパイクとRLS/proxy本番適合の検証は未実施。
 
 **Disposition: Keep Draft.** 次のCHAT_09の優先仕様は`secrets-and-credentials.md`。この文書のレビュー後に別ブランチ/PRで進める。
+
+## Round2 upstream issue/PR case study — CSRF edge conditions
+- **[Issue/PR verified; not merged]** Better Auth [PR #10944](https://github.com/better-auth/better-auth/pull/10944) reports same-origin form POSTs with `Origin:null` under `Referrer-Policy:no-referrer`, including session-bearing forms. The PR was **closed without merging** at inspection time; its proposal is not treated as shipped behavior. This reinforces the need for `AUTH-T05` to test null Origin with Fetch Metadata, strict token fallback, and no generic unsafe Origin bypass. Our own AuthProvider and CSRF settings must be tested independently.
+- Evidence class: **Issue/PR report**, separate from Better Auth pinned `origin-check.ts` **Code verified**. Status and behavior may change; no product integration test run.
