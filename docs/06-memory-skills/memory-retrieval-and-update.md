@@ -31,7 +31,7 @@
 
 `MemoryQueryService` / `MemoryChangeService` がCHAT_06所有、`MemoryRepository` はCHAT_10へ論理契約、`ContextBudgetPort` と再生成のStep境界はCHAT_02、`AuthenticatedPrincipal`はCHAT_09、ID/Event/Error envelopeはCHAT_01、フィードバックイベント正本と自然言語の「好み」解釈はCHAT_14。
 
-**重要な既存ドラフト差分**: CHAT_01 PR #2の公開IDはUUIDv7、`recordVersion`は1開始、Taskは`conversationId=null`可。CHAT_10 PR #10の`gen_random_uuid()`/`revision default 0`/`workspace_id`は衝突あり。MemoryはChat_01の公開IDへ合わせ、DB adapterが対応できるまで`[PROVISIONAL: CHAT_01/09/10]`。Memory-local CAS revisionはTask`goalRevision`でもRun`leaseEpoch`でもない。Run-originated compaction/learningにはfencing tokenを別途必要とする。
+**旧Round1に存在した契約衝突は歴史的記録（現在のP0ではない）**: PR #10の最新HEADではUUIDv4 DB default撤去、recordVersion初期1、Task.conversationId nullable、tenant/owner複合FKへ修正済み。Memory Writerの正式DB保存・tombstone・scopeは引き続き[PROVISIONAL: CHAT_06/09/10]であり、契約の未承認と旧SQLの未修正を混同しない。
 
 ## 4. Requirement table
 
@@ -257,3 +257,8 @@ MR-1: MemoryQueryPort + strict scope/expiry/status validator + fake store unit t
 [S6] [Project Brief](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/project-brief.md)（Docs verified）。
 [S7] [Current SC-01..16](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/acceptance-scenarios.md)（Docs verified）。
 [S8] 設計上限・score・Adapter・APIはHypothesis/Proposal。実Harness未実装、ベンチ/テスト未実行。
+
+
+## 18. Round 4 — Feedback→Memory Writer authoritative mutation
+Feedback is a user-supplied **preference proposal**, not Evidence, Role or Tool Policy. CHAT_14 must request the sole CHAT_06 Memory Writer `applyScopedPreference` with tenant/owner identity, target `canonicalEntityId` (retailer_storefront only if exact mapping), `mappingRevision`, consent proof, idempotency key, expectedRecordVersion and scope (Task/Watch/User). A stale mapping, ambiguous chain vs branch or source text resembling user instruction is rejected as pending clarification. Writer atomically increments revision, writes immutable mutation+active projection and tombstones previous active record upon explicit Undo. Read and model-dispatch boundaries re-check current sourceEpoch/revision. Original observations unchanged. A reversible preference cannot weaken non-optional Watch rules or add Tool capabilities.
+DB proposal CHAT_10 PR #10 `memory_feedback_mutations` extension remains owner-reviewed Draft. Tests MEM-R4-T01 branch-only exclusion; T02 stale mapping version reject; T03 Undo vs concurrent retrieval with sourceEpoch fence; T04 other owner/tenant deny; T05 duplicate key same outcome; T06 source HTML 'exclude all' not treated as user consent. SC-16/08. NOT RUN against Harness.
