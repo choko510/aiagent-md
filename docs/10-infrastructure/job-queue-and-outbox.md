@@ -76,7 +76,7 @@ type OutboxPointer = Readonly<{
 }>; // local physical dispatcher metadata, not public Event type
 type RunJobPointer = Readonly<{
   kind:"run"; tenantId:string; taskId:string; runId:string;
-  expectedLeaseEpoch:number; expectedGoalRevision:number;
+  expectedLeaseEpoch:string; expectedGoalRevision:string;
   schedulerOccurrenceId?:string; expiresAt:string;
 }>;
 type NotificationPointer = Readonly<{
@@ -309,3 +309,7 @@ Remain Draft while P0 contracts are unresolved. Avoid a second Queue/event sourc
 [S12] `https://github.com/choko510/aiagent-md/pull/2` `/pull/1` `/pull/9` `/pull/10` `/pull/11` — **Draft contract evidence**, not Locked.
 
 **Unsupported until tested:** pg-boss API exact method signatures under pinned package lock, transactional interaction with custom ORM, long worker network partition recovery performance, external notification exactly-once, deployment benchmark. No app code was built.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
