@@ -143,21 +143,27 @@ RISK-PR1 bigint money validators, same-currency arithmetic, exact rounding fixtu
 |RISK-T14|1000 candidates + memory budget→ bounded completion/failure|
 |RISK-T15|source correction/identity split→ dependent decisions STALED|
 |RISK-T16|injection in coupon source→ no policy/tool execution|
-## 15. MUST → TEST → SC追跡
-|REQ|TEST|SC|oracle|
+## 15. MUST requirement → TEST → SC 追跡（全ID・省略表記なし）
+
+|Requirement|Designed TEST (未実行)|Acceptance Scenario|確認可能な合格条件|
 |---|---|---|---|
-|RISK-001,013|T01,T02|01,09|全演算exact・invalid拒否|
-|RISK-002,010|T12,T15|01,10|時刻・revision維持|
-|RISK-003,004|T02,T04,T11|01,10|unknown非ゼロ|
-|RISK-005|T03|01,10|coupon条件|
-|RISK-006,007|T04,T11|01,10|3bounds、保証誤称0|
-|RISK-008|T05|01,09|FX根拠なし拒否|
-|RISK-009|T06|10|異SKU混合0|
-|RISK-011|T07,T09|07|結果冪等|
-|RISK-012|T08,T10|07|旧version publish 0|
-|RISK-014|T11,T14|09,10|上限・不明の順位|
-|RISK-015|T15|10,14|stale発火|
-|RISK-016|T12,T13,T16|01,08|出典とtenant隔離|
+|RISK-001|RISK-T01, RISK-T02|SC-01, SC-09|整数minor-unit・丸め|
+|RISK-002|RISK-T12|SC-01, SC-10|Evidence・時間・Identity revision保持|
+|RISK-003|RISK-T04, RISK-T11|SC-01, SC-10|未知項目が利益確定に変換されない|
+|RISK-004|RISK-T02, RISK-T04|SC-01, SC-10|送料/税/手数料の重複0|
+|RISK-005|RISK-T03|SC-01, SC-10|適用不可クーポン割引0|
+|RISK-006|RISK-T04, RISK-T11|SC-01, SC-10|3区間と品質を独立表示|
+|RISK-007|RISK-T04|SC-01, SC-10|査定減額条件を不明として表す|
+|RISK-008|RISK-T05|SC-01, SC-09|FX根拠なし比較拒否|
+|RISK-009|RISK-T06|SC-10|異SKU利益比較を停止|
+|RISK-010|RISK-T12|SC-01, SC-10|時点/stock不明の確定表示0|
+|RISK-011|RISK-T07, RISK-T09|SC-07|同入力/版で計算一意|
+|RISK-012|RISK-T08, RISK-T10|SC-07|旧goal revision結果非公開|
+|RISK-013|RISK-T01|SC-01, SC-09|不正数/負値/0除算拒否|
+|RISK-014|RISK-T11, RISK-T14|SC-09, SC-10|unknownを上位確定候補にしない|
+|RISK-015|RISK-T15|SC-10, SC-14|訂正時下流STALE|
+|RISK-016|RISK-T12, RISK-T13, RISK-T16|SC-01, SC-08|内訳と認可済み証拠追跡|
+
 
 ## 16. Cross-team proposal
 P0-RISK-01 [PROVISIONAL: CHAT_01] typed Money/exact currency minor units+QualityをEvidence relationへ提案（既存Observationを再定義しない）。P0-RISK-02 [PROVISIONAL: CHAT_05] taxIncluded/fees/coupon/availability/quote validity/condition fieldsをConnectorのnormalized draftへ必須化。P0-RISK-03 [PROVISIONAL: CHAT_10] receipt/invalidation unique+FK/decimal string persistence。P0-RISK-04 [PROVISIONAL: CHAT_09] cross-owner quote use and proof of entitlement。P1-RISK-05 [PROVISIONAL: CHAT_07/08/11] Watch threshold, UI quality, adversarial exact-arithmetic tests。共同承認までDraft。通貨換算・税率の外部最新値は固定せず必ずsource付き。
