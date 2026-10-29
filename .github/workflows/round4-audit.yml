@@ -1,0 +1,33 @@
+name: round4-actual-execution
+on:
+  push:
+    branches:
+      - audit/round4-runtime-validation
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  postgres-ddl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract proposed SQL and execute in real PostgreSQL 16 container
+        run: python3 audit/round4/run_ddl.py
+  docker-browser-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker non-root primitive smoke test (NOT Harness sandbox)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker version
+          docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,mode=1777 alpine:3.20 sh -c 'id && test ! -S /var/run/docker.sock && test ! -e /root/.ssh && test ! -e /host'
+      - name: Chromium present and real local navigation smoke (NOT Harness SSRF protection)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          which google-chrome || which chromium || which chromium-browser
+          python3 audit/round4/browser_smoke.py
