@@ -289,6 +289,10 @@ SI-5 rollback/withdrawn/cancel/source delete, fault injection and performance me
 
 **Cross-contract numeric codec:** CHAT_01 PR #23 uses decimal-string wire encoding for BIGINT-valued event sequences; this specification keeps `runLeaseEpoch` as an unrounded decimal string and only converts in a trusted bounded adapter. The Task/Run-state Draft has its own numeric variants and must reconcile before Locked. Memory-local revision/Task Goal Revision/Run leaseEpoch may never be conflated.
 
+### Official upstream documentation cross-check
+
+[OpenClaw Skill Workshop documentation](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/docs/tools/skill-workshop.md) explicitly describes automatic save/patch and an optional "propose" mode. This is **Docs verified** but its default behavior is **not adopted** here: the Harness must never auto-promote a model-generated procedure or bypass project owner policy. [Hermes Curator documentation](https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/website/docs/user-guide/features/curator.md) describes active/stale/archived and no automatic delete, supporting recoverability and staleness evaluation. Neither project's stated intervals/performance are transferred to this product.
+
 ## 17. Sources / Evidence grade
 
 - [S1] Hermes `skill_manager_tool.py`/`skill_manager_guards.py`/`skill_ledger.py` — `2`にcommit固定URL、2026-10-30、**Code verified**。[LICENSE MIT](https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/LICENSE)。
