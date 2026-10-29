@@ -50,7 +50,7 @@ Task.recordVersion初期1案、Run.leaseEpoch number安全整数/DB bigint、Tas
 type ControlKind="CANCEL"|"PAUSE"|"RESUME"|"STEER";
 interface ScopedControl {
  commandId:string;taskId:string;actorUserId:string;
- expectedRecordVersion:number; kind:ControlKind;
+ expectedRecordVersion:string; kind:ControlKind;
  issuedAt:string;payloadRef?:string;goalRevisionBefore:number;
 }
 interface ControlPort {
@@ -156,3 +156,7 @@ CHAT_01 command State/GoalRevision/Event semantics, CHAT_10 Command+Task CAS/out
 - [S3] Code and tests https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/agent/abstract.py ; https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/tests/test_run_cancellation.py
 - [S4] Code and tests https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/src/agents/run.py ; https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/tests/test_hitl_session_scenario.py
 Code verified=ソース関数確認、Test definition verified=テスト本文確認、Issue report=未再現の報告。OSSライセンス: LangGraph/PydanticAIはMIT、@mastra/coreはpackage metadataでApache-2.0。独立実装で丸写ししない。
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
