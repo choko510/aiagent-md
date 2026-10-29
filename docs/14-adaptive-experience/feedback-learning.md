@@ -156,6 +156,12 @@ Validation:
 
 これらは本番IDや現存APIではない。SourceのconfidenceとUserのPreference strengthをPolicy/Tool実行権限に換算してはいけない。
 
+### 5.1 Cross-team mapping gap (2026-10-30): retailer identity
+
+CHAT_12 PR #51のEntity Resolution draftで定義されたDomain unionはproduct、hotel_property、hotel_rate、organization、public_personだけで、retailer/storefront（支店・同一チェーン・merchant account）という独立Domainをまだ持たない。したがって本書のEntity class=retailerは**採用済み共通Entity型ではなくCHAT_14内の暫定入力提案**である。実装Adapterは、対象が正式に承認・版管理された正確な店舗識別子へ解決できる場合だけ除外設定をACTIVE化する。解決できないときは単発の結果評価またはREVIEW_REQUIREDに留め、organizationの一致から全系列店除外を推定しない。店舗merge/split後も古いmappingVersionを黙って新しいEntityへ結び直さない。FBL-P0-06をOwnerへ提案し、FBL-T02に「same chain/different storefront」の否定ケースを含める。
+
+CHAT_13 PR #57はrequired user ruleをoptional exclusionより優先し、quietBypassも別opt-inとしている。このDraftとの整合は、Feedbackからはconfirmed scoped active preferences + revisionだけを提供し、critical/requiredの新しい判定権限を供与しないこと。CHAT_09 PR #47のData Class C4/C8/C9とRestore tombstoneも、Feedbackの原文/履歴/derived indexのGCを制限する。どちらもDraftのため[PROVISIONAL]である。
+
 ## 6. 状態遷移とシーケンス
 
 ~~~text
@@ -356,7 +362,7 @@ Migration: M0 flag OFF+契約/Schema追加、M1 User明示操作のcandidate/dry
 | FBL-P0-03 | CHAT_09/10 principal/privacy | tenant+owner+workspaceのAuth mapping、Feedback/Entity/Memoryの複合FK認可、delete/restored backup high-water。FBL-T01/07/12/13 |
 | FBL-P0-04 | CHAT_07/13 Watch/Notification | soft preferenceとhard configured triggerのprecedenceを正式化。Outbox idempotency、quiet hours、explicit Watch stopのみhard変更。FBL-T10/11 |
 | FBL-P1-05 | CHAT_08 Web/REST/Telegram | scope選択UI+If-Match/idempotency+target review+Undo history; unknown targetは保留。FBL-T02/03/05/15 |
-| FBL-P1-06 | CHAT_12 Entity resolution/risk | entity mappingVersion固定、別容量/系列店false merge、JPY/minorUnits/unknown profit。FBL-T02/05/16 |
+| FBL-P0-06 | CHAT_12 Entity resolution/risk P0 | **Contract mismatch**: PR #51 Entity ResolutionのDomainはproduct/hotel_property/hotel_rate/organization/public_personでありretailer/storefrontを表現しない。本書のexclude_entity class=retailerと正式Entity mappingを同一視できない。CH12がretailer identityを拡張するか、source-scoped merchantRef+specific-store UUIDを正式な独立Portとして承認するまでは、店舗単位の永続excludeをACTIVE化せずREVIEW_REQUIREDとする。mappingRevision, negative evidence, alias/split invalidationとJPY/minorUnits/unknown profitを共同定義。FBL-T02/05/16 |
 | FBL-P1-07 | CHAT_06 Skill lifecycle | feedbackの手順は候補のみ、SkillがTool能力を増やさない。FBL-T04/16 |
 | FBL-P1-08 | CHAT_03/04/14-01 | Browser Recipe disableを別Ownerへ提案、FeedbackからGateway/Policyへ直結しない。FBL-T04/13 |
 | FBL-P1-09 | CHAT_11 Acceptance Harness | cross-user/2 tenant、複雑なUndo、outbox順不同、Privacy/backup restore、false exclusion measurement。FBL-T01..T18 |
