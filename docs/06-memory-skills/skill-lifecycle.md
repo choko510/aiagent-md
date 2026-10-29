@@ -293,6 +293,10 @@ SL-1 Immutable manifest parser/schemas（unknown field negative tests）。SL-2 
 | CHAT_06 (06-05) | P1 | Plugin recipe/hooksには別のcapability/policy boundary |
 | CHAT_11 | P1 | malicious archive, duplicate install, stale Run, disabled capability E2E |
 
+### Additional code/test coverage and upstream issue/PR status
+
+[Deep Agents `test_skills_middleware.py`](https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/tests/unit_tests/middleware/test_skills_middleware.py) includes explicit `test_validate_skill_name_invalid`, `test_parse_skill_metadata_invalid_yaml` and tool declaration tests. [`test_skill_tools.py`](https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/tests/unit_tests/middleware/test_skill_tools.py) includes `test_call_before_any_read_is_rejected_without_running` and `test_registered_tool_wins_over_a_skill_tool_of_the_same_name` (Code verified, not run). Relevant external PR [Hermes #79108](https://github.com/NousResearch/hermes-agent/pull/79108) describes a proposed approval-gate fail-open repair; **PR discussion only, merge status not assumed**. Our product requires gate failure **fail closed** regardless of upstream state. 
+
 ## 17. Sources / confidence
 
 2026-10-30、``## 2`` のHermes/Deep Agents/OpenClaw commit-pinned sourceとテストは **Code verified (static)**。Licenseの原本: [Hermes MIT](https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/LICENSE), [Deep Agents MIT](https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/LICENSE), [OpenClaw MIT](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/LICENSE)。Release tag/installer/API/benchmarkの採用版は **Unverified**。上記Registry/Policy/limits/DDL/APIはHarness独自の**Hypothesis/Proposal**。OSSテストおよびHarnessテストは**未実行**。
