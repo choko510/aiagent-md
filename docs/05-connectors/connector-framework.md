@@ -300,6 +300,7 @@ async function executeApproved(approved, signal) {
   await policy.verifyTenantEntitlementAndCompliance(approved);
   const expiresAt = min(approved.deadlineAt, now() + manifest.limits.maxDurationMs);
   const observations = [];
+  let credentialRefreshAlreadyAttempted = false;
   for (let attempt = 1; attempt <= min(manifest.limits.maxAttempts, 3); attempt++) {
     assertNotCancelled(signal, approved.runGeneration);
     if (now() >= expiresAt) return failure("TIMEOUT", observations);
@@ -321,7 +322,8 @@ async function executeApproved(approved, signal) {
         approved, credentialHandle, signal, { timeoutAt: expiresAt, maxBytes: 2_097_152 }
       );
       await quota.commitAttempt(lease, response.accounting);
-      if (response.status === 401 && canRefreshOnce(approved, attempt)) {
+      if (response.status === 401 && !credentialRefreshAlreadyAttempted && canRefreshOnce(approved, attempt)) {
+        credentialRefreshAlreadyAttempted = true;
         const refresh = await broker.singleFlightRefresh(approved.credentialRef);
         if (refresh.rejected) return failure("AUTH_REVOKED", observations);
         continue;
@@ -337,7 +339,8 @@ async function executeApproved(approved, signal) {
       await evidenceSink.persistDraftAndReceipt(approved, draft, lease);
       return completeOrPartial(draft);
     } catch (err) {
-      await quota.markUnknownAsConsumed(lease);
+      // Must be idempotent: settled attempts stay settled; known pre-send failures release once.
+      await quota.settleOrReleaseOrMarkUnknown(lease, err);
       if (signal.aborted) return failure("CANCELLED", observations);
       if (!isSafeIdempotentRead(approved) || !isKnownPreSendFailure(err))
         return failure("UNCERTAIN_OUTCOME", observations);
@@ -573,3 +576,7 @@ async function executeApproved(approved, signal) {
 **Cross-team proposals**: P05-12/P0 → CHAT_01/02/03のcanonical RunFence・descriptor pin・非損失wire。P05-13/P0 → CHAT_09/10のtenant-workspace-owner mapperとUUIDv7/nullable Conversation/revision/leaseEpoch/goalRevision schema migration。P05-14/P1 → CHAT_13 Event Router/Tool Gateway間の権限fencing。P05-15/P1 → CHAT_12 Entity/Source Reliabilityにはnative IDsとcondition付きEvidenceを渡すが、統合判断をConnectorがしない。
 
 未解決のP0契約と未実行の統合試験があるため、`Reviewed`/`Locked`/`Verified`とは呼ばない。
+
+
+### 18.4 Round-2 pseudocode consistency check
+The ``7.1` method is a **proposed adapter-local design**, not a directly importable library API. Corrected the example to enforce one credential refresh **across the entire logical invocation** and to call an idempotent `settleOrReleaseOrMarkUnknown` rather than double-committing a lease after a successful HTTP response but failed Evidence write. The quota method itself is [PROVISIONAL: CHAT_10]; the implementation must use an atomic state transition with legal paths `RESERVED→RELEASED_PRE_SEND` or `RESERVED→UNKNOWN_CONSUMED/SETTLED` (terminal), and reject `SETTLED→UNKNOWN_CONSUMED` double accounting. Design test `CON-FW-T33`: successful billed HTTP response, Evidence sink fails, then exception reconciliation; expect exactly one provider-unit settlement, Evidence status uncertain, and no duplicate HTTP send. This test extends ``CON-FW-008/025` and SC-07/09. **Not executed.**
