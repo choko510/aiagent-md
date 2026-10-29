@@ -162,17 +162,29 @@ RAD-PR1 bounded plan/frontier/strategy interface and zero-result fixtures。RAD-
 |RAD-T15|SC-10 E2E:混合サイズと0件探索→誤マージなし・出典保持|
 |RAD-T16|latency/CPU/memory/token benchmarks with fixed fixture→metrics recorded|
 |RAD-T17|source retract after candidate verified→stale、通知なし|
-## 15. REQ→TEST→SC
-|MUST|TEST|SC|pass|
+## 15. MUST requirement → TEST → SC 追跡（全ID・省略表記なし）
+
+|Requirement|Designed TEST (未実行)|Acceptance Scenario|確認可能な合格条件|
 |---|---|---|---|
-|RAD-001,002,003|T01,T02,T12|05,10|未探索空間を区別|
-|RAD-004,011|T05,T06,T07|08,09|許可外/超過0|
-|RAD-005,006,007|T03,T04,T15|01,10|出典保持・誤結合0|
-|RAD-008,009,010|T11,T12|10,14|missing不利に明示|
-|RAD-012,013|T08,T09,T10|07|重複0・新dispatch0|
-|RAD-014,015|T02,T07,T12|09,10|partial理由|
-|RAD-016,017|T13,T14|02,08,16|無断効果0|
-|RAD-018|T02,T11|10|empty/partial別|
+|RAD-001|RAD-T01|SC-05, SC-10|goal条件凍結|
+|RAD-002|RAD-T02, RAD-T12|SC-05, SC-10|有限探索slotとcoverage|
+|RAD-003|RAD-T01|SC-10|未知ID候補発見|
+|RAD-004|RAD-T05, RAD-T07|SC-08, SC-09|未許可Provider呼出0|
+|RAD-005|RAD-T04|SC-01, SC-10|候補の時間・証拠保持|
+|RAD-006|RAD-T03, RAD-T08|SC-10|二重登録/誤結合0|
+|RAD-007|RAD-T03, RAD-T11|SC-01, SC-10|未解決identity利益に昇格しない|
+|RAD-008|RAD-T11|SC-10, SC-14|条件/未知をRiskへ委譲|
+|RAD-009|RAD-T11, RAD-T12|SC-10, SC-16|除外条件と閾値を優先|
+|RAD-010|RAD-T12|SC-10, SC-14|欠測をゼロ点にしない|
+|RAD-011|RAD-T05, RAD-T06|SC-09|予算/回数上限遵守|
+|RAD-012|RAD-T10|SC-07|cancel後dispatch0|
+|RAD-013|RAD-T08, RAD-T09|SC-07|再配達でslotは一意|
+|RAD-014|RAD-T02, RAD-T07|SC-08, SC-10|ブロック理由と未探索表示|
+|RAD-015|RAD-T12|SC-10, SC-14|sampling bias可視|
+|RAD-016|RAD-T13|SC-02, SC-16|明示Watch receiptのみ昇格|
+|RAD-017|RAD-T13, RAD-T14|SC-08|購入/投稿/無断通知0|
+|RAD-018|RAD-T02, RAD-T11|SC-10|0/partial/exhaustedを区別|
+
 
 ## 16. Cross-team Proposals / Unresolved
 P0-RAD-01 [PROVISIONAL: CHAT_02/10] DiscoveryPlan/slot checkpointのRun fencing、goalRevision、DB atomic receipt、nullable Task.conversationId。P0-RAD-02 [PROVISIONAL: CHAT_05/09] searchable provider Manifest、token bounds、license/ToS/purpose、API credential handling。P0-RAD-03 [PROVISIONAL: CHAT_01] Candidate Evidence relation IDs and schemaVersion。P0-RAD-04 [PROVISIONAL: CHAT_12-02/12-04] verified identity and exact amount before score。P1-RAD-05 [PROVISIONAL: CHAT_07/08/11] Watch promotion API/coverage UI/E2E。過去のUUIDv7とDB default、tenantId vs workspace mapping、RecordVersion/CAS等の調停は未Lock。Keepa plan/marketplace利用資格は未確認。全件Draft維持。
