@@ -284,7 +284,7 @@ New logical tables/fields: `effect_intent` (immutable ref/args/target/risk/statu
 - Replica stale write prevented by `WHERE lease_epoch=:expected AND task.active_run_id=:runId AND status=...` with consistency model agreed by CHAT_02/10. Late callback may attach evidence to a quarantine append-only log but cannot overwrite result. DB isolation/locks and indexes in CHAT_10; never hold transaction open across remote call.
 - Backup restore cannot rewind idempotency truth about external provider; dispatch disabled on restored scope until uncertainty sweep.
 
-**Contract collision audit**：(1) CHAT_01 UUIDv7 vs CHAT_10 `gen_random_uuid` mismatch; (2) CHAT_01 `recordVersion=1` vs `revision default 0`, define migration/mapping; (3) Task conversation nullable vs DB NOT NULL; (4) `leaseEpoch:number` vs Runtime bigint and DB absence, loss of precision; (5) `tenantId/ownerUserId` vs `workspace_id`. All are P0, **not silently resolved here**. These affect ledger PK/FK, CAS, revision checks, approval scope. Pending result should not be called production-safe until reconciled.
+**Historical Round 1 contract collision audit (superseded by Round 2/3 Draft proposals):** UUIDv7、recordVersion initial1、nullable Conversation、Run leaseEpoch列、tenant/ownerスコープについて、CHAT_01/CHAT_10の更新案が既存Draft PRへ反映された。以降の正本は各PRの最新HEADを参照。これらを現行P0として再宣言しない。ただし実装テスト未実行なので、cross-PR merge gateを通るまではLockedと主張しない。
 
 ## 12. UI/API / operational manual reconcile [PROVISIONAL: CHAT_08]
 - `GET /tool-intents/{id}` response: `intentStatus`, `effectOutcome`, `providerConfirmation` (only if verified), `lastCheckedAt`, `mayHaveSent`, `userActionRequired`, `proofUrlRef`, `estimatedCost` vs `settledCost`. Do not show raw provider operation token or secret.
