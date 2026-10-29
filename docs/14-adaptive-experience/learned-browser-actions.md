@@ -305,3 +305,19 @@ ProposalのSchemaVersion=1は**本CHAT内部**でありShared Event/Task/Tool/DB
 - [S6] [Jev adapter proposal PR #19](https://github.com/choko510/aiagent-md/pull/19), [BrowserSession PR #12](https://github.com/choko510/aiagent-md/pull/12), [Gateway #20](https://github.com/choko510/aiagent-md/pull/20), [Ledger #31](https://github.com/choko510/aiagent-md/pull/31), [Memory/Skill #15/#30](https://github.com/choko510/aiagent-md/pull/30). **Project Draft code/spec contracts inspected, not Locked**.
 - [S7] Stagehand [PR #3229](https://github.com/browserbase/stagehand/pull/3229), [PR #3210](https://github.com/browserbase/stagehand/pull/3210): change-log referenced; independent PR runtime reproduction **unverified**.
 - [S8] Fingerprint DSL/HMAC/policy gating/numeric limits/state machine/DB and REST proposals are **Design hypotheses**, not Stagehand/Playwright guaranteed implementation.
+
+## 18. Round 4 — No unverified interactive replay / POST trap
+**Revision to unsafe action labels:** local `ReadActionV1` currently includes `read_only_click` and `read_only_fill`, but those are **legacy candidate categories**, not an automatic safety grant. A click can trigger POST/XHR/navigation, and fill can auto-save; even a GET can have unintended server effects. Until a real Browser Worker/Gateway effect-monitoring test suite passes, the automatic replay allowlist is **`snapshot` and `scroll` on a strictly verified unchanged page/session**; `navigate` only to a server-approved known read endpoint and with fresh network egress authorization. `read_only_click`/`read_only_fill` must be **freshly planned and approved** each use, never fast-path cached replay.
+```ts
+type AutoReplayV1 = {op:"snapshot"|"scroll"} |
+ {op:"navigate"; allowlistedDestinationRef:string; noCredentialsEscalation:true};
+function canReplay(step:ReadActionV1,ctx:SessionPolicy):boolean {
+  return validatedRecipeAndOwner(ctx) &&
+    (step==="snapshot"||step==="scroll"||
+      (step==="navigate"&&verifiedReadDestinationAndEgress(ctx)));
+}
+```
+**Future opt-in only after enforcement:** to admit any interactive click/fill, policy must prove forbidden HTTP methods/non-allowlisted origin, websocket write messages, ServiceWorker/background requests, hidden form submissions and auto-save are denied at actual network dispatch (not merely observed afterward). Browser intercepted requests can be incomplete if a transport bypasses hooks; CHAT_09 must verify **container-level** proxy/egress, and CHAT_03 records attempted side effects. If protection cannot be demonstrated, interactive cache replay stays disabled. A postcondition check is evidence of result only, never ex-ante permission.
+**Tests (designed not run):** LBA-R4-T01 benign snapshot opt-in replay→0 new mutation; T02 click triggers POST→never automatically executed; T03 fill causes auto-save→never replayed; T04 GET destination redirects/sets state→deny unless specifically approved; T05 same tenant different account cookie→deny; T06 DOM fingerprint drift→invalidate without clicking; T07 policy revoked during replay→stop at dispatch boundary. SC-13/07/08. Owner decision CHAT_03/04/09/14, retained Draft.
+**Old Round1 UUIDv7/v4, nullable Task Conversation and recordVersion0 assertions in §3 are historical and superseded in current PR #10; do not reopen as current P0 without rechecking latest HEAD.**
+
