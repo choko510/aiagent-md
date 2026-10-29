@@ -115,9 +115,9 @@ type UtcInstant = Brand<string, "UtcInstant">;
 // Timezone: validated against configured tz database, e.g. "Asia/Tokyo".
 type IanaZone = Brand<string, "IanaZone">;
 type SchemaVersion = "1.0";
-type RecordVersion = number; // safe positive integer, starts at 1, CAS on each mutation
-type Revision = number;      // positive integer, immutable task goal snapshot
-type LeaseEpoch = number;    // non-negative fencing token, monotonic
+type RecordVersion = Brand<string, "RecordVersion">; // int64 decimal string, initial "1"
+type Revision = Brand<string, "Revision">; // int64 decimal string, initial "1"
+type LeaseEpoch = Brand<string, "LeaseEpoch">; // int64 decimal string, initial "0"
 type OpaqueRef = Brand<string, "OpaqueRef">; // only server-resolved, no embedded secret
 type ActorRef = { type: "user" | "service"; id: string }; // authorization: CHAT_09
 type EntityMeta = {
@@ -185,8 +185,8 @@ type WatchIdentity = EntityMeta & {
 {
   "schemaVersion": "1.0",
   "id": "019a2fc0-4b21-7af0-9c22-34f78b6a1d04",
-  "goalRevision": 1,
-  "recordVersion": 2,
+  "goalRevision": "1",
+  "recordVersion": "2",
   "requestedTimeZone": "Asia/Tokyo",
   "activeRunId": null,
   "status": "see-task-run-state-machines"
@@ -459,3 +459,46 @@ CreateTask APIはcommandIdを受け取れること、更新APIはexpectedVersion
 [S14] **Design decisions proposed by CHAT_01**, **Hypothesis / not benchmarked**: UUIDv7 choice、Task parent DAG、single active Run、leaseEpoch、triggerKey、finite caps、command receipt/outbox boundaries。これらはOSSに「そのまま存在する」と主張しない。
 
 **Self-review against review-gates.md:** 主要OSS3件の実関数・テスト・commit・LICENSEを静的確認。実行テストなし、性能実測なし。Owned path 1件のみ。未確定のP0はDOM-P01/P02/P03/P04/P08/P10のまま。Ready/Lockedは申請しない。外部サービスへの購入・投稿・予約・通知は一切実行していない。
+
+
+## 18. 第2ラウンド共通契約不整合台帳（2026-10-30 / Draft）
+
+最新main b45d4e989998663a00ef09673e69ae1f4191f00d。PR #1/#2/#8/#9/#10 のHEAD全文を確認し、#6/#11も依存範囲を調査。ここでの「採用」はCHAT_01の**提案論理正本**であり、他ownerの合意/変更/テスト実行を意味しない。
+
+| Conflict / severity | 実際の相違 | 採用提案・正本Owner | 影響するファイル、migration、検証 |
+|---|---|---|---|
+| R2-01 P1 | #2 UUIDv7 対 #10 §5.2 gen_random_uuid() v4 default | Server UUIDv7統一 / CHAT_01 ID、CHAT_10 DDL | #2/#8/#10全ID。v4 fallback default撤去、DB v7検証、旧v4は参照graph移行ADRまでquarantine。R2-T01 |
+| R2-02 P1 | #2 Task.conversationId nullable 対 #10 tasks.conversation_id NOT NULL、#8 TaskView必須 | nullable維持 / CHAT_01意味論 | #8 wire null、#10 nullable FK。Watch/API/Event起点で架空Conversationを作らない。R2-T02 |
+| R2-03 P1 | #2 recordVersion初期1 対 #10 revision default 0、#8 number | recordVersion=DB int64初期1、JSON decimal string、CASで+1 / CHAT_01 | #10 record_version列統一、#8 ETag lossless string。旧0は明示migration/ETag無効化。R2-T03 |
+| R2-04 P0 | #2 Run.leaseEpoch number、#1 Fence bigint、#10 runsにlease列なし | Run.leaseEpoch=bigint、wire十進文字列、claim/reclaim時増加、renew時維持 / CHAT_01/02 | #1 fencingTokenをRun.leaseEpochにmapping、#10 lease_epoch/owner/expires列+CAS、#3 Tool前epoch検査。ToolAttempt fenceは別。R2-T04 |
+| R2-05 P0 | #2 tenantId/ownerUserId 対 #10 workspace_idだけ、#9 ownerId | Tenant≠User≠Workspace。初期1:1のTenant→Workspace mappingを永続化し、active membership+user-private ownerを照合 / CHAT_01/09/10 | #9認可、#10 User/Tenant/Membership/mapping/owner FK、#8/SSE/Browser/Watch。未知ownerは推測せず隔離。R2-T05 |
+| R2-06 P0 | #2 Task.goalRevision/goalRevisionRef/activeRunId、Run.inputGoalRevisionが#10で欠落 | Immutable TaskGoalRevision + Task.currentGoalRevision/activeRunId + Run.inputGoalRevision / CHAT_01 | #10列/immutable table/FK/CAS、#1/#3旧revision Approval失効、移行中はdual-readと整合検査。R2-T06 |
+| R2-07 P0 | #1 Tool intent+outbox原子性、#10 idempotency/Watch trigger/Tool台帳の結合未決 | Receipt+domain mutation+Event+Outboxを同一DB transaction、配信はat-least-once、UNKNOWN external effect再試行禁止 / CHAT_01/03/10 | #3/#7/#8/#10のunique keysとtransaction。R2-T07 |
+| R2-08 P0 | #2 same-Run recovery / new-Run terminal retryと#1 runGenerationの不整合 | crash resumeは同runId/attemptNoでleaseEpoch増加、terminal retryは新runId/attemptNo。古いworker effect/commit拒否 / CHAT_01/02 | #1/#3/#10 fencing/ledger。R2-T08 |
+| R2-09 P1 | #11 Watch schedule occurrenceKey と SC-11 ExternalEventのID区別 | Domain UUIDv7とprovider event IDとdedupe hashは別物 / CHAT_01/07/13 | #7/#13 Watch/Event→Task lineageの一意制約。R2-T09 |
+
+### 型・Authorityを解釈するための固定規則
+
+- すべての公開業務IDはTrusted serverによるUUIDv7。UUID列型のみではv7は保証されない。IDは認可能力でない。
+- recordVersion、goalRevision、leaseEpoch、event sequenceは独立counter。DB BIGINT範囲0..9223372036854775807、wire上はcanonical十進文字列、内部でBigIntを使う。JSON number/指数表記/先行0/unsafe Number変換を禁止。recordVersionとgoalRevisionは1開始、leaseEpochはclaim前0。sequenceの初期値とスコープは次のEvent契約を参照。
+- Tenantは論理的な隔離境界、Userは本人、Workspaceは物理DB scope。ユーザーのTenant membershipだけで他owner private dataは閲覧不可。Service actorは実際のowner bound Task grantとfresh権限評価を必要とする。LLM/外部HTMLやqueue metadataからGrantを作れない。
+- TaskはWatch/Event/API起点でConversationを持たなくてよい。TaskのactiveRunIdは同Tenant/同TaskのRun、GoalRevision本文はimmutable revision artifact。Run.inputGoalRevisionは開始時固定、safe-boundaryで適用した新revisionはcheckpoint.effectiveGoalRevisionで記録。
+- 旧epochによるDB更新と新規Tool dispatchは拒否する。ただし外部サービスはDBフェンスを共有しないため不可逆操作のexactly-onceを断定しない。
+
+### 対応テスト（Designed only / 未実行）
+
+| ID | Fixture / Expected | SC |
+|---|---|---|
+| R2-T01 | API/DB全経路でv7を生成しv4 reject、silent ID rewrite 0 | 07,08 |
+| R2-T02 | Watch/Event Task conversation null保存→GET/List→他owner拒否 | 02,11 |
+| R2-T03 | 初期recordVersion=1、同時If-Match更新1件のみ成功、旧0版隔離 | 07 |
+| R2-T04 | 2 Workerでclaim、epoch>2^53をlossless wire、旧epoch commit/effect 0 | 07 |
+| R2-T05 | 2 Tenant×2 owner、SSE/Task/Browser/Artifact/Watchの越境bytes=0 | 06,08 |
+| R2-T06 | Steer後に旧GoalRevision Approvalをconsume、外部副作用0 | 04,07 |
+| R2-T07 | DB commit前後kill、outbox redelivery、lost tool ACK、UNKNOWN再実行0 | 02,07,11 |
+| R2-T08 | Run crash/reclaimは同IDでepoch増分、terminal retryは新ID | 07 |
+| R2-T09 | 同一X Eventをstream/poll双方からreplay、1 subscriptionあたりTask1 | 11 |
+
+**Cross-team proposals:** CHAT_10 PR #10: UUIDv7 default、nullable Conversation、recordVersion=1、Run lease列、GoalRevision/activeRun、owner映射とatomic outbox。CHAT_08 PR #8: nullable TaskView、lossless resourceVersion。CHAT_09 PR #9: Tenant/User/Workspace policy。CHAT_02 PR #1: epoch/fenceとGoal revision safe boundary。CHAT_03 PR #6: approval/side-effect UNKNOWNとfence。CHAT_07 PR #11 およびCHAT_13: trigger key≠domain ID。CHAT_00: ADR ratification、CHAT_11: contract/fault fixtures。
+
+**未解決P0:** R2-04/05/06/07/08。他ownerが実際に修正/合意した証拠はない。Draftを維持しLockedとはしない。
