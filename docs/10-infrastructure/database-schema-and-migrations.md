@@ -1244,6 +1244,15 @@ CREATE TABLE agent.artifact_derivations (
  FOREIGN KEY(tenant_id,parser_job_id) REFERENCES agent.parser_jobs(tenant_id,id),
  UNIQUE(tenant_id,parser_job_id,source_artifact_id,derived_artifact_id)
 );
+-- Runner computes SHA256 over THIS versioned SQL file and supplies the bound checksum.
+-- A repeat launch must compare existing checksum and SKIP rather than rerun CREATE TABLE.
+INSERT INTO agent.schema_migrations
+ (version,checksum_sha256,name,phase,app_min_reader,app_min_writer)
+ VALUES (2,:'migration_checksum_sha256','0002_expansion_ingress_entity_digest_parser','transactional',1,1);
+UPDATE agent.schema_control
+ SET schema_version=2,changed_at=now()
+ WHERE singleton=true AND schema_version=1;
+-- Changed 0 rows => abort transaction, never record a false successful migration.
 COMMIT;
 ```
 
@@ -1409,6 +1418,15 @@ CREATE TABLE agent.memory_feedback_mutations (
  REFERENCES agent.memory_feedback_mutations(tenant_id,id) DEFERRABLE INITIALLY DEFERRED,
  CHECK((scope_code='user' AND scope_ref IS NULL) OR (scope_code<>'user' AND scope_ref IS NOT NULL))
 );
+-- Runner computes SHA256 over THIS versioned SQL file and supplies the bound checksum.
+-- A repeat launch must compare existing checksum and SKIP rather than rerun CREATE TABLE.
+INSERT INTO agent.schema_migrations
+ (version,checksum_sha256,name,phase,app_min_reader,app_min_writer)
+ VALUES (3,:'migration_checksum_sha256','0003_expansion_observation_discovery_feedback','transactional',1,1);
+UPDATE agent.schema_control
+ SET schema_version=3,changed_at=now()
+ WHERE singleton=true AND schema_version=2;
+-- Changed 0 rows => abort transaction, never record a false successful migration.
 COMMIT;
 ```
 
@@ -1419,3 +1437,6 @@ COMMIT;
 
 ### 20.5 Round 4 — Digest reservation constraint corrected
 Previously `UNIQUE(tenant_id,notification_id)` on all `notification_digest_members` prevented **future valid digest reservation after a provably unsent cancelled digest was released**. It is now a partial unique index only for `reserved/covered_accepted/coverage_unknown`, preserving immutable released/blocked history and preventing a second active covering digest. Atomic transitions under CHAT_07 delivery sender must check current owner consent/policy and only move to `released` when a provider request was certainly NOT sent; ACK lost cannot be released automatically. `DB-R4-D06` must assert: second reservation of reserved member fails; transition first member to released permits new digest reservation; covered_accepted/coverage_unknown deny second. This is a physical design fix, not Runtime confirmation.
+
+### 20.6 Round 4 — Migration checksum and replay policy
+The forward SQL snippets now record versions 0002/0003 in `agent.schema_migrations` using the **exact SHA256 supplied by the migration runner** (e.g., psql variable `migration_checksum_sha256` in the proposal). A production driver must bind the value rather than embed the psql syntax. **The runner obtains an advisory schema lock, inspects `schema_migrations` and `schema_control` before executing**. If version exists and checksum matches, it **skips** the migration; if same version with different checksum, it **fails closed** (immutable applied migration), not `CREATE TABLE IF NOT EXISTS`. If version absent, apply in one DB transaction and commit version/control together. Database errors or 0-row schema_control CAS must cause rollback (production runner checks affected rows), do not claim success. Run `MIG-R4-T01` 0001→0002→0003, `T02` repeat skip, `T03` checksum mismatch fail, `T04` interrupted migration rollback, `T05` read/write version compatibility. This is not a production migration runner implementation. 
