@@ -60,7 +60,7 @@ Canonical event の \`eventId,taskId,runId,sequence,schemaVersion,occurredAt,com
 
 ## 5. API / TypeScript wire proposal
 
-REST v1 GET \`/api/v1/tasks/{taskId}/events\`。Accept: text/event-stream。Last-Event-IDはHTTP Headerでのみ受け付け、GET query cursor optional（URLログ・共有linkを通じ認証情報と混ぜない）。Eventはevent field（公開safe kind）、id（opaque *task-bound cursor*）、data（small JSON projection）を持つ。idは後述HMAC cursorであり生UUID/生DB sequenceだけにしない。ID/ETagの公開詳細は[REST spec](rest-api.md)に委譲。
+REST v1 GET \`/api/v1/tasks/{taskId}/events\`。Accept: text/event-stream。v1 Webクライアントは **fetch streaming** を使い、初回から `Last-Event-ID: <signed-snapshot-cursor>` ヘッダーを明示送信する（**native EventSourceは任意Headerを指定できないため、snapshot→liveの初期handoffには使用しない**）。クライアントはSSE frame grammarを有限バッファでparseする。GET queryのcursorは原則無効（任意トークンがアクセスログに残る事故を避ける）。legacy native EventSourceだけが利用可能な環境ではGET snapshotをstream自身の最初のframeとしてサーバで再提供する明示別routeが必要であり、同等のzero-gap試験なしにfallbackしない。Eventはevent field（公開safe kind）、id（opaque *task-bound cursor*）、data（small JSON projection）を持つ。idは後述HMAC cursorであり生UUID/生DB sequenceだけにしない。ID/ETagの公開詳細は[REST spec](rest-api.md)に委譲。
 
 ~~~typescript
 type SafeEventV1 = { // public DTO, NOT canonical CHAT_01 envelope
@@ -98,7 +98,7 @@ data: {"projectionVersion":1,"taskId":"<valid-uuidv7>","runId":null,"sequence":"
 
 ~~~
 
-**EventSourceとAuth:** ブラウザのEventSourceは任意Authorization header送信APIを標準では提供しない。v1のブラウザクライアントはSameSite Secure HttpOnly Cookie+Origin/CORS/CSRF方針（GETは副作用なし）を使うか、header可能なfetch streamingを採用する。URL query bearer token禁止。ServerTokenをJSへ漏らさない。read modelとstreamはsession失効時一貫してdeny。
+**Client auth:** v1は header指定可能なfetch streaming と `credentials:same-origin` によるSecure HttpOnly Cookieを採用。ブラウザのnative EventSourceは任意Headerを付けられないため、このhandshakeの実装には用いない。fetchでもcookie/Origin/CORSの検査をCHAT_09へ委譲し、URL query bearer tokenとJS内の長期tokenを禁止する。read modelとstreamはsession失効時一貫してdeny。
 
 **HTTP pre-stream:** bad ID=400、unauth=401、other tenant/not visible=404、cursor checksum/task mismatch=400（他tenantへ具体的ヒント不可）、retention expiry/replay gap=410 \`STREAM_CURSOR_EXPIRED\`＋ safe snapshot URL、rate=429、service unavailable=503。Header送信後はHTTP statusを変えられないので safe \`event:error\` + close。401/403をSSE dataとして継続配信してしまわない。
 
@@ -194,7 +194,7 @@ SSE-P1 core projection schemas + redaction + unit schema tests; SSE-P2 durable r
 | SSE-T09 | Contract: unknown projection version and retention gap | explicit 410/error + snapshot resync | 07 |
 | SSE-T10 | E2E: uncertain Tool outcome, paused, approval wait, completion | correct distinct UI statuses and aligned GET snapshot | 01,02,04,07 |
 | SSE-T11 | Benchmark: 100 Task sources, cold/warm, proxy buffering enabled/disabled | p95 latency and memory recorded, no unproven SLO claim | 09 |
-| SSE-T12 | Contract: EventSource credentials vs fetch header transport | session cookie controlled, no query bearer token | 08 |
+| SSE-T12 | Contract: native EventSource cannot set initial Last-Event-ID header; fetch streaming with snapshot cursor and session cookie | first request includes correct header; no query bearer token; zero-gap proof | 08 |
 
 All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005→T05,T11; 006→T06; 007→T07; 008→T08; 009→T09; 010→T10. No external real API/notification/purchase tests. Local integration not executed.
 
