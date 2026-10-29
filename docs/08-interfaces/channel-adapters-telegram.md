@@ -265,3 +265,10 @@ TG-P1 bot/webhook verification + owner pairing/unpair + security tests; TG-P2 du
 [S11] **Code verified** Mastra schedules: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/server/src/server/handlers/schedules.ts  
 [S12] **Code verified/test inspected** Mastra pause/resume: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/server/src/server/handlers/schedules.test.ts  
 **Unverified:** Integration with Telegram API in this product, actual Telegram policy entitlement, throughput benchmark, final webhook deployment/pairing UX, source repo exact release tag compatibility. Design proposals/limits are hypotheses, not guarantees.
+
+## 16. Upstream Issue report とIngress stallへの追加防御
+
+**[I-TG-01]** [OpenClaw issue #169176](https://github.com/openclaw/openclaw/issues/169176)（2026-10-30閲覧、Open、Issue report）は、過去メッセージのcallback失効が認可変更エラーになり、その非回復エラーを数時間以上繰り返し再試行し、後続チャット更新を塞いだと報告。**本製品の分類:** `AUTHORITY_REVOKED`/`CALLBACK_EXPIRED`/`APPROVAL_ALREADY_DECIDED` は永続的なterminal rejectionとしてinboxに保存し、Userへ安全な1回の応答だけを試み、**同じupdateのコマンドを再実行しない**。Telegramの期限切れ`answerCallbackQuery`による400も再試行不可能。後続updateのlaneはそのterminal rejectionの後に進める。一方、一時的なDB outage/429は有限backoff+DLQ対象。TG-T06/T09に「失効callback→反復なし→次のupdateが阻害されない」試験を追加する。
+**[I-TG-02]** [Mastra issue #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30、Open、Issue report）ではscheduled fire dispatch成功とrun終端が異なる。Telegramも`Watch fire accepted`を`research completed`とは通知せず、Run終端イベントとEvidence実時刻がある場合だけ終了報告。TG-T07にdispatch後にRunがsuspend/restartするfixtureを加える。
+
+Issue報告は本Harnessの再現実績ではなく、設計時のadversarial test動機として記録する。
