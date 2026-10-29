@@ -73,7 +73,7 @@ Scope of permissions is immutable `principal.ownerUserId + tenantId + taskId + r
 type ExecutorKind = "fetch"|"browser"|"pure_compute"|"outbox_notification";
 type CapabilityBinding = Readonly<{
   tenantId:string; ownerUserId:string; taskId:string; runId:string;
-  goalRevision:number; leaseEpochDecimal:string; registryToolId:string;
+  goalRevision:string; leaseEpochDecimal:string; registryToolId:string;
   allowedActionHash:string; deadlineAt:string; maxCpuMs:number;
   maxWallMs:number; maxMemoryBytes:number; maxOutputBytes:number; expiresAt:string
 }>;
@@ -256,3 +256,7 @@ All tests local/mock with fake sites/tools; no live irreversible operation. **No
 ## Upstream PR investigation — Chromium default sandbox changes
 - **[PR verified, merged upstream]** Playwright [#42490](https://github.com/microsoft/playwright/pull/42490) modified MCP Chromium sandbox defaults for the bundled Linux browser and added config tests. Upstream defaults are version/channel dependent; the pinned actual launcher code still appends `--no-sandbox` if `chromiumSandbox !== true`. We therefore **explicitly require** sandboxed execution and block unsupported environments instead of inheriting upstream defaults (`SBOX-T04/T18`).
 - Grade: merged PR report + pinned code/test inspection, **not** a successful container integration test.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
