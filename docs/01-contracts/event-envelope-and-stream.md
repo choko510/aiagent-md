@@ -256,3 +256,7 @@ No Team owner change is performed in this document.
 **Review gates:** P0 cross-team contracts unresolved. Test suite designed but not executed. This document remains Draft.
 
 **MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
+
+
+### Round 4 Event replay retention contract (2026-10-30 / design)
+The canonical tenant stream cursor and the persisted retention floor have separate roles. CHAT_10 DB owns `agent.event_retention_floors.earliest_replayable_offset`. An authenticated cursor with `lastDeliveryOffset + 1 < earliest_replayable_offset` cannot be reliably replayed and MUST produce `410 STREAM_CURSOR_EXPIRED` with snapshot re-fetch; a hidden user/Task event offset is NOT proof of expiration. Retention floor is advanced in the same DB transaction deleting only a contiguous safe prefix after Outbox/Artifact dependencies are cleared. Tests designed: EVT-R4-T01 mixed hidden/visible offsets; EVT-R4-T02 safe GC with live outbox prevents deletion; EVT-R4-T03 expired cursor 410/clean resync. No implementation code or SQL GC was executed here.
