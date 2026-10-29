@@ -12,7 +12,7 @@ Booking.com Demandは**Managed Affiliate Partner契約、API key、X-Affiliate-I
 - Output: Provider-specific propertyId/rateId, availability status at observedAt, itemized total/unknown fees, parking availability/charge/reservation needs, cancellation schedule, source URL/raw Artifact, partial/uncertain reasons.
 - Owners: CHAT_05 Provider read adapters; CHAT_01 Evidence, CHAT_02 Run/Steer, CHAT_03 policy/ledger, CHAT_04 browser, CHAT_09 secrets/egress, CHAT_10 physical DB, CHAT_12 property identity, CHAT_08 UI, CHAT_07 monitoring.
 - Non-goals: hotel reservation/payment, promise of final availability, cross-provider hotel-ID collision resolution, pricing by simple per-night multiplication, partner qualification bypass.
-- SC-04/05/06/07/08/09/10/14.
+- SC-04, SC-05, SC-06, SC-07, SC-08, SC-09, SC-10, SC-14.
 
 ## 2. Official docs and code/test audit (2026-10-30)
 | Source | Inspected functions / facts | Applicability |
