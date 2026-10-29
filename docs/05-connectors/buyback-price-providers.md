@@ -172,18 +172,18 @@ Security: no scraping permission circumvention, no CAPTCHA claims, no purchase o
 ## 11. Traceability
 | MUST REQ | TEST | SC |
 |---|---|---|
-| BBP-001 | T01 | SC-08 |
-| BBP-002 | T02 | SC-01 |
-| BBP-003 | T03 | SC-01/10 |
-| BBP-004 | T04 | SC-01 |
-| BBP-005 | T05 | SC-02 |
-| BBP-006 | T06 | SC-02/12 |
-| BBP-007 | T07 | SC-06/08 |
-| BBP-008 | T08 | SC-07 |
-| BBP-009 | T09 | SC-02 |
-| BBP-010 | T10 | SC-12 |
-| BBP-011 | T11 | SC-02/12 |
-| BBP-012 | T12 | SC-08 |
+| BBP-001 | BBP-T01 | SC-08 |
+| BBP-002 | BBP-T02 | SC-01 |
+| BBP-003 | BBP-T03 | SC-01, SC-10 |
+| BBP-004 | BBP-T04 | SC-01 |
+| BBP-005 | BBP-T05 | SC-02 |
+| BBP-006 | BBP-T06 | SC-02, SC-12 |
+| BBP-007 | BBP-T07 | SC-06, SC-08 |
+| BBP-008 | BBP-T08 | SC-07 |
+| BBP-009 | BBP-T09 | SC-02 |
+| BBP-010 | BBP-T10 | SC-12 |
+| BBP-011 | BBP-T11 | SC-02, SC-12 |
+| BBP-012 | BBP-T12 | SC-08 |
 
 ## 12. Sources and limitations — 2026-10-30
 - [B1] **Code verified** extruct at `d24f5414fd32c874989492ebd04cb1deb6d7d04e`: https://github.com/scrapinghub/extruct/blob/d24f5414fd32c874989492ebd04cb1deb6d7d04e/extruct/_extruct.py#L22-L100 and https://github.com/scrapinghub/extruct/blob/d24f5414fd32c874989492ebd04cb1deb6d7d04e/extruct/jsonld.py#L202-L230
