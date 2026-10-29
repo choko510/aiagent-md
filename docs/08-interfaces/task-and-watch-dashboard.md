@@ -208,3 +208,7 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 [S6] **Code verified**, OpenClaw sessions history with cursor and SSE: https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/gateway/sessions-history-http.ts  
 [S7] **Code verified test read**, AI SDK UI reconnect: https://github.com/vercel/ai/blob/f8507823abe78471d6b3cfa2da91a63118edbff4/packages/react/src/use-chat.ui.test.tsx  
 **Design Hypothesis:** query layering, UX limits, notification status schema, recordVersion resolution and UI component layout are proposals, not measured/integrated. OSS source read on 2026-10-30; no source test executed.
+
+## 14. Issue報告からの追加テスト
+
+**[I-DASH-01]** [Mastra #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30、Open、Issue report）はScheduleのdispatch成功とRun completionが異なることを指摘する。DASH-T03/T05に「scheduled fire succeeded / Task Running / Approval suspended / Worker restarted」のfixtureを追加し、Watchのチェックが開始された表示と、Taskが完了した表示を**絶対に混ぜない**ことを検証する。**[I-DASH-02]** [OpenClaw #127367](https://github.com/openclaw/openclaw/issues/127367)（issue titleを検索で確認したのみ・本文未検証）はunbounded history readの懸念。関連本体はSSE replay側でbounded batchへ制約する。両者は本システムでの発生を確認したわけではない。
