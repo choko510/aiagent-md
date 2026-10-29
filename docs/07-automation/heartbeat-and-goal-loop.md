@@ -82,7 +82,7 @@ User goal & constraints (CHAT_01/02, immutable goalRevision)
 ~~~ts
 type GoalWake =
  {schemaVersion:"1.0"; goalId:string; tenantId:string; ownerUserId:string;
-  goalRevision:number; wakeReason:"timer"|"new_observation"|"external_event"|"user_resume"|"approval_resolved"|"dependency_resolved";
+  goalRevision:string; wakeReason:"timer"|"new_observation"|"external_event"|"user_resume"|"approval_resolved"|"dependency_resolved";
   reasonKey:string; scheduledForUtc?:string; sourceEvidenceRefs?:string[];};
 type GoalContinuationPolicy =
  {maxTurns:number; maxModelCalls:number; maxUsd:string; maxWallTimeMs:number;
@@ -300,3 +300,7 @@ P0が未決のためDraft。目標が継続できるという宣言は実運用�
 **追加要件 GOL-021 MUST**: WAIT_DEPENDENCYが時間満了または許可済みdependency resolvedとなった場合、外部user turnを待たず**決定的な1回のwake admission**を行う。旧rev・owner失効・まだbusyのRunはその場で拒否する。**GOL-T21 → SC-05/07**: 無入力のGoalをpark→deadline通過→4worker tick→1Wake、LLM起動はpolicy gate合格後だけ。
 
 **追加要件 GOL-022 MUST**: Budget枯渇・iteration上限などによってRun claimが解除されても、旧workerが持つTool実行権限はRun leaseEpoch＋goalRevision再検証で確実に無効化し、後続の新Workerと同時に副作用を実行しない。**GOL-T22 → SC-07/09**: 旧workerをbarrierで保持しRun fence切替、後継runを起動して旧workerを解放→旧worker新Tool0・古いsettlement0、UNKNOWNはTool ledgerへ。テスト未実施。
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
