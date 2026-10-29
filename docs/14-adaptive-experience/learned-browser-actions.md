@@ -41,7 +41,7 @@ Stagehand v4のBrowserbase側server cacheを本Harnessのlocal Playwright cache�
 - CHAT_10: 物理DDL/unique/index/CAS/outbox/GCの提案先。CHAT_08: UI/APIへの提案先。CHAT_11: replay adversarial harness。
 - External HTML/ARIA/LLM action proposal/サイト文言 = **非信頼データ**。Browser owner→Gatewayの境界だけが操作実行を許す。Recipe/キャッシュからToolへ直結しない。
 
-**既知P0**: CHAT_01 UUIDv7 vs CHAT_10 gen_random_uuid、Task.conversationId nullable vs DB NOT NULL、recordVersion初期1 vs SQL revision初期0、Run fence/goalRevision/activeRunIdの物理合意、tenant/owner vs workspace mapping。各々 '[PROVISIONAL: CHAT_01/02/09/10]' のまま。文字列のepochを数値へ暗黙丸めしない。
+**歴史的Round1不一致はRound3のPR #10でDDL修正案が反映済み:** UUIDv4 DB default廃止、Task.conversationId nullable、recordVersion初期1、leaseEpoch/goalRevision/activeRunIdの物理列、tenant+owner FKを確認。実行実装/独立承認まではDraftだが、旧不一致を現在のP0として扱わない。残る現行P1は学習済みBrowserクリック/入力の副作用防御が未実装である点。int64 wireは厳密な十進文字列を使う。
 
 ## 4. 要件（全MUSTは§14のTESTへ対応）
 
