@@ -261,3 +261,21 @@ EVD-PR1 artifact metadata/typed validator/locator, storage checksum; EVD-PR2 obs
 **Review gates:** Security/retention/physical storage/multimodal coordinate P0/P1 dependencies remain. None of the designed tests were executed. Keep Draft.
 
 **MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
+
+## 18. Round 4 — Source locator and parser lineage adapter (extension to CitationLocator)
+The existing `CitationLocator` discriminant stays canonical for public Evidence. Multimodal (CHAT_15) introduces a **versioned provenance envelope** rather than replacing those existing variants:
+```ts
+type TransformLocatorV1 = {
+ schemaVersion:"1.0";
+ sourceArtifactId:ArtifactId; sourceSha256:string; derivedArtifactId:ArtifactId|null;
+ parserJobId:string|null; parserBuildDigest:string|null; transformVersion:string;
+ originalLocator:CitationLocator; // source coordinates (page / image rect / sheet range)
+ extractedLocator:CitationLocator|null; // derived coordinates
+ geometryTransformRef:string|null; // mapping if rotated/cropped/rescaled
+ confidence:"observed"|"estimated"|"unknown";
+};
+```
+Validate (a) `sourceSha256` matches immutable source raw bytes and owner; (b) all derived artifacts have parent edges; (c) page numbers 1-based and bounded by PDF pages, rectangles finite nonnegative and inside source coordinate system, sheet/cell ranges valid, CSV byte range and row ordinal preserved in optional `locatorSchemaVersion=2` adapter; (d) unknown OCR text confidence not promoted to verified fact; (e) source tombstone/retention invalidates cite display. Parser may create staging data but only trusted Evidence Writer records verified lineage and source relations after current owner/Run fence check.
+CHAT_10 PR #10 proposes `parser_jobs/artifact_derivations` with physical FK; CHAT_15 maintains parser behavior. The JSON payload above is proposed to CHAT_01 reviewer; may not be a new `CitationLocator` union until tests pass.
+Tests EVD-R4-T01 OCR rotated table maps to original page bbox; T02 XLSX sheet/cell preserved; T03 hash mismatch returns quarantine; T04 cross-user derived evidence forbidden; T05 parser crash leaves no verified claim; T06 malicious PDF/Office scripts do not run inside parser jail (security integration test required). SC-15/07/08. Design not executable Harness.
+
