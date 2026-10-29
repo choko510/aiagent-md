@@ -72,7 +72,7 @@ App router / Screen Reader / keyboard
 ~~~typescript
 type ChatTaskCardModel = {
   taskId: string; conversationId: string|null; currentRunId: string|null;
-  recordVersion: number; lastEventSequence: string;
+  recordVersion: string; snapshotCursor: string; // lossless int64 CAS; sealed deliveryOffset
   serverState: string; // imported from CHAT_01 canonical types, not redefined
   commandStatus: "idle"|"submitting"|"accepted"|"rejected"|"unknown_ack";
   resultCategory: "complete"|"partial"|"uncertain"|"unavailable"|null;
@@ -137,10 +137,12 @@ async function submitChatIntent(draft, pending) {
 }
 function applyEventToTaskView(view,event) {
   if (!sameTask(event,view)) throw new Error("wrong task");
-  if (BigInt(event.sequence) <= BigInt(view.lastEventSequence)) return view;
+  if (dedupeForTask(view.taskId).has(event.eventId)) return view; // never compare aggregateSequence across aggregates
   if (!knownProjectionVersion(event)) return markNeedsSnapshot(view);
   // Reducer applies server absolute snapshots (not cost increments).
-  return applyAllowedProjectionFields(view,event);
+  const next = applyAllowedProjectionFields(view,event);
+  dedupeForTask(view.taskId).add(event.eventId); // bounded per-Task LRU; snapshot resets window
+  return next;
 }
 async function controlTask(taskId,version,action,intentKey) {
   return api.command(taskId,{action},{ifMatch:quoteVersion(version),idem:intentKey});
@@ -252,3 +254,5 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 ## 16. Upstream PR差分の照合（Code verified PR patch）
 
 **[PR-CHAT-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、**Merged**）の実diffを調査した。`packages/react/src/use-chat.ts` のstable transport wrapperに `get resumeStreamIsReplay() { return getTransport().resumeStreamIsReplay; }` が追加され、`use-chat.ui.test.tsx` に `Hello` 部分表示→network disconnect→`Hello world`全量replay時の重複を防ぐ実テストが追加された。これは [issue #22358](https://github.com/vercel/ai/issues/22358) に対応する修正で、**旧バージョンで起こり得る不具合であり最新mainで未修正とは主張しない**。本Harnessではライブラリ側の修正の有無に依存せず、独自`TaskEvent.sequence`で冪等投影を検証する（CHATUI-T02）。
+
+**Round2 canonical serialization correction:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) defines recordVersion/goalRevision/leaseEpoch as canonical int64 decimal **strings**, not JSON numbers. [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) defines tenant deliveryOffset separate from aggregateSequence; clients use signed snapshotCursor and eventId dedupe, never numeric cross-aggregate comparison. Earlier locally used `lastEventSequence` or numeric recordVersion must not survive generated client. CHATUI-T02/T11 test this contract.
