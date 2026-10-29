@@ -84,7 +84,7 @@ type EvidenceGrade = "PROVIDER_STATUS_CONFIRMATION"|"SIGNED_RECEIPT"|
 interface FrozenEffectIntent {
   id: IntentId; tenantId: string; ownerUserId: string; taskId: string; runId: string;
   stepOrdinal: number; proposalOrdinal: number; logicalCallId: string;
-  goalRevision: number; toolId: string; toolRevision: string;
+  goalRevision: string; toolId: string; // canonical int64 decimal toolRevision: string;
   canonicalArgsDigest: string; targetDigest: string; operationCode: string;
   effectClass: EffectClass; credentialBindingVersion?: string;
   createdAt: string; intentRecordVersion: number; approvalRef?: IntentId;
@@ -362,3 +362,7 @@ L1 immutable identity/fingerprint/intent, unit/uniqueness and owner check. L2 at
 - [S4] [OpenAI Agents SDK test](https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/tests/test_tool_approval_call_id_reuse.py#L333-L435) MIT, **test inspected**.
 - [S5] [pg-boss Issue #925](https://github.com/timgit/pg-boss/issues/925), [PydanticAI #10926](https://github.com/pydantic/pydantic-ai/issues/10926), [LangGraph #9397](https://github.com/langchain-ai/langgraph/issues/9397), 2026-10-30 **Issue report, not independently reproduced**.
 - [S6] [Project Brief](../00-foundation/project-brief.md), [Architecture Rules](../00-foundation/architecture-rules.md), [SC](../00-foundation/acceptance-scenarios.md). Proposed internal Ledger semantics/limits = **Hypothesis** requiring architecture review + fault tests. **Runtime tests executed: 0**.
+
+
+### Round 3 — lossless canonical version boundary (2026-10-30)
+All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
