@@ -55,6 +55,16 @@ try:
  print('CONCURRENCY_RC',concurrent.returncode)
  print(concurrent.stdout[-2000:],concurrent.stderr[-2000:])
  if concurrent.returncode:raise RuntimeError('PostgreSQL multiwriter sequence test failed')
+ v2=(ROOT/'audit/round4/expand_v2.sql').read_text()
+ z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],
+  input=v2,text=True,capture_output=True,timeout=90)
+ print('V2_MIGRATION_RC',z.returncode,'STDOUT',z.stdout[-1000:],'STDERR',z.stderr[-2600:])
+ if z.returncode:raise RuntimeError("Forward migration v2 failed")
+ fixture_v2=(ROOT/'audit/round4/expansion_integration.sql').read_text()
+ z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],
+  input=fixture_v2,text=True,capture_output=True,timeout=90)
+ print('V2_FIXTURE_RC',z.returncode,'STDOUT',z.stdout[-1100:],'STDERR',z.stderr[-2600:])
+ if z.returncode:raise RuntimeError("External Event/Storefront/Digest/Parser v2 FK fixture failed")
  print('RESULT PASS: fresh schema executed and basic catalog assertions passed')
 finally:
  run(['docker','rm','-f',name])
