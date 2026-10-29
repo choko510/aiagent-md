@@ -85,7 +85,7 @@ SSO/OIDC、組織共有、ゲストリンク、公開APIキー発行、外部ユ
 | AUTH-005 | MUST | Cookieを用いる全state-changing操作はOriginの厳格allowlistとCSRF検証。unsafe GETなし、例外は明示監査 | 08 |
 | AUTH-006 | MUST | ログインとrefresh/パスワード変更にIP＋アカウント単位の試行制限を設ける。応答からアカウント存在を漏らさない | 08 |
 | AUTH-007 | MUST | URL/body/header/query/LLMが指定したownerIdよりもサーバーで復元したprincipal/DB ownerが常に優先 | 06,08 |
-| AUTH-008 | MUST | Task/Run/Conversation/Watch/Artifact/Evidence/Memory/Skill/BrowserSession/Connector/Approvalにowner/tenantベースの認可を強制し、越境アクセスを拒否 | 02,06,08 |
+| AUTH-008 | MUST | Task/Run/Conversation/Watch/Artifact/Evidence/Memory/ユーザー作成Skill/BrowserSession/Connector/Approvalにowner/tenantベースの認可を強制し、越境アクセスを拒否。共有システムSkillはoperator管理とし一般ユーザーによる編集は禁止 | 02,06,08 |
 | AUTH-009 | MUST | list/search/export/count/stream/notification/thumbnail/attachment/cacheも所有者で絞り、内容・件数・存在を漏らさない | 06,08 |
 | AUTH-010 | MUST | Workerはqueue payloadを権限として信頼せず、job再開と外部操作直前にDBのresource ownerと実行権限を再確認 | 07,08 |
 | AUTH-011 | MUST | ユーザー/tenantを跨ぐBrowserContext、storageState、Cookie、handoff leaseの再利用不可。所有者照合前に開かない | 06,08 |
@@ -336,7 +336,7 @@ async function subscribeEvents(principal, requestedTaskId, stream) {
 |---|---|---|---|
 | AUTH-T01 / Integration | fresh DBでInternet側から`signup`/bootstrap試行、同時2回bootstrap | ネット経由は失敗。operatorのみ1 owner登録、重複0 | 001,019,021 |
 | AUTH-T02 / Contract | CookieなしでTask/Watch/Artifact/Approval/Debug access | 401; private byte 0、未分類route deny | 002,019,020 |
-| AUTH-T03 / Integration | login→logout→旧cookieでmutation / new SSE | 旧tokenは401、新しいTool intentを起動しない | 003,017 |
+| AUTH-T03 / Integration | login→logout→旧cookieでmutation / new SSE | 旧tokenでの新規UI操作/Tool起動要求は401。既存の承認済みバックグラウンドRunは別途owner状態で判定 | 003,017 |
 | AUTH-T04 / Unit | Cookie flags/TLS無し起動/Domain指定 | 本番安全設定以外拒否、host-only属性検証 | 004 |
 | AUTH-T05 / Security | forged Origin/Referer、`Origin:null`、cross-site form、CSRF missing、GET mutation | 403、DB side effects 0。例外以外にunsafe GET無し | 005,019 |
 | AUTH-T06 / Security | 5+ bad login/15分、2アカウントの有無比較、proxy spoofed XFF | bounded 429、外からの存在推測不可、spoofで回避不可 | 006,023 |
