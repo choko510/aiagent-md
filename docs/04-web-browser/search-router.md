@@ -510,3 +510,30 @@ SHOULD SRCH-023/024/025は T-SR-023/024/025。LATER/EXPERIMENTは T-SR-026 と�
 ### 自己監査（Review Gates）
 
 Scope/所有者/REQ-ID/追跡/State/Error/Cancel/Crash/Secret/費用上限/OSS license/出典URL/実施試験の区別は記載済み。**未解決P0**: Shared Tool I/O/Evidence/Auth/Egress/Ledger契約。実コード・CIが無いためImplemented/Verifiedではなく**Draft維持**。特に検索結果の鮮度保証と、実際の原典情報取得について、本仕様だけでは合格にできない。
+
+
+## 18. Round 2 — 他担当契約整合の再監査（2026-10-30）
+
+本項は PR #2/ #1/ #8/ #9/ #10 の**未マージDraft branch**を実際に確認した結果。正式な共有契約を上書きしない。原案の \`queryId: "q-01"\` と \`runId: "run-123"\` 等は**内部説明用の記号**であって、外部公開ドメインIDの有効な例ではない。
+
+| 論点 | 確認した不一致とSearch Router側のルール | 正本Owner / 提案する検証 |
+|---|---|---|
+| UUID | CHAT_01 #2の公開IDはcanonical lowercase **UUIDv7**。CHAT_10 #10はDB \`gen_random_uuid()\` を多用（通常v4）。RouterはQuery-local IDと公開Task/Run/ToolAttempt UUIDを混同しない。永続公開IDは正本Validatorを必須にし、DB defaultだけを信頼しない。 | [PROVISIONAL: CHAT_01/10] public ID fixtureでinsert→read→REST schemaまで往復検証 |
+| Task/Conversation | #2 \`Task.conversationId: ... | null\`、#10はNOT NULL、#8 DTOはrequired。Watcher/外部イベント起点TaskのSearchをConversationなしで実行できる必要がある。RouterはConversation有無を検索許可の条件にせず、owner/Task scopeをGatewayから取得。 | CHAT_01/08/10: nullable Contract+DB E2E |
+| recordVersion | #2 recordVersion初期1、#10 revision初期0。Routerの\`planVersion\`、Task goalRevision、recordVersion、leaseEpochは**別概念**。混同してCASせず、Gateway提供のopaque conditional tokenで更新。 | CHAT_01/02/10: DB CAS一致試験 |
+| Run leaseEpoch/fencing | #2はnumber、#1はbigint、#10のRun保存にはRun leaseEpoch/owner/expiry未確定。Routerは子検索の結果保存前に**owner Task + Run lease + goalRevision**をDB authoritativeに再照合。stale workerの返答は歴史的artifactへ隔離し、現行成功/新規外部呼出しは不可。 | [PROVISIONAL: CHAT_01/02/03/10] 64-bit epochのdecimal wire定義とfenced commit試験 |
+| Tenant/User/Workspace | #2 tenantId/ownerUserId、#9 actorとownerの厳格検証、#10 workspace_id。Routerは\`workspaceId === tenantId\` を前提にしない。サービス側の明示的mapper + owner認可をGateway毎callで要求。 | CHAT_09/10: cross-tenant ProviderAttempt/Artifact read拒否 |
+| Retry/通知 | #1/03のTool ledger/Run lifecycle確定前はGateway配下の外部検索再試行だけ認める。検索の重複請求は起こり得る。Task状態の自己完了/外部副作用の再試行は行わない。 | CHAT_02/03/10: crash-before/after dispatchとcost uncertainty試験 |
+
+**Round 2追加のlocal MUST**:
+- **SRCH-028**: 全Tool outcomeにTask/Run/constraint snapshotとopaque fencing metadataを関連付け、**現行Run leaseの再検証失敗時は結果を現行成功としてcommitしない**（T-SR-028: worker A/Bを競合させ、旧owner commit 0件、SC-07/08）。
+- **SRCH-029**: ConversationがnullのWatch/Event起点Taskで同一検索経路を使用でき、owner認可を省略しない（T-SR-029: null conversation + owner A/B、検索成功と越境拒否、SC-02/07/11）。
+- **SRCH-030**: shared public ID ValidatorがUUIDv7を要求する場合、Tool/Task/Run/ArtifactのDB既定UUIDv4を結果に混入させない（T-SR-030: API→DB→Result往復でID形式一致、SC-07/08）。
+- **SRCH-031**: \`recordVersion\`/\`goalRevision\`/\`leaseEpoch\`の数値単位を混同せず、精度損失なしにGatewayから保存側へ伝える（T-SR-031: 2^53超のepoch／revision conflict、SC-07/08）。
+- **SRCH-032**: Provider接続とRaw result保存は同じTenant/Owner resolverを通り、管理者用service principalもTask所有者に明示的に束縛（T-SR-032: 別Tenantのcache/Artifactを検索、アクセス0件、SC-06/08）。
+
+**Traceability追加:** SRCH-028→T-SR-028→SC-07/08、029→029→SC-02/07/11、030→030→SC-07/08、031→031→SC-07/08、032→032→SC-06/08。全て**テスト設計、実行なし**。
+
+**新しい拡張への接続:** SC-10の未知候補発掘、SC-11 X投稿イベント起点検索、SC-12サイト変更に対し、Event/Opportunityの本文を新しいTool authorityに昇格させない。SearchPlanをTask/Run/goalRevision/Policyへ紐付け、検索結果に無条件の確定イベントを生成しない。Source reliability (CHAT_12) はrankingヒントとしてのみ参照し、原典Evidenceを変造しない（SC-14）。
+
+**既存PR修正の目的:** 新規機能ではなく、他担当の未マージ仕様と衝突する暗黙仮定を取り除く。下記の共同合意が出るまではDraft維持。契約のレビュー後に正式field namingと型へ置き換える。
