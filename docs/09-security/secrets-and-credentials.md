@@ -74,7 +74,7 @@ type SecretState = "ACTIVE"|"ROTATING"|"REAUTH_REQUIRED"|"REVOKED"|"DELETION_PEN
 type SecretMetadata = Readonly<{id:string; tenantId:string; ownerUserId:string; provider:string;
   kind:SecretKind; scopes:string[]; allowedOrigins:string[]; version:number; keyVersion:string;
   createdAt:string; expiresAt:string|null; state:SecretState; lastUsedAt:string|null}>;
-type CredentialGrantRequest = Readonly<{intentId:string; taskId:string; runId:string; goalRevision:number;
+type CredentialGrantRequest = Readonly<{intentId:string; taskId:string; runId:string; goalRevision:string;
   runLeaseEpochDecimal:string; secretId:string; secretVersion:number;
   executorId:string; method:string; scheme:"https"; origin:string; approvedActionHash:string}>;
 type ScopedCredentialLease = Readonly<{leaseId:string; expiresAt:string; audience:string; boundActionHash:string}>;
@@ -262,3 +262,7 @@ Tests use fake providers and canary secrets; no live provider account or real OA
 - **[PR inspected, open/unmerged]** OpenClaw [#178361](https://github.com/openclaw/openclaw/pull/178361) describes a direct SecretRef resolver path where secret values with unrecognized shapes were not added to exact-value redaction registration; the proposed change affects `src/secrets/resolve.ts`/tests. It is **not evidence that upstream main already fixed this**. Add canary with irregular token shape to `CRED-T01`; our design does not expose plaintext to generic logs in the first place.
 - **[PR inspected, open/unmerged]** OpenClaw [#173635](https://github.com/openclaw/openclaw/pull/173635) documents bounded refresh retries under concurrent credential changes, motivating `CRED-T07/T08` CAS/cancellation/unknown tests. PR description asserts tests but those were **not independently run** here.
 - Source grade: PR report, **not product verification**. No upstream copy, especially arbitrary command-based SecretRef providers.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
