@@ -24,7 +24,7 @@ User / API (CHAT_08/09) -> Task/Run + GoalRevision (CHAT_01)
         -> Browser/HTTP/Adapters (CHAT_04/05)
         -> Evidence/Artifact (CHAT_01/10) -> ResultVerifier
 ~~~
-Public ID UUIDv7、Task.conversationId nullable、Run.leaseEpoch safe integer/DB bigint、Task.recordVersion initial1 (proposals, unLocked)。Task/Run/Goal revision and Tool attempt fence have separate meanings; never use provider Call ID as approval permission. Tenant/Workspace/User ownership is server-resolved, not model-specified.
+Public ID UUIDv7、Task.conversationId nullable、Run.leaseEpoch canonical int64 decimal string / DB BIGINT、Task.recordVersion initial1 (proposals, unLocked)。Task/Run/Goal revision and Tool attempt fence have separate meanings; never use provider Call ID as approval permission. Tenant/Workspace/User ownership is server-resolved, not model-specified.
 
 ## 4. 要求定義
 | REQ-ID | Level | Measurable requirement | SC |
@@ -48,11 +48,11 @@ Public ID UUIDv7、Task.conversationId nullable、Run.leaseEpoch safe integer/DB
 type TrustTier="POLICY"|"USER_GOAL"|"WORKING"|"OBSERVATION"|"MEMORY";
 interface ContextItem {
  ref:string; trustTier:TrustTier; tokenEstimate:number;
- goalRevision:number; observedAt?:string; rawArtifactRef?:string;
+ goalRevision:string; observedAt?:string; rawArtifactRef?:string;
  sourceHash?:string; redactionClass:string;
 }
 interface ContextPlan {
- runId:string;stepOrdinal:number;goalRevision:number;schemaVersion:1;
+ runId:string;stepOrdinal:number;goalRevision:string;schemaVersion:1;
  selectedRefs:string[];summaryArtifactRef?:string;
  droppedRefs:string[];reservedOutputTokens:number;estimatedInputTokens:number;
 }
@@ -165,3 +165,7 @@ P0 CHAT_01 Context/Event/Evidence contracts, CHAT_10 Artifact version/hash/check
 - [S3] PydanticAI Code verified: https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/_agent_graph.py ; tests/test_run_cancellation.py (same commit)
 - [S4] Mastra test directory verified, contents not audited: https://github.com/mastra-ai/mastra/tree/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/durable/__tests__
 Code verified = GitHub source functions inspected. Test definition verified = read test source but not executed. Issue report = not reproduced. Licenses (inspected): DeepAgents MIT, PydanticAI MIT, OpenAI Agents Python MIT, Mastra @mastra/core package Apache-2.0 declaration. Independent implementation only.
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
