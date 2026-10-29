@@ -10,7 +10,7 @@
 
 通知OutboxはCHAT_07が**業務意図と送達ポリシー**を所有し、物理Outbox/Queue/LeaseのDDLとrelayはCHAT_10が正本。Telegram channel adapterとAPIはCHAT_08、メール/Connector資格はCHAT_05/09。CHAT_13-03の通知ランキング/ダイジェストは**このOutboxへ意図を提案**するだけで独立senderを作らない。
 
-**一意性**: same (tenantId, userId, eventKey, policyVersion, destinationBindingId, formatVersion) → logical notification intent最大1件。同じイベントが再検出されても新しいoutbox行を作らない。異なるtriggerKeyであり実質同内容の連続イベントはquiet hours/episode/hysteresisと連携して抑制するが、必要な強制通知をランク付けで捨てない。
+**一意性**: same (tenantId, ownerUserId, semanticEventKey, destinationBindingId, deliveryPurpose) → logical notification intent最大1件。同じイベントが再検出されても新しいoutbox行を作らない。formatやpolicyの改訂は送信済みイベントの再送権限にならない。異なるtriggerKeyであり実質同内容の連続イベントはquiet hours/episode/hysteresisと連携して抑制するが、必要な強制通知をランク付けで捨てない。
 
 ## 1. Scope/非責務と受入
 
@@ -98,7 +98,7 @@ type NotificationPublicStatus =
 
 StatusはUI projectionの局所案でCHAT_01のEvent/Run状態を再定義しない。DeliveryAttemptのsendTokenはproviderが**明示的に冪等性キーを受理する場合だけ**外部へ送る。Telegramのようにprovider-side idempotent sendが確認できないTransportは、timeout後に**unknown**で停止しオペレーター照会/人間確認へ（同じSendを自動反復するとユーザーに2回届き得る）。provider acceptanceはユーザー端末への配信・既読を保証しない。
 
-Validation: notificationId/owner/tenantはtrusted sourceから、ユーザー外部本文はpriorityHint、destinationBindingRef、consentを変更不可。EventKeyは(Watch trigger/ExternalEvent stable identity/Task result revision)をdomain-scope付きcanonical hashで生成、ユーザーの宛先変更時は新bindingVersionで異なるIntentを明示Commandからのみ作成。formatVersion/policyVersionが変わっても**同じ実イベントを無制限に再通知してはならない**ためcooldown/episode re-notification approvalを別Policyで制限。旧通知を新しいDestinationに無断転送しない。
+Validation: notificationId/owner/tenantはtrusted sourceから、ユーザー外部本文はpriorityHint、destinationBindingRef、consentを変更不可。SemanticEventKeyは(Watch trigger/ExternalEvent stable identity/Task result revision)をdomain-scope付きcanonical hashで生成する。**bindingVersion / policyVersion / formatVersionが更新されても同じ通知目的への既存イベントは再送しない**。新宛先への過去イベント再通知は独立した認証済み再送CommandとrequestIdを必須とし、監査して新intentを生成する。新たなperiodic eventは別semantic occurrence IDにする。旧通知を新しいDestinationに無断転送しない。
 
 Delivery Adapterはsend(payload, bindingRef, optionalProviderIdempotency)→{accepted?, providerReceipt?, transportOutcomeEvidence, retryAfter?}を返すが、返答なしの成功はunknown。webhook send先はSSRF/redirect対応のTool Gateway、email SMTP応答は受理/最終配信を区別する。Telegram Chat bindingはCHAT_08/09の認可した本人channelに限定。
 
@@ -139,7 +139,7 @@ acceptNotificationIntent(tenant, trigger, deliveryPolicy):
     assertWatch/Task/Event is committed and owner scoped
     binding := lookupVerifiedBindingForUpdate(tenant,owner,trigger.destinationRef)
     assert binding.currentConsent && policyAllows
-    key := canonicalHash(tenant,trigger.eventKey,binding.id,binding.version,policy.id,formatVersion)
+    key := canonicalHash(tenant, owner, trigger.semanticEventKey, binding.id, deliveryPurpose)
     existing := findByUniqueKey(key)
     if existing: return existing
     insert Intent with immutable payloadRef+evidenceRefs+sourceRevision
@@ -214,7 +214,7 @@ notification_intent_created_total, notification_duplicate_suppressed_total, noti
 
 ## 11. 永続化・Transaction・Migration [PROVISIONAL: CHAT_10]
 
-必要論理概念: notification_intent(public UUIDv7 candidate,tenant,owner,sourceRef,eventKey,bindingRef,bindingVersion,consentVersion,policy/format version,payload/evidence refs)、notification_attempt(notificationId,target,attemptNo,deliveryEpoch,started/finishedAt,transportReceiptRef,errorCode,outcome)、notification_outbox(unique intentId,notBeforeUtc,lease,attemptLimit)、user_ack(notificationId,userId,readAt,version)、binding consent version（正本CHAT_09/08）。Unique(tenant,sourceEventKey,bindingVersion,policyVersion,formatVersion)と物理unique per notification+recipientを提案するが**event keyはsemantic**、頻度違いの繰り返しを誤抑止しない。Watch Trigger→Intent→Outboxを同一DB transaction。Provider APIは当然TX外。
+必要論理概念: notification_intent(public UUIDv7 candidate,tenant,owner,sourceRef,eventKey,bindingRef,bindingVersion,consentVersion,policy/format version,payload/evidence refs)、notification_attempt(notificationId,target,attemptNo,deliveryEpoch,started/finishedAt,transportReceiptRef,errorCode,outcome)、notification_outbox(unique intentId,notBeforeUtc,lease,attemptLimit)、user_ack(notificationId,userId,readAt,version)、binding consent version（正本CHAT_09/08）。Unique(tenant,owner,semanticEventKey,destinationBindingId,deliveryPurpose)と物理unique per notification+recipientを提案する。**bindingVersion, policyVersion, formatVersionは検証・監査属性であり、重複検知キーに含めない**。それらの変更で同一イベントが再配信されることを防ぐ。別日の定期報告はscheduled occurrence IDをsemanticEventKeyの一部にする。Watch Trigger→Intent→Outboxを同一DB transaction。Provider APIは当然TX外。
 
 Retention: Notification/attempt auditとuserデータ削除を分離。terminal tombstone（最小hash/intent ID）をTTL内保持し、その間の再配達で二重を防ぐ。削除要求の法令/Consent漏洩はCHAT_09/10へ。Migrationは通知先identifierからVerified Bindingを手動再確認し、不確かな旧destinationはsend禁止。送信中の旧新Worker排他・rollback時の二重送信を検証。
 
@@ -291,9 +291,18 @@ NOT-PR1: immutable intent/eventKey/Verified Binding validation + safe renderer +
 - [S4] **Code verified (test inspected, not run)** OpenClaw src/cron/service.failure-alert-notifications.test.ts https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/cron/service.failure-alert-notifications.test.ts ; MIT https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/LICENSE
 - [S5] **Code verified**, Apprise master bae311ba19f92124ea1fa3ba794343e14bee68a1, BSD-2-Clause: tests/test_delivery_tracking_retry.py test_retry_does_not_repeat_delivery https://github.com/caronc/apprise/blob/bae311ba19f92124ea1fa3ba794343e14bee68a1/tests/test_delivery_tracking_retry.py ; license https://github.com/caronc/apprise/blob/bae311ba19f92124ea1fa3ba794343e14bee68a1/LICENSE
 - [S6] **Code verified**, changedetection.io master 11c7ca8719bfc59a4ffa8cd06dd5d0c5d090a82b, Apache-2.0: changedetectionio/notification_service.py https://github.com/dgtlmoon/changedetection.io/blob/11c7ca8719bfc59a4ffa8cd06dd5d0c5d090a82b/changedetectionio/notification_service.py ; license https://github.com/dgtlmoon/changedetection.io/blob/11c7ca8719bfc59a4ffa8cd06dd5d0c5d090a82b/LICENSE
-- [S7] **Hypothesis**: Postgres DeliveryAttempt/UNKNOWN state and canonical dedup policy unique to this harness, not yet validated in implementation.
-- [S8] **Unverified**: current Telegram/email provider-specific end-to-end receipt semantics, cost/rate limits; need provider adapter investigation, no delivery guarantee claimed.
+- [S7] **Issue report**, Hermes cron issue #97230: adapterの明示的ambiguous write後にfallbackが部分的に再配信し重複するとの報告（open、現行HEADで再現確認したわけではない）: https://github.com/NousResearch/hermes-agent/issues/97230
+- [S8] **Issue report**, OpenClaw cron delivery pressure/restart/notification design discussion #138348: https://github.com/openclaw/openclaw/issues/138348 。requirementsの反証材料であり現行実装保証ではない。
+- [S9] **PR report**, OpenClaw #168615 (conversation-resultと通知経路の分離): https://github.com/openclaw/openclaw/pull/168615 。マージ/実装状態は本MDで保証しない。
+- [S10] **Hypothesis**: Postgres DeliveryAttempt/UNKNOWN state and canonical dedup policy unique to this harness, not yet validated in implementation.
+- [S11] **Unverified**: current Telegram/email provider-specific end-to-end receipt semantics, cost/rate limits; need provider adapter investigation, no delivery guarantee claimed.
 
 ### Review Gate
 - [x] scope/owner, multiple OSS code+test+license, states, pseudocode, security/races, DB/REST, all16 MUST traceability, failure matrix
 - [ ] source provider receipt test; P0 agreement; actual unit/integration/fault/E2E; independent review (Draft)
+
+### Round 2 focused audit: event semantic identity
+
+**不変条件**: Notificationの一意性は「ある出来事を誰へ何の目的で通知するか」で定義する。Policyや表示形式のversion、単なる宛先bindingのcredential rotationは**同じ出来事をもう一度届ける新しいイベントではない**。Versionを一意キーに含めた旧案はFormat変更で重複通知を生むため撤回した。新しい通知先へ過去イベントを再送したければ明示的なCommandに基づく新semantic resendEventKeyを発行する。
+
+**追加テスト NOT-T20**: 送信済みEventに対しFormat/Policy/Binding credential Versionをそれぞれ更新→同じsource EventをリプレイしてもIntent/Outbox/配送呼出は増えない。新たな翌日Scheduled occurrenceは別semantic Eventとして1件生成される。**NOT-020 MUST → NOT-T20 → SC-02/07/16**。未実施。
