@@ -41,7 +41,7 @@ SC-01/03/04/05：evidence preserving read-only tools、SC-02/11：watch/event tr
 - CHAT_01 Draft [PR #2](https://github.com/choko510/aiagent-md/pull/2)：`tenantId`、`ownerUserId`、`Task.conversationId nullable`、UUIDv7 Entity ID、`recordVersion`(1開始)、`goalRevision`、`leaseEpoch` の論理正本。CHAT_02 Draft [PR #1](https://github.com/choko510/aiagent-md/pull/1)：`prepare/execute/reconcile` Portと`logicalCallId`、step barrier。**いずれも未Locked**。
 - CHAT_03 Tool Registryは`(provider,namespace,sourceName,revision)`を確定的解決。Approval policyとTool ledgerは03-03/03-04、本Gatewayは状態遷移を統率する。Tool AdapterにPolicy decision権を与えない。
 - CHAT_09 Draft [PR #9](https://github.com/choko510/aiagent-md/pull/9)はprincipalをTask→Run→owner DBから復元する。Web/Telegram/Watch/Xイベントのclient-supplied `tenantId/actorId`は信頼しない。
-- CHAT_10 Draft [PR #10](https://github.com/choko510/aiagent-md/pull/10)は`tool_intents/approval_records/tool_attempts`物理DDL案。ただし`workspace_id↔tenantId`、UUIDv7 vs `gen_random_uuid()`、`revision DEFAULT 0` vs `recordVersion 1`、Run `leaseEpoch`/Task `activeRunId`等は未整合。**本書は変換が決まった前提で実行できると主張しない**。
+- CHAT_10 Draft [PR #10](https://github.com/choko510/aiagent-md/pull/10) はToolIntent/Approval/Attempt物理DDL案とtenant/owner複合FK、server UUIDv7（DBのv4 defaultなし）、recordVersion初期1、Run leaseEpoch/Task activeRunId列の修正を反映済み。**未確定なのは実際のExecutor/Side-effect Ledgerの原子性、必要な認可・同時実行・実装統合テスト**であり、古いRound1不一致を現行P0として再掲しない。
 - Event envelope/Artifact storeはCHAT_01/10、UI/RESTはCHAT_08（[PR #8](https://github.com/choko510/aiagent-md/pull/8)）、BrowserタブはCHAT_04。Tool Gatewayから外部site直接Page操作は禁止。
 
 ## 4. 要求仕様
@@ -244,7 +244,7 @@ Logical aggregates: `tool_intent`, `approval_record`, `attempt`, `external_effec
 
 Required transaction boundaries: (T1) intent insert+budget reserve+approval request+outbox, (T2) current run fence/control+policy+approval consume+dispatch claim state, (T3) output/usage/ledger terminal+outbox; no external I/O in transactions. A DB failure after T2 is *UNCERTAIN*, not replayable READY; compensating transaction cannot undo external action. DDL and physical CAS indexes belong CHAT_10. Older `tool_intents` rows with absent fingerprint/fence must migrate to blocked+needs reconciliation, not auto dispatch.
 
-**Contract reconciliation P0**: `workspace_id` ≠ automatically `tenantId`; `gen_random_uuid()` likely v4 ≠ CHAT_01 UUIDv7; `revision=0` might be DB-private but not `recordVersion=1`; `leaseEpoch` (Run claim) and `goalRevision` require durable CAS columns & numeric codecs. No Task Conversation requirement on a schedule/event Task. Proposed `ToolIntent.id` is UUIDv7, `toolRef` opaque. Need common migration & CI across CH01/02/08/09/10.
+**Historic Round1 conflict reconciliation — resolved in Draft, unverified in runtime:** PR #10最新DDLはv4 DB default/recordVersion=0/Conversation必須等を修正。残るP1/P0 GateはToolIntentとApprovalの真正な認可、Run leaseとTool attempt fence、GoalRevision CAS、SideEffect UNKNOWN、外部効果の二重実行防止を**実際のGatewayとPostgreSQL結合テストで検証すること**。Task-less event/schedule起点Taskを引き続き許す。
 
 ## 12. UI / API proposals ([PROVISIONAL: CHAT_08])
 `GET /tasks/:id/tool-intents` → readonly redacted list of intent/approval/uncertain/status; `GET /tool-intents/:id` → confirmed evidence links, observedAt, artifactRef, estimated+actual cost; approval API uses `POST /approvals/:id/decision` from CHAT_08 Draft and must not treat HTTP 202 as executed. User-visible `Queued/Waiting approval/Running/Partial/Uncertain/Succeeded` are projections of committed statuses only. Event stream derives from transactional outbox, not in-memory callback. Telegram cannot bypass identity/fresh-auth challenge.
