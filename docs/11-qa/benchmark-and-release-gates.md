@@ -52,6 +52,8 @@ CHAT_11所有：benchmark manifest、reproducible cohort、metrics extraction、
 | QA-BENCH-017 | MUST | Baseline更新・例外承認・ロールバックを監査可能にし勝手な閾値緩和を禁止 | SC-09 | QA-B-T17 |
 | QA-BENCH-018 | MUST | 定期的/リリース候補の同条件再実験に再現レポートを付け、動作未実施を実績と記載しない | SC-09 | QA-B-T18 |
 
+| QA-BENCH-019 | MUST | SC-10〜16の各個別シナリオのquality metricとfailure Gateを匿名化された合成Fixtureで記録し、欠測を成功へ算入しない | SC-10/11/12/13/14/15/16 | QA-B-T28〜34 |
+
 ## 5. Benchmark内部契約・Version・validation
 
 ```ts
@@ -90,7 +92,7 @@ Strict validation: unknown schema/metric/unit/source/case/fixture versionをreje
 | ID | Metric definition | Optimization target | SC |
 |---|---|---|---|
 | M01 task_goal_success_rate | 合格となるTask数 / 評価対象Task数（infra failure除外し別分母記録） | higher | SC-01〜16 |
-| M02 critical_fact_accuracy | ground truthと一致するmandatory factual assertions / attempted mandatory assertions; unknownは明示別計上 | higher | SC-01/03/04/10/12/14/15 |
+| M02 critical_fact_accuracy | ground truthと一致するmandatory factual assertions / 全required mandatory factual assertions; missingは不正解として分母に含め、正しいunknownだけ別計上 | higher | SC-01/03/04/10/12/14/15 |
 | M03 false_confirmed_claim_rate | 不確定/古いソースを確認済みと断定した件数 / 重要fact claim数 | lower | SC-01/04/05/10 |
 | M04 evidence_completeness | required assertionでURL/sourceAt/observedAt/条件が全て揃った件数 / required assertion数 | higher | SC-01〜16 |
 | M05 wrong_entity_merge_rate | 誤統合したentity pair / known-negative pair | lower | SC-01/10 |
@@ -117,6 +119,20 @@ Strict validation: unknown schema/metric/unit/source/case/fixture versionをreje
 - RSSはworker/browser/sidecar/process-group peakを別報告。shared memoryの二重計上に注意しRSS合計を物理RAM実測と断言しない。CPU秒・ブラウザインスタンス数も保存する。
 - Rate：ratioの0件分母はundefined、0%としない。precision=TP/(TP+FP)、recall=TP/(TP+FN)、false positive=FPなどconventionを固定。FACT precisionとEvidence coverageを混同しない。
 - p50/p95は測定成功リクエストのlatency distributionに加え、timeout/failの割合を必ず併記。timeoutを捨てた速いサブセットだけを高速化と呼ばない。
+
+### SC-10〜16拡張の独立指標とGate
+
+| SC | Quality measure / failure predicate | Evidence source |
+|---|---|---|
+| SC-10 | 未知候補の発見数、distinct entity mergeの偽陽性、条件未確認利益のfalse-confirmed率 | 検証可能な合成Entity pair/SourcePrice oracle |
+| SC-11 | stable actor IDでのイベント受付からlogical Task起動までのlatency、duplicate task率、disable後新規起動数 | IngestEvent/Task/Outbox参照とClock |
+| SC-12 | 正常な価格変更のprecision/recall、広告・時計ノイズの誤差分数、Fetch failureをunchangedとした件数 | before/after snapshot hash + structured field |
+| SC-13 | verified browser recipe hit率、policy/DOM変化時のinvalidated replay率、同じfixtureのモデル呼出削減数 | BrowserSession/recipe version/trace |
+| SC-14 | correlated SNS投稿の過重カウント、source reputation変化への追従、confidence calibration/unknown維持 | 複数観測のprovenanceとLabel |
+| SC-15 | PNG/PDF/XLSXから抽出したpage/box/cell座標の一致率と、判読不可を捏造した件数、実行した危険コード数（0） | 合成文書のgolden provenance |
+| SC-16 | scoped feedback/Undoの反映精度、静音/priority policy違反、通知重複と重要triggerの誤抑止 | Owner memory/notification outbox history |
+
+`Success rate = 総合品質`として押し込めず、各domainのnegative caseにおける重大誤りはG2/G3/G4でBLOCK。上記の測定しきい値はOwnerレビュー後に確定し、未測定ならINCONCLUSIVE。
 
 ## 7. 同条件測定アルゴリズムと統計
 
@@ -242,6 +258,11 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 | QA-B-T29 | 同一X post 5重入力と既停止Watch、通知quiet hours | 重複task/通知false positiveなし、優先ルールで過剰抑止なし | SC-11/16 |
 | QA-B-T30 | マルチモーダルPDF画像表とXLSX欠測セルを意図的に欠落 | 欠測を0としない、出典page/box/cell正しい | SC-15 |
 
+| QA-B-T31 | 二つのHTML snapshotに広告ノイズと実価格変更、Fetcher failureを追加 | 価格差分recall/precisionとFetch failure not unchanged、SC-12を独立集計 | SC-12 |
+| QA-B-T32 | Multimodal PNG/PDF/XLSXの出典が1セルずれる | page/box/cell mismatchを必須false claimとしてBLOCK | SC-15 |
+| QA-B-T33 | feedbackをUndoしquiet hours内に優先trigger、他userを同時評価 | SC-16のuser scope・priority/Undoと重複通知の違反0 | SC-16 |
+| QA-B-T34 | X postを5回重複配送、actor handle変更 | stable ID論理event1、latencyと通知Taskを別分母で表示 | SC-11 |
+
 ## 14. Traceability Matrix
 
 | REQ-ID | TEST-ID | SC-ID |
@@ -265,6 +286,8 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 | QA-BENCH-017 | QA-B-Tundefined | SC-09 |
 | QA-BENCH-018 | QA-B-Tundefined | SC-09 |
 
+| QA-BENCH-019 | QA-B-T28〜34 | SC-10/11/12/13/14/15/16 |
+
 ## 15. Cross-team proposals / unresolved
 
 | ID | Owner | Severity | 決めることと合格証拠 |
@@ -279,7 +302,7 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 | BEN-X08 | CHAT_08 | P2 | user-visible elapsed/observedAt/estimated-vs-billed/partial status・通知満足度 |
 | BEN-X09 | CHAT_09 | P0 | SaaS tracing利用の可否、cost/PII/log retention、Secret誤公開対策 |
 
-**未確定**：閾値の実測値、CI machine/Node/Python/Chromium版、各Provider billed data、正式SDK/ライセンスの採用判断、正式Owner contracts。P0が1件でも未決ならDraft維持。PASSレポートは生成していない。
+**未確定**：閾値の実測値、CI machine/Node/Python/Chromium版、各Provider billed data、正式SDK/ライセンスの採用判断、正式Owner contracts。P0が1件でも未決ならDraft維持。すべてのCross-team提案は[PROVISIONAL: CHAT_01/02/03/07/08/09/10/12/13/14/15]であり、QAが他Ownerの型/DDL/Policyを決めない。PASSレポートは生成していない。
 
 ## 16. Sources（2026-10-30 JST、コード閲覧のみ・試験実行なし）
 
