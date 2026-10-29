@@ -26,6 +26,8 @@ jobs:
           set -euxo pipefail
           docker version
           docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,mode=1777 alpine:3.20 sh -c 'id && test ! -S /var/run/docker.sock && test ! -e /root/.ssh && test ! -e /host'
+      - name: SSRF negative reference-policy fixtures (NOT the unimplemented Harness EgressGuard)
+        run: python3 audit/round4/ssrf_reference_fixture.py
       - name: Chromium present and real local navigation smoke (NOT Harness SSRF protection)
         shell: bash
         run: |
