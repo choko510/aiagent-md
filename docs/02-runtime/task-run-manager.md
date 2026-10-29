@@ -79,8 +79,10 @@ Cancel priority > security revoke > Steer > Pause > ordinary dispatch. Lease ren
 ~~~ts
 async function claim(runId,workerId) {
  return db.tx(async tx=>{
+  const pointer=await tx.readRunPointer(runId); // non-authoritative initial read
+  const task=await tx.lockTask(pointer.taskId);  // global lock order: Task -> Run
   const run=await tx.lockRun(runId);
-  const task=await tx.lockTask(run.taskId);
+  if(run.taskId!==task.id) throw StalePointer();
   requireSameOwnerTenantAndActiveRun(run,task);
   if (!claimable(run,tx.dbNow())) return null;
   requireFiniteBudget(task);
