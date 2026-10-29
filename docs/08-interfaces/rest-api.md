@@ -126,6 +126,7 @@ Web UI / Telegram Adapter / API client
 | Task | POST /tasks/{id}/commands | task:control | 202 pause/resume/cancel/steer。If-MatchとIdempotency-Key必須 |
 | Run | GET /tasks/{id}/runs, GET /runs/{id} | run:read | 200 steps/attempts/cost/terminal-or-unknown read model |
 | Run | POST /tasks/{id}/runs | run:create | 202 既存Taskの安全な新Run request。Idempotency-Key+If-Match |
+| Task | POST /tasks/{id}/retry | task:create | 202 terminal旧Taskの新Task作成。旧Taskの再Runではなくlineageを記録。Idempotency-Key+If-Match |
 | Watch | POST /watches | watch:create | 201 Watch保存と次回確認予定。Idempotency-Key必須 |
 | Watch | GET /watches, GET /watches/{id} | watch:read | 200 current state + nextCheckAt/lastObservedAt |
 | Watch | PATCH /watches/{id} | watch:update | 200 編集可能な条件のみ。If-Match必須、スケジューラ再評価 |
@@ -311,7 +312,7 @@ type ApprovalDecisionInput = {
 - **TaskControl:** pause/resume/cancelにinstructionの紛れ込みは422。steer以外のactionは禁止。steerのinstructionは8KiB以下、先行する条件を無言で破棄せずRuntimeが有効化versionを記録。取消が待機中ならAckにeffective stateを偽らない。
 - **WatchCreate:** canonicalized condition/schedule、有限な頻度、tenant内notification bindingの存在確認を保存前に行う。任意URLをチェックなしにWatchとして登録することは禁止（SSRFと無制限巡回防止）。Validation semanticsのOwnerはCHAT_07/09。
 - **ApprovalDecision:** decisionでは別のaction payloadやURLへのすり替えを許さない。承認対象のserver-side immutable digestを照合（CHAT_03契約待ち）。expired/consumed/revokedなら拒否。理由はUTF-8 0..2048 bytesの提案。
-- **Run:** userが任意のrunIdを指定したり、過去runをdelete/updateしたりできない。再実行対象のTaskをversionでlockし、CHAT_02の再実行条件を検査。
+- **Run:** userが任意のrunIdを指定したり、過去runをdelete/updateしたりできない。\`POST /tasks/{id}/runs\`は**Taskが非terminal**かつ旧Runがterminalで安全なretry可能なときだけ。Task自体がterminalなら\`409 TASK_TERMINAL_NEW_TASK_REQUIRED\`を返し、\`POST /tasks/{id}/retry\`で**新TaskId**を生成する。新Taskは旧Taskにlineageで紐付けるが、旧Approval/Tool Intentは再利用せず、現在のGoal/Owner/予算/認可を再検証する。
 - **BrowserSession:** release/handoffのみで、sessionId以外の内部識別子は利用者には見せない。
 
 ### 5.6.1 Durable Snapshot / SSE Handoff (own API contract; compatible with CHAT_01 event envelope)
@@ -326,6 +327,32 @@ The GET must read Task/Run/Evidence public projection and its *fully applied* ev
 - **REST-T19** (designed only; SC-05/07/08): concurrent Event commits across GET snapshot response / SSE handler start / projection lag, with Task+Run+Tool Events interleaved and other user's Events inserted in same tenant. Assert all visible events eventually appear, no forbidden event contents or raw offset in JSON, no double-application, and explicit 410 resync.
 - **[PROVISIONAL: CHAT_01/09/10]** Canonical envelope, audience/tenant filter and DB projection-barrier persistence remain owner contracts. This REST wire requirement and the snapshot-to-stream gap-free guarantee are CHAT_08 owned.
 
+
+### 5.6.2 Round 3 — 2種類のRetry API（Task terminal vs Run terminal）
+
+CHAT_01 `task-run-state-machines.md`とCHAT_02 `task-run-manager.md`に合わせて、Run再試行の条件とTaskを新規作成する再試行を明確に分ける。
+
+```ts
+// Both commands require authenticated owner+capability, Idempotency-Key, If-Match.
+type RetryTerminalTask = {
+  // POST /api/v1/tasks/{terminalTaskId}/retry
+  // The old Task/Run are historical and are NEVER rewritten.
+  newGoalText?: string; // explicit override; else frozen original intent only if still authorized
+  newBudget?: object;   // validated server-side; no implicit old budget carry-over
+};
+type RetryNonterminalRun = {
+  // POST /api/v1/tasks/{nonterminalTaskId}/runs
+  // EMPTY body: creates new attempt only after prior Run is terminal and safe.
+};
+```
+
+- Terminal Taskで`POST .../runs`を行うと`409 TASK_TERMINAL_NEW_TASK_REQUIRED`。旧TaskのStateも旧Runも不変。
+- 非terminal Taskの`POST .../retry`は`409 TASK_NOT_TERMINAL`（自動的にRun retryへ変換しない）。
+- `POST .../retry`成功時は`202`と**新TaskId、新Resource Location、受付Receipt**を返す。新Taskには`retryOfTaskId` lineage（論理正本はCHAT_01、DDLはCHAT_10への提案）を記録する。Immutable source Taskの機密/古いデータ/承認を暗黙にコピーしない。
+- 両Commandとも`If-Match`とIdempotency-Keyが必要。同じリクエストの通信再送で新しいTaskが二重作成されない。旧TaskのOwner/tenantをfreshに検査、異Tenant/他Ownerは404。削除/期限切れのArtifactを無言で再利用しない。
+- `POST .../runs`成功時は`202`新RunId・attemptNo、Taskは非terminalのまま。Runがnonterminalのままなら409で重複実行を開始しない。
+- `WAITING_RECONCILIATION`およびExternalEffect UNKNOWNがある場合、二つのRouteとも旧効果をblind retryしない。安全が判断できなければ409/202 pending reconciliationを明示する[PROVISIONAL: CHAT_03]。
+- **Contract test**: REST-R3-T01 terminal Task/run-create→409 no mutation; REST-R3-T02 terminal Task/retry→one new Task lineage, same key replay same ID; REST-R3-T03 active Task/run-create after failed terminal Run→new Run, attemptNo+1; REST-R3-T04 auth/If-Match collision→zero unauthorized effect; REST-R3-T05 old effect UNKNOWN→no replay and visible pending state。
 
 ### 5.7 Error envelope and response examples
 
