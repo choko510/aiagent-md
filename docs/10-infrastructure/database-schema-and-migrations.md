@@ -649,7 +649,7 @@ COMMIT;
 
 | Physical table | 正本Owner | 何を**このMDでは決めない**か |
 |---|---|---|
-| conversations / tasks / runs / task_events | CHAT_01, CHAT_02 | state enum、Event envelope、Task完了判定、Steer semantics |
+| conversations / tasks / runs / domain_events | CHAT_01, CHAT_02 | state enum、Event envelope、Task完了判定、Steer semantics |
 | run_checkpoints | CHAT_01, CHAT_02 | context snapshotの内容、safe boundary、replay |
 | tool_intents / tool_attempts / approval_records / side_effect_records | CHAT_03 | approval authorization、effect category、Tool retry許可 |
 | artifacts / evidence_records | CHAT_01, CHAT_04/05 | Evidence contract、source interpretation、Artifact store adapter |
@@ -1032,7 +1032,7 @@ UPDATE agent.runs SET lease_epoch=lease_epoch+1,
 |---|---|---|
 | DB-T026 | trusted generator v7 / v4注入 → UUIDv7 validatorはv7のみ許可、全保存経路でdefault v4に戻らない | 07,08 |
 | DB-T027 | Conversation NULLのWatch Task作成成功、originThreadだけ指定はvalidation/FKで拒否 | 02,07,11 |
-| DB-T028 | 新規recordVersion=1、CAS +1、旧If-Match 412、safe integer overflow拒否 | 07,08 |
+| DB-T028 | 新規recordVersion=1、CAS +1、旧If-Match 412、signed BIGINT overflow拒否 | 07,08 |
 | DB-T029 | 2 WorkersがRun resume、旧epochのCheckpoint/Result更新0、generation単調 | 07 |
 | DB-T030 | Steerとcheckpoint並行、old goal適用なし、他TaskのactiveRun FK拒否 | 01,04,07 |
 | DB-T031 | 同tenantの別ownerと別tenantの全resourceのread/list/stream拒否 | 06,08 |
