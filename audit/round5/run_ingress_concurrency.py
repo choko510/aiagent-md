@@ -39,6 +39,8 @@ BEGIN
   IF r IS NOT NULL THEN
    INSERT INTO agent.tasks(tenant_id,id,owner_user_id,status_code,canonical_schema_version,request_json)
    VALUES('{T}',gen_random_uuid(),'{U}','QUEUED',1,'{{}}') RETURNING id INTO t;
+   INSERT INTO agent.task_goal_revisions (tenant_id,task_id,revision,goal_ref,goal_sha256)
+   VALUES('{T}',t,1,'fixture:external-event',repeat('b',64));
    UPDATE agent.external_event_receipts SET task_id=t WHERE tenant_id='{T}' AND id=r;
    {"RAISE EXCEPTION 'injected-after-Task-before-commit';" if rollback else ""}
   END IF;
