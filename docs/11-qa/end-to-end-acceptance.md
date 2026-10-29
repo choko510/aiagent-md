@@ -328,3 +328,6 @@ Tests must use fake providers, no real purchase, booking, posting or access to u
 - **QA-R5-T05 (unexecuted)**: Real Python/parser sidecar fails closed on ZIP bombs, PDF JavaScript, Office macros/external formula and plugin egress; successful OCR/Excel citations map to original SHA/page/bbox/cell.
 All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural scanner tests. Do not promote QA or Harness status to Verified on these SQL fixture results alone.
 
+### 19.1 Round 5 observed CI status
+[GitHub Actions run 40959094493](https://github.com/choko510/aiagent-md/actions/runs/40959094493) has four green jobs: draft PostgreSQL 16 migrations/FKs/32-writer sequence, 24-worker X ingress SQL Task dedup and transaction rollback/revoke, generic Chromium/SSRF reference tests, restricted Docker ZIP/Office reference parser, and all 61 PR / 85 MD static scan with 11 contract-presence gates. Explicit **not exercised**: actual agent Runtime, provider X entitlement/signed ingress, DomainEvent+Outbox full path, real sender ACK-loss and consent race, Browser EgressGuard, actual multimodal parser and migration runner. Static marker gates only indicate required strings/sections exist; they do not prove semantic consistency. This changes QA testing evidence status only for the synthetic fixtures, not the acceptance outcomes for SC-01..16.
+
