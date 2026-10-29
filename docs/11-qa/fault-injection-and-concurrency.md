@@ -61,7 +61,6 @@ CIがbarrier/killするのはテスト専用プロセスに限定し、Agent Too
 | QA-FT-015 | MUST | seed/fixtureHash/fault order/fencing/DB時刻を再現レポートに保存 | SC-07/09 | QA-FT-T25 |
 | QA-FT-016 | MUST | UI/SSE状態とDB/Outboxの正本の食い違いを検出 | SC-07/08/16 | QA-FT-T18,19,22 |
 | QA-FT-017 | MUST | SC-10〜16のEvent/learned browser/feedbackも同一停止条件を満たす | SC-10〜16 | QA-FT-T14,21,22 |
-
 | QA-FT-018 | MUST | Discovery/Entity/TrendとSnapshot差分の処理中Kill/重複イベントで、不明値やsource reputationを勝手に変えない | SC-10/12/14 | QA-FT-T27,28 |
 | QA-FT-019 | MUST | Multimodal ingestionの部分書込/失敗後もページ/セル出典とアクセス制御を保護 | SC-15/08 | QA-FT-T29 |
 | QA-FT-020 | MUST | SC-10〜16の全てに少なくとも1つの故障耐性/安全性テストを配置する | SC-10〜16 | QA-FT-T14,21,22,27〜30 |
@@ -242,7 +241,6 @@ FAULT-PR1 Test-only typed fault plan/Barrier API/fixtures; FAULT-PR2 実Postgres
 | QA-FT-015 | QA-FT-T25 | SC-07/09 |
 | QA-FT-016 | QA-FT-T18,19,22 | SC-07/08/16 |
 | QA-FT-017 | QA-FT-T14,21,22 | SC-10〜16 |
-
 | QA-FT-018 | QA-FT-T27,28 | SC-10/12/14 |
 | QA-FT-019 | QA-FT-T29 | SC-15/08 |
 | QA-FT-020 | QA-FT-T14,21,22,27〜30 | SC-10〜16 |
