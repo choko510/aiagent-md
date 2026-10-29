@@ -252,3 +252,7 @@ All tests local/mock with fake sites/tools; no live irreversible operation. **No
 
 - [x] 2 OSS implementations & code/tests read, security alternatives, contracts, controls, states, recovery, migration/API, traceability.
 - [ ] Browser+Docker container sandbox actual execution, operating-system compatibility, ADR, canonical owner/Tool/lease contracts and measured budgets. **Keep Draft**.
+
+## Upstream PR investigation — Chromium default sandbox changes
+- **[PR verified, merged upstream]** Playwright [#42490](https://github.com/microsoft/playwright/pull/42490) modified MCP Chromium sandbox defaults for the bundled Linux browser and added config tests. Upstream defaults are version/channel dependent; the pinned actual launcher code still appends `--no-sandbox` if `chromiumSandbox !== true`. We therefore **explicitly require** sandboxed execution and block unsupported environments instead of inheriting upstream defaults (`SBOX-T04/T18`).
+- Grade: merged PR report + pinned code/test inspection, **not** a successful container integration test.
