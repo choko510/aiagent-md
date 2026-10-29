@@ -113,16 +113,16 @@ UI / Telegram (CHAT_08) ─▶ Task/Run Manager (CHAT_02)
 // Logical types only. Exported shared shapes require CHAT_01 decision.
 type OpaqueId = string;
 type Revision = number;
-type Fence = bigint;  // BigInt serialize as decimal string at DB/JSON boundary
+type LeaseEpoch = number; // [PROVISIONAL: CHAT_01] safe integer, DB bigint range-check before conversion
 
 interface LoopIdentity {
-  tenantId: OpaqueId;
-  actorId: OpaqueId;
+  tenantId: OpaqueId; // server-resolved tenant binding
+  actorId: OpaqueId; // fresh ownerUserId; queue/prompt values are not authority
   taskId: OpaqueId;
   runId: OpaqueId;
   goalRevision: Revision;
-  runGeneration: number;
-  fencingToken: Fence;
+  leaseEpoch: LeaseEpoch; // canonical Run.leaseEpoch, NOT separate runGeneration
+  expectedTaskRecordVersion: number; // recordVersion is CAS counter, initially 1
 }
 
 interface LoopPorts {
@@ -182,7 +182,7 @@ interface FrozenToolProposal {
 **ID/validation invariants:**
 1. `logicalCallId` はRun+Step ordinal+提案ordinalから安定決定し、再送時も同じ。providerのcall_idが衝突・欠落しても別Runを相互承認しない。追加のcanonical arguments hashとtool schema versionで完全性を確認。計算方式/DB unique keyはCHAT_01/03/10に提案。
 2. Modelの応答は構文schema検証、unknown tool拒否、argument size/深さ上限、call数上限を適用。unknown fieldの扱いはtool schemaに一致させる。拒否データをmodelへ返す場合もcredentialを含めない。
-3. `GatewayPrepareReceipt` は `READY/WAITING_APPROVAL/DENIED/INVALID/OVER_BUDGET` の概念を表現。承認は特定actor/tenant/run/generation/goalRevision/tool/args hash/有効期限に結び、検証・消費が原子的であることをOwnerへ要求する。
+3. `GatewayPrepareReceipt` は `READY/WAITING_APPROVAL/DENIED/INVALID/OVER_BUDGET` の概念を表現。承認は特定actor/tenant/run/leaseEpoch/goalRevision/tool/args hash/有効期限に結び、検証・消費が原子的であることをOwnerへ要求する。
 4. Event envelopeと永続化はCHAT_01の`event-envelope-and-stream.md`に委譲。Tool intentとeffect ledgerの正本はCHAT_03。Outboxを持たない直接SSE送信は正本にしない。
 
 ### 例: LLMの2件Tool提案（*内部例であり共有JSON契約ではない*）
@@ -223,7 +223,7 @@ any safe boundary ─▶ PAUSED / CANCELLED / BUDGET_EXHAUSTED / TIMED_OUT
 `WAITING_APPROVAL`, `WAITING_RECONCILIATION` はWorkerを占有しない永続待機。Run全体の正式State遷移はCHAT_01の`task-run-state-machines.md`が所有する。Lease切れの旧Workerは必ず停止し、**既にExecutorに渡った操作の物理キャンセル完了までは約束しない**。
 
 ### 正常系シーケンス
-1. RunManagerがDBの現行Runをclaimし、generationとfenceをLoopへ渡す。
+1. RunManagerがDBの現行Runをclaimし、canonical Run.leaseEpochをLoopへ渡す。Task.activeRunIdとRun.taskId、owner binding、goal revisionを同時に検証する。
 2. Loopは永続snapshot+goal revisionを読込、cancel/pause/steer/期限/コストを確認する。
 3. ContextManagerが最小限のtrusted constraints、観測時刻付きEvidence参照、Tool schemaを構築。Budgetで次のLLM callをreserve。
 4. ModelRouter/Model Portを呼ぶ。stream tokenはtentativeなプレビューとして配信できるが、Tool callは部分streamから絶対実行しない。
@@ -352,7 +352,7 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
 | Tool intent保存後/Executor開始前死亡 | ledger READY/NOT_STARTED | fenceつき再claim可 | Gatewayだけが開始判定 |
 | side-effect実行後/receipt保存前死亡 | ledger IN_FLIGHT等 | **禁止**（provider状態照会のみ） | UNCERTAIN、利用者へ説明 |
 | receipt保存後Loop受信前死亡 | Gateway ledger COMPLETED | Executor再発行禁止 | resultをreconcile |
-| 旧Workerがlease失効 | generation/fence CAS failure | 旧Worker不可 | 新ownerでresume、旧callback破棄 |
+| 旧Workerがlease失効 | leaseEpoch/fence CAS failure | 旧Worker不可 | 新ownerでresume、旧callback破棄 |
 | Approval期限切れ/別actor/args変更 | context binding mismatch | 不可 | 再承認・再計画 |
 | CancelとExecutor開始の競合 | dispatch前に双重fence/control check | cancel後の新規実行不可 | 既着手分は照会/不確定 |
 | Pause中の実行済みread結果 | persisted result+timestamp | 不要 | Resume後、鮮度を再評価 |
@@ -376,14 +376,14 @@ async function executeRun(identity: LoopIdentity, ports: LoopPorts): Promise<voi
 
 ## 10. 計測・Trace・性能基準と評価条件
 
-**全Stepの測定フィールド（型/保存先はCHAT_01/10正本へ提案）:** `taskId`, `runId`, `generation`, `stepOrdinal`, `goalRevision`, `modelProvider`, `modelId`, `attemptId`, `logicalCallId`（任意）、`queueWaitMs`, `modelLatencyMs`, `gatewayPrepareMs`, `toolLatencyMs`, `checkpointCommitMs`, `estimatedUsd`, `billedUsd`（取得時のみ）、`inputTokens`, `outputTokens`, `eventSequence`, `retryReason`, `fenceFailure`, `outcomeKind`。
+**全Stepの測定フィールド（型/保存先はCHAT_01/10正本へ提案）:** `taskId`, `runId`, `leaseEpoch`, `stepOrdinal`, `goalRevision`, `modelProvider`, `modelId`, `attemptId`, `logicalCallId`（任意）、`queueWaitMs`, `modelLatencyMs`, `gatewayPrepareMs`, `toolLatencyMs`, `checkpointCommitMs`, `estimatedUsd`, `billedUsd`（取得時のみ）、`inputTokens`, `outputTokens`, `eventSequence`, `retryReason`, `fenceFailure`, `outcomeKind`。
 
 値・しきい値・レイテンシー・成功率の実測は**未実施**。比較時は同じfixture、同じhost/コンカレンシー、同じModel revision、read-only/tool budget、cache条件で10回以上試験し、p50/p95、失敗率、費用/Task、Evidenceの条件合致率、二重副作用回数を取得する。優先判定は **無承認副作用0 / 二重side-effect0（試験fixture） / 旧fenceからのTool新規開始0 / 制約違反成功0**。これらは計画上の合格値であり達成実績ではない。LangGraph等の外部benchを本Harnessの値として転記しない。
 
 ## 11. 永続化・Transaction・Migration提案
 
 CHAT_10へ要求するlogical transaction boundaries:
-- **T1 run claim**: run lease/generation/fenceの原子的claim; 同一runに複数active ownerを許さない。
+- **T1 run claim**: canonical run leaseEpochの原子的claim; 同一runに複数active ownerを許さない。
 - **T2 model step commit**: full raw response artifact参照、normalized proposal一覧、step cursor、token/費用receipt、durable event/outboxを一貫して保存。CAS/fence failure時の破棄。
 - **T3 gateway prepare**: logicalCallId一意のintent、args hash、分類、承認参照、policy versionをcommitしてからexecutorを起動。
 - **T4 tool completion**: ledger terminal outcome、artifact/evidence refs、outboxの原子commit。外部APIそのものとは原子transactionにならない。Executor発火直前にはGatewayが現行fenceとcancel/control版を検査し、dispatch claimの線形化ポイントを定義する。
@@ -515,3 +515,46 @@ SHOULD LOOP-017 → TEST-006/029、LOOP-018 → TEST-020/029。LATER/EXPERIMENT�
 - 上記４OSSのコードと記載テストはGitHub接続経由で閲覧。依存packageの実動作・CI成功・公式release tagとの完全一致は**未検証**。
 - 本repoにHarness本番コードはないため、本書のRuntime実装・Unit/E2E/benchmarkは**未着手/未実行**。
 - 本書独自のPort/型/数値、Tool実行順序と障害アルゴリズムは **Hypothesis / proposed design**。既存OSSにそのまま存在するAPIとして扱わない。
+
+
+## 18. Round 2 — Shared Contract Reconciliation（2026-10-30、Draft加筆）
+
+> 調査対象の**最新版HEADを全文取得して照合**: PR [#2](https://github.com/choko510/aiagent-md/pull/2) `core-domain-models.md`、[#8](https://github.com/choko510/aiagent-md/pull/8) `rest-api.md`、[#9](https://github.com/choko510/aiagent-md/pull/9) `authentication-and-user-isolation.md`、[#10](https://github.com/choko510/aiagent-md/pull/10) `database-schema-and-migrations.md`、依存PR [#6](https://github.com/choko510/aiagent-md/pull/6)/[#11](https://github.com/choko510/aiagent-md/pull/11)。どのPRもレビュー未完であり、下記は**CHAT_02の採用提案**、共通のLocked決定ではない。
+
+### 18.1 Conflict ledger（各Ownerへ変更提案、他担当ファイルは変更しない）
+
+| ID/severity | 最新PR根拠（exact file/section/symbol） | 相違・問題 | 正本Owner / 選ぶ提案 | 必須変更・互換性・確認Test |
+|---|---|---|---|---|
+| R2-02-01 P0 | #2 `core-domain-models.md §5 UUIDv7` vs #10 `database-schema-and-migrations.md §5.2 agent.*.id DEFAULT gen_random_uuid()` | trusted APIを通らないDB insertでv4 UUIDが公開される | CHAT_01 id validation / CHAT_10 generator. **server generated UUIDv7を単一正本、SQL ID defaultは削除する提案** | DB migrationはdefault撤去＋既存v4を安全に識別/隔離し移行。Idempotency key/dedupe hashはUUIDと別物。**R2-LOOP-T01** |
+| R2-02-02 P0 | #2 `Task.conversationId: ConversationId \| null`; #10 `agent.tasks.conversation_id uuid NOT NULL`; #8 `TaskView.conversationId: Id` | Watch・外部Event起点Taskが作れず、架空Conversation作成を強制 | CHAT_01 cardinality / CHAT_10 DDL / CHAT_08 DTO. **nullableを維持** | DDL nullable, FKはnon-nullのみ実施。REST projectionを `Id \| null` とし作成省略時はnull。migration/fixture **R2-LOOP-T02** |
+| R2-02-03 P0 | #2 `recordVersion=1` vs #10 `revision bigint DEFAULT 0` vs #8 §5.5 ETag | CAS初期値不一致。goalRevisionやleaseEpochとも別概念 | CHAT_01 RecordVersion / CHAT_10 row lock / CHAT_08 If-Match。**1開始で統一する案**を提案（0開始のinternal row `dbRevision` とAdapterで分ける代案は棄却: 曖昧・監査難） | 初期行1、mutation CAS `WHERE record_version=expected RETURNING next`、API strong ETagは当該version、If-Match失敗412/欠落428。バックフィル時0→1にあわせETagを再生成。**R2-LOOP-T03** |
+| R2-02-04 P0 | #2 `Run.leaseEpoch: number` (non-negative); #1旧`fencingToken: bigint`; #10 `agent.runs` にlease列なし、`tool_attempts.fence_token`のみ | Run・Tool Attempt間で別fenceを誤同一視し旧Workerがcommit/dispatchできる | CHAT_01 Run epoch / **CHAT_02** loop+manager / CHAT_10。**canonical Run.leaseEpoch=JS safe integer、DB bigint CHECK safe-range; ToolAttempt fenceは別scope** | `runs.lease_epoch` 非null default0、claimで+1 CAS、`lease_owner`/expiry+activeRun検査。Tool Gatewayは各効果開始前にRun epochと別のattempt fenceをともに検査。unsafe number conversion reject。**R2-LOOP-T04/T05** |
+| R2-02-05 P0 | #2 `Task.goalRevision,goalRevisionRef,activeRunId` + `Run.inputGoalRevision` vs #10 `tasks,runs`に対応列なし | Steer後にcurrent plan/approval更新、Taskのactive Run参照を正しく再構成できない | CHAT_01 goal semantics / CHAT_02 applied revision / CHAT_10 storage。**Task.currentGoalRevision/currentRevisionRef及びactiveRunIdを永続化。Run.inputGoalRevisionは初回固定、step.appliedGoalRevisionは別記録** | TaskGoalRevision immutable append、activeRunId参照が同TaskのRunのみ、同Task activeRun<=1、条件変更とEvent/Outbox同tx。CheckpointにappliedGoalRevisionを書き、旧Tool/Approvalをinvalidate。**R2-LOOP-T06/T07** |
+| R2-02-06 P0 | #2 Tenant/ownerUserId; #9 Auth `AuthenticatedPrincipal(userId,tenantId)`; #10 workspace_id、`workspaces`のみ | 物理workspaceが認可主体と混同される、Run/Toolがowner lineageを追えない | CHAT_09 identity/role / CHAT_01 model / CHAT_10 identity binding。**tenantId→workspaceIdはserver-verified 1対1 bindingの初期案、userIdは別、ownerUserIdは必須** | user/tenant/member/workspace binding・owner FK（or verified join）、cross-tenant deny。queue payloadはrunId pointerだけで認可不可。禁止者復旧時dispatch0。**R2-LOOP-T08** |
+| R2-02-07 P0 | #8 §5.2/5.5 Create Task/Watch/Approval、#10 §6.1/7.1 receipt/outbox、#2 command idempotency | DB receiptとTask/Run/outboxを別commitすればACK喪失で二重起動 | CHAT_10 txn / CHAT_08 route / CHAT_01 command。**domain commit + receipt + event + outbox atomic** | DB前提、HTTP requestをtransaction内保持しない、同key同body同receipt、異body409、If-Matchはversion CAS。**R2-LOOP-T09** |
+| R2-02-08 P0 | #1 §8 `UNKNOWN_EFFECT`, #10 §6.2 Tool ledger、#6 Registry§6 caller ref | IN_FLIGHTのlease再取得を理由に副作用を盲目的再実行可能 | CHAT_03 gateway/ledger、CHAT_02 recovery、CHAT_10 persistence。**NOT_STARTEDのみ初回dispatch; UNKNOWNは照会-only、未確認なら人間の判断待ち** | Gateway reconcile returns effect-proof; providerの保証なしに確定済み扱い禁止。old epoch/old intent/old approvalは再利用しない。**R2-LOOP-T10** |
+
+**不採用:** `workspace_id=userId=tenantId`を暗黙に同一視すること、DB v4をUUIDv7として見せること、recordVersionとGoalRevision/leaseEpochを一つの`revision`列に詰めること、永続化前の外部Tool起動、actorが変わった承認の使い回し。
+
+### 18.2 AgentLoopへの拘束条件（今回の直接修正）
+
+- **[PROVISIONAL: CHAT_01]** `LoopIdentity.leaseEpoch` は `Run.leaseEpoch` と一致するsafe integer。DB BIGINTをJSへ読むとき `0 <= epoch <= Number.MAX_SAFE_INTEGER` と整数性をチェック。値が上限に達したRunは新しいleaseを発行せず修復待ち。JSONではNumber型（安全範囲内）とする提案。Tool attempt内の`fence_token bigint`は別系列で、混在不可。
+- **[PROVISIONAL: CHAT_09/10]** `tenantId`はtrusted session又はDBのRun→Task→owner bindingから復元し、`workspaceId`はサーバーで照会。User名を含むqueue payloadとModel outputは権限の根拠にしない。Auth失効・Task.owner disabled中はTool開始不可。
+- **[PROVISIONAL: CHAT_01/10]** Taskは `conversationId=null` でも有効。Runの存在とConversationは独立。Runが参照できるGoal revisionはTaskのimmutable GoalRevisionであり、Steer後のapplied revisionはcheckpointに記録。旧scopeのTool approvalは実行前にexpire。
+- **[PROVISIONAL: CHAT_10]** `recordVersion` 1開始のCASと `leaseEpoch` のfence比較は**双方必要**。毎回のEvent挿入でrecordVersionを上げたとしても、leaseEpoch代用禁止。Event outboxとreceiptはTaskの確定トランザクションで原子化。
+- **[PROVISIONAL: CHAT_03]** Gatewayが直前のTool dispatch claimで `Run.leaseEpoch` / `Task.activeRunId` / `goalRevision` / `Auth identityVersion` / `approval scope` / `budget` を最新DBから照合。Timerやmemory上のAbortSignalだけでcancelの線形化を保証しない。確認不能はfail closed。
+
+### 18.3 追加されたMUSTとテスト計画（Designed only / Not executed）
+
+| REQ | MUST（SC） | TEST-ID / Setup→Action→Expected |
+|---|---|---|
+| LOOP-R2-001 | 公開IDと永続化IDの共通validator一致（SC-07/08） | R2-LOOP-T01: trusted APIとDB補助insertの全IDを検証→UUIDv7以外の新規公開ID0 |
+| LOOP-R2-002 | non-Conversation Taskの実行許可（SC-02/07） | R2-LOOP-T02: Watch/Event起点Taskを作成/再読込→conversationId null、偽Conversation0 |
+| LOOP-R2-003 | RecordVersion CASとIf-Match一致（SC-07） | R2-LOOP-T03: Version1で2同時PATCH→1成功/1が412、version2 |
+| LOOP-R2-004 | leaseEpoch独立・stale rejection（SC-07/08） | R2-LOOP-T04: Worker A/B争奪→旧Run epochのcommit/tool開始0。T05: bigint>MAX_SAFE_INTEGER→safe停止、誤丸め0 |
+| LOOP-R2-005 | GoalRevision/activeRun永続整合（SC-04/07） | R2-LOOP-T06: Steer/再起動→旧approval実行0、新goalに対するcheckpoint。T07: activeRunIdを他Task Runへ差替→FK/CAS拒否 |
+| LOOP-R2-006 | tenant-owner-workspace照合（SC-06/08） | R2-LOOP-T08: 異workspace ID, revoked owner, queue forged tenant→外部Tool開始0/他Evidence読取0 |
+| LOOP-R2-007 | command receipt/outboxの原子commit（SC-02/07） | R2-LOOP-T09: precommit/aftercommit kill+same key replay→Task1、Run1、outbox1、receipt同一 |
+| LOOP-R2-008 | UNKNOWNの盲目的再発行防止（SC-07） | R2-LOOP-T10: 予約Tool実行直後kill→provider lookupかUNCERTAIN、実行回数1 |
+
+**実行はしていない**。横断Contract Testの正本化とE2E実行はCHAT_11へ依頼。全MUSTがTestとSCに対応し、旧LOOP-001〜016と整合することをレビューで確認するまで本書はDraftのままとする。
