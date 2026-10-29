@@ -242,7 +242,7 @@ No published contract is Locked. Thresholds/model detector quality and shared En
 - [S6] **Docs verified** OWASP LLM01 prompt injection: https://genai.owasp.org/llmrisk/llm01-prompt-injection/
 - [S7] **Docs verified** MCP security considerations: https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices
 - [S8] **Hypothesis / not implemented**: product Envelope, provenance propagation, limits, correctness/cost, deterministic policy integration.
-- [S9] **Issue/PR incomplete**: no source-verified upstream issue or PR for the exact combined defense; cited implementations/tests are direct evidence.
+- [S9] **Upstream PR inspected** OpenClaw #165776 (open/unmerged) documents long-paste provenance confusion. It does not verify the combined defense in this project; see appended PR investigation.
 
 ## Review gate
 - [x] 2 OSS code/tests, alternate options, scope and authority, typed interface, sequence/pseudocode, failure/restart/race, DB/UI, TEST/REQ/SC.
