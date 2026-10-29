@@ -15,7 +15,7 @@ Owner CHAT_11: fault plan schema、barrier orchestration、mock external-effect 
 | OSS / Commit | 実見したsource/test | 確認事実と限界 | 採否 / license |
 |---|---|---|---|
 | pg-boss 71ea068b144c75b014a1eb90327aaa4a92da1cf2 (master) | test/attemptFenceTest.ts: staleWorker, expectNewerAttemptUntouched, newer attempt completion/fail/heartbeat/shutdown cases; src/migrationStore.ts migrateCommands | Queue job attempt fencingを検証。ただしjob.retryCountとAgent Run.leaseEpoch/approvalは別物 | DB Queueの試験パターン採用。MIT（要導入時再点検） |
-| Mastra ec3ba11dad428caeb3b4afae77d1669462e8c129 | packages/core/src/agent/run-lease-fence.ts verifyRunLease/startRunStep、packages/core/src/agent/__tests__/thread-lease-loss-abort.test.ts lease backend blipと旧run停止のテスト | Tool呼出前にlease確認、in-flightと新規開始を区別。[issue #27543]はlease喪失の旧runがtoolを続ける報告 | 実装は自前のDB業務境界、テストパターン採用。license導入時確認 |
+| Mastra ec3ba11dad428caeb3b4afae77d1669462e8c129 | packages/core/src/agent/run-lease-fence.ts verifyRunLease/startRunStep、packages/core/src/agent/__tests__/thread-lease-loss-abort.test.ts lease backend blipと旧run停止のテスト | Tool呼出前にlease確認、in-flightと新規開始を区別。[issue #27543]はlease喪失の旧runがtoolを続ける報告 | 実装は自前のDB業務境界、テストパターン採用。Apache-2.0（ee/別条件、LICENSE.md確認） |
 | LangGraph ffc3336367e8139668d11e5f0b0e6def57e7c762 | libs/checkpoint-postgres/langgraph/checkpoint/postgres/__init__.py PostgresSaver.put/put_writes、libs/checkpoint-postgres/tests/test_sync.py | checkpoint/pending writeのDB永続化・migrationとrecord replayの参考。外部送金/予約 exactly-onceの証明ではない | checkpoint耐久性テスト参考。license導入時確認 |
 | Playwright 38fb53bf4c181abb91f1ca2a2ab741983c5d177c (1.65.0-next) | tests/library/browsercontext-har.spec.ts HA-068/071/090、BrowserContext.routeFromHAR | Browser network replay/miss試験。Service WorkerはHARの対象外となる制限 | Browser検証候補、Apache-2.0 |
 
@@ -61,6 +61,10 @@ CIがbarrier/killするのはテスト専用プロセスに限定し、Agent Too
 | QA-FT-015 | MUST | seed/fixtureHash/fault order/fencing/DB時刻を再現レポートに保存 | SC-07/09 | QA-FT-T25 |
 | QA-FT-016 | MUST | UI/SSE状態とDB/Outboxの正本の食い違いを検出 | SC-07/08/16 | QA-FT-T18,19,22 |
 | QA-FT-017 | MUST | SC-10〜16のEvent/learned browser/feedbackも同一停止条件を満たす | SC-10〜16 | QA-FT-T14,21,22 |
+
+| QA-FT-018 | MUST | Discovery/Entity/TrendとSnapshot差分の処理中Kill/重複イベントで、不明値やsource reputationを勝手に変えない | SC-10/12/14 | QA-FT-T27,28 |
+| QA-FT-019 | MUST | Multimodal ingestionの部分書込/失敗後もページ/セル出典とアクセス制御を保護 | SC-15/08 | QA-FT-T29 |
+| QA-FT-020 | MUST | SC-10〜16の全てに少なくとも1つの故障耐性/安全性テストを配置する | SC-10〜16 | QA-FT-T14,21,22,27〜30 |
 
 ## 5. Test-only型/APIとvalidation
 
@@ -207,6 +211,16 @@ Trace fields: fixtureHash、seed、testRunId、taskId/runId、leaseEpoch、goalR
 
 FAULT-PR1 Test-only typed fault plan/Barrier API/fixtures; FAULT-PR2 実Postgres/Queue integration/worker kill/recovery; FAULT-PR3 Tool Gateway intent/ACK loss/UNKNOWN Fake Sink; FAULT-PR4 Browser ownership/credential expiry/tenant & SSRF; FAULT-PR5 Watch/X duplicate, learned-action, feedback/notifications, CI report。段階ごとに実施済み試験を更新するが、現時点はいずれも**未実装・未実行**。
 
+### Round2拡張シナリオの追加故障注入（すべて未実行）
+
+| TEST-ID | Setup / Action | Expected | SC |
+|---|---|---|---|
+| QA-FT-T27 | Opportunity discovery候補列挙中にWorker killし復帰、同時に旧entity mapping revisionを再配送 | candidate/taskの論理重複0、false merge 0、uncertain候補を確定へ昇格0 | SC-10 |
+| QA-FT-T28 | 差分snapshot commit前後でkill、同時にsource reliabilityが低下、古い観測を重複再配信 | latest sourceAt/evidence不変、有意diff重複0、source correlation誤増幅0 | SC-12/14 |
+| QA-FT-T29 | PDFページ/XLSXセル抽出後、Artifact保存とイベントcommitの間でkillし他tenant workerがreclaim | 不完全な出典を成功にせず、page/cell provenanceとtenant隔離、添付コード実行0 | SC-15/08 |
+| QA-FT-T30 | X event trigger / snapshot / feedback notificationが同一Runで異なる順序にreplayされる | disable以降実行0、Preference Undoはuser scopeのみ、優先通知のsilent dropなし | SC-11/12/16 |
+
+
 ## 12. Requirement → Test → Scenario追跡
 
 | REQ-ID | TEST-ID | SC |
@@ -228,6 +242,10 @@ FAULT-PR1 Test-only typed fault plan/Barrier API/fixtures; FAULT-PR2 実Postgres
 | QA-FT-015 | QA-FT-T25 | SC-07/09 |
 | QA-FT-016 | QA-FT-T18,19,22 | SC-07/08/16 |
 | QA-FT-017 | QA-FT-T14,21,22 | SC-10〜16 |
+
+| QA-FT-018 | QA-FT-T27,28 | SC-10/12/14 |
+| QA-FT-019 | QA-FT-T29 | SC-15/08 |
+| QA-FT-020 | QA-FT-T14,21,22,27〜30 | SC-10〜16 |
 
 ## 13. 未決事項 / Cross-team proposals
 
@@ -251,4 +269,5 @@ P0未解決、OSSのテストを実行せず、実Harness未存在なので**Dra
 - [S3 Code verified] LangGraph ffc3336367e8139668d11e5f0b0e6def57e7c762: [PostgresSaver put/put_writes](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/langgraph/checkpoint/postgres/__init__.py)、[tests](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/tests/test_sync.py)。
 - [S4 Code verified/Docs verified] Playwright 38fb53bf4c181abb91f1ca2a2ab741983c5d177c: [browser HAR tests](https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/tests/library/browsercontext-har.spec.ts)、[Service Worker restriction](https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/docs/src/api/class-browsercontext.md)。Apache-2.0。
 - [S5 Draft project docs] [Core #2](https://github.com/choko510/aiagent-md/pull/2)、[AgentLoop #1](https://github.com/choko510/aiagent-md/pull/1)、[REST #8](https://github.com/choko510/aiagent-md/pull/8)、[Auth #9](https://github.com/choko510/aiagent-md/pull/9)、[DB #10](https://github.com/choko510/aiagent-md/pull/10)、[Scheduler #11](https://github.com/choko510/aiagent-md/pull/11)。
+- [S2a License verified] [Mastra LICENSE.md](https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/LICENSE.md) は一般コードApache-2.0・ee/別条件。[LangGraph LICENSE](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/LICENSE) はMIT。2026-10-30確認。
 - [S6 Hypothesis] 本書のfault control schema、時間上限、barrier、sink oracle、CI rolloutは独自設計で未実測。OSS tests はソース閲覧のみで**実行していない**。
