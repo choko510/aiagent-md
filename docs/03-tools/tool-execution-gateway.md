@@ -68,7 +68,7 @@ SC-01/03/04/05：evidence preserving read-only tools、SC-02/11：watch/event tr
 | GW-019 | EXPERIMENT | provider batch APIの費用低減は同一Task fixtureで測定後採用 | 09 |
 
 ## 5. Local interface / strict validation ([PROVISIONAL: CHAT_01])
-次の型は**CHAT_03内部のport例**。公開JSON ContractやDB列はCHAT_01/10の決定を待つ。Entity公開IDはUUIDv7、`opaque` ToolRef/ArtifactRefはUUIDと異なる。BigIntはJSON numberに出さずdecimal-string codecを検討、CH01の`LeaseEpoch:number`を安全整数以上に拡張するかCHAT_01/02で確認する。
+- **[ROUND4 RESOLVED CANONICAL PORT]** LeaseEpoch/goalRevision/recordVersionはCHAT_01のint64十進文字列codec、内部BigInt比較、DB BIGINT。Tool gatewayはRun leaseとToolAttempt fenceを混同せず、stale/authority revokeは物理dispatch前に拒否する。
 
 ~~~ts
 type EntityId = string;       // validated canonical UUIDv7 by CHAT_01
