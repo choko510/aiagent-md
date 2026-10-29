@@ -140,6 +140,7 @@ type Message = EntityMeta & {
 type Task = EntityMeta & {
   id: TaskId; ownerUserId: UserId; conversationId: ConversationId | null;
   originThreadId: ThreadId | null; parentTaskId: TaskId | null;
+  retryOfTaskId: TaskId | null; // new Task created by explicit retry of a terminal Task; never mutates source
   createdFromWatchId: WatchId | null; triggerKey: string | null;
   goalRevision: Revision; goalRevisionRef: OpaqueRef; budgetRef: OpaqueRef;
   requestedTimeZone: IanaZone; requestedLocale: string; state: TaskState;
@@ -177,6 +178,7 @@ type WatchIdentity = EntityMeta & {
 - 不明な公開入力fieldはstrict reject。読込時の旧schemaVersionはversioned migrationを通す。新majorはreject。既存のsnapshotをparseしただけでは認可を満たさない。
 - MessageのseqはThread内一意・単調、任意の編集は新revisionまたは新Messageにする。論理削除はtombstone。情報抽出/証拠の鮮度は01-05、金額の通貨/単位は01-05+各domain担当へ。
 - TaskのactiveRunIdはそのTaskのRun以外を参照不可。Run.inputGoalRevisionは実在のimmutable TaskGoalRevisionに一致。WatchTask triggerKeyは定義済みbounded string（発火時刻・schedule version等の正規化ハッシュ、詳細CHAT_07）で同一Watch内一意。
+- retryOfTaskIdは同Tenant/Ownerの**terminal Taskのみ**を参照し、旧Task・Run・Approvalを更新・継承しない。Retry元の証拠が古い場合には再検証、元のgoalは事前に認証済みの版だけコピー可能。自己参照・循環・期限切れ参照は拒否。実行権限/予算は新Taskとして再評価する。これはCHAT_01 state machine (01-03) のterminal immutabilityに整合。 [PROVISIONAL: CHAT_08/10]
 - parentTaskIdは自己参照や間接循環を拒否。分岐深度・最大child数は明示の有限policy、未設定/無制限を許さない。
 
 **Wire projection例（公開APIの正式pathはCHAT_08、フィールド形は例示）**
