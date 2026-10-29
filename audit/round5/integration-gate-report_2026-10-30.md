@@ -71,6 +71,8 @@ P0 here denotes **merge or release gate**; it is not proof of an exploitable dep
 | CHAT_15 | #54 | 1 |
 | **Total** | **61 Draft PRs** | **85** |
 
+See the [per-PR 61-row merge-gate matrix](pr_merge_gate_matrix_2026-10-30.md) for each exact HEAD SHA, owner and specific outstanding condition.
+
 ## Merge recommendation and implementation transition
 **HOLD all 61 Draft PRs, no automatic main merge.** This is not a statement all specs are defective. Detailed sequencing after Owner signoff:
 1. Foundation #59–61. Product boundary and ADR become reviewed authority, not just an author's opinion.
