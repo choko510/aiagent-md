@@ -269,3 +269,5 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 | HITL-010 | HITL-T10 | SC-04, SC-06 |
 
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
+
+**CHAT_03 PR #20 approval lease reconciliation:** Approval binding is to immutable intentId, goalRevision, toolRevision, argsHash, target and policy epoch. A Run leaseEpoch increment at a safe reclaim **does not by itself change that approved immutable intent or require a new user approval**. However the old Worker is fenced; the new Worker must re-validate current lease, authorization, goal, budget and side-effect ledger at the actual Tool-dispatch boundary. HITL-T03/T06 separately test valid approved intent across safe Run reclaim versus rejected stale worker/effect. The approval UI does not display leaseEpoch as permission, and the owner determines whether changed intent/policy requires fresh consent.
