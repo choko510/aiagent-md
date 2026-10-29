@@ -14,7 +14,7 @@
 
 | Reference/commit/license | 実コード・テスト | 採用する仕組み・制約 |
 |---|---|---|
-| MCP TypeScript SDK 39ae8e6192cf43273aaaf2de4169dfa9f7216e28; package licenseはリリース単位で再確認 [S1] | packages/core-internal/src/types/spec.types.2025-11-25.ts: CallToolRequestParams, CallToolResult, JSONRPCMessage, ProgressToken, JSONRPC errors; test/e2e/scenarios/dynamic.test.ts、test/e2e/scenarios/errors.test.ts | ProtocolではCallToolResultが非構造化contentを許容、JSONRPCとtools/callはtransport規約。Providerのtool name/IDやprogress tokenは内部認可・idempotencyではない |
+| MCP TypeScript SDK 39ae8e6192cf43273aaaf2de4169dfa9f7216e28; core-internal package.json=Apache-2.0, repository mixed legacy MIT / Apache-2.0 [S1] | packages/core-internal/src/types/spec.types.2025-11-25.ts: CallToolRequestParams, CallToolResult, JSONRPCMessage, ProgressToken, JSONRPC errors; test/e2e/scenarios/dynamic.test.ts、test/e2e/scenarios/errors.test.ts | ProtocolではCallToolResultが非構造化contentを許容、JSONRPCとtools/callはtransport規約。Providerのtool name/IDやprogress tokenは内部認可・idempotencyではない |
 | PydanticAI 3809c1b861036197de4a06ae3ee38e27e5455100 MIT [S2] | pydantic_ai_slim/pydantic_ai/tools.py ToolDefinition / Tool.from_schema / prepare_tool_def; tests/test_tools.py の登録とschema validation; tests/test_exceptions.py ModelRetry/ToolFailed等 | JSON schema生成とvalidation/Retry feedbackを分離。ツールの内部実行エラーから権限を推測させない |
 | OpenAI Agents SDK cd26bbbc52847845fde73b9952b51e62e2bcbdc0 MIT [S3] | src/agents/run_state.py にtool action/approval/JSON serialization、tests/test_run_state.py にtool_input roundtrip / schemaVersion guard | 実行途中のTool identityと承認状態を持続できる。SDK-native ToolCallIdだけで外部副作用を重複排除しない |
 
@@ -254,3 +254,5 @@ Do not mark Locked until Tool Gateway and schema dialect are agreed.
 [S4] Hypothesis: canonical Tool IO types / finite caps / gate mapping, not native OSS API and not benchmarked.
 
 **Review gates:** Tool Gateway policy, Schema dialect and owner/lease DB contract unresolved. Tests designed but not run, Draft only.
+
+**MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
