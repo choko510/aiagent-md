@@ -84,7 +84,7 @@ type WatchCommand =
 type WatchTarget = {kind:"provider-entity"|"url"|"query"|"external-event", reference:string, normalizedIdentityRef?:string};
 type PredicateRef = {kind:"price-threshold"|"change"|"structured-expression", version:number, canonicalConditionRef:string};
 type CreateWatch = {target:WatchTarget, predicate:PredicateRef, timeSpecRef?:string, eventSubscriptionRef?:string, destinationBindingRef:string, budgetRef:string, consentRef:string};
-type WatchProjection = {watchId:string, recordVersion:number, definitionRevision:number, status:"active"|"paused"|"retired"|"blocked", target:WatchTarget, nextDueUtc:string|null, lastObservedAtUtc?:string|null, blockedReason?:string, notificationSummary:string};
+type WatchProjection = {watchId:string, recordVersion:string, definitionRevision:string, // canonical int64 decimal status:"active"|"paused"|"retired"|"blocked", target:WatchTarget, nextDueUtc:string|null, lastObservedAtUtc?:string|null, blockedReason?:string, notificationSummary:string};
 ~~~
 
 上記は**所有範囲を示す局所proposal**でありCHAT_01の共有Event/StateやCHAT_08のREST DTOを確定しない。recordVersionは共有record CAS（1開始をCHAT_01が提案）、definitionRevisionはWatch条件の版、Task.goalRevisionはTask目標、Run.leaseEpochはRun実行所有権。互いに代用禁止。value/stringのJSON wireではunsigned safe integerを超えるversionはrejectまたは共有string bigint codec決定待ち。
@@ -282,3 +282,7 @@ Draftの理由: P0 contract調停未了、実装・実テスト未実施。
 - **[S10] PR report**, OpenClaw #167081: recurring commandのrecovery ownerとrunning maintenanceを分離する提案・修正。PRのmerge状態とは独立に、pauseでin-flightを「終了済み」と誤認しない設計の反例として参照。https://github.com/openclaw/openclaw/pull/167081
 
 **追加要件 WAT-020 MUST**: 既存Task/Runを止めずWatchのみPauseしたとき、以降の新規Triggerを禁止しながら、in-flight Runのcompletion/UNKNOWNを**旧definitionRevisionへ帰属**して保存する。Run leaseEpochとの不一致では旧Workerの書込を拒否し、通知先bindingを新revへ勝手に移さない。**WAT-T19 → SC-02/07**: PauseとRun送信中/確認中の3境界を100回故障注入→旧revの結果は正しい履歴に残り、Pause以降の新規Toolは0、結果不明はunknownのまま。テスト未実施。
+
+
+### Round 3 — lossless canonical version boundary (2026-10-30)
+All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
