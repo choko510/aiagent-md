@@ -219,3 +219,11 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 [S7] **Code verified** Mastra \`useChat\` and subscription handling: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/client-sdks/react/src/agent/hooks.ts (Apache-2.0 standard paths; ee exception).  
 [S8] **Code verified test file inspected, not run** Mastra 409 conflict mappings https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/server/src/server/handlers/error.test.ts  
 **[Hypothesis / proposed only]:** durable cursor HMAC, stream memory limits, replay algorithm, versioned redacted projection, polling intervals. No integrated application source/benchmark or exact OSS tag correspondences verified.
+
+## 14. Issue/PRの既知故障と追加回帰要求（Issue report、現行統合では未検証）
+
+- **[I-SSE-01]** [OpenClaw #127368](https://github.com/openclaw/openclaw/issues/127368)（2026-10-30閲覧、Open）: 投稿者が session-history SSE で `res.write()` の `false` を無視し、unbounded Promise chainを蓄積する問題を報告。これは**Issue report**であり本Harnessでの再現ではない。上記 `stream.writeBounded` は実装時に `write(false)` で以後の読み取りを停止し、drain/deadlineで復帰、最大256KiB超過で接続終了する仕様とする。SSE-T05に、0-byte reader・4096イベント・最長30秒・複数クライアントで送出キュー上限を超過しない試験を追加。
+- **[I-SSE-02]** [Mastra #28224](https://github.com/mastra-ai/mastra/issues/28224)（2026-10-30閲覧、Open）: Workerが実作業を終えた後のterminal event送出時にleaseを失ったとの報告。根因未確定。**DBで確定した終状態とSSEに配信された終状態の分離**を維持し、lease喪失時に「成功」イベントを架空生成しない。SSE-T08/T10にterminal event時のlease loss注入を加え、GET照会で真のRun statusを復元する。
+- **[I-SSE-03]** [Mastra #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30閲覧、Open）: schedule dispatchのhook完了を実際のRun完了と誤認するリスクを指摘。SSEがWatchを`complete`と描画できるのは**実Run stateの終端イベント・正本を照合した場合のみ**。dispatch成功や202受付のみでcompleteへ遷移禁止。SSE-T10で複数resume segmentとWorker restartを試す。
+
+これらのIssuesはソースの具体実装を反証する監査材料であり、OSSが本プロジェクトで同じ故障を起こしたという意味ではない。
