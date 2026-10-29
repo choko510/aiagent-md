@@ -216,3 +216,20 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 **[I-DASH-01]** [Mastra #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30、Open、Issue report）はScheduleのdispatch成功とRun completionが異なることを指摘する。DASH-T03/T05に「scheduled fire succeeded / Task Running / Approval suspended / Worker restarted」のfixtureを追加し、Watchのチェックが開始された表示と、Taskが完了した表示を**絶対に混ぜない**ことを検証する。**[I-DASH-02]** [OpenClaw #127367](https://github.com/openclaw/openclaw/issues/127367)（issue titleを検索で確認したのみ・本文未検証）はunbounded history readの懸念。関連本体はSSE replay側でbounded batchへ制約する。両者は本システムでの発生を確認したわけではない。
 
 **Round2 common contract alignment:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) uses int64 decimal strings for recordVersion/goalRevision; [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) uses separate tenant deliveryOffset and per-aggregate sequence. Dashboard stores only signed snapshotCursor, dedups by eventId, and does not render raw tenant counters. DASH-T02/T06 verify distinct Run/Tool events sharing aggregateSequence and immutable GoalRevision string.
+
+## Formal Round 2 MUST Traceability (full stable IDs; designed tests only)
+
+| MUST REQ-ID | TEST-ID(s) | SC-ID(s) |
+|---|---|---|
+| DASH-001 | DASH-T01 | SC-02, SC-08 |
+| DASH-002 | DASH-T02 | SC-01, SC-05, SC-07, SC-11 |
+| DASH-003 | DASH-T03 | SC-02, SC-12 |
+| DASH-004 | DASH-T04, DASH-T11 | SC-07 |
+| DASH-005 | DASH-T05 | SC-06, SC-07 |
+| DASH-006 | DASH-T06 | SC-07, SC-09 |
+| DASH-007 | DASH-T07 | SC-01, SC-03, SC-04, SC-05, SC-14 |
+| DASH-008 | DASH-T08 | SC-02, SC-12 |
+| DASH-009 | DASH-T09 | SC-07, SC-09 |
+| DASH-010 | DASH-T10 | SC-04, SC-06, SC-08 |
+
+**Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
