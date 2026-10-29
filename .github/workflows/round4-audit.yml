@@ -37,6 +37,14 @@ jobs:
       - name: Real Chromium local click/fill POST side-effect trap (threat repro only)
         run: python3 audit/round4/browser_post_trap.py
 
+  parser-negative-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restricted Docker reference Office ZIP and no-network threat fixtures
+        run: python3 audit/round5/parser_sandbox_fixture.py
+
   full-spec-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 25
