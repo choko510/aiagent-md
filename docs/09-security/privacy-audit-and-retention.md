@@ -364,7 +364,7 @@ All fixture stores/emulated providers; **no real user data, credentials or produ
 - **[S12] [Test source verified, not run]** Playwright storage round-trip: https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/tests/library/browsercontext-storage-state.spec.ts
 - **[S13] [Docs verified]** OWASP Logging Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html ; NIST SP 800-88 Rev. 1 media sanitization (apply local policy to backups, not a guarantee of remote deletion): https://csrc.nist.gov/pubs/sp/800/88/r1/final
 - **[S14] [Hypothesis]** Project-specific retention periods, delete/export APIs, record layouts, backup suppression and crypto-shred proof are proposed architecture not validated or deployed.
-- **[S15] [Issue/PR check incomplete]** Specific upstream bug/PR was not verified; cited functions and regression tests are the primary source audit and this is explicitly an evidence gap.
+- **[S15] [Upstream PR inspected]** Langfuse #19453/#17838 (open/unmerged) on shared media deletion races, #19126 (merged) on exact cutoff retention discovery; see appended PR investigation.
 
 ## 18. Review Gate self-audit
 
