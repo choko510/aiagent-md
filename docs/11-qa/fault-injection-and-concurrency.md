@@ -270,3 +270,25 @@ P0未解決、OSSのテストを実行せず、実Harness未存在なので**Dra
 - [S5 Draft project docs] [Core #2](https://github.com/choko510/aiagent-md/pull/2)、[AgentLoop #1](https://github.com/choko510/aiagent-md/pull/1)、[REST #8](https://github.com/choko510/aiagent-md/pull/8)、[Auth #9](https://github.com/choko510/aiagent-md/pull/9)、[DB #10](https://github.com/choko510/aiagent-md/pull/10)、[Scheduler #11](https://github.com/choko510/aiagent-md/pull/11)。
 - [S2a License verified] [Mastra LICENSE.md](https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/LICENSE.md) は一般コードApache-2.0・ee/別条件。[LangGraph LICENSE](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/LICENSE) はMIT。2026-10-30確認。
 - [S6 Hypothesis] 本書のfault control schema、時間上限、barrier、sink oracle、CI rolloutは独自設計で未実測。OSS tests はソース閲覧のみで**実行していない**。
+
+## 15. Round 3 — Common Contract P0/P1 Regression Cases（2026-10-30）
+
+**対象PRのHeadを再取得し、実装前に最低限次のFault/Contract Fixtureを実行可能にする。** これは試験の**設計**であり、現Harnessは未実装・実行0件。
+
+| Test ID | Setup / injected fault | Strict oracle |
+|---|---|---|
+| FIC-R3-T01 | One tenant, Task/Run/Watch/Tool aggregate 100 concurrent committed events | `deliveryOffset` unique and monotonic in commit serialization; aggregate sequence separately monotonic; Task-less Watch events accepted |
+| FIC-R3-T02 | Kill at domain mutation, aggregate counter, tenant counter, Event insert, Outbox insert and commit ACK-loss | Mutation+Event+Outbox all-or-none; rollback consumes no visible offset; successful commit replays exactly same eventId |
+| FIC-R3-T03 | Task snapshot creation, concurrent Event commit, SSE subscription delayed with hidden other-user Event | authorized visible events 0 omissions, no unauthorized leakage, no false 'gap' from filtered offset |
+| FIC-R3-T04 | 1 Run with 5 checkpoint phases at same step, kill between append and Run.head CAS | all completed head phases recoverable, old snapshot still immutable, no missing phase/extra Tool execution |
+| FIC-R3-T05 | Run lease epoch N expires, N+1 reclaimed; old Worker writes late checkpoint + Tool settlement | stale row changes 0; new head/ledger unaffected; uncertain external effect NEVER blind retried |
+| FIC-R3-T06 | DB int64 event offset > Number.MAX_SAFE_INTEGER; serializing via JSON/HTTP/driver | canonical decimal string remains exact; JSON number rejected; `recordVersion` and `leaseEpoch` follow CHAT_01 lossless canonical codec |
+| FIC-R3-T07 | Terminal Task retry against POST /tasks/{id}/runs, and POST /tasks/{id}/retry | first 409, second creates new Task with retry lineage; existing historical Task/Run unchanged and new approval required |
+| FIC-R3-T08 | Nonterminal Task with terminal FAILED Run, concurrent Cancel/Steer/Run retry | CAS permits exactly one effective transition, no stale-goal dispatch |
+| FIC-R3-T09 | Outbox two publishers reverse delivery, duplicate delivery, ACK lost | persistent Event log orders by tenant deliveryOffset, SSE eventually consistent, duplicate notifications/effects not retried blindly |
+| FIC-R3-T10 | Two tenants and two owners: altered HMAC cursor, wrong viewer, role revoked mid-stream | denied with safe status/close, zero cross-scope bytes, expired cursor 410 and fresh snapshot |
+
+**Setup:** Deterministic PostgreSQL and time-controlled test driver; each killpoint repeat with fresh DB schema, masked fake credentials, no real network side effects; record exact commit/run/event/intent IDs and DB row counts. Oracle checks SQL rows as source of truth, not only HTTP success. All tests MUST be run against the same chosen PostgreSQL major as deployment. Retention, idempotency window and 64bit max are documented per fixture.
+
+**Owner cross-links**: CHAT_01 #23 canonical Event, CHAT_02 #27 Checkpoint, CHAT_02 #21 Retry, CHAT_08 #17/#8 SSE/REST, CHAT_10 #10 DDL, CHAT_10 #22 Queue, CHAT_09 auth. This test suite must fail if any incompatible old Task-only Event schema or single-Step checkpoint uniqueness returns. Until executed: status **DESIGNED ONLY / NOT VERIFIED**.
+
