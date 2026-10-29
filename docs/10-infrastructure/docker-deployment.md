@@ -332,3 +332,21 @@ The YAML is intentionally illustrative; it contains placeholders and is not a co
 
 ### 17.1 Failure report reviewed (not a guaranteed current defect)
 [S10] https://github.com/microsoft/playwright/issues/2437 — **Issue report**, opened 2020-06, closed 2020-06; user reported non-root Docker browser binary unavailable because install path was root-owned (Playwright v1.0.2). Historical issue is not evidence the current Playwright Dockerfile still suffers the bug. This specifically motivates DEP-T04/DEP-T15 to probe the pinned browser binary path, UID-readable cache and sandbox on the actual host rather than assuming `USER` alone works.
+
+## 18. Round 3 — P1 deployment / database / egress実機ゲート（未実行）
+
+この仕様はDockerを`作った`・PostgreSQLのDDLを`実行した`という報告ではない。イメージとComposeの実装PRができた時点で以下のpreflightを **CIおよびUbuntuホスト隔離環境** で実行する。結果には採用image digest、PostgreSQL major、kernel/runtime、実際のcommand exit codeとstdout/stderrのredacted artifactを保存する。
+
+| Gate | Mandatory setup / operation | Exit / assert |
+|---|---|---|
+| DEP-R3-T01 | `docker compose config --quiet` とimage digest pinを確認 | compose valid; unpinned latest/host network/privileged/Docker socket mount 0 |
+| DEP-R3-T02 | API/Worker/Browserのnon-root uid、effective capabilities、read-only rootfs、seccomp/no-new-privileges、mountsを実containerで検査 | host shell, Docker socket, privileged mode and arbitrary writable host paths 0 |
+| DEP-R3-T03 | DB clean-install `psql -X -v ON_ERROR_STOP=1` + migration runner twice + `pg_catalog` FK/Index list | all `domain_events`, per-tenant counters, append-only checkpoints, outbox FKs created; second apply no-op |
+| DEP-R3-T04 | Two workers same Run lease and checkpoint after kill | fencing prevents stale write, successful recovery same run ID |
+| DEP-R3-T05 | HTTP/Browser/MCP from service network attempt localhost, RFC1918, link-local, cloud metadata, IPv6 private, DNS rebinding/redirect | deny with audit; zero protected connection; no fallback path to host network |
+| DEP-R3-T06 | Browser login storage readback under configured uid and permission scope | authorized session works, other tenant cannot read credentials, no creds in traces |
+| DEP-R3-T07 | Outbox relay/queue/DB fail-restart with Testcontainers | Event persisted once, stable event ID, terminal status not invented |
+| DEP-R3-T08 | Docker restart+database restore with live checkpoint and artifact refs | consistent resume or explicit quarantine, no cross-tenant leak, backup integrity |
+
+`DEP-R3-T01..08`のうちT02・T03・T05の失敗は**P0リリースブロッカー**。他も未合格のままproduction`Verified`にしない。既存`DEP-Txx`の試験を置き換えるのではなく追加する。Docker CLIはユーザー/テスト管理者が利用するもので、Agent RuntimeへDockerソケットを渡すことは一切許可しない。SSRF testのOracleはモデル回答ではなく接続先のサーバーアクセスログ/pcap/隔離proxyの証拠とする。テストは未実行。
+
