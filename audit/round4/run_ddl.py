@@ -56,7 +56,7 @@ try:
  print(concurrent.stdout[-2000:],concurrent.stderr[-2000:])
  if concurrent.returncode:raise RuntimeError('PostgreSQL multiwriter sequence test failed')
  v2=(ROOT/'audit/round4/expand_v2.sql').read_text()
- z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],
+ z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1','-v','migration_checksum_sha256='+hashlib.sha256(v2.encode()).hexdigest()],
   input=v2,text=True,capture_output=True,timeout=90)
  print('V2_MIGRATION_RC',z.returncode,'STDOUT',z.stdout[-1000:],'STDERR',z.stderr[-2600:])
  if z.returncode:raise RuntimeError("Forward migration v2 failed")
@@ -66,13 +66,38 @@ try:
  print('V2_FIXTURE_RC',z.returncode,'STDOUT',z.stdout[-1100:],'STDERR',z.stderr[-2600:])
  if z.returncode:raise RuntimeError("External Event/Storefront/Digest/Parser v2 FK fixture failed")
  v3=(ROOT/'audit/round4/expand_v3.sql').read_text()
- z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],input=v3,text=True,capture_output=True,timeout=90)
+ z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1','-v','migration_checksum_sha256='+hashlib.sha256(v3.encode()).hexdigest()],input=v3,text=True,capture_output=True,timeout=90)
  print('V3_MIGRATION_RC',z.returncode,'STDOUT',z.stdout[-1100:],'STDERR',z.stderr[-2600:])
  if z.returncode:raise RuntimeError("Forward migration v3 failed")
  fixture_v3=(ROOT/'audit/round4/expansion_v3_integration.sql').read_text()
  z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],input=fixture_v3,text=True,capture_output=True,timeout=90)
  print('V3_FIXTURE_RC',z.returncode,'STDOUT',z.stdout[-1100:],'STDERR',z.stderr[-2600:])
  if z.returncode:raise RuntimeError("Source/Change/Discovery/Risk/Trend/Feedback v3 fixture failed")
+ # Verify migration registry, immutable checksum, replay skip, changed-version rejection.
+ for version,contents in [(1,schema),(2,v2),(3,v3)]:
+  q=run(['docker','exec',name,'psql','-X','-A','-t','-U','postgres','-d','agent_test','-c',
+    'SELECT checksum_sha256 FROM agent.schema_migrations WHERE version='+str(version)])
+  checksum=q.stdout.strip()
+  assert q.returncode==0 and checksum==hashlib.sha256(contents.encode()).hexdigest(),f'migration checksum {version} mismatch: {checksum}'
+  print('MIGRATION_CHECKSUM_PASS',version,checksum[:14])
+ check=run(['docker','exec',name,'psql','-X','-A','-t','-U','postgres','-d','agent_test','-c',
+   "SELECT schema_version FROM agent.schema_control WHERE singleton=true"])
+ assert check.returncode==0 and check.stdout.strip()=='3',check.stdout+' '+check.stderr
+ print('MIGRATION_VERSION_PASS',check.stdout.strip())
+ # Simulation of production runner behavior: existing matching version is a successful SKIP.
+ # Different checksum is a fail-closed immutability violation, not a DDL reapply.
+ def migration_decision(version,submitted_sha):
+  q=run(['docker','exec',name,'psql','-X','-A','-t','-U','postgres','-d','agent_test','-c',
+   'SELECT checksum_sha256 FROM agent.schema_migrations WHERE version='+str(version)])
+  assert q.returncode==0
+  current=q.stdout.strip()
+  if current==submitted_sha:return 'skip'
+  if current:return 'fail_checksum'
+  return 'apply'
+ assert migration_decision(2,hashlib.sha256(v2.encode()).hexdigest())=='skip'
+ assert migration_decision(3,hashlib.sha256(v3.encode()).hexdigest())=='skip'
+ assert migration_decision(3,'0'*64)=='fail_checksum'
+ print('MIGRATION_REPLAY_PASS matching version SKIP, altered checksum FAIL')
  print('RESULT PASS: fresh schema executed and basic catalog assertions passed')
 finally:
  run(['docker','rm','-f',name])

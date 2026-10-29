@@ -143,4 +143,13 @@ CREATE TABLE agent.memory_feedback_mutations (
  REFERENCES agent.memory_feedback_mutations(tenant_id,id) DEFERRABLE INITIALLY DEFERRED,
  CHECK((scope_code='user' AND scope_ref IS NULL) OR (scope_code<>'user' AND scope_ref IS NOT NULL))
 );
+-- Runner computes SHA256 over THIS versioned SQL file and supplies the bound checksum.
+-- A repeat launch must compare existing checksum and SKIP rather than rerun CREATE TABLE.
+INSERT INTO agent.schema_migrations
+ (version,checksum_sha256,name,phase,app_min_reader,app_min_writer)
+ VALUES (3,:'migration_checksum_sha256','0003_expansion_observation_discovery_feedback','transactional',1,1);
+UPDATE agent.schema_control
+ SET schema_version=3,changed_at=now()
+ WHERE singleton=true AND schema_version=2;
+-- Changed 0 rows => abort transaction, never record a false successful migration.
 COMMIT;

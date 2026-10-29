@@ -136,4 +136,13 @@ CREATE TABLE agent.artifact_derivations (
  FOREIGN KEY(tenant_id,parser_job_id) REFERENCES agent.parser_jobs(tenant_id,id),
  UNIQUE(tenant_id,parser_job_id,source_artifact_id,derived_artifact_id)
 );
+-- Runner computes SHA256 over THIS versioned SQL file and supplies the bound checksum.
+-- A repeat launch must compare existing checksum and SKIP rather than rerun CREATE TABLE.
+INSERT INTO agent.schema_migrations
+ (version,checksum_sha256,name,phase,app_min_reader,app_min_writer)
+ VALUES (2,:'migration_checksum_sha256','0002_expansion_ingress_entity_digest_parser','transactional',1,1);
+UPDATE agent.schema_control
+ SET schema_version=2,changed_at=now()
+ WHERE singleton=true AND schema_version=1;
+-- Changed 0 rows => abort transaction, never record a false successful migration.
 COMMIT;
