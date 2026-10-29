@@ -335,7 +335,7 @@ M1 MCP SDK adapter transport/auth handshake/egress under feature flag, integrati
 | MCP-X05 | CHAT_05 P1 | domain provider MCP-vs-native policy, OAuth version/rate/terms, SDK transport endpoint validation; MCP-T10 |
 | MCP-X06 | CHAT_08 P1 | Provider admin auth status, reauth and error projections; MCP-T10 |
 | MCP-X07 | CHAT_11 P1 | MCP Protocol conformance matrix incl HTTP 404/notifications/drop, cost/benchmark; MCP-T25 |
-| MCP-X08 | CHAT_02 P1 | Run cancel/pause/fencing and 2k safe numeric lease codec with MCP session reconnect; MCP-T18 |
+| MCP-X08 | CHAT_02 P1 | Run cancel/pause/fencing and safe numeric lease codec with MCP session reconnect; MCP-T18 |
 | MCP-X09 | CHAT_13/14/15 P1 | X trigger, saved recipe, file embedded tool metadata are data; MCP-T22 |
 | MCP-X10 | CHAT_00 P2 | Any use of trusted isolated stdio MCP as admin opt-in requires ADR, never host command by Agent |
 
