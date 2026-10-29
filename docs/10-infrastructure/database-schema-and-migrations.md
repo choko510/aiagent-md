@@ -97,7 +97,7 @@ CHAT_01: Core Models, Event Envelope, State, Evidence, Errors
 - `jsonb`は正本Schemaバージョン列と共に使用し、trusted adapterでJSON Schema/Zod等を検証。重要な外部キー、query key、時間、idempotencyはJSONB内部に隠さない。
 - DBは使える限り`READ COMMITTED` + row lock + uniqueで実装。複数Entityをまたぐ不変条件は明示的なlock順序を使用、必要な箇所だけSerializable+`40001`全Transaction再試行。**外部HTTP requestをSQL transaction内に入れない**。
 - 非null status textの値は未決。初期migrationはCHECK enumを付けず、状態validatorがOwner canonicalに一致した時点で`CHECK ... NOT VALID`→validationとして後続migrationで追加する。
-- 並列write時の楽観排他には`record_version bigint NOT NULL DEFAULT 1`を使い、`UPDATE ... WHERE revision = previous RETURNING`で0行なら競合。Event writerは必ずDB transaction内で同じ親のlockを確保する。
+- 並列write時の楽観排他には`record_version bigint NOT NULL DEFAULT 1`を使い、`UPDATE ... WHERE revision = previous RETURNING`で0行なら競合。Event writerはDomain row→aggregate counter→tenant counterの固定順序でTX内でロックする。
 
 ### 5.2 Physical v1 proposal（初期migrationのSQL）
 
@@ -189,7 +189,6 @@ CREATE TABLE agent.tasks (
   constraint_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   deadline_at timestamptz,
   record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
-  next_event_sequence bigint NOT NULL DEFAULT 1 CHECK (next_event_sequence > 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -223,7 +222,7 @@ CREATE TABLE agent.runs (
   attempt_no integer NOT NULL CHECK (attempt_no > 0),
   input_goal_revision bigint NOT NULL CHECK(input_goal_revision>0),
   lease_epoch bigint NOT NULL DEFAULT 0 CHECK(lease_epoch BETWEEN 0 AND 9007199254740991),
-  lease_owner_ref text, lease_expires_at timestamptz, checkpoint_ref text,
+  lease_owner_ref text, lease_expires_at timestamptz,
   status_code text NOT NULL,
   state_schema_version integer NOT NULL CHECK (state_schema_version > 0),
   record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
@@ -257,47 +256,84 @@ CREATE TABLE agent.artifacts (
 );
 -- object_keyは検証済みStore key、HTTP URLではない。署名URLは保存しない。
 
+-- Append-only checkpoint history: multiple commits at the same step are legitimate.
 CREATE TABLE agent.run_checkpoints (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid NOT NULL,
-  step_no bigint NOT NULL CHECK (step_no >= 0),
-  checkpoint_schema_version integer NOT NULL CHECK (checkpoint_schema_version > 0),
-  checkpoint_json jsonb,
-  artifact_id uuid,
-  snapshot_sha256 char(64) NOT NULL CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,run_id,step_no),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id),
-  FOREIGN KEY(tenant_id,artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id),
-  CHECK ((checkpoint_json IS NOT NULL) <> (artifact_id IS NOT NULL))
+ tenant_id uuid NOT NULL, id uuid NOT NULL,
+ task_id uuid NOT NULL, run_id uuid NOT NULL,
+ checkpoint_revision bigint NOT NULL CHECK(checkpoint_revision BETWEEN 1 AND 9007199254740991),
+ step_no bigint NOT NULL CHECK(step_no >= 0),
+ phase_code text NOT NULL CHECK(length(phase_code) BETWEEN 1 AND 64),
+ writer_lease_epoch bigint NOT NULL CHECK(writer_lease_epoch BETWEEN 0 AND 9007199254740991),
+ applied_goal_revision bigint NOT NULL CHECK(applied_goal_revision BETWEEN 1 AND 9007199254740991),
+ checkpoint_schema_version integer NOT NULL CHECK(checkpoint_schema_version > 0),
+ checkpoint_json jsonb, artifact_id uuid,
+ snapshot_sha256 char(64) NOT NULL CHECK(snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,run_id,checkpoint_revision),
+ FOREIGN KEY(tenant_id,task_id,run_id) REFERENCES agent.runs(tenant_id,task_id,id),
+ FOREIGN KEY(tenant_id,task_id,applied_goal_revision) REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision),
+ FOREIGN KEY(tenant_id,artifact_id) REFERENCES agent.artifacts(tenant_id,id),
+ CHECK ((checkpoint_json IS NOT NULL) <> (artifact_id IS NOT NULL))
 );
-CREATE INDEX checkpoints_latest ON agent.run_checkpoints
-  (tenant_id,run_id,step_no DESC);
+CREATE INDEX checkpoints_latest ON agent.run_checkpoints(tenant_id,run_id,checkpoint_revision DESC);
+ALTER TABLE agent.runs ADD COLUMN current_checkpoint_id uuid;
+ALTER TABLE agent.runs ADD CONSTRAINT runs_checkpoint_head_fk
+ FOREIGN KEY (tenant_id,current_checkpoint_id) REFERENCES agent.run_checkpoints(tenant_id,id)
+ DEFERRABLE INITIALLY DEFERRED;
 
-CREATE TABLE agent.task_events (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid,
-  sequence_no bigint NOT NULL CHECK (sequence_no > 0),
-  event_type text NOT NULL,
-  event_schema_version integer NOT NULL CHECK (event_schema_version > 0),
-  event_json jsonb NOT NULL CHECK (jsonb_typeof(event_json)='object'),
-  occurred_at timestamptz NOT NULL,
-  persisted_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,task_id,sequence_no),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id)
+-- Canonical CHAT_01 Event Envelope: Task/Run/Watch/Tool/etc, not just Task events.
+-- Both counters are advanced ONLY within the domain mutation + Event + Outbox transaction.
+CREATE TABLE agent.event_aggregate_counters (
+ tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
+ aggregate_type text NOT NULL CHECK(aggregate_type IN
+  ('task','run','watch','approval','tool','evidence','notification')),
+ aggregate_id uuid NOT NULL,
+ next_aggregate_sequence bigint NOT NULL DEFAULT 1
+  CHECK(next_aggregate_sequence BETWEEN 1 AND 9223372036854775807),
+ PRIMARY KEY(tenant_id,aggregate_type,aggregate_id)
 );
-CREATE INDEX task_events_stream ON agent.task_events
-  (tenant_id,task_id,sequence_no DESC);
+CREATE TABLE agent.tenant_event_counters (
+ tenant_id uuid PRIMARY KEY REFERENCES agent.tenants(id),
+ next_delivery_offset bigint NOT NULL DEFAULT 1
+  CHECK(next_delivery_offset BETWEEN 1 AND 9223372036854775807)
+);
+CREATE TABLE agent.domain_events (
+ tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
+ id uuid NOT NULL,
+ aggregate_type text NOT NULL CHECK(aggregate_type IN
+  ('task','run','watch','approval','tool','evidence','notification')),
+ aggregate_id uuid NOT NULL,
+ aggregate_sequence bigint NOT NULL CHECK(aggregate_sequence > 0),
+ delivery_offset bigint NOT NULL CHECK(delivery_offset > 0),
+ event_kind text NOT NULL,
+ schema_version text NOT NULL CHECK(schema_version ~ '^[1-9][0-9]*\\.[0-9]+$'),
+ payload_schema_version text NOT NULL CHECK(payload_schema_version ~ '^[1-9][0-9]*\\.[0-9]+$'),
+ payload_json jsonb NOT NULL CHECK(jsonb_typeof(payload_json)='object'),
+ actor_json jsonb NOT NULL CHECK(jsonb_typeof(actor_json)='object'),
+ audience_code text NOT NULL CHECK(audience_code IN ('owner_private','operator_audit')),
+ owner_user_id uuid, task_id uuid, run_id uuid, watch_id uuid,
+ causation_event_id uuid,
+ correlation_id text NOT NULL CHECK(length(correlation_id) BETWEEN 1 AND 256),
+ trace_id text,
+ occurred_at timestamptz NOT NULL,
+ committed_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,aggregate_type,aggregate_id,aggregate_sequence),
+ UNIQUE(tenant_id,delivery_offset),
+ FOREIGN KEY(tenant_id,aggregate_type,aggregate_id)
+  REFERENCES agent.event_aggregate_counters(tenant_id,aggregate_type,aggregate_id),
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
+ FOREIGN KEY(tenant_id,task_id,run_id) REFERENCES agent.runs(tenant_id,task_id,id),
+ FOREIGN KEY(tenant_id,causation_event_id) REFERENCES agent.domain_events(tenant_id,id)
+  DEFERRABLE INITIALLY DEFERRED,
+ CHECK(run_id IS NULL OR task_id IS NOT NULL),
+ CHECK(audience_code <> 'owner_private' OR owner_user_id IS NOT NULL)
+);
+CREATE INDEX domain_events_task_replay ON agent.domain_events(tenant_id,task_id,delivery_offset) WHERE task_id IS NOT NULL;
+CREATE INDEX domain_events_watch_replay ON agent.domain_events(tenant_id,watch_id,delivery_offset) WHERE watch_id IS NOT NULL;
+CREATE INDEX domain_events_aggregate ON agent.domain_events(tenant_id,aggregate_type,aggregate_id,aggregate_sequence DESC);
 
 CREATE TABLE agent.tool_intents (
   tenant_id uuid NOT NULL,
@@ -448,6 +484,8 @@ CREATE TABLE agent.watches (
  FOREIGN KEY(tenant_id,created_by_task_id) REFERENCES agent.tasks(tenant_id,id)
 );
 ALTER TABLE agent.tasks ADD CONSTRAINT task_watch_fk FOREIGN KEY(tenant_id,created_from_watch_id) REFERENCES agent.watches(tenant_id,id);
+ALTER TABLE agent.domain_events ADD CONSTRAINT domain_events_watch_fk
+ FOREIGN KEY(tenant_id,watch_id) REFERENCES agent.watches(tenant_id,id);
 CREATE INDEX watches_due ON agent.watches(next_due_at,id)
   WHERE next_due_at IS NOT NULL;
 CREATE INDEX watches_by_tenant ON agent.watches(tenant_id,status_code,next_due_at);
@@ -508,7 +546,7 @@ CREATE TABLE agent.outbox_messages (
   last_error_code text,
   PRIMARY KEY(tenant_id,id),
   UNIQUE(tenant_id,topic,dedupe_key),
-  FOREIGN KEY(tenant_id,event_id) REFERENCES agent.task_events(tenant_id,id),
+  FOREIGN KEY(tenant_id,event_id) REFERENCES agent.domain_events(tenant_id,id),
   FOREIGN KEY(tenant_id,notification_id)
     REFERENCES agent.notification_records(tenant_id,id),
   CHECK (event_id IS NOT NULL OR notification_id IS NOT NULL)
@@ -626,7 +664,7 @@ COMMIT;
 1. APIはCHAT_09の認証で`tenant_id`を確定し、CHAT_01のSchemaでrequestを検証。
 2. `api_idempotency`を同一transaction内で占有。Key既存でrequest hash一致なら既存結果参照。相違なら`409 conflict`。
 3. `conversation_id`が指定された場合だけ同tenant/ownerのConversation・origin Threadを照合。Watch/API直起動のConversationなしTaskは合法として`tasks`をinsert。
-4. `next_event_sequence`で連番を確保して`task_events`をappend。
+4. 同一TXでaggregate/tenant counterを採番して`domain_events`を追加。Taskに属さないWatch/Eventにも対応。
 5. 対応`outbox_messages`を同一transactionでinsert。
 6. commitが成功してからAPIへTask IDを返す。レスポンス途絶時でもKeyで結果を再照会できる。
 7. Outbox consumerは別transactionで少なくとも一度dispatchedする。**送信結果が不明ならduplicateを排除できるとは限らない**。
@@ -645,31 +683,39 @@ COMMIT;
 
 ## 7. 実装可能な内部疑似コード / SQLプロトコル
 
-### 7.1 Task sequence割当（原子性・競合）
+### 7.1 汎用Event序数採番と一貫Snapshot（CHAT_01 / CHAT_08統合）
+
+従来の`tasks.next_event_sequence`とTask専用`task_events`は廃止し、**aggregate別`aggregateSequence`とtenant別`deliveryOffset`** を分離する。両者はCHAT_01 PR #23の正本に一致し、`deliveryOffset`はCHAT_08 PR #17/#8のSSE cursorを支える。Taskに属さないWatch等のイベントも合法。`event_id`はtrusted UUIDv7を生成し、Owner/Actor/Payload SchemaはCHAT_01/09で検証する。
 
 ```sql
 BEGIN;
--- authoritative tenantIdは認証済みmiddlewareから取得
-UPDATE agent.tasks
-SET next_event_sequence=next_event_sequence+1,
-    record_version=record_version+1, updated_at=now()
-WHERE tenant_id=$1 AND id=$2 AND record_version=$3
-RETURNING next_event_sequence-1 AS issued_seq;
--- 0 rowsならStaleRevision → transaction rollback → canonical state再読込。
-INSERT INTO agent.task_events
-  (tenant_id,task_id,run_id,sequence_no,event_type,
-   event_schema_version,event_json,occurred_at)
-VALUES ($1,$2,$4,$issued_seq,$5,$6,$7,$8)
-RETURNING id;
-INSERT INTO agent.outbox_messages
-  (tenant_id,topic,dedupe_key,event_id,payload_schema_version,safe_payload_json)
-VALUES ($1,$9,$10,$event_id,$11,$12)
-ON CONFLICT (tenant_id,topic,dedupe_key) DO NOTHING;
--- 重複衝突時は既存行のpayload hashを比較。違う内容ならRollback。
+-- (1) 対象Domain Mutation（Task例）。0行はStaleRevision、全TX rollback。
+UPDATE agent.tasks SET record_version=record_version+1,updated_at=now()
+ WHERE tenant_id=$tenant AND id=$task AND record_version=$old_version
+ RETURNING record_version;
+-- (2) Aggregate counter: first insert then row-locking update (same TX)
+INSERT INTO agent.event_aggregate_counters
+ (tenant_id,aggregate_type,aggregate_id,next_aggregate_sequence)
+ VALUES ($tenant,$kind,$aggregate,1) ON CONFLICT DO NOTHING;
+UPDATE agent.event_aggregate_counters
+ SET next_aggregate_sequence=next_aggregate_sequence+1
+ WHERE tenant_id=$tenant AND aggregate_type=$kind AND aggregate_id=$aggregate
+ AND next_aggregate_sequence < 9223372036854775807
+ RETURNING next_aggregate_sequence-1 AS aggregate_sequence;
+-- (3) Per-tenant committed delivery order (same TX, no external calls while locked)
+INSERT INTO agent.tenant_event_counters(tenant_id,next_delivery_offset)
+ VALUES($tenant,1) ON CONFLICT DO NOTHING;
+UPDATE agent.tenant_event_counters SET next_delivery_offset=next_delivery_offset+1
+ WHERE tenant_id=$tenant AND next_delivery_offset < 9223372036854775807
+ RETURNING next_delivery_offset-1 AS delivery_offset;
+-- (4) INSERT agent.domain_events with both returned counters, validated V1 envelope
+-- (5) INSERT agent.outbox_messages referencing same event_id, unique delivery key
 COMMIT;
 ```
 
-上記`$issued_seq` / `$event_id`は**疑似bind変数**（SQL driverは`RETURNING`値を受けて後続SQLの`$N`へ渡す）。同じconnection + transactionで実施。runtimeが更新失敗を捕捉した場合`40001`、`40P01`、version衝突を区別し、有限回数のみ全transactionを再構築する。**外部通信はこの再試行対象に含めない。**
+`$tenant`等は**説明用の擬似bind変数**でありそのまま実行できるSQLではない。正式実装ではdriver bindと`RETURNING`取得、所有権検証、型/認可/状態チェック、全TX rollback、deadlock時の有限retryを実装する。Lock順: domain resource → aggregate counter → tenant counter → event/outbox。**Write-after-rollbackでEventだけを配信しない。** 逆順Outbox relayはDB replayのoffset昇順で正規化し、遅延/重複はeventIdで排除する。
+
+`GET Task snapshot`はTask/Run/Evidenceの公開projectionとtenant counterのhigh-waterを、**同一 `REPEATABLE READ READ ONLY` Snapshot**で取得。非同期Read Modelを使う場合は`applied_delivery_offset`までのCursorのみ署名。Event間の非認可offsetが飛ぶことは正常で、Cursor欠損と解釈しない。Cursorはtenant/viewer/task filter/expiryでHMAC保護、owner認可を再検証する。実際のEventテーブルに関係するWatch/Tool/ApprovalはTask linkを任意に持ち、Task非関連EventをユーザーTask SSEへ無理に投影しない。
 
 ### 7.2 Tool Attempt fencing
 
@@ -982,3 +1028,20 @@ This is the **CHAT_10-owned physical integration** with the new module specifica
 - **REC-10-05 (PR #45):** Backup and recovery controller requests physical `backup_restore_points` and `recovery_gates`; these are **operator-only future migration** because recovery incarnation and operator authority remain P0 with CHAT_01/02/09. Do not put restore control into AI Tool registry. A backup snapshot that rewinds Run leaseEpoch does not alone fence a pre-restore worker. DB-T037: restoration with still-live old Worker must remain quarantined.
 - **Migration safety:** All modifications to a previously deployed base schema must be separately numbered additive migrations; the revised 0001 sketch here is only the clean-install target, NOT an instruction to mutate an already-applied migration hash. Existing production deployments require expand/dual-read/backfill/contract. No project SQL has yet been executed.
 - **Review request:** CHAT_01 decides recordVersion/CAS, CHAT_02 budget usage, CHAT_03 side effects, CHAT_07 notifications, CHAT_09 owner and secrets, CHAT_11 DDL/restore fixture and benchmarks. P0 unresolved keeps Draft.
+
+## 20. Round 3 contract unification — Draft / NOT TESTED
+
+- P0 Event storage: `agent.domain_events`（Task非必須）、`event_aggregate_counters`、`tenant_event_counters`、outbox FK、Task/Watch回放インデックスを導入。契約OwnerはCHAT_01 PR #23とCHAT_08 PR #17。
+- P1 Checkpoint: 同stepの複数保存を許すappend-only `checkpoint_revision` + `runs.current_checkpoint_id`を導入。Writerの`lease_epoch`と`record_version`をCASで確認し、古いownerは書込0。詳細の復旧はCHAT_02 PR #27に整合。
+- スキーマ自体のSQL実行は未検証（本Repoは仕様書のみ）。循環FK・BindとRace・Migrationを採用予定PostgreSQLで実行検証すること。
+
+| New test | Action / expected |
+|---|---|
+| DB-R3-T01 | Task + Watch等1000並列Event: 同tenant offset一意、per aggregate seq一意、Task NULL Watch Event可 |
+| DB-R3-T02 | Domain/Counter/Event/Outboxの各TX killpoint: all-or-none、offset rollback |
+| DB-R3-T03 | GET SnapshotとSSE開始間にappend: 認可可視Eventの欠落0、他User漏洩0 |
+| DB-R3-T04 | 同Step MODEL/INTENT/EXECUTE等5相のCheckpoint: 5 revision保存、head最後、再実行0 |
+| DB-R3-T05 | 2 Worker fence交代後に旧WorkerがCheckpoint書込: 0 row update, 最新head保持 |
+| DB-R3-T06 | Retention cutoff/署名cursor期限切れ: 410再Snapshot、重複適用0 |
+
+Cross-team proposals: CHAT_01が物理Eventの`schema_version`とactor/audience codecを確認、CHAT_02がRun checkpoint pointer CAS順序を確認、CHAT_08がsnapshot barrier、CHAT_09がTask外Event owner-scope、CHAT_11が以上のContract/Faultテストを追加。これらの承認まで**Lockedではない**。
