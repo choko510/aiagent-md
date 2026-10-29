@@ -51,7 +51,6 @@ CHAT_11所有：benchmark manifest、reproducible cohort、metrics extraction、
 | QA-BENCH-016 | MUST | UUID/nullable Conversation/CAS revision/leaseEpoch/tenant mapping不一致をRelease BLOCKのContract Gateへ接続 | SC-02/06/07/08/11 | QA-B-T16 |
 | QA-BENCH-017 | MUST | Baseline更新・例外承認・ロールバックを監査可能にし勝手な閾値緩和を禁止 | SC-09 | QA-B-T17 |
 | QA-BENCH-018 | MUST | 定期的/リリース候補の同条件再実験に再現レポートを付け、動作未実施を実績と記載しない | SC-09 | QA-B-T18 |
-
 | QA-BENCH-019 | MUST | SC-10〜16の各個別シナリオのquality metricとfailure Gateを匿名化された合成Fixtureで記録し、欠測を成功へ算入しない | SC-10/11/12/13/14/15/16 | QA-B-T28〜34 |
 
 ## 5. Benchmark内部契約・Version・validation
@@ -267,25 +266,24 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 
 | REQ-ID | TEST-ID | SC-ID |
 |---|---|---|
-| QA-BENCH-001 | QA-B-Tundefined | SC-01〜16 |
-| QA-BENCH-002 | QA-B-Tundefined | SC-01〜16 |
-| QA-BENCH-003 | QA-B-Tundefined | SC-04/06/07/08/11/13 |
-| QA-BENCH-004 | QA-B-Tundefined | SC-01/03/04/05/10/14/15 |
-| QA-BENCH-005 | QA-B-Tundefined | SC-01〜16 |
-| QA-BENCH-006 | QA-B-Tundefined | SC-09 |
-| QA-BENCH-007 | QA-B-Tundefined | SC-09/13 |
-| QA-BENCH-008 | QA-B-Tundefined | SC-01〜16 |
-| QA-BENCH-009 | QA-B-Tundefined | SC-09 |
-| QA-BENCH-010 | QA-B-Tundefined | SC-09 |
-| QA-BENCH-011 | QA-B-Tundefined | SC-05/09/13 |
-| QA-BENCH-012 | QA-B-Tundefined | SC-10〜16 |
-| QA-BENCH-013 | QA-B-Tundefined | SC-01〜16 |
-| QA-BENCH-014 | QA-B-Tundefined | SC-07/08/09 |
-| QA-BENCH-015 | QA-B-Tundefined | SC-09 |
-| QA-BENCH-016 | QA-B-Tundefined | SC-02/06/07/08/11 |
-| QA-BENCH-017 | QA-B-Tundefined | SC-09 |
-| QA-BENCH-018 | QA-B-Tundefined | SC-09 |
-
+| QA-BENCH-001 | QA-B-T01 | SC-01〜16 |
+| QA-BENCH-002 | QA-B-T02 | SC-01〜16 |
+| QA-BENCH-003 | QA-B-T03 | SC-04/06/07/08/11/13 |
+| QA-BENCH-004 | QA-B-T04 | SC-01/03/04/05/10/14/15 |
+| QA-BENCH-005 | QA-B-T05 | SC-01〜16 |
+| QA-BENCH-006 | QA-B-T06 | SC-09 |
+| QA-BENCH-007 | QA-B-T07 | SC-09/13 |
+| QA-BENCH-008 | QA-B-T08 | SC-01〜16 |
+| QA-BENCH-009 | QA-B-T09 | SC-09 |
+| QA-BENCH-010 | QA-B-T10 | SC-09 |
+| QA-BENCH-011 | QA-B-T11 | SC-05/09/13 |
+| QA-BENCH-012 | QA-B-T12 | SC-10〜16 |
+| QA-BENCH-013 | QA-B-T13 | SC-01〜16 |
+| QA-BENCH-014 | QA-B-T14 | SC-07/08/09 |
+| QA-BENCH-015 | QA-B-T15 | SC-09 |
+| QA-BENCH-016 | QA-B-T16 | SC-02/06/07/08/11 |
+| QA-BENCH-017 | QA-B-T17 | SC-09 |
+| QA-BENCH-018 | QA-B-T18 | SC-09 |
 | QA-BENCH-019 | QA-B-T28〜34 | SC-10/11/12/13/14/15/16 |
 
 ## 15. Cross-team proposals / unresolved
