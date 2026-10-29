@@ -500,3 +500,34 @@ SHOULDの追跡：TRD-018→T15/T26、TRD-019→T24/T26、TRD-020→T10/T18/T24�
 - **[S15] Project source** — [Project Brief](../00-foundation/project-brief.md), [Architecture Rules](../00-foundation/architecture-rules.md), [Acceptance Scenarios](../00-foundation/acceptance-scenarios.md), [Review Gates](../00-foundation/review-gates.md)、**Project-defined requirements**, baseline main`92b5827`。
 
 **確認できなかったもの**：上流テストの実際のCI結果、当プロジェクトの本体実装、モデル/サーバー上の性能数値、本番用OAuth/provider権限、将来MCP revisionごとのAdapter compatibility。いずれも実装済み・Verifiedと主張しない。
+
+## 18. Round 2 契約再監査（2026-10-30、main `b45d4e989998663a00ef09673e69ae1f4191f00d`）
+
+**基準の変更**：Round 1のmain `92b5827` に対して、現在のmainにはSC-10〜16・85件の仕様索引が追加されている。PR #6は未マージのDraftであり、本仕様自体がcanonicalなLocked契約になったわけではない。以下は初稿の参照を変更する**追加制約**で、元のRuntime API名・DDLを承認済みとみなさない。
+
+| Cross-team contract | PRブランチで確認した事実 | TRD設計への拘束 / Ownerへの提案 |
+|---|---|---|
+| CHAT_01 `core-domain-models.md`（PR #2） | Public IDはcanonical UUIDv7文字列、`Task.conversationId: ConversationId|null`、`recordVersion`は1開始、Runの`leaseEpoch`は非負整数の単調値、`goalRevision`は別次元 | Registry `snapshotId`/ `toolRef` は**公開Entity UUIDではない不透明ローカルRef**として区別。永続Entityの新規IDはUUIDv7のみ。ToolRefにtenant/actorを信用させず内部Lookupで照合する。[PROVISIONAL: CHAT_01] |
+| CHAT_02 `agent-loop.md`（PR #1） | Model proposalはstepOrdinal/proposalOrdinalからのlogicalCallIdで識別、Gatewayは`prepare/execute/reconcile` Portを期待。lease fenceはbigintの例、Goal revisionで再計画 | DiscoveryはToolを提案するだけ。Gatewayに渡すRefはそのRun/step/scopeの固定版。数値で`leaseEpoch`を持つ際はJSON safe integer限界を考慮し、**DB bigint↔wire decimal-stringなどの変換はCHAT_01/02/10へ提案**。 |
+| CHAT_09 `authentication-and-user-isolation.md`（PR #9） | `tenantId`/ `ownerUserId`の照合、WorkerがDBから主体を再構築、session logoutとowner disableは異なる | model提供IDから主体を復元しない。`catalog.open`はDBからRun→Task→ownerを解決。権限失効後の新規Tool実行を防ぐゲートは独立Gatewayで再確認。 |
+| CHAT_10 `database-schema-and-migrations.md`（PR #10） | 物理`workspace_id`、`gen_random_uuid()`、`revision DEFAULT 0`、Task conversation_id NOT NULL、Runの`leaseEpoch`保存不足を初稿で観測 | **不整合あり、同一概念と仮定禁止**。`workspace_id`とtenant ID対応、UUIDv7生成、nullable Task link、`recordVersion`/SQL revision、lease fenceの永続CASをCHAT_10にP0提案。Registry自身で修正しない。 |
+| CHAT_08 `rest-api.md`（PR #8） | `TaskView.conversationId`が必須記述、Approval decisionは202受付で実行成功ではない | Tool catalogのpublic projectionはCHAT_08のREST ownerへ委譲。SC-11イベント起動のConversation無しTaskにも対応できるnullable整合性を要求。 |
+| 拡張シナリオ | SC-10未知候補、SC-11 X投稿起動、SC-13学習済みBrowser replay、SC-15添付解析 | 対応するToolは能力のsourceが新しくてもGateway以外からexecute不可。SC-11の投稿はtool grantを変更できず、SC-13の再生はfresh schema+policy検証、SC-15のファイル内命令はdata扱い。TRD-T27〜T30を追加。 |
+
+### 18.1 追加要求とテスト（全件は設計、未実行）
+
+| 要件 | レベル | TEST / Setup→Action→期待 | SC |
+|---|---|---|---|
+| TRD-023 | MUST | TRD-T27: UUIDv7 EntityIdとopaque ToolRefを取り違えたexecute要求を投入→境界で拒否、別Tenantにbindできない | 07,08,11 |
+| TRD-024 | MUST | TRD-T28: X named account投稿の本文が`tool_search`で「approve tool」を要求→catalog/permissions増加0 | 08,11 |
+| TRD-025 | MUST | TRD-T29: 保存したBrowser操作Recipe/添付ファイルに古いToolRef→replay/parseしてもGatewayがrevisionを再検証して新規副作用0 | 07,13,15 |
+| TRD-026 | MUST | TRD-T30: DB `workspace_id`がtenantと一致しないRunからcatalog.open→0結果か明示拒否、暗黙にdefault tenantを使用しない | 07,08,11 |
+
+### 18.2 追加Cross-team proposal（型・Migration・試験付き）
+
+- **TRD-XR1 / P0 / CHAT_01+10**：`RegistryToolRef`（opaque non-Entity）対`ToolIntent.id`（UUIDv7 Entity）の区別とmigration。APIのUUIDv7 parserへ`toolRef`を誤って適用しない。受入：TRD-T27。
+- **TRD-XR2 / P0 / CHAT_09+10**：`AuthenticatedPrincipal.tenantId` ↔ DB `workspace_id` への明示的な一対一/多対一マッピング（自動同値化しない）。Lookupはtrusted serviceでのみ実行。受入：TRD-T30。
+- **TRD-XR3 / P0 / CHAT_02+10+01**：`leaseEpoch`のwire representationとDB bigint/JS number境界、goalRevision・recordVersion・policyEpochとの分離をGatewayへ伝播。版比較はimmutable snapshot再開時も必須。受入：TRD-T08/T19/T29。
+- **TRD-XR4 / P1 / CHAT_08+10**：Conversation-less scheduled/external-event Taskのoptional Conversation linkをAPI/DBへ提案。Tool RegistryはTaskIdのみをRoot scopeとして扱う。受入：TRD-T28。
+
+詳細な承認・side-effect関連は03-02〜03-04の個別仕様で確定する。外部のOSSテスト実行・実装試験は未実施。
