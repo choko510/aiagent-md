@@ -133,15 +133,13 @@ CREATE TABLE agent.tenants (
 -- tenantはauth principalではない。identity bindingはCHAT_09が決定。
 
 CREATE TABLE agent.users (
-  id uuid PRIMARY KEY,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  disabled_at timestamptz
+ id uuid PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now(), disabled_at timestamptz
 );
 CREATE TABLE agent.tenant_memberships (
-  tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
-  user_id uuid NOT NULL REFERENCES agent.users(id),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,user_id)
+ tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
+ user_id uuid NOT NULL REFERENCES agent.users(id),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,user_id)
 );
 CREATE TABLE agent.conversations (
   tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
@@ -152,17 +150,14 @@ CREATE TABLE agent.conversations (
   created_at timestamptz NOT NULL DEFAULT now(),
   record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
   PRIMARY KEY(tenant_id,id),
-  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id)
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id)
 );
+
 CREATE TABLE agent.threads (
- tenant_id uuid NOT NULL,
- id uuid NOT NULL,
- conversation_id uuid NOT NULL,
- parent_thread_id uuid,
- next_message_seq bigint NOT NULL DEFAULT 1 CHECK(next_message_seq > 0),
+ tenant_id uuid NOT NULL, id uuid NOT NULL, conversation_id uuid NOT NULL,
+ parent_thread_id uuid, next_message_seq bigint NOT NULL DEFAULT 1 CHECK(next_message_seq>0),
  record_version bigint NOT NULL DEFAULT 1,
- PRIMARY KEY(tenant_id,id),
- UNIQUE(tenant_id,conversation_id,id),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,conversation_id,id),
  FOREIGN KEY(tenant_id,conversation_id) REFERENCES agent.conversations(tenant_id,id),
  FOREIGN KEY(tenant_id,conversation_id,parent_thread_id) REFERENCES agent.threads(tenant_id,conversation_id,id)
 );
@@ -171,19 +166,12 @@ ALTER TABLE agent.conversations ADD CONSTRAINT conversations_root_thread_fk
  DEFERRABLE INITIALLY DEFERRED;
 CREATE UNIQUE INDEX threads_one_root ON agent.threads(tenant_id,conversation_id) WHERE parent_thread_id IS NULL;
 CREATE TABLE agent.messages (
- tenant_id uuid NOT NULL,
- id uuid NOT NULL,
- thread_id uuid NOT NULL,
- seq bigint NOT NULL CHECK(seq>0),
- role_code text NOT NULL,
- content_ref text NOT NULL,
+ tenant_id uuid NOT NULL, id uuid NOT NULL, thread_id uuid NOT NULL, seq bigint NOT NULL CHECK(seq>0),
+ role_code text NOT NULL, content_ref text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  record_version bigint NOT NULL DEFAULT 1,
- created_at timestamptz NOT NULL DEFAULT now(),
- PRIMARY KEY(tenant_id,id),
- UNIQUE(tenant_id,thread_id,seq),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,thread_id,seq),
  FOREIGN KEY(tenant_id,thread_id) REFERENCES agent.threads(tenant_id,id)
 );
-
 CREATE TABLE agent.tasks (
   tenant_id uuid NOT NULL,
   id uuid NOT NULL,
@@ -207,735 +195,35 @@ CREATE TABLE agent.tasks (
   PRIMARY KEY(tenant_id,id),
   FOREIGN KEY(tenant_id,conversation_id)
     REFERENCES agent.conversations(tenant_id,id),
-  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
-  FOREIGN KEY(tenant_id,parent_task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,conversation_id,origin_thread_id)
-    REFERENCES agent.threads(tenant_id,conversation_id,id),
-  CHECK(origin_thread_id IS NULL OR conversation_id IS NOT NULL)
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ FOREIGN KEY(tenant_id,parent_task_id) REFERENCES agent.tasks(tenant_id,id),
+ FOREIGN KEY(tenant_id,conversation_id,origin_thread_id) REFERENCES agent.threads(tenant_id,conversation_id,id),
+ CHECK(origin_thread_id IS NULL OR conversation_id IS NOT NULL)
 );
-CREATE UNIQUE INDEX task_trigger_once ON agent.tasks(tenant_id,created_from_watch_id,trigger_key)
- WHERE created_from_watch_id IS NOT NULL AND trigger_key IS NOT NULL;
 CREATE INDEX tasks_by_conversation ON agent.tasks
   (tenant_id,conversation_id,created_at DESC);
 CREATE INDEX tasks_by_status ON agent.tasks
   (tenant_id,status_code,updated_at DESC);
 
+CREATE UNIQUE INDEX task_trigger_once ON agent.tasks(tenant_id,created_from_watch_id,trigger_key) WHERE created_from_watch_id IS NOT NULL AND trigger_key IS NOT NULL;
 CREATE TABLE agent.task_goal_revisions (
- tenant_id uuid NOT NULL,
- task_id uuid NOT NULL,
+ tenant_id uuid NOT NULL, task_id uuid NOT NULL,
  revision bigint NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
- goal_ref text NOT NULL,
- goal_sha256 char(64) NOT NULL CHECK(goal_sha256 ~ '^[0-9a-f]{64}
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  attempt_no integer NOT NULL CHECK (attempt_no > 0),
-  input_goal_revision bigint NOT NULL CHECK(input_goal_revision > 0),
-  lease_epoch bigint NOT NULL DEFAULT 0 CHECK(lease_epoch BETWEEN 0 AND 9007199254740991),
-  lease_owner_ref text,
-  lease_expires_at timestamptz,
-  checkpoint_ref text,
-  status_code text NOT NULL,
-  state_schema_version integer NOT NULL CHECK (state_schema_version > 0),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
-  started_at timestamptz,
-  ended_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,task_id,id),
-  UNIQUE(tenant_id,task_id,attempt_no),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,input_goal_revision)
-    REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision)
-);
-ALTER TABLE agent.tasks ADD CONSTRAINT task_active_run_fk
- FOREIGN KEY(tenant_id,id,active_run_id) REFERENCES agent.runs(tenant_id,task_id,id)
- DEFERRABLE INITIALLY DEFERRED;
-CREATE INDEX runs_by_task ON agent.runs(tenant_id,task_id,attempt_no DESC);
-
-CREATE TABLE agent.artifacts (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  object_key text NOT NULL,
-  sha256_hex char(64) NOT NULL CHECK (sha256_hex ~ '^[0-9a-f]{64}$'),
-  bytes bigint NOT NULL CHECK (bytes >= 0),
-  media_type text NOT NULL,
-  classification_code text NOT NULL,
-  object_state_code text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz,
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,object_key),
-  CHECK (length(object_key) BETWEEN 1 AND 1024)
-);
--- object_keyは検証済みStore key、HTTP URLではない。署名URLは保存しない。
-
-CREATE TABLE agent.run_checkpoints (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid NOT NULL,
-  step_no bigint NOT NULL CHECK (step_no >= 0),
-  checkpoint_schema_version integer NOT NULL CHECK (checkpoint_schema_version > 0),
-  checkpoint_json jsonb,
-  artifact_id uuid,
-  snapshot_sha256 char(64) NOT NULL CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,run_id,step_no),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id),
-  FOREIGN KEY(tenant_id,artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id),
-  CHECK ((checkpoint_json IS NOT NULL) <> (artifact_id IS NOT NULL))
-);
-CREATE INDEX checkpoints_latest ON agent.run_checkpoints
-  (tenant_id,run_id,step_no DESC);
-
-CREATE TABLE agent.task_events (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid,
-  sequence_no bigint NOT NULL CHECK (sequence_no > 0),
-  event_type text NOT NULL,
-  event_schema_version integer NOT NULL CHECK (event_schema_version > 0),
-  event_json jsonb NOT NULL CHECK (jsonb_typeof(event_json)='object'),
-  occurred_at timestamptz NOT NULL,
-  persisted_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,task_id,sequence_no),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id)
-);
-CREATE INDEX task_events_stream ON agent.task_events
-  (tenant_id,task_id,sequence_no DESC);
-
-CREATE TABLE agent.tool_intents (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid NOT NULL,
-  tool_key text NOT NULL,
-  invocation_key text NOT NULL,
-  request_sha256 char(64) NOT NULL,
-  request_schema_version integer NOT NULL CHECK (request_schema_version > 0),
-  safe_arguments_json jsonb NOT NULL CHECK (jsonb_typeof(safe_arguments_json)='object'),
-  status_code text NOT NULL,
-  policy_decision_ref text,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,run_id,invocation_key),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id)
-);
-CREATE INDEX tool_intents_by_run ON agent.tool_intents
-  (tenant_id,run_id,created_at DESC);
-
-CREATE TABLE agent.approval_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  tool_intent_id uuid NOT NULL,
-  request_sha256 char(64) NOT NULL,
-  decision_code text NOT NULL,
-  expires_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
-  requested_at timestamptz NOT NULL DEFAULT now(),
-  decided_at timestamptz,
-  PRIMARY KEY(tenant_id,id),
-  FOREIGN KEY(tenant_id,tool_intent_id)
-    REFERENCES agent.tool_intents(tenant_id,id)
-);
-CREATE INDEX approvals_for_intent ON agent.approval_records
-  (tenant_id,tool_intent_id,requested_at DESC);
-
-CREATE TABLE agent.tool_attempts (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  tool_intent_id uuid NOT NULL,
-  attempt_no integer NOT NULL CHECK (attempt_no > 0),
-  fence_token bigint NOT NULL CHECK (fence_token > 0),
-  worker_ref text NOT NULL,
-  status_code text NOT NULL,
-  started_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz,
-  ended_at timestamptz,
-  result_artifact_id uuid,
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,tool_intent_id,attempt_no),
-  UNIQUE(tenant_id,tool_intent_id,fence_token),
-  FOREIGN KEY(tenant_id,tool_intent_id)
-    REFERENCES agent.tool_intents(tenant_id,id),
-  FOREIGN KEY(tenant_id,result_artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id)
-);
-CREATE INDEX tool_attempts_by_intent ON agent.tool_attempts
-  (tenant_id,tool_intent_id,attempt_no DESC);
-
-CREATE TABLE agent.side_effect_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  tool_intent_id uuid NOT NULL,
-  effect_key text NOT NULL,
-  request_sha256 char(64) NOT NULL,
-  outcome_code text NOT NULL,
-  external_receipt_ref text,
-  result_artifact_id uuid,
-  last_checked_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,effect_key),
-  FOREIGN KEY(tenant_id,tool_intent_id)
-    REFERENCES agent.tool_intents(tenant_id,id),
-  FOREIGN KEY(tenant_id,result_artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id)
-);
--- outcome_code (including UNKNOWN) is canonical CHAT_03-owned contract.
-
-CREATE TABLE agent.evidence_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid,
-  artifact_id uuid,
-  source_locator text NOT NULL,
-  source_kind_code text NOT NULL,
-  observed_at timestamptz,
-  fetched_at timestamptz NOT NULL,
-  confidence_code text NOT NULL,
-  verification_code text NOT NULL,
-  canonical_schema_version integer NOT NULL CHECK (canonical_schema_version > 0),
-  evidence_json jsonb NOT NULL CHECK (jsonb_typeof(evidence_json)='object'),
-  PRIMARY KEY(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id),
-  FOREIGN KEY(tenant_id,artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id)
-);
-CREATE INDEX evidence_by_task ON agent.evidence_records
-  (tenant_id,task_id,fetched_at DESC);
--- source_locatorはcredentials/URL query token除去済み。非null observed_atを強制しない（不明はNULL）。
-
-CREATE TABLE agent.browser_session_refs (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid,
-  browser_worker_ref text NOT NULL,
-  session_state_code text NOT NULL,
-  storage_artifact_id uuid,
-  expires_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id),
-  FOREIGN KEY(tenant_id,storage_artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id)
-);
--- Cookie/sessionデータの実体はBrowser/Secret Store側で管理。
-
-CREATE TABLE agent.watches (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid,
-  status_code text NOT NULL,
-  owner_user_id uuid NOT NULL,
-  created_by_task_id uuid,
-  definition_revision bigint NOT NULL DEFAULT 1 CHECK(definition_revision > 0),
-  condition_schema_version integer NOT NULL CHECK (condition_schema_version > 0),
-  condition_json jsonb NOT NULL CHECK (jsonb_typeof(condition_json)='object'),
-  schedule_json jsonb NOT NULL CHECK (jsonb_typeof(schedule_json)='object'),
-  timezone_id text NOT NULL,
-  next_due_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
-  FOREIGN KEY(tenant_id,created_by_task_id) REFERENCES agent.tasks(tenant_id,id)
-);
-ALTER TABLE agent.tasks ADD CONSTRAINT task_watch_fk FOREIGN KEY(tenant_id,created_from_watch_id) REFERENCES agent.watches(tenant_id,id);
-CREATE INDEX watches_due ON agent.watches(next_due_at,id)
-  WHERE next_due_at IS NOT NULL;
-CREATE INDEX watches_by_tenant ON agent.watches(tenant_id,status_code,next_due_at);
-
-CREATE TABLE agent.watch_observations (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  watch_id uuid NOT NULL,
-  observation_key text NOT NULL,
-  acquisition_code text NOT NULL,
-  observed_at timestamptz,
-  fetched_at timestamptz NOT NULL DEFAULT now(),
-  evidence_id uuid,
-  observation_schema_version integer NOT NULL CHECK (observation_schema_version > 0),
-  observation_json jsonb NOT NULL CHECK (jsonb_typeof(observation_json)='object'),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,watch_id,observation_key),
-  FOREIGN KEY(tenant_id,watch_id) REFERENCES agent.watches(tenant_id,id),
-  FOREIGN KEY(tenant_id,evidence_id) REFERENCES agent.evidence_records(tenant_id,id)
-);
-CREATE INDEX observations_recent ON agent.watch_observations
-  (tenant_id,watch_id,fetched_at DESC);
-
-CREATE TABLE agent.notification_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  watch_id uuid,
-  notification_key text NOT NULL,
-  destination_ref text NOT NULL,
-  delivery_status_code text NOT NULL,
-  trigger_observation_id uuid,
-  delivery_receipt_ref text,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  last_attempt_at timestamptz,
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,notification_key),
-  FOREIGN KEY(tenant_id,watch_id) REFERENCES agent.watches(tenant_id,id),
-  FOREIGN KEY(tenant_id,trigger_observation_id)
-    REFERENCES agent.watch_observations(tenant_id,id)
-);
-
-CREATE TABLE agent.outbox_messages (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  topic text NOT NULL,
-  dedupe_key text NOT NULL,
-  event_id uuid,
-  notification_id uuid,
-  payload_schema_version integer NOT NULL CHECK (payload_schema_version > 0),
-  safe_payload_json jsonb NOT NULL CHECK (jsonb_typeof(safe_payload_json)='object'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  dispatched_at timestamptz,
-  dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
-  next_attempt_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,topic,dedupe_key),
-  FOREIGN KEY(tenant_id,event_id) REFERENCES agent.task_events(tenant_id,id),
-  FOREIGN KEY(tenant_id,notification_id)
-    REFERENCES agent.notification_records(tenant_id,id),
-  CHECK (event_id IS NOT NULL OR notification_id IS NOT NULL)
-);
-CREATE INDEX outbox_ready ON agent.outbox_messages(next_attempt_at,id)
-  WHERE dispatched_at IS NULL;
-
-CREATE TABLE agent.secret_references (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  secret_handle text NOT NULL,
-  purpose_code text NOT NULL,
-  rotated_at timestamptz,
-  revoked_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,secret_handle)
-);
--- 禁止: plaintext secret / cookie / access token / signed access URL を格納。
-
-CREATE TABLE agent.api_idempotency (
-  tenant_id uuid NOT NULL,
-  actor_user_id uuid NOT NULL,
-  operation_name text NOT NULL,
-  operation_key text NOT NULL,
-  request_sha256 char(64) NOT NULL,
-  response_artifact_id uuid,
-  response_http_status integer,
-  response_json jsonb,
-  completed_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL,
-  PRIMARY KEY(tenant_id,actor_user_id,operation_name,operation_key),
-  FOREIGN KEY(tenant_id,actor_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
-  FOREIGN KEY(tenant_id,response_artifact_id)
-    REFERENCES agent.artifacts(tenant_id,id)
-);
-CREATE INDEX api_idempotency_expiry ON agent.api_idempotency(expires_at);
-
-CREATE TABLE agent.cost_usage_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  task_id uuid NOT NULL,
-  run_id uuid,
-  usage_key text NOT NULL,
-  metering_kind_code text NOT NULL,
-  pricing_snapshot_ref text,
-  input_units bigint NOT NULL DEFAULT 0 CHECK (input_units >= 0),
-  output_units bigint NOT NULL DEFAULT 0 CHECK (output_units >= 0),
-  estimated_cost_micro_usd bigint CHECK (estimated_cost_micro_usd >= 0),
-  measured_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id),
-  UNIQUE(tenant_id,usage_key),
-  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,run_id)
-    REFERENCES agent.runs(tenant_id,task_id,id)
-);
-CREATE INDEX cost_by_task ON agent.cost_usage_records
-  (tenant_id,task_id,measured_at DESC);
-
-CREATE TABLE agent.audit_records (
-  tenant_id uuid NOT NULL,
-  id uuid NOT NULL,
-  subject_ref text,
-  action_code text NOT NULL,
-  target_type text NOT NULL,
-  target_ref text,
-  redacted_detail_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  recorded_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(tenant_id,id)
-);
-CREATE INDEX audit_recent ON agent.audit_records(tenant_id,recorded_at DESC);
-
--- 0001適用はrunnerがchecksumとversionを transaction内で更新。
-INSERT INTO agent.schema_migrations
-  (version,checksum_sha256,name,phase,app_min_reader,app_min_writer)
-  VALUES (1,:'migration_checksum_sha256','0001_initial','transactional',1,1);
-UPDATE agent.schema_control
-  SET schema_version=1,min_compatible_reader=1,min_compatible_writer=1,
-      changed_at=now() WHERE singleton=true;
-COMMIT;
-```
-
-**Important implementation note:** `repeat('0',64)` は**説明用の非本番placeholder**。実装時には実際のmigrationファイルSHA-256に置換してから1回だけ適用し、hash不一致なら起動を拒否する。したがって上記SQLは**そのまま本番投入禁止**であり、テスト可能な設計の提示。物理列もProvisional contractsに従う。上記の`watches_due`はscope列を含まない全体scheduler用の索引だが、アプリによる無条件全scope列挙は許可せずscheduler roleのみのアクセスとする。Cross-tenantの読み出し禁止はCHAT_09のpolicyで実施。
-
-### 5.3 所有権別の対応表 / 意味論の侵食禁止
-
-| Physical table | 正本Owner | 何を**このMDでは決めない**か |
-|---|---|---|
-| conversations / tasks / runs / task_events | CHAT_01, CHAT_02 | state enum、Event envelope、Task完了判定、Steer semantics |
-| run_checkpoints | CHAT_01, CHAT_02 | context snapshotの内容、safe boundary、replay |
-| tool_intents / tool_attempts / approval_records / side_effect_records | CHAT_03 | approval authorization、effect category、Tool retry許可 |
-| artifacts / evidence_records | CHAT_01, CHAT_04/05 | Evidence contract、source interpretation、Artifact store adapter |
-| watches / watch_observations / notification_records | CHAT_07 | trigger/threshold、失敗観測、通知de-dup期間 |
-| browser_session_refs | CHAT_04, CHAT_09 | Page ownership、cookie lifecycle |
-| secret_references / audit_records / tenants | CHAT_09 | user model、permission、retention policy |
-| outbox_messages / schema_migrations / schema_control | CHAT_10 | 10-02でdispatch contractの最終化 |
-| cost_usage_records | CHAT_02, CHAT_10-04 | budget enforcement、価格表、prompt/model tokenカウント |
-
-未列挙のMemory/Skill/Provider-specific recordsは対応契約のレビューを待ち、後続migrationで追加する。`jsonb`を根拠なく作って暫定業務テーブルに流用しない。
-
-## 6. 状態/シーケンス/正常系
-
-### 6.1 Task受付とEvent+Outboxのatomic保存
-
-1. APIはCHAT_09の認証で`tenant_id`を確定し、CHAT_01のSchemaでrequestを検証。
-2. `api_idempotency`を同一transaction内で占有。Key既存でrequest hash一致なら既存結果参照。相違なら`409 conflict`。
-3. `conversations`既存IDを同scopeで検証し`tasks`をinsert。
-4. `next_event_sequence`で連番を確保して`task_events`をappend。
-5. 対応`outbox_messages`を同一transactionでinsert。
-6. commitが成功してからAPIへTask IDを返す。レスポンス途絶時でもKeyで結果を再照会できる。
-7. Outbox consumerは別transactionで少なくとも一度dispatchedする。**送信結果が不明ならduplicateを排除できるとは限らない**。
-
-### 6.2 Tool intent → execution → observation
-
-1. Tool Gatewayが認可・予算を確認（CHAT_03正本）。
-2. `tool_intents`をinsert（`(tenant_id,run_id,invocation_key)` UNIQUE）。`approval_records`（必要時）+ Event+Outboxをcommit。
-3. 承認未完了ならExecutorは未呼び出し。許可後、attempt rowを採番/leaseし、**current attempt token**を確定してcommit。
-4. Executor実行。ResultはArtifactを先に耐久保存・hash照合し、`tool_attempts`と`side_effect_records`の結果、`evidence_records`、Event、Outboxをcommit。
-5. Crash後はIntent/side-effect ledgerを読み戻す。非冪等操作で外部結果が不明なら`UNKNOWN`のまま再照会/人間確認を行う。**「DBでリトライ可能」から「外部操作もリトライ可能」を導いてはいけない。**
-
-### 6.3 Watch保存 / 取得失敗
-
-`watches`のcondition/schema/TZ/next_dueをCommitし、watch IDを返す。観測は成功/取得失敗を`acquisition_code`で分離し、失敗なら数値ゼロを捏造しない。観測のprovenanceをEvidence参照へ紐づける。trigger成立の場合だけ`notification_records`と`outbox_messages`を同じtransactionで作成。通知が未配達でもWatchとObservationは消さない。
-
-## 7. 実装可能な内部疑似コード / SQLプロトコル
-
-### 7.1 Task sequence割当（原子性・競合）
-
-```sql
-BEGIN;
--- authoritative tenantIdは認証済みmiddlewareから取得
-UPDATE agent.tasks
-SET next_event_sequence=next_event_sequence+1,
-    record_version=record_version+1, updated_at=now()
-WHERE tenant_id=$1 AND id=$2 AND record_version=$3
-RETURNING next_event_sequence-1 AS issued_seq;
--- 0 rowsならStaleRevision → transaction rollback → canonical state再読込。
-INSERT INTO agent.task_events
-  (tenant_id,task_id,run_id,sequence_no,event_type,
-   event_schema_version,event_json,occurred_at)
-VALUES ($1,$2,$4,$issued_seq,$5,$6,$7,$8)
-RETURNING id;
-INSERT INTO agent.outbox_messages
-  (tenant_id,topic,dedupe_key,event_id,payload_schema_version,safe_payload_json)
-VALUES ($1,$9,$10,$event_id,$11,$12)
-ON CONFLICT (tenant_id,topic,dedupe_key) DO NOTHING;
--- 重複衝突時は既存行のpayload hashを比較。違う内容ならRollback。
-COMMIT;
-```
-
-上記`$issued_seq` / `$event_id`は**疑似bind変数**（SQL driverは`RETURNING`値を受けて後続SQLの`$N`へ渡す）。同じconnection + transactionで実施。runtimeが更新失敗を捕捉した場合`40001`、`40P01`、version衝突を区別し、有限回数のみ全transactionを再構築する。**外部通信はこの再試行対象に含めない。**
-
-### 7.2 Tool Attempt fencing
-
-```text
-function startAttempt(intentId, currentState):
-  BEGIN
-  SELECT intent FOR UPDATE in tenant scope
-  check CHAT_03 approval + expiry + budget + cancel boundary
-  SELECT max(attempt_no) FROM tool_attempts for this intent
-  insert attempt_no = max+1; fence_token = max+1 (same row-lock)
-  mark intent status via canonical validator
-  COMMIT
-  return { attempt_id, attempt_no, fence_token }
-
-function settleAttempt(intentId, attemptId, token, result):
-  BEGIN
-  SELECT tool_intents FOR UPDATE
-  SELECT current latest attempt FOR UPDATE
-  if current.id != attemptId OR current.fence_token != token:
-      ROLLBACK; return STALE_ATTEMPT (never overwrite newer result)
-  validate Owner-required transitions
-  persist artifact ref, result, ledger, Event, Outbox
-  COMMIT
-  return COMMITTED
-
-on crash after executor call but before commit:
-  external-effect status UNKNOWN until provider receipt/lookup resolves
-  if non-idempotent and no verified result: no automatic re-execution
-```
-
-`fence_token`は同一intent内の単調世代。ToolのHTTP呼出自体を事後的に取り消せる保証ではない。Timeout後に旧Workerが外部作用を完了し得るため、復旧後は`side_effect_records`の照会により安全性を判定する。
-
-### 7.3 Idempotency key
-
-```text
-create(tenant, operationKey, canonicalPayload):
-  h = sha256(canonicalSerialize(canonicalPayload))
-  BEGIN
-  INSERT key + h ON CONFLICT DO NOTHING
-  existing = SELECT ... FOR UPDATE
-  if existing.h != h: ROLLBACK; return 409
-  if existing durable result exists: COMMIT; return result
-  if request still in progress: COMMIT; return 202 + status locator
-  otherwise create domain row + durable response pointer + Event + Outbox
-  COMMIT
-```
-
-`canonicalSerialize`は正本schemaに依存。取り決めなしの`JSON.stringify`はKey順や型で衝突/非一致を起こし得るため禁止。Key namespaceはtenant+operation（CHAT_08/03合意対象）。
-
-### 7.4 上限 / DB pool / retry
-
-初期**設定値の提案（実測目標でなく安全な導入用config）**: API/Worker合計DB pool最大20接続（API 8、runtime worker 8、browser/aux 2、migration 2を上限に環境別調整）、statement timeout通常`10s`、管理migrationは個別設定、`idle_in_transaction_session_timeout 15s`、`lock_timeout 2s`、Tx retries`最大3回`かつ全体deadline遵守。Checkpoint JSON inline上限64 KiB（超過はArtifactへ）。Event JSON inline上限64 KiB、Evidence JSON inline上限16 KiB、watch JSON inline上限16 KiBをadapterで制限し、raw内容はArtifactへ。これらは**暫定の初期ガード**であり、CHAT_02/11の負荷実測で見直す。
-
-`SERIALIZABLE 40001` / `deadlock 40P01`: SQL-only transactionならjitterを入れ最大3回再試行。`23505`（UNIQUE）: key+payload比較してidempotent/409を判別。`23503`（FK）: 参照不整合として失敗。`55P03`（lock timeout）: 状態を変更せず有限backoff。`57014`（cancel/statement_timeout）: commit有無を照会、外部side-effect無条件retry禁止。DB接続が切れcommit応答を失った場合は**結果不確定**としてDB正本を再読込する。
-
-## 8. 障害マトリクス
-
-| 境界 / 障害 | DBに残るもの | 復旧/検出 | ユーザー表示・副作用 |
-|---|---|---|---|
-| Task insert前にAPI crash | なし | 同Keyで再依頼可 | 未登録。重複作成を防ぐ |
-| Task/Outbox transaction COMMIT直後に応答断 | 完全なTask+Event+Outbox | idempotency keyで照会 | 既存Task IDを返す |
-| Eventだけ書く途中でcrash | 同Tx rollback | 一貫性監査 | Event/Outboxだけ孤立しない |
-| Executor前のcrash | Intentはある、attemptなし/未実行 | policy再評価 | 許可がある場合だけ開始 |
-| 非冪等Executor完了後、DB result前crash | Intent + 未確定effect | receipt照会/人間判断 | UNKNOWN、勝手に二度実行しない |
-| 旧Workerが新Workerの結果を上書き | 世代違い | fencing UPDATE 0行 | 旧結果は採用しない |
-| Watch poll中にサイト取得失敗 | acquisition=failure | 次回監視/診断 | **0円通知は禁止** |
-| Notification send後、ack保存前crash | Outbox未完了 | channel idempotency/receipt照会 | duplicate riskを明示、無期限retryなし |
-| DB connection切断/commit不明 | 確定またはrollback | Key/Revision照会 | Partial/Uncertain |
-| マイグレーション途中/DDLロック超過 | schema_control旧版 | transaction rollback / nonTx checkpoint | 旧版継続または停止、安全側 |
-| Artifact upload成功、DB rowなし | orphan object | GC grace period後に監査 | 直ちに削除せず復元可能性を保つ |
-| DB rowあるがArtifactが欠ける | FKは通るがStore不整合 | restore audit / hashチェック | 結果不完全、Evidenceを信用しない |
-
-## 9. Security / Privacy / Trust Boundary
-
-- **AgentにDB資格情報、DDL権限、SQL実行ツール、ホストshellを渡さない。** DBへのwrite/readはtrusted API/Worker adapter経由のみ。migration用roleは起動時workerから分離。
-- 接続はDocker内部ネットワーク、DBポートはpublicにpublishしない。DBは専用role（API/worker/readonly/migrator）を分離。`search_path`を固定。識別子やschema名を外部入力から組み立てない。
-- 全Queryに`tenant_id`フィルタと複合FK。`tenant_id`をクライアント任意指定値から受け取らない。RLS導入前はtrusted adapterと統合テストが不可欠。DB roleを分けても**相互参照自体は認可の代用ではない**。
-- URL含有credential、OAuth token、cookie、生HTML、全文プロンプト、credit card等はaudit/notification/event JSONへ保存しない。`safe_arguments_json`と`redacted_detail_json`はCHAT_09のallowlist serializerのみ。
-- `secret_handle`は秘密値ではなく不透明な参照。Secret自体の保存、暗号鍵、rotation、アクセス監査はCHAT_09。Browser session cookie原本はBrowser/Secret Store Ownerが保存。
-- 外部ページ/SNS由来JSONを`event_type`、`tool_key`、DDL、Queryに昇格しない。生データは非信頼artifactとしてclassification付き保存、LLM実行上限/egressはPolicy経由。
-- 大量write、巨大JSON、悪意あるソースのresource exhaustionを制限。対象URLや利用者IDを高カーディナリティのmetric labelにしない。
-- `audit_records`の保存期間と削除権限、法令対応はCHAT_09の決定待ち。秘密情報が入ったauditを「後から消せる」ことに依存しない。
-
-## 10. 性能・Trace・観測の設計
-
-- 指標: `db_tx_duration_ms`（operation type別）、`db_pool_wait_ms`、`db_pool_in_use`、`db_deadlocks_total`、`db_serialization_retries_total`、`db_lock_timeout_total`、`migration_duration_ms`、`migration_lock_wait_ms`、`checkpoint_bytes`、`event_rows/task`、`outbox_oldest_age_seconds`、`FK_errors_total`、`artifact_missing_total`。
-- Trace相関は`task_id`・`run_id`を**ログ相関フィールド**として保持し、metrics labelは低cardinality値に限定。生prompt/credentialsはTrace属性に入れない。
-- Query profile: Task一覧、Run最新Checkpoint、Event stream page、due Watch、Observation最新N件、unpublished Outboxを実際のsample volumeで`EXPLAIN (ANALYZE, BUFFERS)`。本番で`ANALYZE`を乱用しない。
-- Benchmark環境: PostgreSQL major/CPU/RAM/SSD、connection、dataset件数/分布/JSON平均サイズ、同時Worker数、WAL増加、p50/p95/p99、Error rate、restore後のQuery consistencyを記録。Index追加はread gainだけでなくwrite overheadとindex sizeを比較。
-- **SLO数値は未確定**（SC-09の測定後にCHAT_10-04/CHAT_11と決定）。仮の10s timeout等を性能保証と書かない。
-
-## 11. Migration / Rollout / Rollback
-
-### 11.1 Migration manifest（コード管理）
-
-```ts
-type Migration = {
-  version: number;                     // strictly increasing
-  filename: string;                    // immutable once applied
-  sha256: string;                      // hash actual bytes
-  phase: "transactional" | "postcommit";
-  minCompatibleReader: number;
-  minCompatibleWriter: number;
-  upSql: string;                       // reviewed static SQL
-  verifySql: string;                   // idempotent integrity probe
-  downPolicy: "rollback" | "forward-only";
-};
-// 0001: transactional; 0002: add columns; 0003: dual-read; 0004: backfill batches;
-// 0005: CREATE INDEX CONCURRENTLY outside BEGIN; 0006: constraint validation;
-// 0007: contract/remove old columns AFTER old readers drained.
-```
-
-- **起動時自動任意DDL禁止**。専用migration jobを手動/管理者deployで実行。全workerは`schema_control`の`min_compatible_reader/writer`と自身のschema capabilitiesを起動・定期チェック。互換範囲外ならread/write停止しhealthに`INCOMPATIBLE_SCHEMA`を表示。
-- 1つのdeploymentがmigration lock取得。`pg_advisory_lock`等の**セッションロックを専用接続で保持**、接続喪失時はlockを失うことを考慮しphase/checksumをDBで再検査。DB connection pooling経由で無条件にsession lockを使い回さない。
-- Transactional migrationは1 transaction内`LOCK_TIMEOUT`設定→既存hash照合→upSQL→verify→schema_migrations insert→schema_control更新→commit。失敗時は丸ごとrollback。既適用版のchecksum相違や欠番はstop。
-- Postcommit migration（`CREATE INDEX CONCURRENTLY`等）はDB transaction**外**。`schema_migration_steps`（後続migrationで定義）相当の実行台帳にphase/task/result/hashを管理し、失敗時は`pg_index.indisvalid`等を検査してから再構築。**IF NOT EXISTSだけではInvalid indexを修復できない**。実行前後`pg_get_indexdef`で定義一致を検証。
-- Deploy順: 旧/新互換宣言を設計 → expand SQL → old+new dual-read/dual-write rollout → small-batch idempotent backfill（cursor/watermarkの永続化）→ compare/count/false-positive防止 → code switch → old workerが0であること確認 → constraint validation → contract。実Runが残る場合、旧payload/schema readerは必要期間維持する。
-- Migration中もAPIにTaskを受け付けるにはそのversionで互換なread/writeが必要。不明ならWriteを停止して`503 maintenance`を返す。**逆向きdownSQLが存在するという理由だけで、破壊的migrationのrollbackが安全だとは判断しない**。
-- SchemaもArtifactも一緒にrestoreできるよう、バックアップcheckpoint IDとschema version/Artifact manifestの整合を記録。RPO/RTOはCHAT_10-05で定義。
-
-### 11.2 不変性・削除
-
-Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい記録/状態change）。Runtimeに一般`UPDATE/DELETE`権限を無条件付与しない。保持期限やPrivacy削除はCHAT_09の契約、バックアップ保持は10-05に従う。参照中ArtifactのGCを禁止し、DB FKを跨いだStore GCは「mark→referenced check→grace→delete→reverify」の別Jobで管理する。Partitionは初期から強制せず、測定で導入を決める（Postgres partitioned tableのUNIQUEはpartition keyを含む必要あり [S17]）。
-
-## 12. UI / HTTP / 他モジュールへの変更提案
-
-- CHAT_08: 作成成功レスポンスはCommit後に返す。Idempotency-Key要求、request hash mismatch `409`、commit不明時の照会URL、Task/WatchのID・保存済みnext_due表示。OutboxはUIイベント配信用の正本に使うがSSEの再送ルールはCHAT_08。
-- CHAT_01: Eventに`event_schema_version`、scope/Task/Run参照とTask stream序数、`occurred_at` と `persisted_at` の区別を提案。状態enum/enum migrationの互換性を確定する。
-- CHAT_02: `run_checkpoints`と`runs`のrevision/recovery snapshotを使う前提のserialization contract、stale generation rejectを定義する。JS objectをそのままstoreしない。
-- CHAT_03: `invocation_key`、`request_sha256`、`effect_key`、`outcome UNKNOWN`、approval identityとeffect reconciliationの正本契約を確定。外部操作のreplay semanticsはDBから推定不可。
-- CHAT_04: BrowserSession storage artifactのTTL/owner/cookie secret分離。
-- CHAT_07: `observation_key`と`notification_key`の再計算可能な導出規則、受信者スコープ、停止時動作、trigger結合を定義。DBは正しい重複Keyに対するuniqueを実装するのみ。
-- CHAT_09: `tenant_id`とactor/user/tenant mapping、Row-level authorization/RLS方針、Secret Handle/Retentionを承認。
-- CHAT_11: migration matrixと障害注入test fixtureを作る。番号/Schemaを変更する場合はCross-team proposal→再レビュー。
-
-## 13. 実装フェーズとPR分割案（本仕様repoとは別の実装repo）
-
-1. **PR-DB-A:** Postgres container/dev-test、migration runner、schema_control、tenant scope（CHAT_09 contract確定後）、権限最小化、CI schema test。外部Job/LLMを入れない。
-2. **PR-DB-B:** Conversation/Task/Run/Event + revision/atomic outbox + repeatable idempotency + Crash fixtures。CHAT_01/02/08 contractと同時確認。
-3. **PR-DB-C:** Tool Intent/Approval/Attempt/Side-effect Ledger + fencing + Artifact/Evidence references。CHAT_03/04 contractと照合。
-4. **PR-DB-D:** Watch/Observation/Notification storage、fail≠zero、outbox relay integration。CHAT_07/10-02合同。
-5. **PR-DB-E:** BrowserSession/secret refs/usage/audit、バックフィルとmigration expand/contract、EXPLAIN/Privacy/Fault test。CHAT_09/10-04/05/11合同。
-
-この仕様PRはPhase実装を行ったものではない。契約が未決なら各実装PRをmerge不可にする。
-
-## 14. テスト仕様（未実行。すべて設計のみ）
-
-| TEST-ID | Level / Setup | Action | Expected |
-|---|---|---|---|
-| DB-T001 | Integration / fresh PG container | 0001適用、再適用 | schema+checksum一致、2回目no-op、dirtyなし |
-| DB-T002 | Integration / 2 scope | 他scopeのtask_idをrun/evidenceへFK指定 | `23503`、横断参照0件 |
-| DB-T003 | Concurrency / 2 connections | 同Taskへ100並列Event append | 序数は1..100一意、欠番/状態不一致なし（失敗transactionは全rollback） |
-| DB-T004 | Fault / commit boundary | Task+Event+Outbox間でkill | 0件or3件同時、片方だけ残らない |
-| DB-T005 | Contract / API | 同Idempotency-Key同payload再送 | 同じTask ID、追加作成0 |
-| DB-T006 | Contract / API | 同Key異なるpayload | 409、旧結果不変 |
-| DB-T007 | Fault / Tool | Intent commit前/後でkill | commit前0、後はIntentから再検出 |
-| DB-T008 | Concurrency / Tool | attempt-1を停止させattempt-2成功後に旧attempt settle | 更新0行、attempt-2結果保持 |
-| DB-T009 | Fault / external effect | mock provider success直後result commit前kill | UNKNOWN、再実行0、receipt照会へ |
-| DB-T010 | Integration / Evidence | expired/failed sourceを保存 | observed_at NULL許容、失敗は0円にならない |
-| DB-T011 | Integration / Watch | Watch登録後Worker/container restart | Watch同ID、同条件、next_due残存 |
-| DB-T012 | Fault / Notification | fake Telegram ack前kill | Outbox残存、idempotency規則で照会/安全な再送 |
-| DB-T013 | Security | 生Cookie/token/URL query credentialをsafe JSONへ投入 | scrub/validation reject、DB/Log/Traceに残らない |
-| DB-T014 | Security | 任意tenant_id/偽scopeをAPI送信 | 本人のscope以外参照不可 |
-| DB-T015 | Migration | 同時に2 migrator起動 | lockで一者のみ、version/hash一致 |
-| DB-T016 | Migration | checksum改変済みmigration適用 | 即時abort、table/data変更なし |
-| DB-T017 | Migration | CONCURRENT index途中kill | invalid index検知、検査なし成功扱いしない |
-| DB-T018 | Migration | old/new app並走・checkpointあり | old/new両方read、既存Run保持、contract延期 |
-| DB-T019 | Recovery | DB restore後Artifact Store整合を検査 | missing/hash mismatchをerror分類、誤成功0 |
-| DB-T020 | Benchmark | seeded 10k Task/1m Event/1m Observation等、環境固定 | EXPLAIN+WAL+latency report、閾値の根拠を保存（数値合格は未決） |
-| DB-T021 | Security / injection | Web HTML内の`DROP TABLE`指示を入力 | DDL呼出なし、権限変更なし、文字列SQL injection不成立 |
-| DB-T022 | Load / limit | JSON size>設定上限、DB Pool枯渇、1000並列requests | size reject/artifact offload、bounded timeout、接続上限超過なし |
-| DB-T023 | Consistency | 正本のRun/Tool/Approval各state transition fixture | 不正遷移がadapterで拒否、status_codeとrevision対応 |
-| DB-T024 | Retention | Artifact参照中GC + backup cutoff | 参照生存中削除0、再開可能 |
-| DB-T025 | DDL | PostgreSQL採用majorでSQLを`psql -v ON_ERROR_STOP=1`実行 | 型/FK/Indexが実際に全作成され、migration runnerと一致 |
-
-**実際に実施した試験: 0件。** 既存OSS側のテストファイルを**読んだ**だけで、このprojectのDB実装/テストは存在しない。DB-T025未実行のため初期DDLは**検証前の提案**。
-
-## 15. REQ → TEST → SC 追跡
-
-| REQ | TEST | SC | 合格判定 |
-|---|---|---|---|
-| DB-001 | T001,T011,T019 | 02,07 | Restart後同一IDと永続値 |
-| DB-002 | T002,T014 | 06,08 | scope横断0件 |
-| DB-003 | T023,T025 | 01,02,07 | Canonical schemaをstorage adapterがvalidate |
-| DB-004 | T003,T004 | 07 | Event/Outbox atomic, sequence unique |
-| DB-005 | T007,T009 | 07,08 | Intentなし外部実行0 |
-| DB-006 | T005,T006,T012 | 02,07 | 重複/衝突を検出 |
-| DB-007 | T008,T009 | 07 | stale settle 0 |
-| DB-008 | T010,T019 | 01〜05 | Provenance/失敗正確 |
-| DB-009 | T013,T021 | 06,08 | Sensitive rawなし |
-| DB-010 | T011,T023 | 02 | Watch restart consistency |
-| DB-011 | T004,T012 | 02,07 | lost dispatch discoverable |
-| DB-012 | T001,T015,T016,T025 | 07 | hash/lock/version |
-| DB-013 | T017,T018,T024 | 07 | safe expand/contract |
-| DB-014 | T020 | 09 | profile+WAL reportあり |
-| DB-015 | T020,T022 | 09 | budget violation検出 |
-| DB-016 | T013,T014,T021 | 08 | secrets absent/tenant safe |
-| DB-017 | T009,T012 | 02,07 | UNKNOWN保持、盲目再送なし |
-| DB-018 | T019,T024 | 07 | integrity audit可 |
-
-`T###`は本節の`DB-T###`を指す。SC参照は`docs/00-foundation/acceptance-scenarios.md`に対応。
-
-## 16. 未確定事項 / Cross-team proposals（Draft PRで要審議）
-
-| ID / Owner | 優先度 | 提案/未決 | 決定条件 |
-|---|---|---|---|
-| DB-X01 CHAT_01 | **P0** | Canonical ID型、Event envelope/sequence scope、Task/Run status/version、Error型。`event_json`保存形の重複を解消する必要 | 契約MDのReviewed/Lockedとstorage mapping review |
-| DB-X02 CHAT_09 | **P0** | tenant / tenant / user / actorの対応、row authorization、secret redaction、retention、auditアクセス | Cross-scope security testsとpolicy review |
-| DB-X03 CHAT_03 | **P0** | Tool Intent/Approval/Effect/attemptとUNKNOWN・idempotencyのcanonical schema | side-effect ledger accepted + kill-window E2E |
-| DB-X04 CHAT_02 | **P0** | Checkpoint形式、snapshot schema version、recovery/steer/cancel safe boundary | crash replay fixturesで既存Run可読 |
-| DB-X05 CHAT_07 | **P1** | observation_key、trigger identity、Watch停止/周期/TZ、notification_keyの衝突規則 | reboot/double notification fixture合格 |
-| DB-X06 CHAT_10-02 | **P1** | pg-boss採否、Outbox relay lease/fencing/ack/consumer group、job retention | at-least-once kill/duplicate test |
-| DB-X07 CHAT_10-05 | **P1** | DB+Artifact+Secret snapshot整合、WAL retention、RPO/RTO | restore drill |
-| DB-X08 CHAT_11 | **P1** | PG16/17/18の採用majorとtest matrix、query workload/閾値 | executable DDL+EXPLAIN+load |
-| DB-X09 CHAT_00 | P1 | 個人利用起点で将来multi-user前提を物理モデルへ固定してよいか、Artifact store採用 | Architecture ADR |
-| DB-X10 CHAT_01/09 | P1 | SQLのpayload retention/各JSON canonical schema/許容サイズ | Unit validation + privacy audit |
-| DB-X11 CHAT_08 | P1 | Idempotency-Keyのnamespace, 409/202, SSE cursorとの対応 | API Contract + reconnect test |
-
-**P0が残る間は本PRをDraftのまま維持。** 上記のProvisional列は任意にLocked扱いせず、Ownerの契約決定後にSQLとREQ/TESTを改訂する。
-
-## 17. Sources（確認方法・範囲・Evidence grade）
-
-すべて2026-10-30 JST調査。URLのbranch参照は**調査時点のGit commit**と組で追跡し、後日の上流更新を自動的に既検証とは扱わない。
-
-- [S1] `https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/package.json` — `12.38.0`, Node >=22.12, MIT; **Code verified**（package内容）。
-- [S2] `https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/src/plans.ts` — `create()`, job table/indices/functions, lines around 174-220; **Code verified**。
-- [S3] `https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/src/migrationStore.ts` — `MigrationCommands`、`flatten()`, `rollback()`, inlineAsync; **Code verified**。
-- [S4] `https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/test/attemptFenceTest.ts` — stale worker attempt takeover, complete/fail/heartbeat tests; `test/migrationTest.ts` migration assertions; **Code verified**。
-- [S5] `https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/LICENSE` — MIT; **Docs verified**。
-- [S6] `https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/pyproject.toml` — `3.2.0`, PostgreSQL psycopg dependencies; **Code verified**。
-- [S7] `https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/langgraph/checkpoint/postgres/base.py` — `MIGRATIONS`、`UPSERT_CHECKPOINTS_SQL`、`UPSERT_CHECKPOINT_WRITES_SQL`; **Code verified**。
-- [S8] `https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/langgraph/checkpoint/postgres/__init__.py` — `PostgresSaver.setup()` version iteration; **Code verified**。
-- [S9] `https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/tests/test_sync.py` — migration nonnull/pending sends tests; **Code verified**。
-- [S10] `https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint-postgres/LICENSE` — MIT; **Docs verified**。
-- [S11] `https://github.com/temporalio/temporal/blob/3eb5fb80523443d8583bcec463843275908f1bbc/schema/postgresql/v12/temporal/schema.sql` — workflow execution/current/history/task physical tables; **Code verified**。
-- [S12] `https://github.com/temporalio/temporal/blob/3eb5fb80523443d8583bcec463843275908f1bbc/schema/postgresql/v12/temporal/versioned/v1.19/current_chasm_executions.sql` — physical PK and table addition; **Code verified**。
-- [S13] `https://github.com/temporalio/temporal/blob/3eb5fb80523443d8583bcec463843275908f1bbc/schema/postgresql/v12/temporal/versioned/v1.19/manifest.json` — `CurrVersion=1.19`, `MinCompatibleVersion=1.0`; **Code verified**。
-- [S14] `https://github.com/temporalio/temporal/blob/3eb5fb80523443d8583bcec463843275908f1bbc/LICENSE` — MIT; **Docs verified**。
-- [S15] `https://www.postgresql.org/docs/18/indexes-unique.html` — Composite UNIQUE / NULLS DISTINCT; **Docs verified** (PG18)。
-- [S16] `https://www.postgresql.org/docs/18/mvcc-intro.html` — MVCC and transaction isolation overview; **Docs verified** (PG18)。
-- [S17] `https://www.postgresql.org/docs/18/ddl-partitioning.html` — partitioned UNIQUE key/CONCURRENT index limitation; **Docs verified** (PG18)。
-- [S18] `https://www.postgresql.org/docs/18/sql-createindex.html` — CREATE INDEX CONCURRENTLY and constraints; **Docs verified** (PG18)。
-- [S19] `https://github.com/choko510/aiagent-md/blob/92b5827ed16a7d4ae61e8146ce382795398293cb/docs/00-foundation/project-brief.md` + `architecture-rules.md` + `acceptance-scenarios.md` — product/owners/scenarios; **Docs verified**。
-- [S20] `https://github.com/choko510/aiagent-md/blob/92b5827ed16a7d4ae61e8146ce382795398293cb/prompts/CHAT_10.md`, `prompts/COMMON.md`, `docs/00-foundation/review-gates.md` — deliverable/review protocol; **Docs verified**。
-
-**Evidence boundary:** source/テストファイルは実際に閲覧したが、上流OSSのテストをこの環境で再実行したわけではない。提案SQLをPostgresで実行したわけでもない。DBの外部副作用 exactly-once、SLO、性能値、互換性は未検証。コード未確認の関数名を事実として追加しない。
-),
+ goal_ref text NOT NULL, goal_sha256 char(64) NOT NULL CHECK(goal_sha256 ~ '^[0-9a-f]{64}$'),
  created_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,task_id,revision),
  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id)
 );
-ALTER TABLE agent.tasks ADD CONSTRAINT tasks_current_goal_fk
- FOREIGN KEY(tenant_id,id,goal_revision) REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision)
- DEFERRABLE INITIALLY DEFERRED;
-
+ALTER TABLE agent.tasks ADD CONSTRAINT tasks_current_goal_fk FOREIGN KEY(tenant_id,id,goal_revision)
+ REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision) DEFERRABLE INITIALLY DEFERRED;
 CREATE TABLE agent.runs (
   tenant_id uuid NOT NULL,
   id uuid NOT NULL,
   task_id uuid NOT NULL,
   attempt_no integer NOT NULL CHECK (attempt_no > 0),
-  input_goal_revision bigint NOT NULL CHECK(input_goal_revision > 0),
+  input_goal_revision bigint NOT NULL CHECK(input_goal_revision>0),
   lease_epoch bigint NOT NULL DEFAULT 0 CHECK(lease_epoch BETWEEN 0 AND 9007199254740991),
-  lease_owner_ref text,
-  lease_expires_at timestamptz,
-  checkpoint_ref text,
+  lease_owner_ref text, lease_expires_at timestamptz, checkpoint_ref text,
   status_code text NOT NULL,
   state_schema_version integer NOT NULL CHECK (state_schema_version > 0),
   record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
@@ -946,12 +234,10 @@ CREATE TABLE agent.runs (
   UNIQUE(tenant_id,task_id,id),
   UNIQUE(tenant_id,task_id,attempt_no),
   FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,task_id,input_goal_revision)
-    REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision)
+ FOREIGN KEY(tenant_id,task_id,input_goal_revision) REFERENCES agent.task_goal_revisions(tenant_id,task_id,revision)
 );
-ALTER TABLE agent.tasks ADD CONSTRAINT task_active_run_fk
- FOREIGN KEY(tenant_id,id,active_run_id) REFERENCES agent.runs(tenant_id,task_id,id)
- DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE agent.tasks ADD CONSTRAINT task_active_run_fk FOREIGN KEY(tenant_id,id,active_run_id)
+ REFERENCES agent.runs(tenant_id,task_id,id) DEFERRABLE INITIALLY DEFERRED;
 CREATE INDEX runs_by_task ON agent.runs(tenant_id,task_id,attempt_no DESC);
 
 CREATE TABLE agent.artifacts (
@@ -1146,9 +432,8 @@ CREATE TABLE agent.watches (
   id uuid NOT NULL,
   task_id uuid,
   status_code text NOT NULL,
-  owner_user_id uuid NOT NULL,
-  created_by_task_id uuid,
-  definition_revision bigint NOT NULL DEFAULT 1 CHECK(definition_revision > 0),
+  owner_user_id uuid NOT NULL, created_by_task_id uuid,
+  definition_revision bigint NOT NULL DEFAULT 1 CHECK(definition_revision>0),
   condition_schema_version integer NOT NULL CHECK (condition_schema_version > 0),
   condition_json jsonb NOT NULL CHECK (jsonb_typeof(condition_json)='object'),
   schedule_json jsonb NOT NULL CHECK (jsonb_typeof(schedule_json)='object'),
@@ -1159,8 +444,8 @@ CREATE TABLE agent.watches (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
   FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
-  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
-  FOREIGN KEY(tenant_id,created_by_task_id) REFERENCES agent.tasks(tenant_id,id)
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ FOREIGN KEY(tenant_id,created_by_task_id) REFERENCES agent.tasks(tenant_id,id)
 );
 ALTER TABLE agent.tasks ADD CONSTRAINT task_watch_fk FOREIGN KEY(tenant_id,created_from_watch_id) REFERENCES agent.watches(tenant_id,id);
 CREATE INDEX watches_due ON agent.watches(next_due_at,id)
@@ -1242,18 +527,14 @@ CREATE TABLE agent.secret_references (
 
 CREATE TABLE agent.api_idempotency (
   tenant_id uuid NOT NULL,
-  actor_user_id uuid NOT NULL,
-  operation_name text NOT NULL,
+  actor_user_id uuid NOT NULL, operation_name text NOT NULL,
   operation_key text NOT NULL,
   request_sha256 char(64) NOT NULL,
-  response_artifact_id uuid,
-  response_http_status integer,
-  response_json jsonb,
-  completed_at timestamptz,
+  response_artifact_id uuid, response_http_status integer, response_json jsonb, completed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   PRIMARY KEY(tenant_id,actor_user_id,operation_name,operation_key),
-  FOREIGN KEY(tenant_id,actor_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ FOREIGN KEY(tenant_id,actor_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
   FOREIGN KEY(tenant_id,response_artifact_id)
     REFERENCES agent.artifacts(tenant_id,id)
 );
@@ -1618,7 +899,6 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 - [S20] `https://github.com/choko510/aiagent-md/blob/92b5827ed16a7d4ae61e8146ce382795398293cb/prompts/CHAT_10.md`, `prompts/COMMON.md`, `docs/00-foundation/review-gates.md` — deliverable/review protocol; **Docs verified**。
 
 **Evidence boundary:** source/テストファイルは実際に閲覧したが、上流OSSのテストをこの環境で再実行したわけではない。提案SQLをPostgresで実行したわけでもない。DBの外部副作用 exactly-once、SLO、性能値、互換性は未検証。コード未確認の関数名を事実として追加しない。
-
 
 ## 18. Round 2 契約相違台帳・修正指示（2026-10-30）
 
