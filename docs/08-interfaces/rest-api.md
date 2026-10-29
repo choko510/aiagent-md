@@ -228,7 +228,7 @@ Content-Type: application/json
 Idempotency-Key: "b5c93e0e-d441-43c2-b106-d6c75db76f8a"
 
 {
-  "conversationId": "c_abc",
+  "conversationId": "019a2bc3-4d5e-7abc-8def-123456789abc",
   "goal": "11月20日から3人1泊、駐車場ありで合計15,000円以下のホテルを探す",
   "constraints": {"guests":3,"nights":1,"maxTotal":{"amount":"15000","currency":"JPY"},"parkingRequired":true},
   "timezone": "Asia/Tokyo",
@@ -237,10 +237,10 @@ Idempotency-Key: "b5c93e0e-d441-43c2-b106-d6c75db76f8a"
 }
 ~~~
 
-Response **202**, Location: /api/v1/tasks/t_abc, commandIdとstateを持つackを返す。最大費用USD 1は**サンプル入力**でありサービスのdefaultや推奨値ではない。constraintsは任意のドメインキーを無制限に通すのではなく、versioned goal/constraint codecをCHAT_01/02と合意する。resourceIDやbudget超過を後でモデルが勝手に書き換えない。
+Response **202**, Location: /api/v1/tasks/019a2bc3-4d5e-7abc-8def-123456789abd, commandIdとstateを持つackを返す。最大費用USD 1は**サンプル入力**でありサービスのdefaultや推奨値ではない。constraintsは任意のドメインキーを無制限に通すのではなく、versioned goal/constraint codecをCHAT_01/02と合意する。resourceIDやbudget超過を後でモデルが勝手に書き換えない。
 
 ~~~http
-POST /api/v1/approvals/a_123/decision HTTP/1.1
+POST /api/v1/approvals/019a2bc3-4d5e-7abc-8def-123456789abe/decision HTTP/1.1
 Idempotency-Key: "e72b1990-9688-47c1-a150-799b3a35c8e7"
 If-Match: "7"
 Content-Type: application/json
@@ -593,7 +593,7 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 **Migration priority/order:** (1) CHAT_09+01 owner/tenant model and CHAT_10 mapping → (2) nullable relationships and GoalRevision/activeRun persisted layout → (3) UUIDv7 and RecordVersion+LeaseEpoch DB contract → (4) ACL+outbox event alignment → (5) crash/replay and API/stream contract tests. Any existing v4 IDs/zero revisions must be inventoried and migrated with explicit mapping/rewrite of all foreign keys, not silently reinterpreted; whether early database is empty is an explicit migration precondition, not assumed in code.
 
 **Impact on this REST specification:**
-1. Public URI path segments must be parsed with the **CHAT_01 validated UUIDv7 helper** (not fabricated \`t_abc\`/\`c_abc\` IDs). Existing synthetic examples with \`t_abc\`, \`c_abc\`, \`a_123\` are **non-valid schematic placeholders**; replace before OpenAPI contract tests. Never accept arbitrary prefix IDs in production. The UUID in \`Idempotency-Key\` is a *different client-generated intent identifier* and need not be UUIDv7.
+1. Public URI path segments must be parsed with the **CHAT_01 validated UUIDv7 helper** (not fabricated \`019a2bc3-4d5e-7abc-8def-123456789abd\`/\`019a2bc3-4d5e-7abc-8def-123456789abc\` IDs). Existing synthetic examples with \`019a2bc3-4d5e-7abc-8def-123456789abd\`, \`019a2bc3-4d5e-7abc-8def-123456789abc\`, \`019a2bc3-4d5e-7abc-8def-123456789abe\` are **non-valid schematic placeholders**; replace before OpenAPI contract tests. Never accept arbitrary prefix IDs in production. The UUID in \`Idempotency-Key\` is a *different client-generated intent identifier* and need not be UUIDv7.
 2. \`GET /tasks?conversationId=...\` accepts explicit \`conversationId=null\` as scoped filter for conversationless Tasks, plus absent means no filter; empty string is invalid. POST Task allows missing/null conversation and no originThread; any nonnull link requires verified tenant/owner and optionally Thread match.
 3. \`recordVersion\` (starts 1) is the only public ETag/CAS source. \`If-Match: "n"\` means canonical version n; do not serialize raw DB revision if mapped differently. If-Match zero/negative is 400; stale is 412, state conflict 409. JavaScript arithmetic after MAX_SAFE_INTEGER is refused; consider decimal string external form after CHAT_01 schema decision.
 4. GoalRevision is not recordVersion. Steer command should include expected recordVersion, owner validates and updates immutable goal snapshot, runtime worker revalidates applied revision at safe boundary; old approval cannot authorize changed parameters.
