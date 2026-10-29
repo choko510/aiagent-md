@@ -75,7 +75,7 @@ type ChildAdmissionDecision =
   | {kind:"REJECT"; reasonCode:"NOT_INDEPENDENT"|"BUDGET"|"AUTH"|"DEPTH"|"CANCEL"|"UNKNOWN"};
 interface DelegationRequest {
   parentTaskId:string; parentRunId:string;
-  parentGoalRevision:number; childPurpose:string;
+  parentGoalRevision:string; childPurpose:string;
   sourceEvidenceRefs:string[]; proposedToolRefs:string[];
   maxCostMicroUsd:string; maxModelTurns:number;
   maxToolCalls:number; deadlineUtc:string;
@@ -84,7 +84,7 @@ interface DelegationRequest {
 interface ChildTaskGrant {
   childTaskId:string; parentTaskId:string;
   tenantId:string; ownerUserId:string;
-  inheritedGoalRevision:number; childGoalRevision:number;
+  inheritedGoalRevision:string; childGoalRevision:string;
   allowedToolRefs:string[]; budgetReservationId:string;
   authIdentityVersion:number; maxDepth:number;
 }
@@ -286,3 +286,7 @@ Task詳細には親子TaskのGoal、状態（Queued/Running/Waiting/Partial/Unce
 - [S9] **License verified** DeepAgents MIT: https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/LICENSE ; OpenAI Agents Python MIT: https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/LICENSE ; Mastra Apache-2.0 declaration in @mastra/core package.json: https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/package.json
 
 **検証状態:** この仕様RepositoryにHarness本体コードはない。すべてのSUB-Txxテストは設計のみであり未実行。実行・実測・合格・Locked等の主張はしない。
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
