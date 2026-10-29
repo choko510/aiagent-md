@@ -66,15 +66,15 @@ UI file proposals: \`features/dashboard/{task-list,run-timeline,watch-list,actio
 
 ~~~ts
 type TaskRow = {
-  id:string; recordVersion:number; conversationId:string|null;
+  id:string; recordVersion:string; conversationId:string|null;
   state:string; resultKind:string|null;
-  goalSummary:string; goalRevision:number; activeRunId:string|null;
-  lastUpdatedAt:string; lastEventSequence:string;
+  goalSummary:string; goalRevision:string; activeRunId:string|null;
+  lastUpdatedAt:string; snapshotCursor:string;
   budget:{confirmed:string|null;estimated:string|null;currency:string;asOf:string|null};
   evidenceCount:number;
 };
 type RunRow = {
-  id:string; taskId:string; attemptNo:number; inputGoalRevision:number;
+  id:string; taskId:string; attemptNo:number; inputGoalRevision:string;
   state:string; progress:{
     completedSteps:number; pendingSteps:number; unknownSteps:number;
   };
@@ -82,7 +82,7 @@ type RunRow = {
   // leaseEpoch/leaseOwner are never client authority or editable UI.
 };
 type WatchRow = {
-  id:string; recordVersion:number; state:string;
+  id:string; recordVersion:string; state:string;
   conditionSummary:string; scheduleTimezone:string;
   nextCheckAt:string|null; lastObservedAt:string|null;
   lastAcquisition:"ok"|"error"|"not_run"|"unknown";
@@ -99,7 +99,7 @@ GET \`/tasks\` / \`/watches\` return pages with opaque authenticated cursors fro
 
 ~~~text
 Dashboard open → authenticated GET /tasks?limit=20 [safe projection]
-  → user selects Task → GET /tasks/:id (recordVersion + lastEventSequence)
+  → user selects Task → GET /tasks/:id (recordVersion + snapshotCursor)
   → GET /tasks/:id/runs, GET /runs/:id/usage
   → SSE(after signed snapshot cursor) → reducer applies absolute projections
   → user presses Pause → confirmation → POST /tasks/:id/commands
@@ -131,9 +131,11 @@ async function dispatchDashboardAction(resource,action,body,readModel) {
  return {status:"accepted-not-applied",commandId:result.commandId,key};
 }
 function applyDashboardEvent(view,evt) {
- if(evt.taskId!==view.id || BigInt(evt.sequence)<=BigInt(view.lastEventSequence))return view;
+ if(evt.taskId!==view.id || dedupeForTask(view.id).has(evt.eventId))return view;
  if(!knownPublicProjectionVersion(evt))return {...view,requiresRefetch:true};
- return mergeAbsoluteRedactedProjection(view,evt);
+ const next=mergeAbsoluteRedactedProjection(view,evt);
+ dedupeForTask(view.id).add(evt.eventId); // bounded LRU, reset when fresh GET snapshot loaded
+ return next;
 }
 ~~~
 
@@ -212,3 +214,5 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 ## 14. Issue報告からの追加テスト
 
 **[I-DASH-01]** [Mastra #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30、Open、Issue report）はScheduleのdispatch成功とRun completionが異なることを指摘する。DASH-T03/T05に「scheduled fire succeeded / Task Running / Approval suspended / Worker restarted」のfixtureを追加し、Watchのチェックが開始された表示と、Taskが完了した表示を**絶対に混ぜない**ことを検証する。**[I-DASH-02]** [OpenClaw #127367](https://github.com/openclaw/openclaw/issues/127367)（issue titleを検索で確認したのみ・本文未検証）はunbounded history readの懸念。関連本体はSSE replay側でbounded batchへ制約する。両者は本システムでの発生を確認したわけではない。
+
+**Round2 common contract alignment:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) uses int64 decimal strings for recordVersion/goalRevision; [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) uses separate tenant deliveryOffset and per-aggregate sequence. Dashboard stores only signed snapshotCursor, dedups by eventId, and does not render raw tenant counters. DASH-T02/T06 verify distinct Run/Tool events sharing aggregateSequence and immutable GoalRevision string.
