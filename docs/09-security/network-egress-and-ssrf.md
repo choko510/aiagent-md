@@ -258,3 +258,8 @@ All tests operate synthetic DNS/HTTP/Chromium/local private targets in isolated 
 ## Review gates
 - [x] code/tests pinned; two OSS approaches; threat surface across adapters, resolver/redirect policy, transport-bound algorithm, failure/race, test traceability and cross-team ownership.
 - [ ] egress proxy effective firewall/Chromium integration run, browser-use LICENSE checked, provider policy/owner contract approved. **Draft**.
+
+## Upstream issue and PR investigation — Bypass defaults and DNS rebinding
+- **[PR inspected, closed/unmerged]** OpenClaw [#103041](https://github.com/openclaw/openclaw/pull/103041) describes a proxy/redirect path where a hostname was checked but the resolved IP was not revalidated, enabling the proposed DNS-rebinding bypass; the PR author's reported passing tests are **not** independent verification and the PR is not evidence of a shipped fix. Our `EGR-T04/T05/T14` must pin DNS at actual dispatch and fail closed on any unsafe re-resolution.
+- **[Open issues inspected]** browser-use [#5879](https://github.com/browser-use/browser-use/issues/5879) documents the default URL/IP protections being permissive; [#6218](https://github.com/browser-use/browser-use/issues/6218) reports configuration parse errors potentially resetting restrictive browser profiles to allow-all. Issue allegations must be tested against the selected version, but justify fail-closed startup, immutable effective profile validation and network-level egress controls (`EGR-T01/T09/T14`).
+- These are **Issue/PR reports** separate from pinned code/test verification. browser-use [MIT license](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/LICENSE) is verified at pinned ref.
