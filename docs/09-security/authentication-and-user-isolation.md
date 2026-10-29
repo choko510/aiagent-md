@@ -235,7 +235,8 @@ async function workerStep(jobPointer) {
   const task = await taskRepo.load(run.taskId);
   if (task.id !== jobPointer.taskId || run.generation !== jobPointer.generation)
     throw StaleWorker();
-  if (run.ownerId !== task.ownerId || run.tenantId !== task.tenantId)
+  // Canonical CHAT_01 supplies Task.ownerUserId / Task.tenantId; physical JOIN by CHAT_10.
+  if (run.tenantId !== task.tenantId || !await ownerBindingMatches(run, task))
     throw OwnerIntegrityViolation();
   if (task.isCancelled || task.ownerDisabled || run.isRevoked) throw StopWithoutTool();
   // Internal authority is an immutable runtime-owned persisted intent, not caller-provided userId.
@@ -417,6 +418,57 @@ async function subscribeEvents(principal, requestedTaskId, stream) {
 | AUTH-P10 / P2 | CHAT_00/01/08 | 将来「ユーザーが他人に特定Taskを共有」する需要が出たらRole/ACLのADR、共有監査、撤回、approval非委譲を別設計。現時点はdeny |
 
 **現在のP0 blocker:** プロジェクトのShared Contract・物理DB・Tool Gateway/UI/Browser契約が未Locked。上の依存はDraft提案であり勝手に既成事実化しない。担当外の文書をこのPRから変更しない。
+
+## Round 2 — Contract Reconciliation（2026-10-30追加 / すべてDraft）
+
+> 調査対象は最新main `b45d4e989998663a00ef09673e69ae1f4191f00d` と、Draft PR #1/#2/#8/#9/#10 のHEAD全文（それぞれ `63c87a5`/`a5f2893`/`3b9e8c5`/`6ac299d`/`16dab69`）。他Ownerの仕様を上書きせず、承認待ち。**採用案は提案であり合意済みのLocked contractではない。**
+
+### 具体的な契約相違台帳
+
+| ID / 優先 | 現在の実際の相違（source path / symbol） | 正本Owner・提案採用案 | 影響範囲・Migration / Test |
+|---|---|---|---|
+| **RC-09-01 / P0** | #2 `core-domain-models.md §5`: `Task.tenantId`、`ownerUserId`、Tenant/UserMembership。#10 `database-schema-and-migrations.md §5.1/§5.2`: `workspace_id`のみで`workspaces`にauth principal bindingなし。現行の本MD `requireAccess`も単純な`ownerId=userId`照合を前提 | **正本: CHAT_01論理、CHAT_09認可、CHAT_10物理**。初期は**TenantとWorkspaceの明示的な1:1の永続mapping**を定め、DB内のresourceは`workspace_id` FKを持つがAPI/Workerは`tenantId`で解決。 `ownerUserId`があるuser-owned resourceはtenant一致＋所有者一致。service workerはlogin sessionを偽造せず、DB保存されたowner-bound task authorityから限定再評価。1:1は**[PROVISIONAL: CHAT_01/10]** | #2/#9/#10/#8、Browser/Watch/Artifact/Approval/SSE/notification/search/cache/outbox; mapping migration、owner unknown行隔離、`AUTH-R2-T01/T02` |
+| **RC-09-02 / P1** | #2 `core-domain-models.md §5`: 公開ID UUIDv7必須。#10 SQLの `gen_random_uuid()` は通常UUIDv4。物理DBが一部v4を発行し、Shared validatorに拒否される | **CHAT_01論理 / CHAT_10 DDL**。ID採番はserverのUUIDv7 generatorに統一し、DB defaultは除去するか選択されたPG versionのUUIDv7実装をテストして固定。DBは`uuid`を保持しversion=7検証。既存v4データの再番号付けはFK/外部URL/cursor互換移行のADR後のみ | #2/#10/#8、全Entity IDs、`AUTH-R2-T03` |
+| **RC-09-03 / P1** | #2 `Task.conversationId: ConversationId|null`、#10 `tasks.conversation_id uuid NOT NULL`、#8 `TaskView.conversationId: Id` | **CHAT_01意味論 / CHAT_10保存 / CHAT_08 wire**。`conversation_id NULL`許可。Watch/API/外部イベント起点ではConversation無しが正常。GET projectionに`conversationId: Id|null`、`WHERE tenant`とownerで認可、nullのアクセス制御をskipしない | #2/#8/#10/CHAT_07/13、NULL migration、`AUTH-R2-T04` |
+| **RC-09-04 / P1** | #2 `recordVersion`初期1、#10 `revision bigint default 0`。両者が同じCAS versionか、DB internal counterか未定義 | **CHAT_01論理 / CHAT_10物理 / CHAT_08 ETag**。同一CASなら初期1に統一し、writeは`WHERE revision=expected`と次値を原子commit。別カウンタとするならexplicit mapperと2種類の別名、テスト必須。0→1 migrationはold ETag/cache/Idempotency再検証 | #2/#8/#10/#9、`AUTH-R2-T05` |
+| **RC-09-05 / P0** | #2 `Run.leaseEpoch: number`、#1 `fencingToken: bigint`、#10 `runs`にlease epoch/owner/expiry列なし。#10 ToolAttempt `fence_token`は**Tool Intent内**の別counter。2種類は代用不可 | **CHAT_01/02 Run lease意味論 / CHAT_10物理**。`Run.leaseEpoch`をDB `bigint NOT NULL`で正本化し、API/JSONはlossless decimal string（または安全範囲を厳密検査したnumber）に揃える。Run claim/renew/commitでDB CAS、失効leaseによるTool dispatchを拒否。ToolAttempt fenceは別counter | #1/#2/#10/CHAT_03/#9、`AUTH-R2-T06` |
+| **RC-09-06 / P0** | #2 `Task.goalRevision`, `goalRevisionRef`, `activeRunId`, `Run.inputGoalRevision`。#10 tasks/runs SQLに対応する明示列とimmutable revision FKが不足。#1はrevisionへのApproval拘束を要求 | **CHAT_01/02意味論 / CHAT_10 DDL**。Taskのcurrent goal revision + active run FK と immutable goal revisions table、Runのinput goal revisionを保存し、同一Task内の整合CAS。Steer後の旧intent approvalはinvalid。既存JSONにある場合も明示的なdual-write/backfill/validation後に移行 | #1/#2/#3/#10/#9、`AUTH-R2-T07` |
+| **RC-09-07 / P0** | #2 AgentLoopはTool intentとOutboxの原子的保存とUNKNOWN停止を要求。#10 SQL案はDB内outbox/ledgerを定義するが、API受付やWatch発火のidempotency/ownerの単位合意待ち | **CHAT_03 side-effect / CHAT_10 txn / CHAT_01 event / CHAT_08 REST**。Task/Watch/Approval作成・Tool intent・Event・Outboxの同一DB txnとtenant+actor+operation+payload-hash key。未知実行結果は外部receipt照合まで止め、旧epoch再実行を禁止 | #1/#2/#6/#8/#10/#9、`AUTH-R2-T08` |
+| **RC-09-08 / P1** | #9初稿はBrowser/Run/Watchのowner検証に`resource.ownerId`を仮定し、#2は`ownerUserId`、#10には`workspace_id`しかない。ServiceのactorIdもUserとは限らない | **CHAT_09認可 / CHAT_01論理 / CHAT_10物理**。owner identityを明示したdomain→persistence resolverと、owner-bound service capabilityを分離し、`clientRole`/JWT claims/LLMでownerを上書きさせない。複数userが同一Tenantに属する未来でも共有ACLがない限り他人のprivate resourceはdeny | #9/#2/#8/#10、`AUTH-R2-T01/T02/T09` |
+
+### [PROVISIONAL] 認可判定の具体化 — Tenant ≠ User ≠ Workspace
+
+- `UserId` は人間の主体、`TenantId` は論理的なセキュリティ/データ分離、`WorkspaceId` はDB側の物理scope。**値の偶然の一致を権限証拠として使わない**。初期構成でTenant→Workspaceが1:1になるmapping行とactive membership/owner policyをDBに置く案をCHAT_10へ提案する。将来1:Nを認めるならADRと全面的なrevalidationが必要。
+- `ownerUserId` が存在する私有Resourceは、①authenticated Userのactive Tenant membership、②tenantに対応したworkspace、③resource.ownerUserId=userId、④task parent chain / Browser session / Watch / Approvalの同Tenant owner一貫性、⑤action+revision/current lease/approvalを**すべて**照合する。owner付き行がないResourceは親Task/Run/Watchのownerを厳密にjoinして解決する。親不在・矛盾・複数帰属はdeny。
+- `system-record`やstatic system Skill等の共有system objectは一般ユーザーから編集不可とし、read projectionもexplicit policyが必要。ユーザー作成Skill、Memory、Connector、Browser Cookieはuser-private。Tenant memberであっても他userの作成物に自動アクセス不可。
+- Background workerがユーザーのcookie/sessionを再利用して実行することは禁止。処理権限はDB保存の`Task.ownerUserId`、元のapproval/budget、active user/tenant、run leaseEpoch、GoalRevisionを**Tool intent直前**にtransactional snapshotで検証し、専用service principalで実行する。Web logout ≠ Task cancel。User disable/tenant revocationは次のTool dispatchを停止。
+- セッションハンドオフ、queue/outbox、SSE、Telegram、cross-tenant artifactsでは`request.context`の文字列だけを信じない。trusted identity resolverが署名/セッション/永続bindingから復元し、対象ごとにownerを確認する。RLSは必要条件をDBロール/poolでテストした後の追加防御。
+- **変換境界案:** `resolveUserPrincipal(session)`→`resolveAuthorizedTenantMembership(user)`→`mapTenantToWorkspace(tenant)`→`loadScopedResource(workspace,id)`→`resolveOwnerChain(resource)`→`requireActionPolicy`→`issueBoundOperationGrant`（短命、不可転用、Tool Gatewayで再評価）。これはCHAT_09の内部設計案であり、正式なUserMembership/Owner/Workspace schemaはCHAT_01/10の正本を待つ。
+
+### Round2 Contract/Fault/Security tests — 設計のみ・未実行
+
+| ID | Setup / Action | Expected | Owner |
+|---|---|---|---|
+| AUTH-R2-T01 | Tenant A/User 1とTenant B/User 2＋same tenant別ownerを用意し全resourceを読み書き | cross-tenantおよび同Tenant別ownerのprivate resource bytes/count/stream = **0** | 09+01+10+08 |
+| AUTH-R2-T02 | Worker/job/Browser/SSEの偽装ownerUserId、workspace_id、tenantId、Roleを渡す | server-side owner resolverだけ採用、無権限Toolと漏洩0 | 09+02+04+08 |
+| AUTH-R2-T03 | 全Server ID生成経路をUUIDv7 validatorへ渡す、DB fallback生成を有効化 | v4拒否、v7通過、migrationなしの旧ID強制変換禁止 | 01+10+08 |
+| AUTH-R2-T04 | Watch/Event起点Taskをconversation_id=NULLでcreate→list→get→authorize | 合法に保存・取得、別owner read=404、REST null返却 | 01+07+08+10 |
+| AUTH-R2-T05 | 初期versionとIf-Matchを照合、2並列UPDATE、0→1 migration scenario | first 1、1成功/1 precondition failure、旧ETag混同0 | 01+08+10 |
+| AUTH-R2-T06 | 同RunへWorker A/B claimし古いleaseEpochでresume/store/tool dispatch | stale write=0 rows、新ownerのみTool dispatch、lossless epoch parse | 01+02+03+10 |
+| AUTH-R2-T07 | SteerでgoalRevisionを上げ旧ApprovalをPOST/execute、Run.inputGoalRevision相違 | 旧Approval拒否、旧Tool effect=0、正しいactiveRunIdのみ | 01+02+03+10 |
+| AUTH-R2-T08 | Task+Outbox commit境界でKill、external effect ACK loss、同一Idempotency keyで再送 | 同じTask/承認1件、UNKNOWNは再発火0、reconcileのみ | 03+08+10 |
+| AUTH-R2-T09 | User disabled、tenant mapping変更、SSE接続中、Browser Handoff active | commit以降の新権限0、stream/handoff失効、実行中外部副作用の補償を偽らない | 09+04+08+10 |
+
+### 所有者への明示的な差分依頼
+
+1. **CHAT_01 PR #2**: `Tenant/UserMembership`と`ResourceOwner`をshared contractに明確化。`WorkspaceId`とのmappingは論理/物理を区別。`recordVersion`/leaseEpochのwire serializationも正本化。
+2. **CHAT_10 PR #10**: users/membership/tenant_workspace mappings/owner FK、UUIDv7/defaultの修正、tasks nullable conversation、revision初期値とCAS、runs leaseEpoch/owner/expiry、goal revision/activeRunIdテーブル/列、outbox idempotencyのSQLを提案。移行時にlegacy user-less rowsの所有者を推測して埋めない。
+3. **CHAT_08 PR #8**: TaskView.conversationIdをnullable、public `resourceVersion`とIf-MatchのDB CAS mapping、owning actor/tenantをバインドしたcursor・SSEとapproval ownershipを調整。
+4. **CHAT_02 PR #1**: Run leaseEpoch BigInt/decimal wireまたは安全なnumber変換、`runGeneration`と`fencingToken`の関係、Steer時のGoalRevision/Approval失効チェックの入力と位置を明文化。
+5. **CHAT_03 PR #6**: 認可付きTool proposal/approvalのowner/tenant/goalRevision/leaseEpoch/side-effect UNKNOWNをbindingし、replay時の重複発火を抑止。Service principalはmodel instructionでは作成できない。
+6. **CHAT_07 PR #11**: Watch起点Taskのconversation=nullとowner lineage、Watchのdisable/owner-disable時の再起動処理/notification recipient revalidationを明示。
+
+**採用しない代案:** `workspace_id`を文字列が一致する`tenantId`/userIdとして認可する、UUIDをv4/v7混在のままvalidatorを緩める、null Conversationに架空Conversationを割当てる、0/1 CASを暗黙補正する、ToolAttempt fenceをRun leaseEpochの代わりに使う、未知の外部作用を「失敗」とみなして再実行する。変更はすべて未合意のため**Draftのまま**。
 
 ## 17. Sources — verified actual refs and evidence grades
 
