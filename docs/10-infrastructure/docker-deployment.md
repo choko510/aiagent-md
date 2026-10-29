@@ -328,3 +328,7 @@ Research date 2026-10-30 JST. Code read; container integration untested.
 [S9] `https://github.com/choko510/aiagent-md/pull/9` / `/pull/10` / `/pull/1` — dependency Drafts **Docs verified**, not Locked.
 
 The YAML is intentionally illustrative; it contains placeholders and is not a copy-paste production deployment.
+
+
+### 17.1 Failure report reviewed (not a guaranteed current defect)
+[S10] https://github.com/microsoft/playwright/issues/2437 — **Issue report**, opened 2020-06, closed 2020-06; user reported non-root Docker browser binary unavailable because install path was root-owned (Playwright v1.0.2). Historical issue is not evidence the current Playwright Dockerfile still suffers the bug. This specifically motivates DEP-T04/DEP-T15 to probe the pinned browser binary path, UID-readable cache and sandbox on the actual host rather than assuming `USER` alone works.
