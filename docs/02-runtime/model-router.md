@@ -24,7 +24,7 @@ User / API (CHAT_08/09) -> Task/Run + GoalRevision (CHAT_01)
         -> Browser/HTTP/Adapters (CHAT_04/05)
         -> Evidence/Artifact (CHAT_01/10) -> ResultVerifier
 ~~~
-Public ID UUIDv7、Task.conversationId nullable、Run.leaseEpoch safe integer/DB bigint、Task.recordVersion initial1 (proposals, unLocked)。Task/Run/Goal revision and Tool attempt fence have separate meanings; never use provider Call ID as approval permission. Tenant/Workspace/User ownership is server-resolved, not model-specified.
+Public ID UUIDv7、Task.conversationId nullable、Run.leaseEpoch canonical int64 decimal string / DB BIGINT、Task.recordVersion initial1 (proposals, unLocked)。Task/Run/Goal revision and Tool attempt fence have separate meanings; never use provider Call ID as approval permission. Tenant/Workspace/User ownership is server-resolved, not model-specified.
 
 ## 4. 要求定義
 | REQ-ID | Level | Measurable requirement | SC |
@@ -56,7 +56,7 @@ interface ModelCaps {
 interface ModelAttempt {
  attemptId:string;runId:string;stepOrdinal:number;
  providerId:string;modelId:string;profileHash:string;
- goalRevision:number;usageReservationRef:string;status:"RESERVED"|"STREAMING"|"COMMITTED"|"UNRESOLVED";
+ goalRevision:string;usageReservationRef:string;status:"RESERVED"|"STREAMING"|"COMMITTED"|"UNRESOLVED";
 }
 interface ModelRouter {
  select(required:RequiredCapabilities,budget:BudgetSnapshot):Promise<ModelAttempt>;
@@ -176,3 +176,7 @@ CHAT_01 ModelEvent/UsageReceipt schema, CHAT_03 Tool schema & provider capabilit
 - [S3] Code verified: https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/src/agents/models/multi_provider.py
 - [S4] Mastra directory-level evidence, tests not read: https://github.com/mastra-ai/mastra/tree/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/durable/__tests__
 Code verified = GitHub source functions inspected. Test definition verified = read test source but not executed. Issue report = not reproduced. Licenses (inspected): DeepAgents MIT, PydanticAI MIT, OpenAI Agents Python MIT, Mastra @mastra/core package Apache-2.0 declaration. Independent implementation only.
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
