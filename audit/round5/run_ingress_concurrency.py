@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Real PostgreSQL concurrent subscription ingestion transaction fixture.
 Not a deployed provider adapter or full DomainEvent/Outbox implementation."""
-import subprocess,concurrent.futures,sys
+import subprocess,concurrent.futures,sys,time,secrets,uuid
+def uuid7():
+ # Synthetic server-issued UUIDv7, not a DB-side v4 default.
+ ms=(time.time_ns()//1000000)&((1<<48)-1)
+ x=(ms<<80)|(0x7<<76)|(secrets.randbits(12)<<64)|(0b10<<62)|secrets.randbits(62)
+ out=uuid.UUID(int=x)
+ assert out.version==7 and out.variant==uuid.RFC_4122
+ return str(out)
 C='round4-spec-postgresql'
 T='01900000-0000-7000-8000-000000000001'
 U='01900000-0000-7000-8000-000000000002'
@@ -22,6 +29,7 @@ COMMIT;"""
 p=run(init)
 assert p.returncode==0,p.stderr[-1300:]
 def sql_for(event_id,rollback=False):
+  receipt_id,task_id=uuid7(),uuid7()
   return f"""BEGIN;
 DO $$
 DECLARE r uuid; t uuid; g bigint; active text;
@@ -32,13 +40,13 @@ BEGIN
   INSERT INTO agent.external_event_receipts
   (tenant_id,id,subscription_id,subscription_generation,provider_code,
   native_event_kind,native_event_id,actor_native_id,source_sha256,disposition_code)
-  VALUES('{T}',gen_random_uuid(),'{S}',1,'x','post_created','{event_id}','actor100',
+  VALUES('{T}','{receipt_id}','{S}',1,'x','post_created','{event_id}','actor100',
   repeat('a',64),'accepted')
   ON CONFLICT(tenant_id,subscription_id,provider_code,native_event_kind,native_event_id)
   DO NOTHING RETURNING id INTO r;
   IF r IS NOT NULL THEN
    INSERT INTO agent.tasks(tenant_id,id,owner_user_id,status_code,canonical_schema_version,request_json)
-   VALUES('{T}',gen_random_uuid(),'{U}','QUEUED',1,'{{}}') RETURNING id INTO t;
+   VALUES('{T}','{task_id}','{U}','QUEUED',1,'{{}}') RETURNING id INTO t;
    INSERT INTO agent.task_goal_revisions (tenant_id,task_id,revision,goal_ref,goal_sha256)
    VALUES('{T}',t,1,'fixture:external-event',repeat('b',64));
    UPDATE agent.external_event_receipts SET task_id=t WHERE tenant_id='{T}' AND id=r;
