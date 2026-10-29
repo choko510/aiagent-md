@@ -234,3 +234,20 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 **[PR-SSE-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、Merged）はtransport wrapperがreplayフラグを失う問題を修正、React regression testを追加。UI側のtransportがsnapshot replayかdelta continuationかの**識別は必須**。本設計はTaskEvent sequenceに基づくreplayであり、全量Snapshotは既存状態を置換、delta Eventはsequenceでskipする。SSE-T03/T09でこの2経路を明示的に分ける。
 
 **SSE-T13 (designed / SC-07,08):** interleave Task aggregateSequence=2, Run aggregateSequence=2 and Tool aggregateSequence=2 with an unrelated user's Event between tenant deliveryOffsets 41..44; assert all three authorized distinct eventIds delivered, none skipped due to colliding aggregateSequence, no other user's event content or raw deliveryOffset in public payload. Owner: CHAT_01 event envelope; CHAT_10 SQL replay. Source: [PR #23](https://github.com/choko510/aiagent-md/pull/23). Source status Draft, no integration tests run.
+
+## Formal Round 2 MUST Traceability (full stable IDs; designed tests only)
+
+| MUST REQ-ID | TEST-ID(s) | SC-ID(s) |
+|---|---|---|
+| SSE-001 | SSE-T01 | SC-06, SC-08 |
+| SSE-002 | SSE-T02, SSE-T08 | SC-05, SC-07 |
+| SSE-003 | SSE-T03, SSE-T13 | SC-07, SC-08 |
+| SSE-004 | SSE-T04, SSE-T09 | SC-07, SC-08 |
+| SSE-005 | SSE-T05, SSE-T11 | SC-09 |
+| SSE-006 | SSE-T06 | SC-06, SC-08 |
+| SSE-007 | SSE-T07 | SC-03, SC-08 |
+| SSE-008 | SSE-T08 | SC-07 |
+| SSE-009 | SSE-T09 | SC-07 |
+| SSE-010 | SSE-T10 | SC-01, SC-02, SC-04, SC-07 |
+
+**Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
