@@ -84,7 +84,7 @@ type MemoryUpdateCandidate = {
   kind: "profile"|"episodic"|"procedural_hint"|"task_note";
   claim: unknown; origin: "user_explicit"|"agent_inference"|"feedback";
   expectedRecordRevision?: number; proposedScope?: "task"|"project"|"user";
-  expectedGoalRevision?: number; runFence?: {runId:string;leaseEpoch:number};
+  expectedGoalRevision?: number; runFence?: {runId:string;leaseEpoch:string}; // wire decimal bigint per CHAT_01 event contract; validate <= PG BIGINT
 };
 ```
 
@@ -147,6 +147,8 @@ async function acceptUpdate(actor, candidate, runState) {
   return memoryService.mutateWithCASAndIdempotency(actor,candidate);
 }
 ```
+
+**Wire / revision audit:** CHAT_01 PR #23 Event Envelope uses positive decimal strings for BIGINT counters; Run `leaseEpoch` is a fencing token rather than Task `goalRevision` or Memory-local CAS. A JSON number is not acceptable for arbitrary DB BIGINT, even if most present values happen to fit JavaScript safe integers. Normalize with strict decimal parser, reject leading zeros/negative/out of-range, and compare as BigInt in the trusted adapter. CHAT_10 PR #22 queue design still suggests safe-number bounds and needs a common codec decision. This is [PROVISIONAL: CHAT_01/02/10].
 
 **Rankingの順序**: hard filter（ACL/expiry/status/source validity）→ conflict collapse → deterministic score。同点は`updatedAt DESC, memoryId ASC`固定。Scoreは序列専用で「事実の確信度」ではない。Taskのgoal/date/party size/price constraintsと不一致ならmemory候補を抑制し、勝手にGoalを更新しない。`validUntil`が経過した価格はpast-event質問に限りhistoricalとして扱う。
 
