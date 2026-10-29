@@ -55,8 +55,8 @@ interface MiddlewareManifest { id:string;version:string;
  needsCapabilities:string[];retrySafety:"PURE"|"ONCE_WITH_LEDGER";
 }
 interface FrozenHookContext {
- taskId:string;runId:string;goalRevision:number;
- leaseEpoch:number;stepOrdinal:number;redactedInputRef:string;
+ taskId:string;runId:string;goalRevision:string;
+ leaseEpoch:string;stepOrdinal:number;redactedInputRef:string;
 }
 interface HookPort { execute(stage:HookStage,ctx:FrozenHookContext,
  manifest:MiddlewareManifest):Promise<ValidatedHookPatch>; }
@@ -170,3 +170,7 @@ Contract ownersの合意と実試験を経るまではDraft。実コード未実
 - [S4] Code verified https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/_agent_graph.py
 - [S5] Code verified https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/deepagents/middleware/summarization.py
 Evidence: Code verified = precise source function inspection; Test definition verified = tests read not run. License MIT for OpenAI Agents Python/PydanticAI; Mastra @mastra/core Apache-2.0 declared. External issues cited only as reports if any.
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
