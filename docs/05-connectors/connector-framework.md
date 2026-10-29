@@ -312,8 +312,9 @@ async function executeApproved(approved, signal) {
       deadlineAt: expiresAt
     });
     if (!lease.granted) return deferred("QUOTA_WAIT", lease.nextAt, observations);
-    const credentialHandle = await broker.scopedHandle(approved);
+    let credentialHandle: ScopedHandle | undefined;
     try {
+      credentialHandle = await broker.scopedHandle(approved);
       // 送信開始前にleased attemptを永続的にsent-or-unknownへ更新
       await ledger.markExternalAttemptStarting(approved, lease);
       const response = await transport.executeApproved(
@@ -343,7 +344,7 @@ async function executeApproved(approved, signal) {
       if (attempt === min(manifest.limits.maxAttempts, 3))
         return classifyTransportFailure(err, observations);
       await boundedBackoffBeforeNextAttempt(attempt, expiresAt, signal);
-    } finally { broker.releaseHandle(credentialHandle); }
+    } finally { if (credentialHandle) broker.releaseHandle(credentialHandle); }
   }
   return failure("TIMEOUT", observations);
 }
@@ -534,3 +535,41 @@ async function executeApproved(approved, signal) {
 ---
 
 **Draft review checklist**: owned path only ✓ / Project Brief alignment ✓ / Source code + tests inspected ✓ / security & errors ✓ / finite budget ✓ / cross-team contracts provisional ✓ / tests designed ✓ / tests actually run ✗ / P0 cross-team contracts resolved ✗。したがって **Draftのまま維持**。
+
+
+## 18. Round-2 契約整合と訂正（2026-10-30 / rev 0.2, Draft維持）
+
+**検証した他担当Draft**: CHAT_01 [PR #2](https://github.com/choko510/aiagent-md/pull/2) の共有UUIDv7、nullable `Task.conversationId`、1開始の`recordVersion`、`Run.leaseEpoch`と`Task.goalRevision/activeRunId`。CHAT_03 [PR #6](https://github.com/choko510/aiagent-md/pull/6) の`descriptorRevision` digest / `registryGeneration`とTool Gateway。CHAT_09 [PR #9](https://github.com/choko510/aiagent-md/pull/9) の`tenantId/ownerUserId` ACL。CHAT_10 [PR #10](https://github.com/choko510/aiagent-md/pull/10) には現状`gen_random_uuid()`、`revision=0`、`tasks.conversation_id NOT NULL`、Run lease fencing列がないという相違がある。CHAT_04 [PR #3](https://github.com/choko510/aiagent-md/pull/3) のSearch RouterはProvider選択をGateway再認可へ委譲。これらのPRは**mainに未マージ**であり確定契約ではない。
+
+### 18.1 実行境界 [PROVISIONAL: CHAT_01/02/03/09/10]
+
+1. Gatewayが発行したopaqueな`AuthContext(tenantId,actorId,ownerUserId)`、`RunFence(taskId,runId,leaseEpoch,goalRevision,recordVersion)`、`ToolApproval`、`descriptorRevision`だけを採用する。Provider bodyやLLM queryから権限情報を生成しない。
+2. 公開IDはServer生成の正規UUIDv7。Amazon ASIN / X Post ID / hotel IDは独立のProvider-native identifierでありUUIDを強要しない。`tenantId`とDBの`workspace_id`の同値性、`actorId`と`ownerUserId`の同値性を仮定せず、CHAT_09/10が決めるowner mappingを必須とする。
+3. `Run.leaseEpoch`はSafe Integer範囲外でも正確な`bigint`または厳密decimal wireを保持（正式型はOwner決定）。本MDの`attemptGeneration`は別概念、fence tokenの代用品にしない。送信開始前に`leaseEpoch`、`goalRevision`、`approvalRevision`、`descriptorRevision`、Cancel/SteerをGateway側で再検証。旧Workerは送信も現在RunのEvidence更新も禁止。
+4. Watch/Event起点の`Task.conversationId=null`を合法とする。ConnectorはConversationを要求しない。`recordVersion`とDB`revision`の0/1差を暗黙補正せず、migrationと明示的mapperで合意。DBがv4を発行した場合にvalidatorを緩めず、UUIDv7生成経路をOwnerが整備する。
+
+### 18.2 Retry/Quota/OAuth擬似コードへの補足（実装MUST）
+- `7.1`の制御順序は概念例。Quota acquire後に`CredentialBroker.scopedHandle`が失敗した場合、**送信前が証明できれば**一度だけLeaseを解放し、Budget reservationも一致させる。そこで例外が出ても`finally`でreceiptを残す。認証ハンドルの取得位置を本改訂で`try`内へ移した。
+- `ledger.markExternalAttemptStarting`成功後は送信実態が不確定なら`sent-or-unknown`。Worker kill / ACK lossで無条件再送しない。lease expiryは外部課金0の証拠にならない。401を受信してrefreshする際もその試行のProvider usageを先に精算し、新しい試行はquota/budgetを再取得。
+- HTTP 429 `Retry-After`がTask deadlineを越えるなら待機指示か期限切れを返し、期限短縮して再送しない。single-flight token refresh後にはtenant/scope/entitlement/lease generationを再検証。
+- Evidence保存が失敗したがraw Artifact receiptがある場合、**同一Attempt**で再parse/commitを実施。再度HTTP実行するなら新しいGateway認可/attempt。Provider resultの古いgoalへの紐付け禁止。
+
+### 18.3 Round-2 要件・追加テスト（**Designed, Not run**）
+
+| REQ | Priority | 検証可能な要件 | TEST / SC |
+|---|---|---|---|
+| CON-FW-022 | MUST | UUIDv7/internal IDとProvider ID、Tenant/Workspace/Owner mappingを区別 | CON-FW-T28 / SC-08 |
+| CON-FW-023 | MUST | leaseEpoch/goalRevision/descriptorRevisionを非損失で別々に保持し、stale送信/commitゼロ | CON-FW-T29 / SC-07 |
+| CON-FW-024 | MUST | nullable Conversation、recordVersionの差をOwner mapperで明示処理。暗黙修正なし | CON-FW-T30 / SC-07 |
+| CON-FW-025 | MUST | Lease取得後のCredential失敗/kill/timeoutでも未送信/unknownを区別して清算 | CON-FW-T31 / SC-07,09 |
+| CON-FW-026 | MUST | CHAT_13 EventSubscriptionの呼出もGatewayを迂回せず承認/費用/ownerを検証 | CON-FW-T32 / SC-11 |
+
+- `T28`: tenant AのUUIDv7、workspace B、外部ASINをInternal IDとして注入 → ACL deny、外部送信0。
+- `T29`: 2 Worker、leaseEpoch=9007199254740993、旧descriptorとSteerを競合 → 古いWorkerによる送信/更新0、整数丸め0。
+- `T30`: Conversation=nullのWatch起点Task、DB legacy revision=0 fixture → migrationのない暗黙1加算・偽Conversation追加0。
+- `T31`: quota獲得直後Credential拒否、送信前kill、送信後ACK loss → 証明済み未送信だけ解放1回、不確定usageはunknown、blind retry0。
+- `T32`: disabled X subscription / revoked user、悪意のあるX投稿 → Event Router→Gateway外の実行0。
+
+**Cross-team proposals**: P05-12/P0 → CHAT_01/02/03のcanonical RunFence・descriptor pin・非損失wire。P05-13/P0 → CHAT_09/10のtenant-workspace-owner mapperとUUIDv7/nullable Conversation/revision/leaseEpoch/goalRevision schema migration。P05-14/P1 → CHAT_13 Event Router/Tool Gateway間の権限fencing。P05-15/P1 → CHAT_12 Entity/Source Reliabilityにはnative IDsとcondition付きEvidenceを渡すが、統合判断をConnectorがしない。
+
+未解決のP0契約と未実行の統合試験があるため、`Reviewed`/`Locked`/`Verified`とは呼ばない。
