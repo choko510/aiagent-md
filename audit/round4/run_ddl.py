@@ -44,6 +44,16 @@ try:
   z=run(['docker','exec',name,'psql','-X','-A','-t','-U','postgres','-d','agent_test','-c',sql])
   assert z.returncode==0 and z.stdout.strip()=='t',key+': '+z.stdout+' '+z.stderr
   print('ASSERT_PASS',key)
+ integration=(ROOT/'audit/round4/contract_integration.sql').read_text()
+ z=subprocess.run(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','agent_test','-v','ON_ERROR_STOP=1'],
+  input=integration,text=True,capture_output=True,timeout=90)
+ print('CONTRACT_SQL_RC',z.returncode,'STDOUT',z.stdout[-1200:],'STDERR',z.stderr[-2500:])
+ if z.returncode:raise RuntimeError("PostgreSQL FK/Checkpoint/Task-less Event contract failed")
+ concurrent=subprocess.run([sys.executable,str(ROOT/'audit/round4/run_concurrency.py')],
+  text=True,capture_output=True,timeout=180)
+ print('CONCURRENCY_RC',concurrent.returncode)
+ print(concurrent.stdout[-2000:],concurrent.stderr[-2000:])
+ if concurrent.returncode:raise RuntimeError('PostgreSQL multiwriter sequence test failed')
  print('RESULT PASS: fresh schema executed and basic catalog assertions passed')
 finally:
  run(['docker','rm','-f',name])
