@@ -7,6 +7,10 @@ INSERT INTO agent.external_event_subscriptions
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000101',
  '01900000-0000-7000-8000-000000000002','x','111111','credential-ref','x_timeline_poll',
  'active','1.0','{}','{}','consent-ref');
+INSERT INTO agent.external_subscription_generations
+ (tenant_id,subscription_id,generation,transition_reason)
+VALUES('01900000-0000-7000-8000-000000000001',
+ '01900000-0000-7000-8000-000000000101',1,'initial_subscription');
 INSERT INTO agent.external_event_cursors (tenant_id,subscription_id,generation,coverage_code)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000101',1,'complete');
 INSERT INTO agent.external_event_receipts
@@ -82,4 +86,28 @@ BEGIN
  IF (SELECT count(*) FROM agent.parser_jobs WHERE job_state_code='verified')<>1
  THEN RAISE EXCEPTION 'missing parser fixture'; END IF;
  RAISE NOTICE 'PASS R4 migration positive/negative FKs and uniqueness';
+END $$;
+
+-- Migration validation of historical receipt FK across new generation and status change.
+BEGIN;
+INSERT INTO agent.external_subscription_generations
+ (tenant_id,subscription_id,generation,transition_reason)
+VALUES('01900000-0000-7000-8000-000000000001',
+ '01900000-0000-7000-8000-000000000101',2,'revoked');
+UPDATE agent.external_event_subscriptions SET generation=2,status_code='revoked',
+ record_version=record_version+1
+WHERE tenant_id='01900000-0000-7000-8000-000000000001'
+ AND id='01900000-0000-7000-8000-000000000101' AND generation=1;
+COMMIT;
+DO $$
+BEGIN
+ IF (SELECT count(*) FROM agent.external_event_receipts r
+ JOIN agent.external_subscription_generations g
+ ON r.tenant_id=g.tenant_id AND r.subscription_id=g.subscription_id
+ AND r.subscription_generation=g.generation
+ WHERE r.subscription_generation=1)<>1
+ THEN RAISE EXCEPTION 'lost old generation receipt after revoke'; END IF;
+ IF (SELECT count(*) FROM agent.external_event_subscriptions WHERE generation=2 AND status_code='revoked')<>1
+ THEN RAISE EXCEPTION 'new generation not activated/revoked'; END IF;
+ RAISE NOTICE 'PASS generation advance retains old receipt and current revoked generation';
 END $$;

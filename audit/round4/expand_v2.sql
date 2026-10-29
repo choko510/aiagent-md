@@ -14,6 +14,15 @@ CREATE TABLE agent.external_event_subscriptions (
  UNIQUE(tenant_id,id,generation),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id)
 );
+-- Immutable generation records keep old receipts valid when current subscription generation increments.
+CREATE TABLE agent.external_subscription_generations (
+ tenant_id uuid NOT NULL, subscription_id uuid NOT NULL,
+ generation bigint NOT NULL CHECK(generation BETWEEN 1 AND 9223372036854775807),
+ created_at timestamptz NOT NULL DEFAULT now(), transition_reason text NOT NULL,
+ PRIMARY KEY(tenant_id,subscription_id,generation),
+ FOREIGN KEY(tenant_id,subscription_id)
+ REFERENCES agent.external_event_subscriptions(tenant_id,id)
+);
 CREATE TABLE agent.external_event_cursors (
  tenant_id uuid NOT NULL, subscription_id uuid NOT NULL,
  generation bigint NOT NULL,
@@ -23,7 +32,7 @@ CREATE TABLE agent.external_event_cursors (
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,subscription_id,generation),
  FOREIGN KEY(tenant_id,subscription_id,generation)
- REFERENCES agent.external_event_subscriptions(tenant_id,id,generation)
+ REFERENCES agent.external_subscription_generations(tenant_id,subscription_id,generation)
 );
 CREATE TABLE agent.external_event_receipts (
  tenant_id uuid NOT NULL, id uuid NOT NULL, subscription_id uuid NOT NULL,
@@ -38,7 +47,7 @@ CREATE TABLE agent.external_event_receipts (
  PRIMARY KEY(tenant_id,id),
  UNIQUE(tenant_id,subscription_id,provider_code,native_event_kind,native_event_id),
  FOREIGN KEY(tenant_id,subscription_id,subscription_generation)
- REFERENCES agent.external_event_subscriptions(tenant_id,id,generation),
+ REFERENCES agent.external_subscription_generations(tenant_id,subscription_id,generation),
  FOREIGN KEY(tenant_id,payload_artifact_id) REFERENCES agent.artifacts(tenant_id,id),
  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
  FOREIGN KEY(tenant_id,domain_event_id) REFERENCES agent.domain_events(tenant_id,id)
