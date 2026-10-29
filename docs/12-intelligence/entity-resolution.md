@@ -49,7 +49,7 @@
 
 ## 5. 内部型・バリデーション（共有型改定ではない）
 ~~~ts
-type Domain = 'product'|'hotel_property'|'hotel_rate'|'organization'|'public_person';
+type Domain = 'product'|'hotel_property'|'hotel_rate'|'organization'|'retailer_storefront'|'public_person'; // organization != physical branch or marketplace seller
 type Decision = 'MATCH'|'DISTINCT'|'REVIEW'|'UNRESOLVED';
 type RelationV1 = {
  schemaVersion:'1.0'; tenantId:string; ownerUserId:string;
