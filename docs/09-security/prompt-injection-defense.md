@@ -246,3 +246,7 @@ No published contract is Locked. Thresholds/model detector quality and shared En
 ## Review gate
 - [x] 2 OSS code/tests, alternate options, scope and authority, typed interface, sequence/pseudocode, failure/restart/race, DB/UI, TEST/REQ/SC.
 - [ ] Shared contracts, runtime integration, evidence accuracy measurement, full test execution. **Keep Draft**.
+
+## Upstream PR investigation — Provenance of user paste versus external data
+- **[PR inspected, open/unmerged]** OpenClaw [#165776](https://github.com/openclaw/openclaw/pull/165776) documents a UI paste provenance issue: long user-pasted content became an attachment and was handled as untrusted external source despite originating from the operator's message. **Not adopted as shipped upstream behavior**. Our implementation must preserve *verified transport origin* separately from whether the **content itself** contains third-party untrusted instructions. A user's pasted webpage text can be a trusted request to analyze the pasted bytes, but the embedded webpage commands cannot become server/tool policy. Add `INJ-T19`: typed text vs long paste vs file vs forwarded web content, origin metadata preserved, tool privileges unchanged.
+- Source grade: PR report. This strengthens explicit `AUTHENTICATED_USER` transport vs `UNTRUSTED_EXTERNAL` quoted content separation without granting external instructions new authority.
