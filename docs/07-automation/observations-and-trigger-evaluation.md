@@ -296,3 +296,12 @@ OBS-PR1: exact money/time/unit validators + baseline pure evaluator + fixture。
 
 - [x] 16 MUSTにTEST/SCを対応づけた。source level、alternative、failure/restart/race、quota、prompt-injection、DDL/REST proposalとmigration含む。
 - [ ] 共有Contract Lock、実テスト・Benchmark、独立レビュー。Draft維持。
+
+
+### Round 2 negative evidence: false changes and requested thresholds
+
+- **[S9] Issue report**, changedetection.io #879 (closed、旧版ユーザーの要望): 単なるテキスト変更では数値価格が閾値を超えたか判定できないとの具体的ユースケース。最新版で未対応と断言する根拠ではない。https://github.com/dgtlmoon/changedetection.io/issues/879
+- **[S10] Issue report**, changedetection.io #962 (closed、旧版): 同一内容でも空diffの通知が発火したとの報告。比較品質とnotification outboxを分ける反例。https://github.com/dgtlmoon/changedetection.io/issues/962
+- **[S11] PR report**, changedetection.io #3824: タグごとのrestock settingsをAPIから設定する変更提案。正式な型や現在の動作保証ではなく設定世代とgroupingの考慮事項。https://github.com/dgtlmoon/changedetection.io/pull/3824
+
+**追加要件 OBS-020 MUST**: 正規化された構造化値が等しいのに、HTML広告/日時/DOM差分だけの理由でprice threshold triggerを発火しない。**OBS-T20 → SC-02/12**: fixture A/BでHTML timestamp/rotating adだけ変更しprice=45,000を維持→meaningful price change=false、episode中の再通知0。なお「毎日同条件なら知らせる」といったユーザー明示ルールは07-04/13のpolicy別評価。テスト未実施。
