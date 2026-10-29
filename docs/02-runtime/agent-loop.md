@@ -538,7 +538,7 @@ SHOULD LOOP-017 → TEST-006/029、LOOP-018 → TEST-020/029。LATER/EXPERIMENT�
 
 ### 18.2 AgentLoopへの拘束条件（今回の直接修正）
 
-- **[PROVISIONAL: CHAT_01]** `LoopIdentity.leaseEpoch` は `Run.leaseEpoch` と一致するsafe integer。DB BIGINTをJSへ読むとき `0 <= epoch <= Number.MAX_SAFE_INTEGER` と整数性をチェック。値が上限に達したRunは新しいleaseを発行せず修復待ち。JSONではNumber型（安全範囲内）とする提案。Tool attempt内の`fence_token bigint`は別系列で、混在不可。
+- **[ROUND4 CONTRACT RESOLVED AT WIRE BOUNDARY]** `LoopIdentity.leaseEpoch` = `Run.leaseEpoch`: canonical signed int64 decimal **string**, internal BigInt, DB BIGINT; validation rejects JSON number / overflow / exponent. This is a *Run* fence and is distinct from ToolAttempt's own fence. Stale worker writes return zero rows. All DB/SSE/Tool changes require head CAS and explicit ownership verification.
 - **[PROVISIONAL: CHAT_09/10]** `tenantId`はtrusted session又はDBのRun→Task→owner bindingから復元し、`workspaceId`はサーバーで照会。User名を含むqueue payloadとModel outputは権限の根拠にしない。Auth失効・Task.owner disabled中はTool開始不可。
 - **[PROVISIONAL: CHAT_01/10]** Taskは `conversationId=null` でも有効。Runの存在とConversationは独立。Runが参照できるGoal revisionはTaskのimmutable GoalRevisionであり、Steer後のapplied revisionはcheckpointに記録。旧scopeのTool approvalは実行前にexpire。
 - **[PROVISIONAL: CHAT_10]** `recordVersion` 1開始のCASと `leaseEpoch` のfence比較は**双方必要**。毎回のEvent挿入でrecordVersionを上げたとしても、leaseEpoch代用禁止。Event outboxとreceiptはTaskの確定トランザクションで原子化。
