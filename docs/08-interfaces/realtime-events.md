@@ -176,6 +176,27 @@ Never copy credentials, browser storage state, raw prompts, model private reason
 - [PROVISIONAL: CHAT_10] DB task_events/sequence index tenant-qualified \`(workspace_id,task_id,sequence_no)\`; event rows strictly ordered by committed parent transaction; retention floor / response semantics, safe projection storage if event visibility differs.
 - Migration: old clients without snapshot cursor may only receive a full bootstrap (no false continuity); new field addition to REST API additive; projection major mismatch fails close. Retention lowering requires advance notice and safe fallback.
 
+## 9.1 Round 3 — Storage/Event/Snapshot 物理契約との接続（CHAT_01 #23・CHAT_10 #10）
+
+このSSEは、旧`task_events`の`task_id+sequence_no`では構築できない。最新のCHAT_10 SQLでは汎用`agent.domain_events`へ統合し、`aggregate_sequence`は同一aggregate内、`delivery_offset`はtenant全体のcommit順序を担保する。
+
+1. TaskのHTTP read modelと`agent.tenant_event_counters.next_delivery_offset-1`を**同一MVCC snapshot**（例：`REPEATABLE READ READ ONLY`）内で取得する。非同期で更新されるprojectionを使う場合、`projection_applied_delivery_offset`を別途追跡し、反映済み地点より未来のcursorを返してはならない。
+2. SSE HandlerのAuthorized event replayは`agent.domain_events WHERE tenant_id=? AND delivery_offset > lastOffset AND task_id=? ORDER BY delivery_offset ASC LIMIT ?`が基盤。Run/Tool/Approval等、元Taskに属するEventには正しい`task_id`を確実に付与。Task無所属のWatchイベントはTask SSEではなく、Watcher専用認証ストリームまたは明示関連付けされたTask経由で提供。User未認可のoperator_audit eventsは除外。
+3. `owner_user_id`がイベントからnullであっても「見てよい」の意味にしてはならない。アクセスはTask/Watchの最新のowner+tenant policyで決定し、`audience_code`は追加制限として適用する。Cursor内のtenantとviewerを変更して流用不可。
+4. Event中の`aggregateSequence`は異Aggregateでは独立、`eventId`と`deliveryOffset`で順序・dedupする。隠れたEventによるoffsetの欠番をgapと扱わず、Serverがoffset範囲を調べて再開可能性を検証。
+5. Snapshot作成直後・Subscribe登録直前・Event Emitの競合は`subscribeHint→replay→bounded polling`で収束。Redis/PG NOTIFY/SSE publisherはwake-up hintでありDBが正本。
+6. Retentionで古いEventが消え、Cursor位置より古い範囲が失われた場合は`410 STREAM_CURSOR_EXPIRED`。Retentionの`earliestRetainedOffset`は**DBの保持メタデータ**で明示管理し、空のAuthorized Listだけを根拠にexpiredと判定しない。
+
+| Test (designed, not executed) | Expected |
+|---|---|
+| SSE-R3-T01 | Same tenant Task+Watch+Run emit, hidden events between visible→表示0欠損、偽gap0 |
+| SSE-R3-T02 | GET snapshot直後にEvent append→first stream replayに全件現れ、重複加算なし |
+| SSE-R3-T03 | 2 parallel outbox relays逆順→UIはDB tenant offsetでソートして結果整合 |
+| SSE-R3-T04 | 異user/tenantへのSigned Cursor再利用→401/403/404、event payload 0 bytes |
+| SSE-R3-T05 | retention expired + role revoked during stream→410/close、safe GET re-sync |
+
+**このMDとEvent/DBの記述はまだ実装テストされていないためDraft。** DB Ownerが`outbox`とtenant cursorの更新を検証し、CHAT_11がFault/E2Eテストへ反映するまでは`Locked`にしない。
+
 ## 10. Proposed implementation PR split
 
 SSE-P1 core projection schemas + redaction + unit schema tests; SSE-P2 durable replay query/cursor signing & GET snapshot bridge with DB fault tests; SSE-P3 stream auth/heartbeat/backpressure and proxy config; SSE-P4 Web-client lifecycle/reconnect/dup filtering; SSE-P5 Load, auth expiry, 410, migration + release gate.
