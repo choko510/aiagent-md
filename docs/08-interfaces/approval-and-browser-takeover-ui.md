@@ -246,3 +246,7 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 **[I-HITL-01]** [Mastra issue #28224](https://github.com/mastra-ai/mastra/issues/28224)（2026-10-30、Open、Issue report）はRun作業後terminal publish時のlease喪失を報告。HITL-T06/T08に「human takeover解放→Run resume→terminal event直前にowner lease失効」を追加し、UIはcompletedを偽装せずGETから確定状態/uncertainを復元すること。Tool Gateway/Browser Workerのfencing実装はCHAT_02/03/04所有。
 
 **[I-HITL-02]** [OpenClaw issue #169176](https://github.com/openclaw/openclaw/issues/169176)（2026-10-30、Open、Issue report）では失効したTelegram callbackを永続的にretryして後続更新が滞留するという報告がある。HITL-T09に`expired callback → terminal reject → no repeat decision/reply → later message proceeds`という境界を追加する。こうした非再試行エラーの分類はTG adapterとCHAT_07/10との合同契約。
+
+## 16. Upstream PR差分：lease障害時の安全性
+
+**[PR-HITL-01]** [Mastra PR #27760](https://github.com/mastra-ai/mastra/pull/27760)（2026-10-30確認、**Open / 未マージ**）の `packages/core/src/workflows/evented/workflow-event-processor/index.ts` 差分を読んだ。同PRはlease acquireの待機を5秒で制限し、backend timeout時にstepを**fenceなしで進行**させる既存fallbackを用いる。本Harnessでは**外部副作用/BrowserSessionのownership fence失敗時に実行を許可しない**ため、timeoutでunfenced executionへ進む案は明確に却下する。HITL-T04/T06にLeaseProvider hang、late grant、stale ownerを注入し、**副作用実行0**、暫定WAITING_INPUT/UNKNOWN、限定的recoveryを検証する。Mastra PRの修正の有効性/取り込み状態は本Harnessに移植していない。
