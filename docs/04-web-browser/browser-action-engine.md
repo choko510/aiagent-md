@@ -66,8 +66,9 @@ async function execute(cmd, ctx) {
  const owner = await sessionManager.acquire(cmd.sessionId,cmd.expectedEpoch,ctx.principal);
  return owner.withPageMutex(cmd.tabId, async page => {
    await assertLiveFence(ctx); const pre = await snapshotWithBudget(page);
-   const target = strictResolveLocator(page,cmd.target,pre);
-   if (cmd.action !== "snapshot" && !exactlyOneVisible(target)) return stale("TARGET_AMBIGUOUS");
+   const requiresTarget = ["click","fill","select","press"].includes(cmd.action);
+   const target = requiresTarget ? strictResolveLocator(page,cmd.target,pre) : null;
+   if (requiresTarget && (!target || !exactlyOneVisible(target))) return stale("TARGET_AMBIGUOUS");
    const grant = await gatewayAuthorize(cmd,pre,ctx);
    if (!grant.allowed) return denied(grant);
    const receipt = await ledgerRecordIntent(grant,ctx);
@@ -143,3 +144,9 @@ Before/After snapshot artifacts・page generation・action intent/receipt・fenc
 [S2] **Browser Use**, 導入前LICENSE再確認, **Code verified: source inspected, tests read not executed**, commit `2cc71890e65056b67fdb29d98bb407749c15bb08` (2026-10-30): [`browser_use/tools/service.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/tools/service.py) (Tools._click_by_index/input/switch/scroll); [`browser_use/browser/session.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py) (BrowserSession); [`tests/ci/test_tools.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/tests/ci/test_tools.py) (fixture HTTP server + action tests).
 [S3] **jev-browser**, 導入前LICENSE再確認, **Code verified: source inspected, tests read not executed**, commit `817b09eea6e21aad836b5ed32a613c68e5644a08` (2026-10-30): [`src/navigate.ts`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/src/navigate.ts) (NavigateOptions.page, navigate/abort/budget); [`src/provider.ts`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/src/provider.ts) (askJev / InvalidJevAnswer); [`test/unit.test.mjs`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/test/unit.test.mjs) (injected Page life-cycle, redaction, action space); [`test/e2e.test.mjs`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/test/e2e.test.mjs) (key-gated fixture navigation).
 **Design hypothesis:** 本書のType、state、limit、timeout、retry、fault protocolはCHAT_04独自の未検証提案。正式Shared ID/Event/Policy/DDLの正本は各Owner。
+
+
+### Round 2 Action種別テスト補強（2026-10-30）
+
+`navigate`/`scroll`/`snapshot`/`screenshot` は必ずしもDOM Locatorを持たない。旧擬似コードは `snapshot` 以外の全操作を `exactlyOneVisible(target)` に渡していたため、Locatorなしの正常操作が実行不能になる。現在は `requiresTarget` を明示し、`click/fill/select/press` のみ一意Locator必須。**T-BACT-004** は重複/非表示Locatorの拒否に加え `scroll` と `navigate` が適切なPolicy/egress審査を経て実行できることを試す。Navigationにも必ずGateway許可とHTTP/Browser egressを適用する。
+
