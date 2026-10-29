@@ -304,3 +304,19 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 
 **注意:** これらは受入試験の要求であり、現在の仕様書repoから実装実行できるテストではない。実際のHarnessコードと固定PostgreSQL/browser fixture環境の導入後に実行して初めてVerifiedとする。対応する契約はCHAT_01/02/08/10の各Draft PRでレビューが必要。
 
+## 18. Round 4 — Expansion feature cross-owner E2E gate (DESIGNED, NOT RUN)
+| E2E ID | Setup, operation and fault | Assert against DB/event/user output |
+|---|---|---|
+| E2E-R4-T01 | X stream + polling the same provider post, concurrent workers, crash before/after Task TX | one stable ExternalEventReceipt and at most one Task, source URL/actor ID correct, disabled subscription creates no subsequent Task |
+| E2E-R4-T02 | X account handle changes but stable provider actor ID same; repost/quote/partial feed | stable identity, explicit filter, missing gap doesn't advance cursor or create fabricated relevance |
+| E2E-R4-T03 | Same merchant chain two branches and same model different color/capacity | wrong entity merge 0, storefront-specific feedback exclusion only, mapping split invalidates derived Radar/Trend |
+| E2E-R4-T04 | Unknown fee/stock/buyback condition and stale offer in Opportunity Radar | unknown not zero, no guaranteed profit claim and no unauthorized source crawl |
+| E2E-R4-T05 | Notification optional digest reservation and individual sender race, then ACK lost | one send intent, all member coverage_unknown, no automatic individual resend, required immediate alert not lost |
+| E2E-R4-T06 | Trusted user Feedback Undo concurrent with active Watch/Memory read | strict actor/scope/mapping revision, no stale preference still active, original Evidence immutable |
+| E2E-R4-T07 | Cached Browser click sends hidden POST; cached fill triggers auto-save; redirect or WS | no unauthorized mutation/transport request; fail closed and fresh approval required |
+| E2E-R4-T08 | malicious XLSX/ZIP bomb, PDF script, rotated OCR and hidden sheet | parser process bounded no network, no macro, correct raw/derived SHA+source bbox/cell, malformed input quarantined |
+| E2E-R4-T09 | migration 0001→0002 and repeated restart, FK violation across owners | tenant FK, idempotent migration, no incomplete durable Event/Outbox/Parser claim |
+| E2E-R4-T10 | Watch snapshot changes during no-data/304/provider outage | no false change, zero-value substitute or duplicate notify |
+| E2E-R4-T11 | Source feed duplicate/reposts at irregular sampling interval | trend counts independent roots/coverage, confidence unknown until verified |
+Tests must use fake providers, no real purchase, booking, posting or access to unauthorized service; verify DB row counts/lease/CAS/network logs, not only model success text. SC-01..16 mapping required; all tests remain **DESIGNED, not Harness-verified**. Required gate before merging dependencies of PR #50–58, #10, #22, #31, #33, #41.
+
