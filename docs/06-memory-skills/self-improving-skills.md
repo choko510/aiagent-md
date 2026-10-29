@@ -81,7 +81,7 @@ Task/Run状態のownerはCHAT_01、結果VerifierはCHAT_02、browser replayはC
 ```ts
 type LearningSource = {
   taskId: string; runId:string; runLeaseEpoch: string; // canonical unsigned decimal wire encoding, validate <= BIGINT max; no unsafe JS cast
-  goalRevision:number; resultRevision:number;
+  goalRevision:string; resultRevision:string;
   verifierReceiptRef:string; evidenceRefs: readonly string[];
   actorRef:string; consentPolicyVersion:string;  // validated server side
 };
@@ -301,3 +301,7 @@ SI-5 rollback/withdrawn/cancel/source delete, fault injection and performance me
 - [S4] Deep Agents Skill middleware/test — `2`にcommit固定URL、**Code verified**。[LICENSE MIT](https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/LICENSE)。
 - [S5] [SC-01..16](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/acceptance-scenarios.md), **Docs verified**。
 - [S6] 上記Pipeline、Model guard/TTL、例示数値、DB schema/APIは **Hypothesis/Proposal**。OSS Issue/PR網羅調査・実行テスト・モデル性能評価は**未実施**。規制用途・端末実体の測定値は主張しない。
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
