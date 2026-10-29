@@ -54,7 +54,7 @@
 
 外部Web、添付、X投稿、LLM提案、検索結果、他人のチャット本文は**常に非信頼データ**。Web上の「店Aを除外して」という文章は本人意思の証明でない。Principalは受信テキスト内のuserIdではなくCHAT_09認証で導く。Skill文書やFeedback本文をSYSTEM命令やTool Policyへ昇格させない。
 
-[PROVISIONAL: CHAT_01/02/09/10] 共有P0: UUIDv7公開ID vs gen_random_uuid(), nullable Task.conversationId vs SQL NOT NULL, recordVersion初期1 vs SQL revision初期0、leaseEpoch/goalRevision/activeRunIdの原子的保存、tenantId/ownerUserIdとworkspace_idの写像。本書は独自のShared型やDDLで矛盾を解消しない。
+**歴史的Round1契約差（解消案は最新PR #10に反映済み）**: UUIDv4 default撤去、nullable Task Conversation、recordVersion初期1、Run lease/Task goalとactiveRunの永続列、tenant/owner複合FKは現行物理DDLにある。実装/Owner審査は未完了だが、同じ古い衝突を現行P0とは再起票しない。現行ProvisionalはFeedback target/storefront、Memory WriterとUndoの契約統合。
 
 ## 4. MUST/SHOULD/LATER要件
 
@@ -93,12 +93,12 @@ type Scope =
   | { level:"user" };
 type Target =
   | { kind:"research_result"; taskId:Ref; resultRevision:WireVersion; itemRef:string }
-  | { kind:"entity"; entityRef:Ref; mappingVersion:string; class:"retailer"|"product"|"hotel"|"source" }
+  | { kind:"entity"; entityRef:Ref; mappingVersion:string; class:"retailer_storefront"|"retailer"|"product"|"hotel"|"source" }
   | { kind:"watch"; watchId:Ref; definitionRevision:WireVersion }
   | { kind:"notification"; notificationId:Ref; decisionId:Ref }
   | { kind:"browser_recipe"; recipeId:Ref; revision:WireVersion };
 type Preference =
-  | { op:"exclude_entity"; entityRef:Ref; mappingVersion:string; class:"retailer"|"product"|"hotel"|"source" }
+  | { op:"exclude_entity"; entityRef:Ref; mappingVersion:string; class:"retailer_storefront"|"retailer"|"product"|"hotel"|"source" }
   | { op:"minimum_margin"; amountMinorUnits:WireVersion; currency:string;
       domain:"profit_estimate"; unknownHandling:"do_not_qualify" }
   | { op:"ranking_weight"; axis:"price"|"reliability"|"freshness"|"relevance"; value:"low"|"normal"|"high" }
@@ -358,7 +358,7 @@ Migration: M0 flag OFF+契約/Schema追加、M1 User明示操作のcandidate/dry
 | ID / Severity | Owner / Target | 提案するBefore→After、Migration、Contract test |
 |---|---|---|
 | FBL-P0-01 | CHAT_06 memory-data-model.md, memory-retrieval-and-update.md | 現在MEM-DATA-022は概念要求。→ scoped typed feedback, conflictKey, sourceRefs, CAS/Undo, active/contested/tombstoneとrevocationEpochのCanonical Port決定。Memoryと二重書込み禁止。FBL-T03/06/07/08/11 |
-| FBL-P0-02 | CHAT_01/02/10 Core/Run/DDL | UUIDv7 vs v4 DB default, nullable Task conversation, recordVersion 1 vs revision0、goalRevision/leaseEpoch/activeRunId mappingを正本とSQL migration/DB contract testで一致。FBL-T06/12 |
+| FBL-HIST-02 | CHAT_01/02/10 Core/Run/DDL | Round1のUUID/Conversation/revision/Run永続化差はPR #10現行設計で修正済み。最新HEADと実装テストで照合するが、旧不一致を現在のP0とみなさない。FBL-T06/12 |
 | FBL-P0-03 | CHAT_09/10 principal/privacy | tenant+owner+workspaceのAuth mapping、Feedback/Entity/Memoryの複合FK認可、delete/restored backup high-water。FBL-T01/07/12/13 |
 | FBL-P0-04 | CHAT_07/13 Watch/Notification | soft preferenceとhard configured triggerのprecedenceを正式化。Outbox idempotency、quiet hours、explicit Watch stopのみhard変更。FBL-T10/11 |
 | FBL-P1-05 | CHAT_08 Web/REST/Telegram | scope選択UI+If-Match/idempotency+target review+Undo history; unknown targetは保留。FBL-T02/03/05/15 |
