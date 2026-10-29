@@ -11,7 +11,7 @@ Xを「ニュースの確定情報源」とみなさず、**時刻、author ID�
 - In: `XRecentSearch(query, UTC [from,to), maxPosts, filters)`, `XUserTimeline(userId,sinceId,...)`, `XFilteredStreamRule` if explicitly enabled and eligible, authenticated Gateway grant + tenant/owner + RunFence + provider cost ceiling.
 - Out: `XPostObservationDraft` + API cost/usage + pagination/cursor + coverage/partial, source permalink, fetchedAt / authoredAt, referenced Post IDs + confidence flags. All X text and source URLs are untrusted.
 - Non-scope: canonical EventSubscription/ExternalEvent/Task/Watch/Notification state (CHAT_01/07/13), cross-platform trend scoring (CHAT_12), external source verification (CHAT_02 ResultVerifier/CHAT_12 Source Reliability), Tool permissions (CHAT_03/09), UI (CHAT_08), DB DDL (CHAT_10).
-- SC-03/05/07/08/09/11/14。
+- SC-03, SC-05, SC-07, SC-08, SC-09, SC-11, SC-14。
 
 ## 2. Code-first prior-art audit (2026-10-30)
 | Source | Code & tests actually inspected | Adapt / reject |
