@@ -162,7 +162,7 @@ type EvidenceSummary = {
 };
 type ResourceMeta = {
   id: Id;
-  recordVersion: number;          // CHAT_01 safe positive integer; initial 1; CAS
+  recordVersion: string;          // CHAT_01 canonical int64 decimal string, initial "1"; CAS
   createdAt: ISOInstant;
   updatedAt: ISOInstant;
 };
@@ -170,8 +170,7 @@ type TaskView = ResourceMeta & {
   conversationId: Id | null;      // direct API / Watch / event Task may be conversationless
   state: string;                   // from CHAT_01, not enumerated here
   currentRunId?: Id;
-  lastEventSequence: string;       // canonical Task event high-water as decimal bigint string
-  snapshotCursor: string;          // signed, task+actor+projection bound SSE resume marker
+  snapshotCursor: string;          // signed, task+actor+filter bound SSE cursor; tenant offset SEALED
   goalSummary: string;
   budget: {
     configured?: MoneyWire;
@@ -210,7 +209,7 @@ type CommandAck = {
   commandId: Id;
   resource: PublicRef;
   acceptedAt: ISOInstant;
-  observedVersion: number;        // wire alias of recordVersion, never DB revision without mapping
+  observedVersion: string;        // wire alias of recordVersion, int64 decimal string
   disposition: "accepted" | "already_recorded"; // accepted != performed
 };
 type Page<T> = {
@@ -313,14 +312,18 @@ type ApprovalDecisionInput = {
 - **Run:** userが任意のrunIdを指定したり、過去runをdelete/updateしたりできない。再実行対象のTaskをversionでlockし、CHAT_02の再実行条件を検査。
 - **BrowserSession:** release/handoffのみで、sessionId以外の内部識別子は利用者には見せない。
 
-### 5.6.1 Durable Snapshot / SSE Handoff (own API contract)
+### 5.6.1 Durable Snapshot / SSE Handoff (own API contract; compatible with CHAT_01 event envelope)
 
-\`GET /api/v1/tasks/{id}\` **MUST** provide \`lastEventSequence\` and \`snapshotCursor\` in the same snapshot as \`recordVersion\` and projected Task state. \`lastEventSequence\` is the latest committed Task Event sequence represented by that state (base10 decimal string, not a JS number); \`snapshotCursor\` is a scoped opaque signed cursor for \`GET /api/v1/tasks/{id}/events\` from [realtime-events.md](realtime-events.md). The GET must read Task view and Event high-water under one documented consistent DB snapshot (or an equivalent projection log barrier). **Do not sign the current Event high-water if the returned Task state has not actually incorporated those Events**; doing so would permanently skip results on reconnect. If materialized projection lags, return its *applied* cursor, not the DB's newer raw Event maximum. New Task with no Events uses seq "0" only for initial snapshot marker (public recordVersion still starts 1). \`snapshotCursor\` is not an auth token and is checked against the current principal on SSE subscribe; neither the cursor nor Event sequence grants resource access.
+\`GET /api/v1/tasks/{id}\` **MUST** provide a \`snapshotCursor\` together with \`recordVersion\` and the projected Task state. **CHAT_01's canonical Event is not a single Task-local sequence**: it has per-aggregate \`aggregateSequence\` and a *tenant-wide* \`deliveryOffset\` (both BIGINT decimal strings) for ordered cross-aggregate delivery. The API's signed \`snapshotCursor\` seals the **last fully applied tenant deliveryOffset** and binds tenant, viewer, Task filter, projection version and expiry. **Do not expose raw tenant deliveryOffset in the public JSON** merely to drive a UI progress bar, because its gaps can reveal concurrent activity not authorized to this viewer. \`snapshotCursor\` is not an auth token; access is rechecked on SSE subscribe.
 
-- Browser frontend uses \`fetch\` streaming to send signed \`Last-Event-ID\` as a request header even on the first subscription; standard native \`EventSource\` cannot set arbitrary headers. URL query cursor/bearer token is disallowed in v1.
-- SSE replay returns canonical Event projections strictly *after* the signed high-water. On logout/tenant switch the frontend discards both snapshot and cursor. If cursor expired (410), it reGETs a fresh consistent snapshot, then resubscribes.
-- \`REST-T19\` (design only; SC-05/07/08): concurrent Event commit across GET snapshot response / SSE handler start / DB materialization delay; assert each Event applied **at least once** and visible state exactly once, including when \`conversationId=null\`; assert no sequence gap and no exposure across tenant.
-- **[PROVISIONAL: CHAT_01/10]** Canonical Event sequence, projection commit barrier, and retention lower bound require explicit owner contract. The *wire form* and requirement to make the snapshot/stream gap-free are CHAT_08-owned and are specified here.
+The GET must read Task/Run/Evidence public projection and its *fully applied* event offset under one documented consistent DB snapshot (or proven equivalent projection barrier). **Do not sign the newest global Event offset if the returned Task projection has not incorporated earlier matching Events**; that would permanently skip results on reconnect. An initial Task with zero events may internally use an offset 0 *only in the signed cursor*; canonical Event deliveryOffset remains positive. Once a Task is created and its first canonical event committed, GET may return a cursor representing that committed event. A paused/restarted Run does not reset the tenant deliveryOffset.
+
+- The v1 browser frontend uses \`fetch\` streaming to set \`Last-Event-ID: <signed-snapshot-cursor>\` even on the first stream request; native EventSource cannot set arbitrary headers. Query cursor/bearer tokens are disallowed.
+- Stream replay scans canonical Events ordered by \`deliveryOffset\` (not UUID timestamp and not per-aggregate sequence), filters to visible related Task/Run/Tool/Approval/Evidence events, and emits only authorized safe DTOs. Cursor gaps due to filtering are normal. CLIENT de-duplicates using \`eventId\` + signed cursor and absolute GET snapshot state, never assumes two different aggregates share an \`aggregateSequence\`.
+- If cursor expired (410), reload a fresh consistent Task snapshot, then resubscribe; on logout/tenant switch clear both snapshot and cursor.
+- **REST-T19** (designed only; SC-05/07/08): concurrent Event commits across GET snapshot response / SSE handler start / projection lag, with Task+Run+Tool Events interleaved and other user's Events inserted in same tenant. Assert all visible events eventually appear, no forbidden event contents or raw offset in JSON, no double-application, and explicit 410 resync.
+- **[PROVISIONAL: CHAT_01/09/10]** Canonical envelope, audience/tenant filter and DB projection-barrier persistence remain owner contracts. This REST wire requirement and the snapshot-to-stream gap-free guarantee are CHAT_08 owned.
+
 
 ### 5.7 Error envelope and response examples
 
@@ -340,7 +343,7 @@ X-Request-Id: req_123
   "instance": "/api/v1/problems/req_123",
   "code": "RESOURCE_VERSION_MISMATCH",
   "requestId": "req_123",
-  "currentResourceVersion": 8,
+  "currentResourceVersion": "8",
   "retryable": false
 }
 ~~~
@@ -608,7 +611,7 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 **Impact on this REST specification:**
 1. Public URI path segments must be parsed with the **CHAT_01 validated UUIDv7 helper** (not fabricated \`019a2bc3-4d5e-7abc-8def-123456789abd\`/\`019a2bc3-4d5e-7abc-8def-123456789abc\` IDs). Existing synthetic examples with \`019a2bc3-4d5e-7abc-8def-123456789abd\`, \`019a2bc3-4d5e-7abc-8def-123456789abc\`, \`019a2bc3-4d5e-7abc-8def-123456789abe\` are **non-valid schematic placeholders**; replace before OpenAPI contract tests. Never accept arbitrary prefix IDs in production. The UUID in \`Idempotency-Key\` is a *different client-generated intent identifier* and need not be UUIDv7.
 2. \`GET /tasks?conversationId=...\` accepts explicit \`conversationId=null\` as scoped filter for conversationless Tasks, plus absent means no filter; empty string is invalid. POST Task allows missing/null conversation and no originThread; any nonnull link requires verified tenant/owner and optionally Thread match.
-3. \`recordVersion\` (starts 1) is the only public ETag/CAS source. \`If-Match: "n"\` means canonical version n; do not serialize raw DB revision if mapped differently. If-Match zero/negative is 400; stale is 412, state conflict 409. JavaScript arithmetic after MAX_SAFE_INTEGER is refused; consider decimal string external form after CHAT_01 schema decision.
+3. \`recordVersion\` (starts 1) is the only public ETag/CAS source. \`If-Match: "n"\` means canonical version n; do not serialize raw DB revision if mapped differently. If-Match zero/negative is 400; stale is 412, state conflict 409. JavaScript Number arithmetic is forbidden for int64 CAS versions; parse validated canonical decimal strings into BigInt and reject out-of-range values per CHAT_01. The decimal-string wire format is no longer optional in latest PR #2.
 4. GoalRevision is not recordVersion. Steer command should include expected recordVersion, owner validates and updates immutable goal snapshot, runtime worker revalidates applied revision at safe boundary; old approval cannot authorize changed parameters.
 5. \`LeaseEpoch\` and DB physical fence are INTERNAL to runtime, never a claim token in REST/SSE/Telegram. The HTTP layer only sends authenticated, versioned commands.
 6. The REST pseudocode must **not transact around an external network authz call** while holding row locks: prior identity check may precede transaction, transaction should verify stored identityVersion/owner epoch from transaction snapshot or readonly indexed data, with fail-closed behavior. The \`target\` may be absent on creation; authorize parent/tenant instead. Design assumes consistent lock order \`tenant/member → task/watch → command receipt → outbox\`, to be agreed with CHAT_10.
@@ -631,3 +634,5 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 
 
 **REST-R2-T09 (designed, not run; SC-05/07/08)**: snapshot GET vs worker Event commit vs SSE stream handshake, slow projection barrier, cursor expiration and cross-tenant replay: assert no event loss, no double billing/step UI, 410 resnapshot, access denied on revoked principal. Complements REST-T19 and SSE-T02.
+
+**Round 2 latest shared schema update (2026-10-30):** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) now specifies `RecordVersion`, `Revision`, `LeaseEpoch` as lossless int64 **decimal strings** (initial `"1"`, `"1"`, `"0"`). [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) defines `aggregateSequence` vs tenant `deliveryOffset`, Task/Run state and `StreamCursorV1.lastDeliveryOffset`. The REST proposal adopts their wire serialization, while physical DDL/owner mapping and released schema remain [PROVISIONAL]. Any earlier illustrative TypeScript numeric field/comment in this Draft that conflicts with the current shared logical model must be interpreted according to this paragraph and the edited DTO above; do not ship such an inconsistency into OpenAPI.
