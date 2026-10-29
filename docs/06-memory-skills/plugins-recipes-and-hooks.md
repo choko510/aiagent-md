@@ -322,6 +322,12 @@ PH-6 Review UI rollout, rollback, restore, benchmark and operator incident contr
 | CHAT_11 | P1 | Duplicate/SSRF/prompt injection/timeout/unsafe retry tests |
 | CHAT_06 | P1 | 06-03 Skill release pin, 06-04 learned recipe promotion are separate review flows |
 
+### Upstream PR evidence and compatibility caveats (2026-10-30)
+
+[OpenClaw PR #173178](https://github.com/openclaw/openclaw/pull/173178) discusses JSON5 manifest parsing compatibility, while [OpenClaw PR #158601](https://github.com/openclaw/openclaw/pull/158601) proposes purging rejected workshop candidates with ownership/revision guard. Both were **open/unmerged at inspection**; PR body is *Issue/PR report* and not source-code-verified accepted behavior. This Harness deliberately chooses strict canonical JSON for the v1 wire manifest even if upstream supports different local formats, with an explicit import parser/migration rather than silent acceptance. Any rejected candidate purge must pass owner/scope, CAS and dependent artifact retention checks.
+
+**Shared contracts:** CHAT_01 PR #23 event envelope describes BIGINT counters as canonical decimal strings; DB/JS adapters must not convert Run leaseEpoch from arbitrary BIGINT to lossy JS numbers. CHAT_03 PR #20 requires policy-first approval with **fresh Run leaseEpoch fence on execution**; do not bind a pending approval irrecoverably to an obsolete lease if resumed Run reclaims a new epoch, but only the current epoch can dispatch. These remain [PROVISIONAL] until owner review.
+
 ## 17. Sources / grades
 
 - [S1] [OpenClaw hooks](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/src/plugins/hooks.ts), [pre-Tool policy](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/src/agents/agent-tools.before-tool-call.policy.ts), [plugin manifest tests](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/src/plugins/manifest-registry.test.ts), [migration tests](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/src/commands/doctor-plugin-manifests.test.ts) — **Code verified**, 2026-10-30。MIT。
