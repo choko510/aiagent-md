@@ -84,13 +84,16 @@ async function withSessionCommand(cmd, principal) {
   const session = await sessionRepo.getByTenant(cmd.sessionId,principal.tenantId);
   assertOwnerTaskRun(session,principal); assertLiveFence(session,cmd);
   return await pageLock(session.id, cmd.tabId).runExclusive(async () => {
-    const reread = await sessionRepo.getForUpdate(session.id);
+    // ここでDB行ロックを握りながらWeb/ブラウザの外部待機をしない。
+    const reread = await sessionRepo.readCurrentWithOwnerAndFence(session.id,principal);
     assertLiveFence(reread,cmd); assertMode(reread,"AGENT");
     const page = workerPrivatePages.resolve(cmd.tabId, reread.leaseEpoch);
     if (!page || page.isClosed()) return "SESSION_REQUIRES_RECOVERY";
+    await toolLedger.recordIntentBeforeDispatch(cmd,principal);
     const outcome = await executeBoundedPageAction(page,cmd);
-    await sessionRepo.commitIfEpochMatches(cmd.sessionId,cmd.expectedEpoch,outcome);
-    return outcome;
+    const committed = await sessionRepo.commitIfEpochAndGoalMatch(
+      cmd.sessionId,cmd.expectedEpoch,cmd.expectedGoalRevision,outcome);
+    return committed ? outcome : "STALE_RESULT_NOT_CURRENT";
   });
 }
 ```
@@ -194,3 +197,7 @@ Owned pathのみ。Sourceコードとテストを参照したがHarness test未�
 - **[Issue report / not reproduced]** Playwright [#31108](https://github.com/microsoft/playwright/issues/31108) は `storageState` にsessionStorageの扱いを追加する機能要求。現行 `BrowserContext.storageState()` で**sessionStorageやあらゆるサイト認証状態まで完全に復元できるとは仮定しない**。T-BSESS-007ではsessionStorage依存のfixtureも追加し、復元できなければWAITING_INPUTに留める。
 - **[Issue report / not reproduced]** Browser Use [#5912](https://github.com/browser-use/browser-use/issues/5912) は切断済みCDP clientへのStorageStateWatchdogアクセスでERRORを繰り返す報告。関連 [PR #5913](https://github.com/browser-use/browser-use/pull/5913) は確認時点でopen・未マージ（PR metadata inspected）。本HarnessはBrowser disconnect時にwatchdogを停止・破棄し、旧Session event listenerが復元後も走り続けないようにする。T-BSESS-011で旧listenerのログ/保存の発火0件を検証。
 
+
+### Round 2 transaction-lock self-audit（2026-10-30）
+
+Browser actionの間に `SELECT ... FOR UPDATE` 行ロックを保持すると、ページ待機や人間HandoffによってDB更新がブロックされ、Cancel/Handoff/lease takeoverのデッドロックや大幅遅延を起こし得る。**旧擬似コードの `getForUpdate` を削除した**。Action開始前にowner+lease mode/epoch/goalRevisionを読取り、Tool Ledgerにdispatch intentをcommit。外部操作中はDB transactionを保持せず、観測保存時に短いtransaction内で `WHERE lease_epoch=:expected AND goal_revision=:expectedGoal AND mode='AGENT'` 相当の条件付き更新/Insertでfenceする。CAS失敗後の遅延結果は現行成功にしない。**BSESS-T03/08/09/12**に、外部操作が長時間待機してもCancel/Human handoffのtransactionが完了し、古いWorkerのcommitだけが0行になる競合fixtureを追加する。物理SQLはCHAT_10の契約提案。
