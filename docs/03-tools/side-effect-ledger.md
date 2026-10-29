@@ -84,10 +84,11 @@ type EvidenceGrade = "PROVIDER_STATUS_CONFIRMATION"|"SIGNED_RECEIPT"|
 interface FrozenEffectIntent {
   id: IntentId; tenantId: string; ownerUserId: string; taskId: string; runId: string;
   stepOrdinal: number; proposalOrdinal: number; logicalCallId: string;
-  goalRevision: string; toolId: string; // canonical int64 decimal toolRevision: string;
+  goalRevision: string; // canonical int64 decimal
+  toolId: string; toolRevision: string;
   canonicalArgsDigest: string; targetDigest: string; operationCode: string;
   effectClass: EffectClass; credentialBindingVersion?: string;
-  createdAt: string; intentRecordVersion: number; approvalRef?: IntentId;
+  createdAt: string; intentRecordVersion: string; // canonical int64 decimal approvalRef?: IntentId;
 }
 interface EffectAttempt {
   attemptId: IntentId; intentId: IntentId; ordinal: number;
