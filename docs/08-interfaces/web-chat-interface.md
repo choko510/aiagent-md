@@ -248,3 +248,7 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 **[I-CHAT-01]** [Vercel AI SDK issue #22358](https://github.com/vercel/ai/issues/22358)（2026-10-30閲覧、**Closed**、Issue report）: Custom ChatTransportの`resumeStreamIsReplay`フラグが`useChat`経由で失われ、全量replayが古いpartial textに重複追加される事象が報告された。本仕様はSDK側が修正済みかどうかに依存せず、**server Event ID/Task seqとabsolute redacted snapshotを正本**とする。CHATUI-T02に「partial assistant output→切断→全量replay→完成」のとき完成テキストは1回のみ、StepとUsageも重複しない試験を追加する。SDK導入時には対象バージョンで同型の回帰テストを実行する。
 
 **[I-CHAT-02]** [Mastra issue #28224](https://github.com/mastra-ai/mastra/issues/28224)（2026-10-30閲覧、Open、Issue report）: terminal event公開前のRun lease喪失。Runが途中で応答を停止してもUIは架空の完了を宣言せず、GETの永続Task/RunとSSEの最後の正常イベントを比較し、uncertain/refreshを表示する。CHATUI-T03/T12へterminal-event欠落時の表示fixtureを追加する。
+
+## 16. Upstream PR差分の照合（Code verified PR patch）
+
+**[PR-CHAT-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、**Merged**）の実diffを調査した。`packages/react/src/use-chat.ts` のstable transport wrapperに `get resumeStreamIsReplay() { return getTransport().resumeStreamIsReplay; }` が追加され、`use-chat.ui.test.tsx` に `Hello` 部分表示→network disconnect→`Hello world`全量replay時の重複を防ぐ実テストが追加された。これは [issue #22358](https://github.com/vercel/ai/issues/22358) に対応する修正で、**旧バージョンで起こり得る不具合であり最新mainで未修正とは主張しない**。本Harnessではライブラリ側の修正の有無に依存せず、独自`TaskEvent.sequence`で冪等投影を検証する（CHATUI-T02）。
