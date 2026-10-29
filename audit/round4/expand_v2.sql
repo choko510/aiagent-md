@@ -99,10 +99,14 @@ CREATE TABLE agent.notification_digest_members (
  rank_decision_ref text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,digest_id,notification_id),
- UNIQUE(tenant_id,notification_id),
  FOREIGN KEY(tenant_id,digest_id) REFERENCES agent.notification_digest_envelopes(tenant_id,id),
  FOREIGN KEY(tenant_id,notification_id) REFERENCES agent.notification_records(tenant_id,id)
 );
+-- A cancelled/proven unsent membership is historical, not a permanent lock.
+-- Accepted/UNKNOWN digest coverage remains locked against duplicate individual sends.
+CREATE UNIQUE INDEX digest_active_member_only ON agent.notification_digest_members
+ (tenant_id,notification_id)
+ WHERE member_state_code IN ('reserved','covered_accepted','coverage_unknown');
 -- Source bytes and derived artifacts must retain provenance and bounded parser budgets.
 CREATE TABLE agent.parser_jobs (
  tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,

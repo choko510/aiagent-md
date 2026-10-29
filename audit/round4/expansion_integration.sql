@@ -111,3 +111,46 @@ BEGIN
  THEN RAISE EXCEPTION 'new generation not activated/revoked'; END IF;
  RAISE NOTICE 'PASS generation advance retains old receipt and current revoked generation';
 END $$;
+
+-- Digest reservation concurrency semantics: active uniqueness and historical release.
+INSERT INTO agent.notification_digest_envelopes(tenant_id,id,owner_user_id,
+ destination_ref,policy_revision,send_state_code)
+VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000114',
+ '01900000-0000-7000-8000-000000000002','binding-1','1','reserved'),
+('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000115',
+ '01900000-0000-7000-8000-000000000002','binding-1','1','reserved');
+DO $$
+DECLARE active_collision boolean:=false;
+BEGIN
+ BEGIN
+  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+  member_state_code,rank_decision_ref)
+  VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000114',
+  '01900000-0000-7000-8000-000000000106','reserved','dup-before-release');
+ EXCEPTION WHEN unique_violation THEN active_collision:=true; END;
+ IF NOT active_collision THEN RAISE EXCEPTION 'active reservation duplicate not denied'; END IF;
+ RAISE NOTICE 'PASS active duplicate digest member denied';
+END $$;
+UPDATE agent.notification_digest_members SET member_state_code='released'
+WHERE tenant_id='01900000-0000-7000-8000-000000000001'
+ AND digest_id='01900000-0000-7000-8000-000000000107'
+ AND notification_id='01900000-0000-7000-8000-000000000106';
+INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+ member_state_code,rank_decision_ref)
+VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000114',
+ '01900000-0000-7000-8000-000000000106','reserved','new-reservation-after-release');
+UPDATE agent.notification_digest_members SET member_state_code='coverage_unknown'
+WHERE tenant_id='01900000-0000-7000-8000-000000000001'
+ AND digest_id='01900000-0000-7000-8000-000000000114';
+DO $$
+DECLARE unknown_collision boolean:=false;
+BEGIN
+ BEGIN
+  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+  member_state_code,rank_decision_ref)
+  VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000115',
+  '01900000-0000-7000-8000-000000000106','reserved','should-not-retry-unknown');
+ EXCEPTION WHEN unique_violation THEN unknown_collision:=true; END;
+ IF NOT unknown_collision THEN RAISE EXCEPTION 'UNKNOWN digest member incorrectly re-reserved'; END IF;
+ RAISE NOTICE 'PASS digest release allows new reservation; UNKNOWN blocks retry';
+END $$;
