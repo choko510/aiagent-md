@@ -158,20 +158,29 @@ TRND-PR5 UI/read API + replay and 2-tenant fault and SC14 E2E。
 |TRND-T19 Contract|unknown major version / malformed time / NaN money → reject|
 |TRND-T20 Integration|late retraction/delete post → revised provenance and stale derived series|
 
-## 15. Requirements → Test → Acceptance
-|MUST|TEST|SC|expected|
+## 15. MUST requirement → TEST → SC 追跡（全ID・省略表記なし）
+
+|Requirement|Designed TEST (未実行)|Acceptance Scenario|確認可能な合格条件|
 |---|---|---|---|
-|TRND-001,002|T03,T19|01,10|unmatched series rejected|
-|TRND-003,004|T01,T02,T05|03,14|repost/time correct|
-|TRND-005,006,007|T01,T04,T17|03,14|missing buckets null|
-|TRND-008,009|T06,T08|01,14|value class separation|
-|TRND-010,011|T06,T07,T08,T09|14|no causal implication or invented score|
-|TRND-012|T10,T11|10,14|stale invalidation|
-|TRND-013|T04,T17|11,14|retrieval failure not zero|
-|TRND-014,015|T05,T12,T13,T20|07,14|replay/version safe|
-|TRND-016|T16|07,08|no stale effects|
-|TRND-017|T15|08,11|no autonomous side effects|
-|TRND-018|T18|09|bounded resources|
+|TRND-001|TRND-T19|SC-03, SC-14|provenance/time入力検証|
+|TRND-002|TRND-T03|SC-01, SC-10|別商品/地域/通貨非混合|
+|TRND-003|TRND-T02|SC-03, SC-14|repost source dedup|
+|TRND-004|TRND-T01, TRND-T05|SC-03, SC-14|late時刻で最新汚染0|
+|TRND-005|TRND-T04|SC-03, SC-14|sampling欠測保持|
+|TRND-006|TRND-T04, TRND-T17|SC-14|薄いデータtrend unknown|
+|TRND-007|TRND-T01|SC-03, SC-14|UTC half-open bucket|
+|TRND-008|TRND-T03, TRND-T19|SC-01, SC-14|unitとcondition不正拒否|
+|TRND-009|TRND-T06, TRND-T08|SC-14|別系列の独立変化を明示|
+|TRND-010|TRND-T08, TRND-T09|SC-09, SC-14|校正なしscore null|
+|TRND-011|TRND-T07, TRND-T09|SC-14|相関≠因果・反証表示|
+|TRND-012|TRND-T10, TRND-T11|SC-10, SC-14|依存revision変化でSTALE|
+|TRND-013|TRND-T04, TRND-T17|SC-11, SC-14|429や取得失敗が0件に化けない|
+|TRND-014|TRND-T05, TRND-T20|SC-07, SC-14|watermark後は新version|
+|TRND-015|TRND-T12, TRND-T13|SC-07, SC-14|duplicate/crash receipt 1|
+|TRND-016|TRND-T16|SC-07, SC-08|cancel後publish0|
+|TRND-017|TRND-T15|SC-08, SC-11|外部副作用なし|
+|TRND-018|TRND-T18|SC-09|有限予算内終了・部分説明|
+
 
 ## 16. Cross-team proposals / blocked contracts
 P0-TRND-01 [PROVISIONAL: CHAT_01] ObservationV1拡張ではなくlineage extension: originalPostId/upstreamRootId, sourceAt, sampling completeness, entityRevision, source profile revision; event revision semantics owned 01。P0-TRND-02 [PROVISIONAL: CHAT_05/13] X actor ID/quote/repost taxonomy、search query revision、pagination and post deletion handling; upstream source coverage cannot be promised. P0-TRND-03 [PROVISIONAL: CHAT_10] append-only metric revision, bucket version CAS, source invalidation/outbox, tenant indexes, ID UUIDv7 consistency. P0-TRND-04 [PROVISIONAL: CHAT_09] data tenancy/owner scope, source permission revocation and retention. P1-TRND-05 [PROVISIONAL: CHAT_07/08/11] Watch alert oracle, dashboard bias warnings, held-out false positive metrics. CHAT01/10 common UUIDv7 vs random uuid, Task conversation nullable, recordVersion CAS, tenant/workspace mapping unresolved until coordinator decision. This draft must not become Locked automatically.
