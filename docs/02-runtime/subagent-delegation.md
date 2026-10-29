@@ -127,17 +127,21 @@ Parent STEER -> previous revision child output marked STALE for changed conditio
 ~~~ts
 async function delegate(parentClaim: RunClaim, req: DelegationRequest) {
   return db.tx(async tx => {
+    const runPointer=await tx.readRunPointer(parentClaim.runId);
+    const parentTask=await tx.lockTask(runPointer.taskId); // Task before Run (shared lock order)
     const parentRun=await tx.lockCurrentRun(parentClaim.runId);
-    const parentTask=await tx.lockTask(parentRun.taskId);
+    if(parentRun.taskId!==parentTask.id) throw StaleParentPointer();
     assertSameTenantAndOwner(parentRun,parentTask);
     assertCurrentEpoch(parentRun,parentClaim.leaseEpoch);
     assertActiveRunAndGoal(parentTask,parentRun,req.parentGoalRevision);
     assertNotCancelledOrRevoked(parentTask);
     assertDAGandFiniteDepth(parentTask,req);
-    const scope=await authz.intersectParentAndChildCapabilities(parentTask,req.proposedToolRefs);
-    const budget=await tx.reserveChildBudgetWithinParent(parentTask,req.maxCostMicroUsd);
     const existing=await tx.lookupIdempotencyByParentAndCommand(parentTask.id,req.commandId);
     if(existing) return assertSamePayloadAndReuseReceipt(existing,req);
+    // Reserve the unique fork command first: any competing request locks/reuses its receipt.
+    await tx.claimUniqueDelegationCommand(parentTask.id,req.commandId,canonicalHash(req));
+    const scope=await authz.intersectParentAndChildCapabilities(parentTask,req.proposedToolRefs);
+    const budget=await tx.reserveChildBudgetWithinParent(parentTask,req.maxCostMicroUsd);
     const child=await tx.createChildTaskWithImmutableGoal({
       parentTaskId:parentTask.id, tenantId:parentTask.tenantId,
       ownerUserId:parentTask.ownerUserId, conversationId:null,
