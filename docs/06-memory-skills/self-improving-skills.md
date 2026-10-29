@@ -80,7 +80,7 @@ Task/Run状態のownerはCHAT_01、結果VerifierはCHAT_02、browser replayはC
 
 ```ts
 type LearningSource = {
-  taskId: string; runId:string; runLeaseEpoch: number;
+  taskId: string; runId:string; runLeaseEpoch: string; // canonical unsigned decimal wire encoding, validate <= BIGINT max; no unsafe JS cast
   goalRevision:number; resultRevision:number;
   verifierReceiptRef:string; evidenceRefs: readonly string[];
   actorRef:string; consentPolicyVersion:string;  // validated server side
@@ -282,6 +282,12 @@ SI-5 rollback/withdrawn/cancel/source delete, fault injection and performance me
 | CHAT_08 | P1 | review/approve/reject/withdraw UIと本人が操作したdiff |
 | CHAT_11 | P1 | negative training set、restore/replay/cancel/TOCTOU fault tests |
 | CHAT_06 | P1 | Skill Lifecycle 06-03と06-05のhook install boundaryで未確定capabilities接続 |
+
+### Additional upstream PR/Issue checks (2026-10-30)
+
+[Hermes PR #41485](https://github.com/NousResearch/hermes-agent/pull/41485) proposes provenance-tagged draft suppression for generated skills; closed/unmerged at time of inspection, **PR discussion (not established released functionality)**. [Hermes PR #125277](https://github.com/NousResearch/hermes-agent/pull/125277) describes serializing rollback with Skill mutations; open/unmerged when checked, **PR discussion**. [Letta Code PR #4539](https://github.com/letta-ai/letta-code/pull/4539) proposes background memory worker repair and is also historical/unmerged, **PR discussion**. They motivate tests for snapshot/stale worker and rollback races; current behavior claims are grounded in `2` source/tests, not these unmerged proposals.
+
+**Cross-contract numeric codec:** CHAT_01 PR #23 uses decimal-string wire encoding for BIGINT-valued event sequences; this specification keeps `runLeaseEpoch` as an unrounded decimal string and only converts in a trusted bounded adapter. The Task/Run-state Draft has its own numeric variants and must reconcile before Locked. Memory-local revision/Task Goal Revision/Run leaseEpoch may never be conflated.
 
 ## 17. Sources / Evidence grade
 
