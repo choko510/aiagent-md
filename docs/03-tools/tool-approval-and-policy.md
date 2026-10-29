@@ -92,7 +92,7 @@ interface ApprovalBinding { approvalId: string; intentId: string; tenantId: stri
   createdAt: string; expiresAt: string; recordVersion: string; // lossless canonical int64
 }
 interface ApprovalCommand {approvalId: string; decision: "APPROVE"|"DENY";
-  commandId: string; expectedRecordVersion: number; }
+  commandId: string; expectedRecordVersion: string; // canonical int64 decimal }
 type ApprovalStatus="PENDING"|"APPROVED"|"DENIED"|"EXPIRED"|"REVOKED"|"CONSUMED";
 ~~~
 
