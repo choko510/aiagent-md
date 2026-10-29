@@ -227,3 +227,7 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 - **[I-SSE-03]** [Mastra #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30閲覧、Open）: schedule dispatchのhook完了を実際のRun完了と誤認するリスクを指摘。SSEがWatchを`complete`と描画できるのは**実Run stateの終端イベント・正本を照合した場合のみ**。dispatch成功や202受付のみでcompleteへ遷移禁止。SSE-T10で複数resume segmentとWorker restartを試す。
 
 これらのIssuesはソースの具体実装を反証する監査材料であり、OSSが本プロジェクトで同じ故障を起こしたという意味ではない。
+
+## 15. OSS PR差分による追加リスク確認
+
+**[PR-SSE-01]** [Vercel AI SDK PR #22362](https://github.com/vercel/ai/pull/22362)（2026-10-30確認、Merged）はtransport wrapperがreplayフラグを失う問題を修正、React regression testを追加。UI側のtransportがsnapshot replayかdelta continuationかの**識別は必須**。本設計はTaskEvent sequenceに基づくreplayであり、全量Snapshotは既存状態を置換、delta Eventはsequenceでskipする。SSE-T03/T09でこの2経路を明示的に分ける。
