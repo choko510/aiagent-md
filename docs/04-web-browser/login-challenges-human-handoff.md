@@ -73,22 +73,32 @@ EXPIRED/CANCELLED terminal for ticket, new ticket requires new approval
 ## 7. アルゴリズム（疑似コード）
 ```typescript
 async function requestHandoff(req,principal) {
- const session=await sessions.readForUpdateByTenant(req.sessionId,principal.tenantId);
- assertOwnerAndTask(session,principal); assertValidRunGoalEpoch(session,req);
- await gatewayCheckpointWaitingInput(req.taskId,req.sessionId);
- await sessions.casModeEpoch(session,"AGENT","HUMAN_PENDING");
- return await ticketStore.createHashedOneTime({user:principal.userId,
-     tenant:principal.tenantId,task:req.taskId,session:req.sessionId,
-     audience:"browser-takeover",epoch:session.leaseEpoch,ttlSeconds:300});
+  // 原子的境界: owner/Run/goalチェック + WAITING_INPUT checkpoint +
+  // session mode/leaseEpoch CAS + hashed ticket作成を1 transactionに束ねる。
+  return await db.transaction(async tx => {
+    const s=await tx.sessions.lockByTenant(req.sessionId,principal.tenantId);
+    assertOwnerAndTask(s,principal); assertValidRunGoalEpoch(s,req);
+    await tx.checkpoint.waitingInput(req.taskId,req.sessionId);
+    const next=await tx.sessions.casModeAndIncrementEpoch(s,"AGENT","HUMAN_PENDING");
+    return tx.tickets.createHashedOneTime({user:principal.userId,
+      tenant:principal.tenantId,task:req.taskId,session:req.sessionId,
+      audience:"browser-takeover",epoch:next.leaseEpoch,ttlSeconds:300});
+  });
 }
-async function releaseHandoff(ticket,principal) {
- const claim=await ticketStore.consumeAtomically(ticket,principal);
- await sessions.assertHumanLease(claim);
- await browserWorker.stopHumanInput(claim.session);
- const observed=await browserWorker.recheckAuthAndTab(claim.session);
- if(!observed.authenticated) return "WAITING_INPUT";
- await sessions.casModeAndIncrementFence("HUMAN","AGENT",claim);
- return checkpoint.resumeAfterFreshGoalPolicyValidation(claim.task);
+async function beginHumanTakeover(oneTimeTicket,principal) {
+  // チケットはHUMAN開始時に1度だけ消費。releaseには再使用しない。
+  const claim=await ticketStore.consumeAndClaimHumanModeAtomically(oneTimeTicket,principal);
+  await browserWorker.bindHumanInput(claim.session,claim.epoch);
+  return issueShortLivedAuthenticatedTakeoverConnection(claim);
+}
+async function releaseHandoff(authenticatedConnection,principal) {
+  const claim=await ticketStore.lookupConsumedGrantForOwner(authenticatedConnection,principal);
+  await sessions.assertHumanLeaseAndCurrentGoal(claim);
+  await browserWorker.stopHumanInput(claim.session);
+  const observed=await browserWorker.recheckAuthAndTab(claim.session);
+  if(!observed.authenticated) return "WAITING_INPUT";
+  await sessions.casModeAndIncrementFence("HUMAN","AGENT",claim);
+  return checkpoint.resumeAfterFreshGoalPolicyValidation(claim.task);
 }
 ```
 関数名は実装提案であって既存OSS API名を捏造したものではない。Gateway/DB/Secret Storeの呼出しが正式Contract確定前に[PROVISIONAL]であることを明示。
@@ -103,7 +113,7 @@ async function releaseHandoff(ticket,principal) {
 | login cookie missing | auth probe fails | re-handoff | WAITING_INPUT |
 | Run cancel while human active | revision/lease stale | revoke + isolate Browser | CANCELLED |
 | Browser crash | tab state lost | invalidate ticket / new owner claim | RECOVERING |
-| user clicks purchase | side effect intent missing | block/reconfirm approval, do not treat handoff as approval | NEEDS_APPROVAL |
+| human manually attempts external purchase | direct human operation (not Agent Tool) | user-directed UI actions are distinct; cannot guarantee every website-side effect blocked; no implicit AI approval or automatic replay | HUMAN_DIRECT_ACTION |
 - Controllerの複数worker claim時はepoch fenceにより一方のみ取得。旧workerは遅延完了を現行結果へcommitできない。
 - 意図保存→外部Action→結果保存の間にKillしたら`UNKNOWN`を識別。ログイン操作やボタン押下はread-onlyと断定できない。不可逆な外部Actionの再送は禁止。Cancel/Steer後は新Action開始0件。
 
@@ -166,3 +176,7 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 [S2] **Skyvern** at `fa2c00ff7ec9599b495cc52d24a1363613937895` (2026-10-30, Code verified: source/test read, not executed; 導入時にLICENSE確認（再利用しない）): [`skyvern/forge/sdk/copilot/challenge_evidence.py — typed challenge evidence`](https://github.com/Skyvern-AI/skyvern/blob/fa2c00ff7ec9599b495cc52d24a1363613937895/skyvern/forge/sdk/copilot/challenge_evidence.py) · [`skyvern/forge/sdk/copilot/tools/page_challenge.py — challenge flow`](https://github.com/Skyvern-AI/skyvern/blob/fa2c00ff7ec9599b495cc52d24a1363613937895/skyvern/forge/sdk/copilot/tools/page_challenge.py).
 [S3] **Jev browser** at `817b09eea6e21aad836b5ed32a613c68e5644a08` (2026-10-30, Code verified: source/test read, not executed; 導入前LICENSE確認): [`src/password.ts — parseTrustedOrigin/readHandoffSecret/makeRedactor`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/src/password.ts) · [`test/unit.test.mjs — password handoff one-shot/redaction tests`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/test/unit.test.mjs) · [`src/navigate.ts — page injection and bot challenge inspection`](https://github.com/jkudish/jev-browser/blob/817b09eea6e21aad836b5ed32a613c68e5644a08/src/navigate.ts).
 **Design hypothesis:** 本Harness内の構造、limit、状態遷移、権限検証順序、パーサー・Human Handoff Bridgeは未実装。将来OSS仕様が変わればpinned SHAと再比較する。
+
+### Round 2 ticket consumption / side-effect self-audit（2026-10-30）
+
+初稿は`releaseHandoff(ticket)`に`consumeAtomically`を呼び、TicketがTakeover開始時に**既に消費されている**場合release不能になる矛盾があった。修正版は`requestHandoff`の短いDB transactionでWAITING_INPUT+HUMAN_PENDING+新epoch+ticket hashを一貫コミットし、**開始時にだけconsume**、終了時は認証済Takeover connectionに紐づく使用済grantを検証する。人間の操作がブラウザを通じて外部サイトへ送る行為はAgentの承認付きTool実行とは別だが、本Harnessが人間操作の全副作用を技術的に必ず阻止すると保証してはならない。**HND-T03/04/09/10/12/14**にはOne-shot reuse拒否、開始済connection release成功、古いepoch/Steer拒否、cancelとの競合、ユーザー自身の操作をAI Toolの承認に昇格させない負のテストを追加する。
