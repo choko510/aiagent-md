@@ -78,7 +78,7 @@ type ToolRisk = "read"|"sensitive"|"write"|"irreversible"; // 03-03 local
 type PrepareDisposition = "READY"|"WAITING_APPROVAL"|"DENIED"|"INVALID"|"OVER_BUDGET"|"STALE";
 interface TrustedRunScope {
   tenantId: EntityId; taskId: EntityId; runId: EntityId;
-  ownerUserId: EntityId; goalRevision: number; stepOrdinal: number;
+  ownerUserId: EntityId; goalRevision: string; stepOrdinal: number; // goalRevision canonical int64 decimal
   leaseEpoch: MonotonicFence; policyEpoch: string;
 }  // constructed from DB by server, never model-supplied
 interface ToolProposal {
@@ -323,3 +323,7 @@ Test execution is **not** claimed; all use fake providers and dummy approvals; n
 - [S4] [MCP SDK callTool](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/src/client/client.ts#L2331-L2493), 2026-10-30 **Code verified**, mixed MIT/Apache-2.0 transition.
 - [S5] [PydanticAI issue 10926](https://github.com/pydantic/pydantic-ai/issues/10926), [Mastra issue 27485](https://github.com/mastra-ai/mastra/issues/27485), [LangGraph issue 9397](https://github.com/langchain-ai/langgraph/issues/9397), 2026-10-30 **Issue report**; not separately reproduced.
 - [S6] [Project requirements](../00-foundation/project-brief.md), [Architecture Rules](../00-foundation/architecture-rules.md), [SC-01..16](../00-foundation/acceptance-scenarios.md), latest main `b45d4e9`. Our validation/caps and storage design = **Hypothesis**, not SDK contract.
+
+
+### Round 3 — lossless canonical version boundary (2026-10-30)
+All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
