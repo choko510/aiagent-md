@@ -187,3 +187,10 @@ GET /browser-sessions/{id} はredacted stateとTakeover可能/期限だけ。ses
 ## Review gate
 
 Owned pathのみ。Sourceコードとテストを参照したがHarness test未実施、依存共有契約未Lockedにつき**Draft**。Cross-team合意がない部分を確定APIとして配布してはならない。
+
+
+### Round 2 Upstream Issue/PR audit（2026-10-30）
+
+- **[Issue report / not reproduced]** Playwright [#31108](https://github.com/microsoft/playwright/issues/31108) は `storageState` にsessionStorageの扱いを追加する機能要求。現行 `BrowserContext.storageState()` で**sessionStorageやあらゆるサイト認証状態まで完全に復元できるとは仮定しない**。T-BSESS-007ではsessionStorage依存のfixtureも追加し、復元できなければWAITING_INPUTに留める。
+- **[Issue report / not reproduced]** Browser Use [#5912](https://github.com/browser-use/browser-use/issues/5912) は切断済みCDP clientへのStorageStateWatchdogアクセスでERRORを繰り返す報告。関連 [PR #5913](https://github.com/browser-use/browser-use/pull/5913) は確認時点でopen・未マージ（PR metadata inspected）。本HarnessはBrowser disconnect時にwatchdogを停止・破棄し、旧Session event listenerが復元後も走り続けないようにする。T-BSESS-011で旧listenerのログ/保存の発火0件を検証。
+
