@@ -400,3 +400,7 @@ All tests **designed but 0 executed**. Upstream code/tests were read, no release
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+
+### Round 4 Event retention floor and restore consistency
+Backups must include `agent.event_retention_floors`, tenant counters, domain_events and outbox in one recovery-point-consistent snapshot. Restoring a database to an older snapshot while newer signed cursors still exist MUST NOT silently promise replay of deleted/never-committed offsets; sign cursors with a DB recovery generation or invalidate outstanding cursor tokens after restore. Restored data cannot advance retention floor past the oldest event required by a pending Outbox/Evidence/Checkpoint reference. Test BUR-R4-T01: backup/restore with live replay window and queued outbox, expect safe cursor invalidation/410+snapshot and zero phantom success. Design only; restore drill not executed.
