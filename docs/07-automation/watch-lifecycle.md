@@ -79,15 +79,20 @@ Watch ownerUserId, tenantIdはCHAT_01/09から取得、DB workspace_idとのmapp
 ~~~ts
 type WatchCommand =
  | {kind:"create", idempotencyKey:string, spec:CreateWatch}
- | {kind:"patch", watchId:string, expectedRecordVersion:number, patch:WatchPatch}
- | {kind:"pause"|"resume"|"retire", watchId:string, expectedRecordVersion:number, idempotencyKey:string};
+ | {kind:"patch", watchId:string, expectedRecordVersion:string, patch:WatchPatch}
+ | {kind:"pause"|"resume"|"retire", watchId:string, expectedRecordVersion:string, idempotencyKey:string};
 type WatchTarget = {kind:"provider-entity"|"url"|"query"|"external-event", reference:string, normalizedIdentityRef?:string};
 type PredicateRef = {kind:"price-threshold"|"change"|"structured-expression", version:number, canonicalConditionRef:string};
 type CreateWatch = {target:WatchTarget, predicate:PredicateRef, timeSpecRef?:string, eventSubscriptionRef?:string, destinationBindingRef:string, budgetRef:string, consentRef:string};
-type WatchProjection = {watchId:string, recordVersion:string, definitionRevision:string, // canonical int64 decimal status:"active"|"paused"|"retired"|"blocked", target:WatchTarget, nextDueUtc:string|null, lastObservedAtUtc?:string|null, blockedReason?:string, notificationSummary:string};
+type WatchProjection = {
+ watchId:string; recordVersion:string; definitionRevision:string; // canonical int64 decimal
+ status:"active"|"paused"|"retired"|"blocked";
+ target:WatchTarget; nextDueUtc:string|null; lastObservedAtUtc?:string|null;
+ blockedReason?:string; notificationSummary:string;
+};
 ~~~
 
-上記は**所有範囲を示す局所proposal**でありCHAT_01の共有Event/StateやCHAT_08のREST DTOを確定しない。recordVersionは共有record CAS（1開始をCHAT_01が提案）、definitionRevisionはWatch条件の版、Task.goalRevisionはTask目標、Run.leaseEpochはRun実行所有権。互いに代用禁止。value/stringのJSON wireではunsigned safe integerを超えるversionはrejectまたは共有string bigint codec決定待ち。
+上記は**所有範囲を示す局所proposal**でありCHAT_01の共有Event/StateやCHAT_08のREST DTOを確定しない。recordVersionは共有record CAS（1開始をCHAT_01が提案）、definitionRevisionはWatch条件の版、Task.goalRevisionはTask目標、Run.leaseEpochはRun実行所有権。互いに代用禁止。Versionのwireは正規十進文字列・内部BigIntで無損失に扱い、JSON numberは禁止。
 
 Validation: target URLはnetwork/egr​​ess/SSRF認可済みprovider gatewayで確認、redirect/DNS rebindingの初回・実行時再検証必須。外部イベントはCHAT_13 Subscription ID/安定Actor IDの照合が必須、SNS handleだけをIdentityにしない。価格閾値はfinite decimal + ISO currency、条件比較は07-03へ、無限大/NaN/negative invalid。宛先は自分の検証済binding参照であり任意email/chat ID直入力は禁止。Cron/TZの検証は07-01、最低周期/rate/quotaは契約値に従う。
 
