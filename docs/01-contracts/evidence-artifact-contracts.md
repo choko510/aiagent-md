@@ -16,7 +16,7 @@
 |---|---|---|
 | LangGraph ffc3336367e8139668d11e5f0b0e6def57e7c762 MIT [S1] | libs/checkpoint/langgraph/store/base/__init__.py: Item, PutOp, GetOp, BaseStore.get/put/search; libs/checkpoint/tests/test_store.py: namespace guard/search/pagination/cancel tests | namespace/key,value storeは参考だが原本バイトcontent hashと観測/主張の参照構造は別に設計する |
 | PydanticAI 3809c1b861036197de4a06ae3ee38e27e5455100 MIT [S2] | pydantic_ai_slim/pydantic_ai/messages.py: ImageUrl/DocumentUrl/BinaryContent/StructuredContent、tests/test_messages.py: binary image/document, data URI, content serialization/roundtrip | Media type/bytes/structured textを別扱いする。画像PDFのpage/cell provenanceはSDK media objectsに含まれないため自作 |
-| MCP TS SDK 39ae8e6192cf43273aaaf2de4169dfa9f7216e28 [S3] | packages/core-internal/src/types/spec.types.2025-11-25.ts: Resource, Content, CallToolResult; test/e2e/scenarios/dynamic.test.ts | MCP resource URI/embedded contentはtool transport用であり長期Artifact retentionとauth scopeを保証しない。SDK/revisionとlicense詳細は要再検証 |
+| MCP TS SDK 39ae8e6192cf43273aaaf2de4169dfa9f7216e28 [S3] | packages/core-internal/src/types/spec.types.2025-11-25.ts: Resource, Content, CallToolResult; test/e2e/scenarios/dynamic.test.ts | MCP resource URI/embedded contentはtool transport用であり長期Artifact retentionとauth scopeを保証しない。core-internal package.json declares Apache-2.0; root legacy MIT/Apache-2.0 mix; protocol revision compatibility remains to validate |
 
 Alternative A: LLM回答を根拠として保存する→二次推測と原資料が混ざり却下。B: 全HTML/画像を毎回LLMへ送る→コスト、秘匿、入力長超過で却下。C: immutable Artifact + structured Observation + claim-specific Evidence DAG→採用。D: URLのみを保存し再訪時再取得→価格/空室が変わり再現性がないため単独採用禁止（storage TTLが短い場合のみ制約明示）。
 
@@ -254,8 +254,10 @@ EVD-PR1 artifact metadata/typed validator/locator, storage checksum; EVD-PR2 obs
 
 [S1] Code verified: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint/langgraph/store/base/__init__.py and https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/checkpoint/tests/test_store.py (Item, PutOp, BaseStore, namespace and paginated tests). MIT LICENSE.  
 [S2] Code verified: https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/pydantic_ai_slim/pydantic_ai/messages.py and https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/tests/test_messages.py (DocumentUrl/BinaryContent/StructuredContent and tests). MIT LICENSE.  
-[S3] Code verified: https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/src/types/spec.types.2025-11-25.ts and https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/dynamic.test.ts. Package licensing/revision compatibility not yet verified.  
+[S3] Code verified: https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/src/types/spec.types.2025-11-25.ts and https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/dynamic.test.ts. Pinned core-internal package.json specifies Apache-2.0 and root LICENSE documents legacy MIT contributions; per-contribution licensing and revision integration not verified.  
 [S4] Hypothesis: our Evidence DAG, numeric confidence prohibition, source locator/version/retention constraints. Independent code benchmark not done.  
 [S5] Docs verified: main project-brief, architecture-rules, acceptance-scenarios and expansion requirements.
 
 **Review gates:** Security/retention/physical storage/multimodal coordinate P0/P1 dependencies remain. None of the designed tests were executed. Keep Draft.
+
+**MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
