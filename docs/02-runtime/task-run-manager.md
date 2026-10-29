@@ -133,7 +133,7 @@ transaction中にLLM/外部HTTPを呼ばず、acquire/commitを短く保つ。Ep
 | Steer after approval | old revision no execution; new step replans |
 | Parent Cancel/child submit race | lock parent, deny child if control changed |
 | Effect success but receipt missing | ledger UNKNOWN until provider reconcile |
-| Epoch beyond JS safe integer | no new claim; operator repair |
+| Epoch exceeds signed PostgreSQL BIGINT limit | no new claim; operator repair |
 | Task invalid workspace/owner | deny even if ID exists |
 - 無期限リトライ禁止。DB/lease backendが不明ならfail closed。既着手Toolの結果が不明ならUNCERTAINとし、Tool Gatewayだけがprovider receiptをreconcileする。
 - Ack消失: authoritative receipt/ledgerを再読込。同じ操作のExecutorを直接再呼出ししない。
@@ -190,7 +190,7 @@ TRM1 task idempotency/receipt; TRM2 activeRun FK & immutable goal; TRM3 lease/CA
 | TRM-012 | TRM-T12 | SC-02/07/08/09 |
 
 ## 16. 未決事項とCross-team proposal
-P0 CHAT_01 Task/Run State, GoalRevision, leaseEpoch number, nullable conversationId and recordVersion1; P0 CHAT_10 runs.lease_epoch/lease_owner/expiry + tasks.active_run_id/goal_revision and idempotent receipt outbox; P0 CHAT_03 dispatch claim (lease/control/auth/budget), unknown ledger; P0 CHAT_09 tenant↔workspace/owner lineage; P1 CHAT_08 If-Match controls; CHAT_11 concurrent kill tests.
+P0 CHAT_01 Task/Run State, GoalRevision, leaseEpoch decimal string, nullable conversationId and recordVersion1; P0 CHAT_10 runs.lease_epoch/lease_owner/expiry + tasks.active_run_id/goal_revision and idempotent receipt outbox; P0 CHAT_03 dispatch claim (lease/control/auth/budget), unknown ledger; P0 CHAT_09 tenant↔workspace/owner lineage; P1 CHAT_08 If-Match controls; CHAT_11 concurrent kill tests.
 契約不一致のOwnerの決裁前は、本書や依存実装をLocked/Verifiedとしない。主なブロッカーはUUIDv7 vs DB UUIDv4、nullable conversation、CAS version初期値、Run.leaseEpochの保存、tenant↔workspaceの認可binding、activeRunId/goalRevision永続化。これらはPR #1のRound2 conflict ledgerにも反映済み。
 
 ## 17. Sources (inspection 2026-10-30)
