@@ -31,3 +31,6 @@
 
 ## Git operations
 mainへの直接push禁止、PRの自動マージ禁止。必要ならレビューコメント・Issue/提案のみ。ユーザーがマージを承認した場合に限り所定の方法で統合可能。**一度に多くのPRがマージできる前提を置かず、依存順序とreview gateを守る。**
+
+## 2026-10-30 scope expansion
+The owner has now approved 11 additional functions and **16 author chats / 85 planned specs**. Read `docs/00-foundation/feature-expansion-2026-10.md`, check PRs from CHAT_12–15, and cross-review that CHAT_13 does not reimplement CHAT_07's Watch/Notification outbox, CHAT_14 does not bypass CHAT_04 browser ownership, and CHAT_12 does not redefine shared entity/evidence schemas. Add named-X-user-post triggers, prompt-injection isolation, provider availability/latency and event dedup to the contract audit matrix. Current original 74 docs may still be in unmerged PRs; never claim everything has been merged without checking.

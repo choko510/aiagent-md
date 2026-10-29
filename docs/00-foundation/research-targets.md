@@ -31,3 +31,11 @@
 - 具体的な採用パターン（抽象化、所有権、アルゴリズム、テスト）に落とす。名前の紹介や精神論だけで終わらせない。
 - ライセンス、互換性、API契約、コスト、長期メンテの理由で不採用も可能。採用は義務ではない。
 - 技術的に直接使えないものは再実装/Adapter化するが、OSSの著作権を無視したコードコピーはしない。
+
+## Additional upstream study targets for expansion
+- Stagehand (v4 and older v3 must be distinguished): https://github.com/browserbase/stagehand , https://www.stagehand.dev/ , caching docs https://www.browserbase.com/changelog/caching-configurable ; compare local self-host support vs Browserbase-managed cache.
+- Composio trigger/event adapter: https://docs.composio.dev/docs/triggers and https://docs.composio.dev/reference/api-reference/webhook-subscriptions ; compare signed webhooks, delayed polling, supported provider triggers and cost.
+- X official stream and timeline APIs: https://docs.x.com/x-api/posts/filtered-stream/introduction and https://docs.x.com/x-api/posts/timelines/introduction ; verify trigger entitlement, rates, pricing and actual data delivery options.
+- Firecrawl monitor & diff: https://www.firecrawl.dev/monitor ; compare SaaS vs self-managed diff, cost and snapshot retention.
+- Entity resolution/matching: inspect recordlinkage/Splink libraries, product EAN databases and similarity algorithms with false merge evaluation; actual support and license to be verified.
+References above are candidates for source-level audit, not conclusive interoperability or benchmark claims.

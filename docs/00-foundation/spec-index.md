@@ -1,4 +1,4 @@
-# Canonical Specification Inventory: 74 Modules / 12 Independent Chats
+# Canonical Specification Inventory: 85 Modules / 16 Independent Chats
 
 > 2026-10-30。**ここに列挙したパスは作成予定であり、現時点でファイルが存在するという意味ではない。** カテゴリオーナー以外は編集禁止。
 
@@ -92,7 +92,32 @@
 - CHAT_09: `docs/09-security/` (6 MD)
 - CHAT_10: `docs/10-infrastructure/` (5 MD)
 - CHAT_11: `docs/11-qa/` (4 MD)
-**Count: 74 module specs.** README/AGENTS/prompts/template/bootstrap文書は数えない。
+**Count: 85 module specs.** README/AGENTS/prompts/template/bootstrap文書は数えない。
 
 ## Change control
 機能の分割/統合・命名変更は管理担当がADRと参照先を更新し、全担当に通知する。1MDの追加や変更は当該カテゴリに限りDraft PRで行う。 `Locked`化はレビューと契約整合後のみ。
+
+## 2026-10-30 approved feature expansion — CHAT_12–15
+
+11 new module specs **planned, not implemented**; these are additional to the original 74. See [feature expansion](feature-expansion-2026-10.md). The core contracts and side-effect ownership remain with the existing owners.
+
+| ID | Required specification path | Owner | Initial state |
+|---|---|---|---|
+| 12-01 | `docs/12-intelligence/opportunity-radar.md` | CHAT_12 | Draft / not yet created |
+| 12-02 | `docs/12-intelligence/entity-resolution.md` | CHAT_12 | Draft / not yet created |
+| 12-03 | `docs/12-intelligence/trend-fusion.md` | CHAT_12 | Draft / not yet created |
+| 12-04 | `docs/12-intelligence/decision-risk-engine.md` | CHAT_12 | Draft / not yet created |
+| 12-05 | `docs/12-intelligence/source-reliability-profiles.md` | CHAT_12 | Draft / not yet created |
+| 13-01 | `docs/13-event-ingestion/event-driven-agent.md` | CHAT_13 | Draft / not yet created |
+| 13-02 | `docs/13-event-ingestion/change-intelligence.md` | CHAT_13 | Draft / not yet created |
+| 13-03 | `docs/13-event-ingestion/notification-intelligence.md` | CHAT_13 | Draft / not yet created |
+| 14-01 | `docs/14-adaptive-experience/learned-browser-actions.md` | CHAT_14 | Draft / not yet created |
+| 14-02 | `docs/14-adaptive-experience/feedback-learning.md` | CHAT_14 | Draft / not yet created |
+| 15-01 | `docs/15-multimodal/multimodal-ingestion.md` | CHAT_15 | Draft / not yet created |
+
+- CHAT_12: `docs/12-intelligence/` (5 MD)
+- CHAT_13: `docs/13-event-ingestion/` (3 MD)
+- CHAT_14: `docs/14-adaptive-experience/` (2 MD)
+- CHAT_15: `docs/15-multimodal/` (1 MD)
+
+**Total 74 + 11 = 85 planned module documents across 16 author chats.**

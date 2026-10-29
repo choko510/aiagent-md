@@ -83,3 +83,6 @@
 6. 既存OSSの仕様・README、過去のマスターv0.2（参考資料のみ）
 
 **衝突時は勝手に片方を修正しない。Cross-team proposal → ADR/契約所有者 → レビュー → 仕様改訂を行う。**
+
+## 12. User-approved expansion requests (2026-10-30)
+The user wants proactive opportunity discovery beyond monitoring fixed SKUs; cross-site product/hotel/entity matching; **event-driven tasks triggered by a named X account posting**, Gmail sale mail or other approved external changes; validated replay of prior successful browser actions; meaningful Web page diff; X/price/buyback trend fusion; risk-adjusted deterministic profit analysis; PDF/image/Excel ingestion; importance-ranked, deduplicated notifications; user feedback learning; and source reliability profiles. See `feature-expansion-2026-10.md` for the 11 assigned spec modules and boundaries. These are **approved items for detailed design**, not declarations that the implementation has already been completed. General-purpose functionality remains the objective.

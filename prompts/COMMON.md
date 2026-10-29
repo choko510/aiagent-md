@@ -47,3 +47,6 @@
 
 ## 7. 禁止事項
 AgentへホストShell/SSH/Docker socket/任意コンテナ権限を渡す提案、未承認の購入/予約/投稿/送金、SecretのLLM文脈露出、CAPTCHAを必ず突破すると断言、無期限/無制限のLLMループ、他のAI担当MDへの無断修正、根拠のない成功率/速度/費用の断定。
+
+## 8. New user-approved scope (2026-10-30)
+Read `docs/00-foundation/feature-expansion-2026-10.md` whenever a module touches discovery, entity matching, X events, change monitoring, browser caching, price/trend calculations, multimodal files, feedback, source reliability, or notifications. CHAT_12–15 own **11 additional specs**; the original 74 remain assigned to CHAT_00–11. The existing module owners must **not** be replaced or bypassed. Preserve user constraints and all approval/evidence requirements. The canonical inventory now has **85 planned specs**.

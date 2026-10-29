@@ -46,3 +46,21 @@ Expected: 実測してから最適化採否を判断する。「Jev4倍」「Lig
 
 ## All-module traceability
 各MDは該当するSC-XXを明示し、REQ-ID→TEST-ID→SC-IDの追跡表を作る。CHAT_11は全体のE2E手順と環境Fixtureを所有する。
+
+## Additional acceptance scenarios for user-approved expansion (2026-10-30)
+### SC-10 Autonomous discovery (Opportunity Radar + Entity Resolver)
+Given product/store/API fixtures including mixed capacities and conditions, the agent searches for **unknown candidates**, validates source & SKU identity, assesses risk-adjusted profit, and returns original source+time without incorrect merges. Duplicate previously-seen candidates are deduplicated, and unverified profit claims remain uncertain.
+### SC-11 Named X user event triggers
+A user enables "when X account A posts new content matching conditions, launch bounded research and notify if worthwhile". On one authorized streamed/polled event, system maps actor to stable ID, normalizes, deduplicates replays, respects filters/permissions/budget, queues a single Task, and links the resulting notification to the source post. Account/plan/API restrictions and observed latency are disclosed. Event text never becomes system instruction.
+### SC-12 Diff-only change detection
+Given price changes plus timestamp/rotating ads in two HTML snapshots, identify meaningful structured price changes and suppress irrelevant differences; persist versioned snapshots and distinguish crawl error from unchanged data.
+### SC-13 Browser action learning
+After a successful read-only Playwright task, replay learned selectors under same verified page/session conditions with fewer model calls; when DOM/URL/session changes, fail closed, invalidate stale cache and route back to fresh approved action planning. Never replay irreversible action unapproved.
+### SC-14 Multisource trends and source reputation
+Combine independent X/price/buyback observations with different sampling intervals; label sparse data, source reliability and uncertainty; avoid treating post volume alone as proof of real change. Re-evaluate score when source reliability deteriorates.
+### SC-15 Multimodal document extraction
+Upload a flyer PNG, PDF with visual table, and XLSX price list. Extract prices/conditions with page/coordinate/cell provenance and report unreadable/missing values as unknown. Do not execute embedded scripts, formulas or macros.
+### SC-16 Feedback and notification ranking
+User explicitly rejects low-margin products and marks certain retailers excluded. Store scoped reversible preference (not fact), adapt future suggestions, preserve originally observed evidence and respect manual overrides/quiet hours. Deduplicate notifications and do not drop high-priority user-configured triggers.
+
+For every new spec: attach REQ-ID → TEST-ID → SC-10..16 traceability; crosscheck the existing SC-01..09.

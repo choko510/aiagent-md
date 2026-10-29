@@ -2,7 +2,7 @@
 
 **セルフホストの汎用パーソナルAIエージェント**を、既存ハーネスを横断研究しながら実装可能な詳細仕様へ分解して設計するためのGitHubワークスペースです。スクレイピング専用・Amazon専用・コーディング専用ではありません。自然言語によるWeb調査、商品比較、SNS調査、ホテル調査、定期監視、通知を、同じAgent Runtimeとツール基盤で扱います。
 
-> **重要：74個の詳細仕様MDはこれから作るものです。** 本repoにAgent本体のコードはありません。各担当AIはDraft PRに仕様を提出し、人間が横断レビューして確定します。
+> **重要：85個の詳細仕様MD（当初74＋追加11）はこれから作るものです。** 本repoにAgent本体のコードはありません。各担当AIはDraft PRに仕様を提出し、人間が横断レビューして確定します。
 
 ## Start here — AIチャットが必ず読む文書
 
@@ -15,7 +15,7 @@
 7. [Specification Inventory — 全74MDの担当一覧](docs/00-foundation/spec-index.md)
 8. [Research Protocol](docs/00-foundation/research-protocol.md) · [Review Gates](docs/00-foundation/review-gates.md) · [Module Template](templates/MODULE_SPEC.md)
 
-## 12 parallel chats
+## 16 parallel chats
 
 | 担当 | 仕様カテゴリ | 開始プロンプト |
 |---|---|---|
@@ -31,6 +31,10 @@
 | CHAT_09 | `docs/09-security/` (6MD) | [CHAT_09](prompts/CHAT_09.md) |
 | CHAT_10 | `docs/10-infrastructure/` (5MD) | [CHAT_10](prompts/CHAT_10.md) |
 | CHAT_11 | `docs/11-qa/` (4MD) | [CHAT_11](prompts/CHAT_11.md) |
+| CHAT_12 | `docs/12-intelligence/` (5MD) | [CHAT_12](prompts/CHAT_12.md) |
+| CHAT_13 | `docs/13-event-ingestion/` (3MD) | [CHAT_13](prompts/CHAT_13.md) |
+| CHAT_14 | `docs/14-adaptive-experience/` (2MD) | [CHAT_14](prompts/CHAT_14.md) |
+| CHAT_15 | `docs/15-multimodal/` (1MD) | [CHAT_15](prompts/CHAT_15.md) |
 
 ## 新しいチャットへ渡す最小限の開始メッセージ
 ```text
@@ -57,4 +61,7 @@ mainへ直接pushしたり、他担当のMDを変更したり、無断マージ�
 - [COORDINATOR — 12チャット横断の契約照合・PR統合監査](prompts/COORDINATOR.md)
 - [INDEPENDENT_REVIEWER — 1 PRずつの詳細監査](prompts/INDEPENDENT_REVIEWER.md)
 
-**推奨：12執筆チャット + 1統合コーディネータ**。74件のMDが全て揃っても、横断レビューで契約を整合させるまでは仕様確定としない。
+**推奨：16執筆チャット + 1統合コーディネータ**。74件のMDが全て揃っても、横断レビューで契約を整合させるまでは仕様確定としない。
+
+## Approved expansion: Autonomous Discovery & Events (2026-10-30)
+The user additionally selected 11 functions, including "start an agent when a specified X account posts". Read **[feature-expansion-2026-10.md](docs/00-foundation/feature-expansion-2026-10.md)** before new functionality planning. Four newly assigned chats are CHAT_12–15 (5+3+2+1 specs). All specs are investigation/draft until reviewed; no agent code exists here. The existing authors' open PRs are not overwritten.

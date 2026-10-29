@@ -18,3 +18,6 @@ CHAT_00とCHAT_01が設計の中心だが、残り10チャットは独立した*
 
 ## Status
 Draft → Reviewed → Locked → Implemented → Verified。初期段階の74MDは全てDraft/未作成。実装コードが存在するという意味ではない。
+
+## New independent ownership categories (2026-10-30)
+User approved 11 additional features. CHAT_12 owns `docs/12-intelligence/`; CHAT_13 owns `docs/13-event-ingestion/`; CHAT_14 owns `docs/14-adaptive-experience/`; CHAT_15 owns `docs/15-multimodal/`. All coordinator-owned guidance/index docs remain coordinator-only. Original CHAT_00–11 ownership is unchanged. Interface proposals to CHAT_01/03/04/05/06/07/08/09/10 are mandatory; no cross-owner edits. Each new author works on at most 1–2 module specs per Draft PR, no main push or auto-merge. `docs/00-foundation/feature-expansion-2026-10.md` defines the initial accepted expansion scope.

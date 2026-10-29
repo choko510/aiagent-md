@@ -20,3 +20,6 @@ Host shell/SSH/Docker socket/capability escalation禁止。未承認の購入・
 
 ## Success definition
 大量のMarkdownではなく、**Codexが推測せず実装できる矛盾のない仕様、根拠が追跡できる判断、測定可能な受入テスト**を目指す。
+
+## Additional approved module scope (2026-10-30)
+The user selected 11 advanced modules assigned to CHAT_12–15: autonomous opportunity discovery/entity resolution/trend fusion/risk/source reliability; external event triggers incl. named X account post/change detection/notification ranking; learned browser action replay and feedback; multimodal input. `docs/00-foundation/feature-expansion-2026-10.md` is mandatory background for ALL chats when affected. Existing authority boundaries remain unchanged. The correct current inventory is **85 planned specs / 16 author chats**, plus an independent coordinator/reviewer.
