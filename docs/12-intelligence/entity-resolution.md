@@ -176,3 +176,19 @@ P0-ER-01 [PROVISIONAL: CHAT_01] CanonicalEntity relation・mappingRevision・inv
 [S4] https://www.gov.uk/algorithmic-transparency-records/moj-splink-master-record (Docs verified; clerical labels are imperfect). Library adoption/performance/license notices must be independently reviewed at implementation lock.
 
 [S5] Splink merged PR [#2150](https://github.com/moj-analytical-services/splink/pull/2150) fixes blocking-aware true-negative accuracy calculations (closed/merged; PR description + state verified 2026-10-30). Merged [#3088](https://github.com/moj-analytical-services/splink/pull/3088) changes blocking comparison estimation with sampling and public API removal (description/state verified). Together with [CHANGELOG](https://github.com/moj-analytical-services/splink/blob/5b719296d62bc48d55c1a63322fd60c0bfba4c2e/CHANGELOG.md) this reinforces pinning the blocking/accuracy version; neither PR establishes Harness accuracy. This is PR metadata/readme evidence, not an independent test execution.
+
+## 18. Round 4 — Retailer storefront identity and feedback resolution
+**Canonical domain proposal for approval by CHAT_01/10:** `Domain` extends with `retailer_storefront`. The existing `organization` is a chain/company and is NOT interchangeable with a concrete retailer's branch, merchant seller account, marketplace storefront or online channel. A single company may have separate physical branches, price rules and inventory. Stable identity includes tenant, provider source namespace, provider merchant ID, branch identifier (if any), channel and evidence/revision, never only display name/address fuzzy match.
+```ts
+type DomainV2 = "product"|"hotel_property"|"hotel_rate"|"organization"|"retailer_storefront"|"public_person";
+type StorefrontIdentityDraftV1 = {
+  version:"1.0"; tenantId:string; storefrontEntityId:string; organizationEntityId:string|null;
+  merchantProviderId:string|null; branchNativeId:string|null;
+  channel:"marketplace_seller"|"webstore"|"physical_branch"|"unknown";
+  sellerAccountRef:string|null; jurisdiction:string|null;
+  sourceEvidenceIds:string[]; mappingRevision:string; uncertainty:"verified"|"review"|"unknown";
+};
+```
+**Negative rules:** ambiguous organization-only reference must NOT exclude every storefront; different branches/seller IDs cannot be merged solely via same brand, phone, address or storefront URL; marketplace seller name changes do not mint a new proven identity without source evidence. Legacy Feedback class `retailer` maps only to verified `retailer_storefront`, otherwise `REVIEW` with no hard exclusion. Split/undo increments mappingRevision and atomically invalidates dependent Radar, Trend, Risk, Feedback lookup/proposals; data provenance remains immutable.
+**Physical proposal:** CHAT_10 PR #10 `canonical_entities(entity_kind='retailer_storefront')`, `entity_source_links` with revision/history; exact tenant/owner mapping and related source artifact proofs. **Tests:** ER-R4-T01 chain with 2 branches stays 2 storefronts; T02 same name but separate marketplace seller ID stays distinct; T03 retailer Feedback ambiguity blocks automatic exclusion; T04 split invalidates previous cached Radar result; T05 old mappingRevision commands fail CAS; T06 cross-tenant lookup blocked. SC-10,14,16. DRAFT until owner agreement.
+
