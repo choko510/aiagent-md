@@ -48,8 +48,11 @@ Task.recordVersion初期1案、Run.leaseEpoch number安全整数/DB bigint、Tas
 ## 5. 内部Port / TypeScript pseudo contracts
 ~~~ts
 interface LocalCheckpoint {
- runId:string; leaseEpoch:number; stepOrdinal:number;
- expectedRecordVersion:number; appliedGoalRevision:number;
+ runId:string;
+ // canonical 01-01 wire values: int64 decimal strings, lossless internal bigint only
+ leaseEpoch:string; stepOrdinal:string;
+ expectedRecordVersion:string; appliedGoalRevision:string;
+ checkpointRevision:string; checkpointId:string; // immutable row + current Run head
  phase:"MODEL"|"INTENT"|"APPROVAL"|"EXECUTE"|"VERIFY"|"WAIT";
  modelAttemptId?:string; modelReplyRef?:string;
  pendingLogicalCalls:string[]; receipts:string[];
@@ -61,7 +64,7 @@ interface RecoveryPort {
  reconcile(logicalCallId:string):Promise<"COMPLETED"|"NOT_STARTED"|"UNKNOWN">;
 }
 ~~~
-Schema major unknownはreject。Run leaseEpochは非負safe integer、DB bigintから丸め無しで変換。expectedVersion/goalRevision/owner bindingの完全一致が必要。APIは上記Portの正式名称ではなく本書内設計案 [PROVISIONAL]。actorやTask権限はLLM inputから取得しない。
+Schema major unknownはreject。Run leaseEpoch/recordVersion/GoalRevision/CheckpointRevisionはCHAT_01の正本に合わせて正規十進文字列で受渡し、内部でBigIntとして比較する（DB BIGINT）。JSON numberまたは安全範囲外のNumber変換は禁止。old snapshotのwriter epochと復帰後current Run epochの一致は要求しない（新epochで再Claimするため）。expectedVersion/goalRevision/owner bindingの完全一致が必要。APIは上記Portの正式名称ではなく本書内設計案 [PROVISIONAL]。actorやTask権限はLLM inputから取得しない。
 
 ## 6. State machineとSequence
 ~~~text
@@ -92,6 +95,51 @@ async function recover(claim:RunClaim) {
 }
 ~~~
 **不変条件**: エラーによるTask無言終了禁止。永続状態とoutboxが同一transactionで確定するまで「成功」と表示しない。DB lock中に外部HTTP・LLMを呼ばない。CASをすり抜けた旧Worker/期限切れapprovalのTool発火を防ぐため、Gatewayが外部作用直前に最新epoch・controlVersion・GoalRevision・Authを再確認する。
+
+### 7.1 Round 3 — 複数PhaseのAppend-only Checkpoint / Head CAS（CHAT_10 PR #10）
+
+**発見された問題:** 旧物理表`UNIQUE(tenant_id,run_id,step_no)`では、一つのstepでMODEL→INTENT→EXECUTE→VERIFYの複数Checkpointを書けない。`checkpoint_revision`をrun内で単調増加のappend-only IDとし、`runs.current_checkpoint_id`のみが**正本HEAD**であると決定する。単一Stepは複数のRevisionを持つ。
+
+```ts
+async function commitCheckpoint(claim, expectedHead, next) {
+  return db.transaction(async tx => {
+    const task = await tx.lockTask(claim.tenantId,claim.taskId);
+    const run = await tx.lockRun(claim.runId);
+    assertAuthorizedOwnerAndActiveRun(task, run, claim);
+    assert(run.leaseEpoch === claim.leaseEpoch && !leaseExpired(run));
+    assert(task.goalRevision === claim.inputGoalRevision);
+    assert(run.recordVersion === claim.expectedRunRecordVersion);
+    assert(run.currentCheckpointId === expectedHead.id);
+    const revision = decimal(BigInt(expectedHead.revision ?? "0") + 1n);
+    const row = await tx.appendImmutableCheckpoint({
+      ...next, checkpointRevision: revision, writerLeaseEpoch: run.leaseEpoch,
+      appliedGoalRevision: task.goalRevision, stepNo: next.stepNo,
+      snapshotHash: hash(canonicalBytes(next.snapshot))
+    });
+    await tx.advanceRunHeadCAS({runId:run.id, expectedHeadId:expectedHead.id,
+      expectedRecordVersion:run.recordVersion, currentLeaseEpoch:run.leaseEpoch,
+      newHeadId:row.id});
+    // If a publicly visible transition occurred: canonical Domain Event + Outbox in same Tx.
+    await tx.appendRelatedDomainEventsAndOutboxIfNeeded(next);
+    return row;
+  });
+}
+```
+
+- `checkpointRevision`は正のBIGINT、stepNoは0以上。初回revision 1、HEAD CAS成功後にのみそのRevisionが可視となる。失敗TXのINSERTはrollbackし孤児rowを確定させない。
+- 復旧後のRun Claimでは`leaseEpoch`が+1されるので、過去Checkpointの`writerLeaseEpoch`は新epochと**異なっていてよい**。最新headを読み、hash/Schema/Goal/Tool ledgerを検証し、**現在epochで次のCheckpoint**を書き込む。
+- Tool external effectは必ず不変Intent/Side-effect Ledgerを経由。復旧時に`MAY_HAVE_SENT/UNKNOWN`なら結果照会・承認待ち、物理再送しない。Checkpoint書込みの再試行可否とTool副作用の再試行可否は独立。
+- `recordVersion`と`checkpointRevision`は別。過去Checkpoint行をUPDATEしない。Run headとCAS更新、Event/Outboxを原子的にcommit。Task/Runの状態とGoalRevisionが変わったとき旧Workerの書込は0行。
+- ファイルArtifactがDB commit後に欠損するときは破損扱いとし、成功を捏造しない。書込み前にArtifactを耐久保存してから参照する。
+
+**追加契約/故障注入試験（未実行）**：
+`CPR-R3-T01`: 同Step内に5Phaseを保存→checkpointRevision 1..5、HEAD=5、実行したTool Intent 1件。
+`CPR-R3-T02`: 旧Worker leaseEpoch=3と新Worker=4が競合→旧Checkpoint/Outcomeが全て拒否。
+`CPR-R3-T03`: Checkpoint/HEAD/Event/Outbox境界でkill→全件0または整合した1Tx。
+`CPR-R3-T04`: Crash再開でSnapshot writerEpochが旧値でも新lease claimで復旧し、旧外部副作用を再送0。
+`CPR-R3-T05`: JSON number / 2^53近傍のVersionが来たらcodec rejectまたはlossless string処理。
+
+**Dependency:** CHAT_10の`database-schema-and-migrations.md`で同Run head FK・phase_code・checkpoint_revision・atomic CASが明記されているか実装前照合する。未実行・未レビューの間はDraft。
 
 ## 8. Failure/timeout/retry/cancel matrix
 | Fault / killpoint | Durable recovery | Forbidden |
