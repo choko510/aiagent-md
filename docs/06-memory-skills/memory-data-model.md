@@ -1,6 +1,6 @@
 # Memory Data Model — Detailed Implementation Specification
 
-> Owner: **CHAT_06** | Canonical path: `docs/06-memory-skills/memory-data-model.md` | **Status: Draft / PROVISIONAL** | Revision: 0.1 | Research: **2026-10-30** | Main baseline: `92b5827ed16a7d4ae61e8146ce382795398293cb` | Next: `memory-retrieval-and-update.md`
+> Owner: **CHAT_06** | Canonical path: `docs/06-memory-skills/memory-data-model.md` | **Status: Draft / PROVISIONAL** | Revision: 0.1 | Research: **2026-10-30** | Main baseline: `92b5827ed16a7d4ae61e8146ce382795398293cb` (Round2 audit against `b45d4e989998663a00ef09673e69ae1f4191f00d`) | Next: `memory-retrieval-and-update.md`
 >
 > **重要**：本repoは仕様のみで実装なし。以下は **提案するHarness独自仕様** であり、外部OSSの現在の実装や稼働結果ではない。共有型、認可、物理DDLはそれぞれの担当がLockedにするまで未確定。
 
@@ -37,7 +37,7 @@
 | DB DDL / migration | CHAT_10 | このMDの論理要件を物理スキーマへ落とす |
 | Chat / Telegram UI | CHAT_08 | Userの閲覧・訂正・削除・保留表示を提供 |
 
-**適用SC**: SC-01（型番・価格の混同防止）、SC-02（WatchをMemoryへ誤移行しない）、SC-03（SNSの主張/注入）、SC-04（旅行条件と日付の限定）、SC-05（出典の鮮度）、SC-06（ユーザー隔離）、SC-07（再起動/競合）、SC-08（権限境界）、SC-09（取得費用）。
+**適用SC**: SC-01（型番・価格の混同防止）、SC-02（WatchをMemoryへ誤移行しない）、SC-03（SNSの主張/注入）、SC-04（旅行条件と日付の限定）、SC-05（出典の鮮度）、SC-06（ユーザー隔離）、SC-07（再起動/競合）、SC-08（権限境界）、SC-09（取得費用）、**SC-16（明示的フィードバックによる好み更新・Undo）**。
 
 **Non-goals**: 学習用モデル重みの更新、無承認自動Tool実行、Webページ全文の長期保存、全会話のMemoryへの複製、Skill自動昇格、LLMを動かし続ける常駐Memory Agent、実行時のシステム命令のMemoryによる変更。
 
@@ -116,6 +116,7 @@
 | MEM-DATA-015 | MUST | 未確認の外部引用/ページ指示を直接user profileやpolicyに格上げしない | 03,08 |
 | MEM-DATA-016 | MUST | Read/Write/Eraseに上限、入力サイズ制限、レート制限、可視の容量超過を持つ | 09 |
 | MEM-DATA-017 | MUST | 監査ログは本文/Secretを出さずrequest ID・対象・分類・判定のみ記録 | 08 |
+| MEM-DATA-022 | MUST | SC-16の明示フィードバックは元Evidenceを変更せず、scope付き可逆なユーザー好みとして保存し、Undoで旧版・禁止ルールを安全に失効させる | 16 |
 | MEM-DATA-018 | SHOULD | dedupe・source provenance統合・候補のreview UIを用意する | 05,09 |
 | MEM-DATA-019 | SHOULD | keyword/vector indexを置き換え可能にし、Index欠損で誤確信せずdegradedを返す | 05,09 |
 | MEM-DATA-020 | LATER | End-user export（限定scope）とMemory quality feedbackを追加する | 06 |
@@ -174,7 +175,7 @@ type MemoryClaim = {
   language: string;         // valid BCP-47
 };
 type MemoryRecord = {
-  id: string;               // server-generated opaque ID
+  id: string;               // [PROVISIONAL: CHAT_01] canonical lowercase UUIDv7 ID (wire string, validated)
   scope: MemoryScope;       // immutable; cross-scope = new record
   kind: MemoryKind;
   claim: MemoryClaim;
@@ -193,12 +194,12 @@ type MemoryRecord = {
   expiresAt?: string;       // selection eligibility deadline
   retentionUntil?: string;  // physical deletion requested deadline (policy-owned)
   supersedesId?: string;
-  revision: number;         // >=1, monotonically increasing per record
+  revision: number;         // memory-local CAS version >=1; distinct from Shared recordVersion/Task goalRevision
   policyVersion: string;    // read-time revalidationにも使用
 };
 
 type MemoryMutation = {
-  operationId: string;      // client-generated idempotency key, scoped to actor
+  operationId: string;      // bounded opaque idempotency key, scoped to authenticated actor + command hash; NOT resource ID
   targetId?: string;        // correction/erase
   expectedRevision?: number;// required for update, status change
   intent: "propose" | "activate" | "correct" | "revoke";
@@ -219,11 +220,12 @@ type MemoryRejection =
   | "TOMBSTONED" | "UNKNOWN_REVISION" | "REVIEW_REQUIRED";
 ```
 
-**注意**：これらはMemoryService内の説明用型。CHAT_01が正式なID/Event/Error envelopeを確定したら整合させる。権限Principalの正本とtenant discriminatorはCHAT_09。timestampsはUTC保存、UIだけ利用者TZで表示する。
+**注意**：これらはMemoryService内の説明用型。CHAT_01 Draft公開IDはUUIDv7 canonical lowercase、`recordVersion`は1開始と明記する。本書の`revision`はMemory内CAS版の暫定表現であり、共有`recordVersion`との統合・命名は[PROVISIONAL: CHAT_01/10]。`goalRevision`（Task条件改定）と`leaseEpoch`（Run fencing）は代用禁止。`MemoryRecord.scope.taskId`は**任意のTaskに限る**（`Task.conversationId`はnullable）のでConversation経由の必須join禁止。権限Principalの正本とtenant discriminatorはCHAT_09。timestampsはUTC保存、UIだけ利用者TZで表示する。
 
 ### 5.3 バリデーションと不変条件
 
-1. `scope.tenantId/subjectUserId` はサーバーでAuthContextより強制。LLMやMCPが任意のprincipal/scopeを与えても拒否。異なるscope間の推測による自動共有を禁止。
+1. **ID規約:** 外部公開Memory ID/Task ID/Message ID/tenant/user IDはCHAT_01のUUIDv7正本に合わせ生成/検証（DBの`gen_random_uuid()` defaultはそのまま公開IDに用いない）。Memoryの独自prefix形式を公開しない。内部短縮ID・sourceRefのopaque参照は別途型と所有者を確認。`workspace_id`と`tenantId/ownerUserId`の一対一または別写像は未決のため、DB adapterで権限照合が確立するまではfail closed。
+2. `scope.tenantId/subjectUserId` はサーバーでAuthContextより強制。LLMやMCPが任意のprincipal/scopeを与えても拒否。異なるscope間の推測による自動共有を禁止。
 2. `task_note` は `scope.level="task"` と `taskId` 必須。`project` は許可対象のprojectId必須。`profile`をtask scopeに留めることは可能だが、user scopeへの自動コピーは禁止。
 3. `active` は非空の`claim`、少なくとも1個の検証可能なsourceRef、同意根拠、取得時刻を要求する。sourceは存在確認とprincipal認可を通す。取得できないsourceは `candidate`/ `uncertain` に保留。
 4. `sourceRefs.uri` は読取り表示用。認可済Evidenceから派生、資格情報/URL userinfo/追跡token削除。URIをそのままfetchしたりツール操作を誘導しない。
@@ -238,8 +240,8 @@ type MemoryRejection =
 
 ```json
 {
-  "id": "mem_01EXAMPLE",
-  "scope": { "tenantId": "t_example", "subjectUserId": "u_example", "level": "task", "taskId": "task_example" },
+  "id": "018fa55e-2e00-7bd0-8a00-000000000001",
+  "scope": { "tenantId": "018fa55e-2e00-7bd0-8a00-000000000002", "subjectUserId": "018fa55e-2e00-7bd0-8a00-000000000003", "level": "task", "taskId": "018fa55e-2e00-7bd0-8a00-000000000004" },
   "kind": "task_note",
   "claim": {
     "subject": "hotel-search:task_example",
@@ -250,7 +252,7 @@ type MemoryRejection =
   },
   "status": "active",
   "origin": "user_explicit",
-  "sourceRefs": [{ "kind": "message", "opaqueId": "msg_example", "capturedAt": "2026-10-30T00:00:00Z" }],
+  "sourceRefs": [{ "kind": "message", "opaqueId": "018fa55e-2e00-7bd0-8a00-000000000005", "capturedAt": "2026-10-30T00:00:00Z" }],
   "confidence": "user_stated",
   "sensitivity": "personal",
   "consentBasis": "user_explicit",
@@ -313,7 +315,8 @@ async function mutateMemory(auth: AuthContext, cmd: MemoryMutation): Promise<Mem
   if (isRunCancelledOrOverBudget(auth)) return rejected("STOPPED");
 
   return memoryRepo.transaction(async tx => {
-    const prior = await tx.getIdempotencyResult(principal.id, cmd.operationId);
+    const prior = await tx.getIdempotencyResult(principal.tenantId, principal.id, cmd.operationId);
+    // same operationId + different canonical request hash => reject IDEMPOTENCY_MISMATCH
     if (prior) return prior;                            // durable replay
     const current = cmd.targetId ? await tx.lockRecord(scope, cmd.targetId) : null;
     if (cmd.targetId && (!current || current.revision !== cmd.expectedRevision))
@@ -331,7 +334,7 @@ async function mutateMemory(auth: AuthContext, cmd: MemoryMutation): Promise<Mem
 }
 ```
 
-**補足**: Postgresで`UNIQUE(tenant,actor,operationId)`と`UPDATE ... WHERE revision = expectedRevision`（またはrow lock+revision check）を使う論理要件。[PROVISIONAL: CHAT_10] 。Idempotency記録のうちトランザクション中のvalidation失敗を永続化する範囲・TTLはCHAT_10/09と合意。衝突検出はkeyを同一TXでロック/ユニーク制約し、2 writerによる新規同一key作成も保護する。DB deadlock/serialization retryは有限回、元のoperationIdを保持し、LLMに解決を委ねない。
+**補足**: Postgresで`UNIQUE(tenant,actor,operationId)`、Memory IDはUUIDv7、Memory CAS版は1開始を提案。Memoryの`revision`とCHAT_01の`recordVersion`は[PROVISIONAL]で名称/境界未確定。と`UPDATE ... WHERE revision = expectedRevision`（またはrow lock+revision check）を使う論理要件。[PROVISIONAL: CHAT_10] 。Idempotency記録のうちトランザクション中のvalidation失敗を永続化する範囲・TTLはCHAT_10/09と合意。衝突検出はkeyを同一TXでロック/ユニーク制約し、2 writerによる新規同一key作成も保護する。DB deadlock/serialization retryは有限回、元のoperationIdを保持し、LLMに解決を委ねない。
 
 ### 7.2 Deterministic conflict policy
 
@@ -469,6 +472,7 @@ Rejectionsは共通Error taxonomyがLockedならそれへmap。各リトライ�
 | MEM-TEST-021 | Integration | 同時明示発言の内容が矛盾→contested、会計/宿泊の確定条件としては不採用 |
 | MEM-TEST-022 | Unit | 旧価格の`assertedAt`と`capturedAt`を入れ替えた入力→誤認・時系列検証エラー |
 | MEM-TEST-023 | Fault | SourceRef削除/アクセス権撤回→次回retrievalで再検証要求、秘匿resourceを漏らさない |
+| MEM-TEST-025 | E2E/security | SC-16で「この店舗を候補から除外」を本人が登録→他scopeで無効、元Evidence不変、UndoをCASで適用→次候補表示から消去ルールを除外 |
 | MEM-TEST-024 | Benchmark | 固定seedの複数ユーザー×並列writer、1000 records→p50/p95, token, memory, index lagを実測記録（目標値捏造禁止） |
 
 対象OSSのテストソースは読み取ったが、OSSのテストスイートも本Harnessのテストも**実行していない**。テスト環境を作る担当はCHAT_11。
@@ -494,6 +498,7 @@ Rejectionsは共通Error taxonomyがLockedならそれへmap。各リトライ�
 | 015→015 | 03/08 | 未信頼Web文章はuser命令にならない |
 | 016→016 | 09 | finite上限と観測可能な拒否 |
 | 017→017 | 08 | PII漏れのない監査 |
+| 022→025 | 16 | scope限定の明示的なPreference保存とUndo、Evidence正本不変 |
 | SHOULD 018→018, 019→019 | 05/09 | dedupe/Index劣化の明示 |
 | LATER 020 / EXPERIMENT 021 | 06/09 | 別PRで定義し本Draftの完了条件には含めない |
 
@@ -503,6 +508,7 @@ Rejectionsは共通Error taxonomyがLockedならそれへmap。各リトライ�
 
 | ID / Owner | Severity | Proposal / 理由 | 完了条件 |
 |---|---|---|---|
+| **M06-P11 / CHAT_14** | P1 | `[PROVISIONAL: CHAT_14]` SC-16 feedback event, reversible preference mutation input, scope and Undo semantics; Memory is canonical mutation owner | Feedback/Memory contract test, no evidence rewriting |
 | **M06-P01 / CHAT_01** | **P0** | `[PROVISIONAL: CHAT_01]` message/evidence/task/run IDs、source引用の削除イベントとcanonical envelope。Memoryはこれらを重複定義しない。契約変更でretrieval/source invalidationの互換試験が必要 | typed ref/versionと消去通知合意 |
 | **M06-P02 / CHAT_09** | **P0** | `[PROVISIONAL: CHAT_09]` tenant/user/project/taskのPrincipalとsensitivity・consent・erase/backup/監査保持規則。user requestと自動推論の境界も明記 | ACL/Privacy matrixがLocked |
 | **M06-P03 / CHAT_10** | **P0** | `[PROVISIONAL: CHAT_10]` transactional revisions、uniqueness、outbox、revocation epoch、RLS/物理隔離、restore resurrection防止、retention job。既存DDLへ独断で追加しない | migration plan・100 writer fault test合意 |
@@ -521,6 +527,16 @@ Rejectionsは共通Error taxonomyがLockedならそれへmap。各リトライ�
 - LangGraphのTTLはBackendにより差があり、BaseStoreのdefaultでは無効。Storeを使えば期限が必ず消えると想定しない。[S5]
 - Embedding provider、暗号化アプローチ、Postgres RLS、Index engine、locale-specific conflict normalizerは **未実証**。CHAT_09/10/11で追加検証が必要。
 - User explicitという事実だけで機微情報を自動保存できる訳ではない。Consent/Privacy policy決定が必要。
+
+
+### Round 2 cross-contract audit (2026-10-30, latest main b45d4e989998663a00ef09673e69ae1f4191f00d)
+
+- **CHAT_01 PR #2** (`docs/01-contracts/core-domain-models.md`) supports publicly serialized canonical UUIDv7, `recordVersion >= 1`, `Task.conversationId: null | UUID`, Task `goalRevision` vs Run `leaseEpoch`; no provenance code should assume a Task always has a Conversation. Our Memory record's local version is **not** Run fencing or Task revision. Store-level physical mapping remains [PROVISIONAL: CHAT_01/10].
+- **CHAT_10 PR #10** (`docs/10-infrastructure/database-schema-and-migrations.md`) proposes `workspace_id`, `gen_random_uuid()` defaults and `revision bigint DEFAULT 0`, while CHAT_01 proposes `tenantId`, UUIDv7 and `recordVersion=1`. **Not resolved by this PR:** demand a canonical adapter mapping and migration (existing v4/0 → UUIDv7/1, version semantics preserved), no silent numeric +1 translation, explicit dual-read prevention, and DB tests for identity/ownership/CAS; dedicated CHAT_10/01 owner approval required.
+- **CHAT_09 PR #9** (`authentication-and-user-isolation.md`) treats Memory as owner-isolated and denies client-provided tenant/user identity; don't derive scope from stored Memory. CHAT_08 PR #8 currently contains an outdated claim that SC-11 doesn't exist, while latest main defines SC-11 to SC-16. **Cross-team proposal for CHAT_08**, not a change to their spec.
+- **Run generation/leaseEpoch**: Memory **direct explicit user operations** require actor+Memory revision CAS, not Run leaseEpoch. **Run-originated automatic inference** must carry Task ID, Run ID, Run leaseEpoch, Goal revision and Cancellation/Steer generation validated with CHAT_02/10 *immediately before commit*; reject stale workers, and don't mutate Task constraints from Memory.
+- **Expansion SC-16**: Feedback lifecycle canonical owner CHAT_14; our Memory Service only owns reversible scoped preference mutation, consent, consistency, tombstones, source links and old-version visibility. Do not turn feedback into an Evidence rewrite or a bypass of manual Watch/notification rules.
+- **Race requiring dedicated integration test:** worker A stages inference, user B deletes/corrects same preference, worker A later resumes with old lease epoch/revision. Result must be no revival, no stale write and no stale projection. Add to CHAT_11 fixtures; tests specified but not executed.
 
 ## 17. Sources（全て2026-10-30確認）
 
