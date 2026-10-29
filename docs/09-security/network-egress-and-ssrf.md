@@ -253,7 +253,7 @@ All tests operate synthetic DNS/HTTP/Chromium/local private targets in isolated 
 - [S7] **License verified** browser-use MIT: https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/LICENSE ; **Docs verified** Docker networking: https://docs.docker.com/engine/network/
 - [S8] **Docs verified** OWASP SSRF Prevention: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
 - [S9] **Hypothesis** Exact browser proxy/network namespace/deadlines/byte limits are not integrated or benchmarked. Not a claim of passing tests.
-- [S10] **Issue/PR** No project-relevant upstream issue/PR was source-verified; source and tests are direct evidence. browser-use license verified MIT at pinned ref; integration/redistribution still requires compliance review.
+- [S10] **Issue/PR reports inspected** OpenClaw PR #103041 (closed/unmerged) and browser-use Issues #5879/#6218 (open), documented in appended study. browser-use MIT LICENSE verified at pinned ref. Deployment and transport tests remain unverified.
 
 ## Review gates
 - [x] code/tests pinned; two OSS approaches; threat surface across adapters, resolver/redirect policy, transport-bound algorithm, failure/race, test traceability and cross-team ownership.
