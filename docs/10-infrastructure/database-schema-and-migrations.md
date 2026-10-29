@@ -1189,6 +1189,21 @@ CREATE TABLE agent.entity_source_links (
 CREATE INDEX entity_links_active ON agent.entity_source_links
  (tenant_id,canonical_entity_id,mapping_revision) WHERE invalidated_at IS NULL;
 -- Ranker never sends: only the canonical CHAT_07 delivery sender sends a digest.
+-- A committed notification intent must carry an owner/destination binding before any digest grouping.
+-- Existing v1 rows require authorized backfill; feature flag remains OFF until done.
+ALTER TABLE agent.notification_records ADD CONSTRAINT notification_destination_identity_key
+ UNIQUE (tenant_id,id,destination_ref);
+CREATE TABLE agent.notification_intent_ownership (
+ tenant_id uuid NOT NULL, notification_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, destination_ref text NOT NULL,
+ established_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,notification_id),
+ UNIQUE(tenant_id,notification_id,owner_user_id,destination_ref),
+ FOREIGN KEY(tenant_id,notification_id,destination_ref)
+   REFERENCES agent.notification_records(tenant_id,id,destination_ref),
+ FOREIGN KEY(tenant_id,owner_user_id)
+   REFERENCES agent.tenant_memberships(tenant_id,user_id)
+);
 CREATE TABLE agent.notification_digest_envelopes (
  tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,
  destination_ref text NOT NULL, policy_revision text NOT NULL,
@@ -1197,18 +1212,22 @@ CREATE TABLE agent.notification_digest_envelopes (
  ('draft','reserved','queued','sending','provider_accepted','unknown','failed','cancelled')),
  outbox_id uuid, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,id,owner_user_id,destination_ref),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
  FOREIGN KEY(tenant_id,outbox_id) REFERENCES agent.outbox_messages(tenant_id,id)
 );
 CREATE TABLE agent.notification_digest_members (
  tenant_id uuid NOT NULL, digest_id uuid NOT NULL, notification_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, destination_ref text NOT NULL,
  member_state_code text NOT NULL CHECK(member_state_code IN
  ('reserved','covered_accepted','coverage_unknown','released','blocked')),
  rank_decision_ref text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,digest_id,notification_id),
- FOREIGN KEY(tenant_id,digest_id) REFERENCES agent.notification_digest_envelopes(tenant_id,id),
- FOREIGN KEY(tenant_id,notification_id) REFERENCES agent.notification_records(tenant_id,id)
+ FOREIGN KEY(tenant_id,digest_id,owner_user_id,destination_ref)
+   REFERENCES agent.notification_digest_envelopes(tenant_id,id,owner_user_id,destination_ref),
+ FOREIGN KEY(tenant_id,notification_id,owner_user_id,destination_ref)
+   REFERENCES agent.notification_intent_ownership(tenant_id,notification_id,owner_user_id,destination_ref)
 );
 -- A cancelled/proven unsent membership is historical, not a permanent lock.
 -- Accepted/UNKNOWN digest coverage remains locked against duplicate individual sends.
@@ -1440,3 +1459,7 @@ Previously `UNIQUE(tenant_id,notification_id)` on all `notification_digest_membe
 
 ### 20.6 Round 4 — Migration checksum and replay policy
 The forward SQL snippets now record versions 0002/0003 in `agent.schema_migrations` using the **exact SHA256 supplied by the migration runner** (e.g., psql variable `migration_checksum_sha256` in the proposal). A production driver must bind the value rather than embed the psql syntax. **The runner obtains an advisory schema lock, inspects `schema_migrations` and `schema_control` before executing**. If version exists and checksum matches, it **skips** the migration; if same version with different checksum, it **fails closed** (immutable applied migration), not `CREATE TABLE IF NOT EXISTS`. If version absent, apply in one DB transaction and commit version/control together. Database errors or 0-row schema_control CAS must cause rollback (production runner checks affected rows), do not claim success. Run `MIG-R4-T01` 0001→0002→0003, `T02` repeat skip, `T03` checksum mismatch fail, `T04` interrupted migration rollback, `T05` read/write version compatibility. This is not a production migration runner implementation. 
+
+### 20.7 Round 5 — Digest owner/destination composite FK isolation (2026-10-30)
+Prior v2 member FKs verified only `tenant_id`, not that the digest envelope and original notification intent share **the same owner and destination**. In a tenant with multiple users, an incorrectly authorized sender could accidentally include another user's notification even though both individual rows were valid. Add `notification_intent_ownership` (one owner+destination per committed intent), composite `(tenant,digestId,ownerUserId,destination)` envelope FK and composite `(tenant,notificationId,ownerUserId,destination)` ownership FK on members. New identity table must have FK to original notification/destination, membership to authenticated owner, and trusted sender validates *actual* user and consent before establishing ownership. New physical FKs reject cross-user/different-binding membership without relying only on application checks. Existing v1 intents require an explicit authorized backfill; unknown owner remains ineligible for digest until resolved; never guess from arbitrary payload. Maintains partial unique active member index; `UNKNOWN` cannot release reservation.
+**Tests:** DB-R5-D01 different tenant→FK reject; D02 same tenant different owner→FK reject; D03 same owner wrong destination→FK reject; D04 own notification exact binding→admitted; D05 cancelled provably-unsent member→can re-reserve; D06 UNKNOWN→second reservation reject. **Owner sign-off CHAT_07/09/10/13 and real sender integration still pending.**
