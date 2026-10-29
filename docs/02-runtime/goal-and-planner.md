@@ -53,7 +53,7 @@ interface GoalSnapshot {
  successCriteria:ReadonlyArray<{criterionId:string;verifierId:string}>;
  timeZone:string; locale:string; schemaVersion:1;
 }
-interface PlanStep { localStepId:string;goalRevision:number;
+interface PlanStep { localStepId:string;goalRevision:string;
  dependsOn:string[]; objective:string; evidenceNeeds:string[];
  proposedToolRefs:string[]; estimatedCostMicroUsd:string;
 }
