@@ -512,3 +512,16 @@ async function subscribeEvents(principal, requestedTaskId, stream) {
 ## Round2 upstream issue/PR case study — CSRF edge conditions
 - **[Issue/PR verified; not merged]** Better Auth [PR #10944](https://github.com/better-auth/better-auth/pull/10944) reports same-origin form POSTs with `Origin:null` under `Referrer-Policy:no-referrer`, including session-bearing forms. The PR was **closed without merging** at inspection time; its proposal is not treated as shipped behavior. This reinforces the need for `AUTH-T05` to test null Origin with Fetch Metadata, strict token fallback, and no generic unsafe Origin bypass. Our own AuthProvider and CSRF settings must be tested independently.
 - Evidence class: **Issue/PR report**, separate from Better Auth pinned `origin-check.ts` **Code verified**. Status and behavior may change; no product integration test run.
+
+
+## Round 3 — Generic Event and signed SSE Cursor authorization (2026-10-30)
+
+CHAT_01 PR #23 defines Domain Events for Task/Run/Watch/Tool/Approval/Evidence/Notification, not merely Task-scoped Event. CHAT_10 PR #10 introduces `agent.domain_events` with tenant-wide deliveryOffset and `owner_user_id`+`audience_code`. A nullable `task_id` or `owner_user_id` is **never a grant of public read permission**.
+
+- `owner_private`: authenticated owner or explicit delegated policy only, tenant scope checked on every initial GET and stream revalidation. Event payload provenance remains untrusted and secrets never exposed.
+- `operator_audit`: visible only to explicit audited operator capability, never accidentally exposed to ordinary user via null owner, wildcard filter or unsigned global cursor.
+- Task-specific SSE query must JOIN/validate Task owner and related Task/Run/Tool Event association; Watch-only Event requires Watch-specific authorization, not arbitrary TaskId inference. Streaming/reconnect after revocation terminates safely.
+- HMAC-signed Cursor binds canonical tenant, viewer, Task/Watch filter, projection/version, lastDeliveryOffset, expiry; signature validity is **not** sufficient without fresh resource ACL verification. Cross-tenant, wrong viewer, altered filter, expired token and stale session all fail closed without leaking offset or payload.
+- Expected tests **designed only**: `AUTH-R3-T01` Task-less Watch Event from same tenant another owner →0 bytes; `AUTH-R3-T02` operator audit event in normal task stream→0 bytes; `AUTH-R3-T03` valid signed cursor then revoke membership→stream closes; `AUTH-R3-T04` cursor replay as other tenant/viewer/filter→deny, zero Event data.
+
+This is a scope-level proposal to support the existing canonical Event/DB/SSE design, not a claim of implemented runtime security. Cross-owner review and actual tests still required.
