@@ -49,7 +49,7 @@ Runtimeが署名済みのidentity/ownerとcurrent leaseEpochをDBで検証し、
 interface RuntimeIdentity {
  tenantId:string;ownerUserId:string;taskId:string;runId:string;
  inputGoalRevision:number;appliedGoalRevision:number;
- leaseEpoch:number;authIdentityVersion:number;
+ leaseEpoch:string;authIdentityVersion:number;
 }
 interface RuntimeScope {
  identity:Readonly<RuntimeIdentity>;abort:AbortSignal;
