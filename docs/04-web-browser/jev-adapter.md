@@ -69,7 +69,9 @@ async function jevSuggest(req, ctx) {
  const candidate = await askJevWithAbort(transport,snapshot,req.deadlineAt);
  if (!validateJudgment(candidate)) return fallback("INVALID_JEV_REPLY");
  ctx.assertFence(); if (snapshot.generation !== currentGeneration(page)) return fallback("STALE");
- if (!req.allowedActions.includes(candidate.kind)) return fallback("ACTION_NOT_ALLOWED");
+ const action = classifyProposedAction(candidate); // candidate.kindは結果種別。操作種別ではない
+ if (action !== null && !req.allowedActions.includes(action)) return fallback("ACTION_NOT_ALLOWED");
+ if (candidate.kind !== "candidate") return toNonActionOutcome(candidate);
  return toGatewayActionProposal(candidate); // browser action is NOT executed here
 }
 ```
@@ -139,3 +141,9 @@ Jevの判断候補と理由は提案として表示。ステップ実行/サイ�
 [S2] **Playwright**, Apache-2.0, **Code verified: source inspected, tests read not executed**, commit `62d25ac221370f6fc5e26c600823792b83c67f1e` (2026-10-30): [`packages/playwright-core/src/client/locator.ts`](https://github.com/microsoft/playwright/blob/62d25ac221370f6fc5e26c600823792b83c67f1e/packages/playwright-core/src/client/locator.ts) (Locator.click/fill); [`packages/injected/src/ariaSnapshot.ts`](https://github.com/microsoft/playwright/blob/62d25ac221370f6fc5e26c600823792b83c67f1e/packages/injected/src/ariaSnapshot.ts) (generateAriaTree/renderAriaTreeAsJSON); [`tests/library/browsercontext-storage-state.spec.ts`](https://github.com/microsoft/playwright/blob/62d25ac221370f6fc5e26c600823792b83c67f1e/tests/library/browsercontext-storage-state.spec.ts) (context isolation tests).
 [S3] **Browser Use**, 導入前LICENSE再確認, **Code verified: source inspected, tests read not executed**, commit `2cc71890e65056b67fdb29d98bb407749c15bb08` (2026-10-30): [`browser_use/tools/service.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/tools/service.py) (Tools._click_by_index/input/switch/scroll); [`browser_use/browser/session.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py) (BrowserSession); [`tests/ci/test_tools.py`](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/tests/ci/test_tools.py) (fixture HTTP server + action tests).
 **Design hypothesis:** 本書のType、state、limit、timeout、retry、fault protocolはCHAT_04独自の未検証提案。正式Shared ID/Event/Policy/DDLの正本は各Owner。
+
+
+### Round 2 擬似コード型監査（2026-10-30）
+
+`JevJudgment.kind` は候補の**結果状態**（candidate/no_action/blocked/uncertain）であって、`allowedActions` が保持する**操作種別**（observe/propose_click/propose_fill）ではない。比較するのは `classifyProposedAction` によって明示的に復元したAction種別のみ。**T-JEV-003/007/008** は `candidate.kind='candidate', allowedActions=['propose_click']` の正常提案を許可済み操作として識別し、禁止候補の拒否・`no_action`非実行・old DOMの拒否をassertする。
+
