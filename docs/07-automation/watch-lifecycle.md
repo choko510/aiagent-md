@@ -274,3 +274,11 @@ Draftの理由: P0 contract調停未了、実装・実テスト未実施。
 
 - [x] Scope、Owner、実コード/テストとLicense、代替案、契約/状態/シーケンス/疑似コード、race/権限/費用/移行、16 MUST traceability
 - [ ] Cross-team P0の合意・実装側のテスト・独立レビュー（全部未実施）
+
+
+### Round 2 evidence-driven audit: ownership generation and pause
+
+- **[S9] Issue report**, Hermes cron/session recovery #88688: exact ownership generationを用いた復旧の整合性の議論。現行headで同一不具合が存在するという証明ではない。https://github.com/NousResearch/hermes-agent/issues/88688
+- **[S10] PR report**, OpenClaw #167081: recurring commandのrecovery ownerとrunning maintenanceを分離する提案・修正。PRのmerge状態とは独立に、pauseでin-flightを「終了済み」と誤認しない設計の反例として参照。https://github.com/openclaw/openclaw/pull/167081
+
+**追加要件 WAT-020 MUST**: 既存Task/Runを止めずWatchのみPauseしたとき、以降の新規Triggerを禁止しながら、in-flight Runのcompletion/UNKNOWNを**旧definitionRevisionへ帰属**して保存する。Run leaseEpochとの不一致では旧Workerの書込を拒否し、通知先bindingを新revへ勝手に移さない。**WAT-T19 → SC-02/07**: PauseとRun送信中/確認中の3境界を100回故障注入→旧revの結果は正しい履歴に残り、Pause以降の新規Toolは0、結果不明はunknownのまま。テスト未実施。
