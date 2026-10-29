@@ -152,13 +152,13 @@ Race: goal Steer changes 3 adults→2, cancellation, stale leaseEpoch, approval 
 Security: no host commands, no egress to private IP, direct provider SDK raw bearer leaked, or unauthorized booking. PII/guest credentials do not enter LLM or general logs. All source text is untrusted. Defaults: max3 providers, max50 rates per provider, max150 items, max60sec provider request / 180sec task, max2 in-flight per tenant; actual provider contract can impose stricter budget. Metrics: source/provider, rate hash, comparable count, fee-complete ratio, cancellation evidence, parking completeness, fetchedAt age, p50/p95, usage reserved/unknown; **no benchmark measured**.
 
 ## 8. Persistence, interfaces and cross-team proposals
-- **P0 [PROVISIONAL CHAT_01]** Evidence: room allocation and adult/child ages, rate native IDs, source and fetched time, charge breakdown, parking/cancellation condition status, raw receipt.
-- **P0 [PROVISIONAL CHAT_09/10]** owner/Tenant→Workspace mapping, UUIDv7/nullable Conversation/record revision and leaseEpoch fencing, priced rate snapshot keyed by conditions; DDL not ours.
-- **P0 [PROVISIONAL CHAT_03]** prohibit orderCreate/reservation/charge in read-only Tool, use approval/side-effect ledger to classify any future preview/booking.
-- **P1 [PROVISIONAL CHAT_04]** entitled login Browser session/human takeover; no unauthorized fallback.
-- **P1 [PROVISIONAL CHAT_12]** cross-source property matching with address/coordinates/negative evidence, do not combine different hotels' amenities and rates.
-- **P1 [PROVISIONAL CHAT_08]** show source link/check time, total components, onsite fee, parking availability/fee, cancellation conditions, strict matches vs partial and fallback conditions.
-- **P1 [PROVISIONAL CHAT_07]** for price monitoring, precise checkin/checkout/guests/rooms/locale/currency must be Watch key.
+- **P0 [PROVISIONAL: CHAT_01]** Evidence: room allocation and adult/child ages, rate native IDs, source and fetched time, charge breakdown, parking/cancellation condition status, raw receipt.
+- **P0 [PROVISIONAL: CHAT_09/10]** owner/Tenant→Workspace mapping, UUIDv7/nullable Conversation/record revision and leaseEpoch fencing, priced rate snapshot keyed by conditions; DDL not ours.
+- **P0 [PROVISIONAL: CHAT_03]** prohibit orderCreate/reservation/charge in read-only Tool, use approval/side-effect ledger to classify any future preview/booking.
+- **P1 [PROVISIONAL: CHAT_04]** entitled login Browser session/human takeover; no unauthorized fallback.
+- **P1 [PROVISIONAL: CHAT_12]** cross-source property matching with address/coordinates/negative evidence, do not combine different hotels' amenities and rates.
+- **P1 [PROVISIONAL: CHAT_08]** show source link/check time, total components, onsite fee, parking availability/fee, cancellation conditions, strict matches vs partial and fallback conditions.
+- **P1 [PROVISIONAL: CHAT_07]** for price monitoring, precise checkin/checkout/guests/rooms/locale/currency must be Watch key.
 Unresolved: no partner credentials or actual live rate test, unknown exact API plan/usage/contract, hotel free-parking validation. All remain Draft.
 
 ## 9. Implementation PR plan
@@ -185,19 +185,19 @@ Unresolved: no partner credentials or actual live rate test, unknown exact API p
 ## 11. Traceability
 | MUST | TEST | SC |
 |---|---|---|
-| HTL-001 | T01 | SC-04/08 |
-| HTL-002 | T02 | SC-04 |
-| HTL-003 | T03 | SC-04/10 |
-| HTL-004 | T04 | SC-04 |
-| HTL-005 | T05 | SC-04 |
-| HTL-006 | T06 | SC-04 |
-| HTL-007 | T07 | SC-04 |
-| HTL-008 | T08 | SC-04/08 |
-| HTL-009 | T09 | SC-04/05 |
-| HTL-010 | T10 | SC-07 |
-| HTL-011 | T11 | SC-06/08 |
-| HTL-012 | T12 | SC-04/07 |
-| HTL-013 | T13 | SC-09 |
+| HTL-001 | HTL-T01 | SC-04, SC-08 |
+| HTL-002 | HTL-T02 | SC-04 |
+| HTL-003 | HTL-T03 | SC-04, SC-10 |
+| HTL-004 | HTL-T04 | SC-04 |
+| HTL-005 | HTL-T05 | SC-04 |
+| HTL-006 | HTL-T06 | SC-04 |
+| HTL-007 | HTL-T07 | SC-04 |
+| HTL-008 | HTL-T08 | SC-04, SC-08 |
+| HTL-009 | HTL-T09 | SC-04, SC-05 |
+| HTL-010 | HTL-T10 | SC-07 |
+| HTL-011 | HTL-T11 | SC-06, SC-08 |
+| HTL-012 | HTL-T12 | SC-04, SC-07 |
+| HTL-013 | HTL-T13 | SC-09 |
 
 ## 12. Sources (all reviewed 2026-10-30)
 - [H1] **Docs verified** Booking Demand prerequisites: https://developers.booking.com/demand/docs/getting-started/prerequisites
