@@ -45,11 +45,11 @@ BEGIN
  END IF;
 END $$;
 COMMIT;"""
-def concurrent(i): 
+def run_one_delivery(i): 
  p=run(sql_for('post_parallel_1'))
  return i,p.returncode,p.stderr[-550:]
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
- results=list(ex.map(concurrent,range(24)))
+ results=list(ex.map(run_one_delivery,range(24)))
 fail=[r for r in results if r[1]]
 print('INGRESS_PARALLEL_FAILURES',len(fail),fail[:5])
 assert not fail,fail[:4]
