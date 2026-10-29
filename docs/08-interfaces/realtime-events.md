@@ -272,3 +272,7 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 | SSE-010 | SSE-T10 | SC-01, SC-02, SC-04, SC-07 |
 
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
+
+
+### Round 4 signed SSE cursor / persisted retention floor (2026-10-30 / design)
+SSE replay must consult `agent.event_retention_floors` and actual `domain_events` ordering, not compute retention from owner-filtered visible Events. If `cursor.lastDeliveryOffset < earliest_replayable_offset - 1`, return **410 STREAM_CURSOR_EXPIRED** and force a fresh authorized GET Snapshot; otherwise hidden offsets are legitimate and replay may return zero items without a gap. For an empty tenant, firstOffset=1 is normal. Signed cursors remain bound to viewer/tenant/filter and are checked against fresh auth. GC/outbox integrity is physical CHAT_10 ownership. Tests SSE-R4-T01 owner filter hides some offsets (no false410), T02 expired floor (410), T03 delete+replay/subscribe race (complete or reset). Not executable until server implementation.
