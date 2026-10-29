@@ -8,9 +8,9 @@
 ## 1. Responsibility, non-scope, boundaries
 - Input: Gateway-approved read-only lookup, model/JAN/market/condition/store/quantity, auth context, RunFence, cost ceiling, deadline.
 - Output: timestamped `BuybackOfferDraft`, structured unknown/partial, canonical source URL/raw evidence refs, provider usage.
-- CHAT_05: Provider manifest, native API/extraction profiles, domain semantics; CHAT_01 Evidence schema、CHAT_03 Policy/Gateway/ledger、CHAT_04 HTTP/Browser session、CHAT_07 Watch/通知、CHAT_09 Secret/egrеss/tenant isolation、CHAT_10 DB、CHAT_12 Entity Resolver/Risk、CHAT_13 Change Intelligence、CHAT_15 OCR/CSV。
+- CHAT_05: Provider manifest, native API/extraction profiles, domain semantics; CHAT_01 Evidence schema、CHAT_03 Policy/Gateway/ledger、CHAT_04 HTTP/Browser session、CHAT_07 Watch/通知、CHAT_09 Secret/egress/tenant isolation、CHAT_10 DB、CHAT_12 Entity Resolver/Risk、CHAT_13 Change Intelligence、CHAT_15 OCR/CSV。
 - Non-scope: 商品照合の真偽や利益期待値の確定、Watchの状態機械、物理DDL、同じショップ名だからと別店舗を同一視する処理。
-- SC-01/02/05/06/07/08/09/10/12/14/15。
+- SC-01, SC-02, SC-05, SC-06, SC-07, SC-08, SC-09, SC-10, SC-12, SC-14, SC-15。
 
 ## 2. Primary source/code/test research (2026-10-30)
 | Source | inspected classes/functions/tests | apply / reject |
@@ -139,13 +139,13 @@ async function observeBuyback(approved, input, abort) {
 Security: no scraping permission circumvention, no CAPTCHA claims, no purchase or resale actions. Egress handles redirect/DNS rebinding/private IP; cookie/BrowserSession only CHAT_04. Redact all secret-bearing query parameters and PII. Logs: provider, profile digest, anonymized item fingerprint, status category, missing-field count, observedAt/sourceEffectiveAt, cost unknown, retries, drift; no HTML/content/token. Compare p50/p95 and extraction accuracy with fixed offline fixtures; no fabricated measurements.
 
 ## 8. Owner proposals / persistence / UI
-- **P0 CHAT_01** Evidence requires `priceKind`/conditions/source effective time/native offer identity/uncertainty/raw artifact, not one price scalar.
-- **P0 CHAT_09/10** tenant-workspace-owner mapping, UUIDv7 internal IDs, nullable Conversation, `leaseEpoch`/goalRevision fencing and quota receipt persistence. All physical DDL owned by CHAT_10.
-- **P1 CHAT_12** model/variant identity and negative evidence, price adjustment risk; do not equate displayed upper limit to profit.
-- **P1 CHAT_07** Watch failure vs observed 0, strict threshold semantics, notification idempotency owned by 07.
-- **P1 CHAT_13** structural price diff ignores ad/time noise, emits only meaningful change; Event Dispatcher not duplicated.
-- **P1 CHAT_08** show source URL/claim kind/validity/store/quantity/time, never “確定” for up_to.
-- **P1 CHAT_04/15** browser owner & provenance for screenshot/PDF/table price lists.
+- **P0 [PROVISIONAL: CHAT_01]** Evidence requires `priceKind`/conditions/source effective time/native offer identity/uncertainty/raw artifact, not one price scalar.
+- **P0 [PROVISIONAL: CHAT_09/10]** tenant-workspace-owner mapping, UUIDv7 internal IDs, nullable Conversation, `leaseEpoch`/goalRevision fencing and quota receipt persistence. All physical DDL owned by CHAT_10.
+- **P1 [PROVISIONAL: CHAT_12]** model/variant identity and negative evidence, price adjustment risk; do not equate displayed upper limit to profit.
+- **P1 [PROVISIONAL: CHAT_07]** Watch failure vs observed 0, strict threshold semantics, notification idempotency owned by 07.
+- **P1 [PROVISIONAL: CHAT_13]** structural price diff ignores ad/time noise, emits only meaningful change; Event Dispatcher not duplicated.
+- **P1 [PROVISIONAL: CHAT_08]** show source URL/claim kind/validity/store/quantity/time, never “確定” for up_to.
+- **P1 [PROVISIONAL: CHAT_04/15]** browser owner & provenance for screenshot/PDF/table price lists.
 - Unresolved blocker: actual merchant/API permissions and ToS must be researched per provider; this generic spec does NOT authorize production scraping.
 
 ## 9. Implementation PRs
