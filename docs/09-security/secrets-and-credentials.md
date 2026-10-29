@@ -257,3 +257,8 @@ Tests use fake providers and canary secrets; no live provider account or real OA
 - [x] Scope/owner/alternatives; pinned implementation and test paths (OpenClaw, Playwright, Better Auth); proposed contract, algorithm, state, race, revocation, migration, API.
 - [x] All MUST → TEST → SC and negative security checks.
 - [ ] Actual product integration, benchmarks, key-management spike and unresolved canonical contracts. **Keep Draft.**
+
+## Upstream PR investigation — Credential redaction and refresh races
+- **[PR inspected, open/unmerged]** OpenClaw [#178361](https://github.com/openclaw/openclaw/pull/178361) describes a direct SecretRef resolver path where secret values with unrecognized shapes were not added to exact-value redaction registration; the proposed change affects `src/secrets/resolve.ts`/tests. It is **not evidence that upstream main already fixed this**. Add canary with irregular token shape to `CRED-T01`; our design does not expose plaintext to generic logs in the first place.
+- **[PR inspected, open/unmerged]** OpenClaw [#173635](https://github.com/openclaw/openclaw/pull/173635) documents bounded refresh retries under concurrent credential changes, motivating `CRED-T07/T08` CAS/cancellation/unknown tests. PR description asserts tests but those were **not independently run** here.
+- Source grade: PR report, **not product verification**. No upstream copy, especially arbitrary command-based SecretRef providers.
