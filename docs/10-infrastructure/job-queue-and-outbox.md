@@ -5,7 +5,7 @@
 
 ## 0. 採用案と設計不変条件
 
-**採用:** Agent業務の正本は`agent.tasks/runs/task_events/tool_intents/side_effect_records/watches/notification_records/outbox_messages`（10-01、Draft）。実行待ち・再試行のトランスポートはPostgreSQL永続Queue（第一候補pg-boss、独立`pgboss` schema）。**同じPostgres内でも別transactionでQueueへのpublishが発生するため、Outbox relayは重複送信を許容し、受信側をfence/idempotent化する**。Event/User-visible通知のExactly-once外部配達は一般には不可能。ユーザーを誤解させない。
+**採用:** Agent業務の正本は`agent.tasks/runs/domain_events + event_aggregate_counters + tenant_event_counters/tool_intents/side_effect_records/watches/notification_records/outbox_messages`（10-01、Draft）。実行待ち・再試行のトランスポートはPostgreSQL永続Queue（第一候補pg-boss、独立`pgboss` schema）。**同じPostgres内でも別transactionでQueueへのpublishが発生するため、Outbox relayは重複送信を許容し、受信側をfence/idempotent化する**。Event/User-visible通知のExactly-once外部配達は一般には不可能。ユーザーを誤解させない。
 
 **Hard invariants (MUST):** (1) ドメイン変更・Event・Outbox recordを一つのDB commitで保存。(2) Outbox未publishを必ず再列挙可能。(3) Queue job payloadは不透明なPointer+generationでありauthorityではない。(4) Run leaseEpoch、Tool attempt fence、Schedule revisionは**別値**。(5) 既に外部実行したか不明なTool/NotificationはACK喪失だけを理由に盲目再実行しない。(6) pause/cancel/steer後の旧JobをTool Gatewayへ通さない。(7) CAS結果0行は「成功扱い」しない。(8) Queue障害でもTask/Watch正本を削除しない。
 
@@ -181,6 +181,20 @@ settleCheckpoint(...):
 ### 7.3 Job backoff and limits (configuration proposal; not empirical SLO)
 
 Initial sandbox config: 1 DB cluster, API pool 8 + worker 8 + relay 2 + migration 2 connection max; relay batch <=100, scan interval <=5s and >=0.5s, lease=30s, heartbeat=10s, queue max attempts 5, base exponential 2s cap 5min jitter; Run wall deadline owner-policy; outstanding per tenant 1000 and active per tenant 2 / total 8; polling concurrency 2; no indefinite AI loops. Exact thresholds require CHAT_02/07/10-04/11 load and fairness tests; **do not inherit pg-boss defaults silently**. Queue retry only on classified transient DB/network errors for idempotent state transitions, not on purchase/post/notification uncertain outcome.
+
+### 7.4 Round 3 — Canonical Domain Event / Tenant CursorとOutbox再配信の整合
+
+Eventの唯一の保存正本はCHAT_10 `database-schema-and-migrations.md`の`agent.domain_events`であり、旧`task_events`は廃止。CHAT_01 `event-envelope-and-stream.md`の`aggregateSequence`（aggregate単位）と`deliveryOffset`（tenant単位）が別々のスコープである点を維持する。
+
+1. Domain mutation + Event/counters + Outboxの書込みは**必ず同一Postgres TX**。queue publishはコミット後なのでOutbox RelayはAt-least-once。
+2. Outbox rowは`event_id`で`domain_events`の永続Eventを参照。RelayはEventを再作成したりtenant offsetを採番しない。Event ID、aggregateSequence、deliveryOffsetを外部配送の時に変えない。
+3. PG通知・queue jobはwake-up hint/transportであり、SSEの正本順序は`agent.domain_events ORDER BY delivery_offset`。Tenantに複数Aggregateが存在してもEvent順を配送順序と混同しない。
+4. Relay途中でcrash/ACK lostなら同じ`eventId`とdedupe keyで再publish可。下流consumerがprocessed event ID / projection versionをDBで重複抑止。**外部不可逆Tool effectやTelegram送信自体の再試行可否は別**で、相手側冪等性と照会可能性なしに再送を保証しない。
+5. Scope enforcement: relayは認可判定を省略してeventの`owner_user_id`や`audience_code`を任意subscriberへ直接流さない。UI/SSE subscriberでCHAT_09 policyのfresh認可を行いSafeEvent projectionだけを返す。
+6. `tenant_event_counters`の単一行lockはEvent commit順序の直列化点。多数イベント時のボトルネックはベンチで測定し、勝手にshardやRedis sequenceへ切り替えない。
+7. Rehydration: Queueが欠落・逆順でもOutbox + Domain Eventを読んで順序正規化。Task snapshotは同一MVCCもしくはmaterialized projection barrierで整合させ、HMAC cursorの先読みでEventを落とさない。
+
+**テスト（設計のみ）**：`QUEUE-R3-T01` Task/Watch同Tenant10並列でEvent ID/offset一意、Outbox1:1+重複0。`QUEUE-R3-T02` Domain Tx commit前/後killでall-or-none。`QUEUE-R3-T03` Outbox relay2個逆順→DB順序でReplay。`QUEUE-R3-T04` Outbox成功ACK lost→同EventId再配送、外部Effect重送0。`QUEUE-R3-T05` cross-tenant subscriber認可漏れ0。`QUEUE-R3-T06` queue outageでOutbox残存、復旧後SSE欠落0。
 
 ## 8. Failure matrix
 
