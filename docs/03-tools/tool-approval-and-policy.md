@@ -84,12 +84,12 @@ interface PolicyReceipt { decision: PolicyDecision; effectiveRisk: Risk;
   expiresAt: string; source: "TRUSTED_POLICY_ENGINE"; }
 interface ApprovalBinding { approvalId: string; intentId: string; tenantId: string;
   ownerUserId: string; requestedByActorRef: string; expectedApproverRef: string;
-  taskId: string; runId: string; stepOrdinal: number; goalRevision: number;
+  taskId: string; runId: string; stepOrdinal: number; goalRevision: string; // canonical int64 decimal string
   leaseEpochAtProposal: string;  // lease changes on resume: NOT binding authority on its own
   toolId: string; toolRevision: string; argsSha256: string;
   externalTargetDigest: string; amountCurrency?: string; amountMinorUnits?: string;
   credentialBindingVersion?: string; risk: Risk; policyEpoch: string;
-  createdAt: string; expiresAt: string; recordVersion: number;
+  createdAt: string; expiresAt: string; recordVersion: string; // lossless canonical int64
 }
 interface ApprovalCommand {approvalId: string; decision: "APPROVE"|"DENY";
   commandId: string; expectedRecordVersion: number; }
@@ -309,3 +309,7 @@ Use existing [REST PR #8](https://github.com/choko510/aiagent-md/pull/8) `POST /
 - [S4] LangGraph [`interrupt.py`](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/prebuilt/langgraph/prebuilt/interrupt.py), MIT, **Code verified**.
 - [S5] [PydanticAI issues #6452](https://github.com/pydantic/pydantic-ai/issues/6452) / [#10926](https://github.com/pydantic/pydantic-ai/issues/10926), [Mastra #27485](https://github.com/mastra-ai/mastra/issues/27485), **Issue report, not reproduced**.
 - [S6] [SC](../00-foundation/acceptance-scenarios.md), [Architecture Rules](../00-foundation/architecture-rules.md), [Round 2](../../prompts/ROUND2_AUTHOR_CONTINUE.md), **project requirements**. Our binding/caps are **design hypotheses**. All implementation tests **not executed**.
+
+
+### Round 3 — lossless canonical version boundary (2026-10-30)
+All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
