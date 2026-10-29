@@ -91,7 +91,7 @@ Web UI / Telegram Adapter / API client
 | REST-011 | MUST | RFC 9457の機械可読エラー・requestId・Retry-After・安全な文言を提供 | 07,08 |
 | REST-012 | MUST | 受付とjob enqueueをoutbox等で整合させ、クラッシュ時に二重外部副作用を作らない | 02,07 |
 | REST-013 | MUST | すべての副作用endpointにCSRF/Origin検証などCHAT_09のpolicyを適用し、rate/body/timeout上限を設ける | 08,09 |
-| REST-014 | MUST | Task/Watchのpause/resume/cancelは遷移Command。Ackと完了状態を別々に表す | 02,07 |
+| REST-014 | MUST | Taskのpause/resume/cancel、Watchのpause/resume/retireは遷移Command。Ackと完了状態を別々に表す | 02,07 |
 | REST-015 | MUST | Read responses/監査ログにsecret、raw cookie、外部HTMLをそのまま混ぜない | 06,08 |
 | REST-016 | MUST | ApprovalとBrowser操作は対象owner/current actorの権限を**決定直前にも再評価** | 06,07,08 |
 | REST-017 | SHOULD | If-None-Match ETag・gzip/br・PATCH read-model diffを導入してポーリングを抑える | 07,09 |
@@ -129,7 +129,7 @@ Web UI / Telegram Adapter / API client
 | Watch | POST /watches | watch:create | 201 Watch保存と次回確認予定。Idempotency-Key必須 |
 | Watch | GET /watches, GET /watches/{id} | watch:read | 200 current state + nextCheckAt/lastObservedAt |
 | Watch | PATCH /watches/{id} | watch:update | 200 編集可能な条件のみ。If-Match必須、スケジューラ再評価 |
-| Watch | POST /watches/{id}/commands | watch:control | 202 pause/resume/cancel（or delete semanticsはCHAT_07決定） |
+| Watch | POST /watches/{id}/commands | watch:control | 202 pause/resume/retire（retireはWatchの終了操作でTask cancelと別） |
 | Approval | GET /approvals, GET /approvals/{id} | approval:read | 200 target action summary, scope, expiry, decision status |
 | Approval | POST /approvals/{id}/decision | approval:decide | 202 approve/denyのみ、If-Match + Idempotency-Key |
 | BrowserSession | GET /browser-sessions, GET /browser-sessions/{id} | browser:read | 200 redacted handoff status, own task linkage |
@@ -184,9 +184,11 @@ type TaskView = ResourceMeta & {
 type WatchView = ResourceMeta & {
   state: string;                   // CHAT_07-owned
   conditionSummary: string;
+  definitionRevision: string;     // CHAT_07 immutable definition generation, int64 decimal string
   scheduleTimezone: string;
   nextCheckAt: ISOInstant | null;  // null when paused/never scheduled
-  lastObservedAt: ISOInstant | null;
+  lastCheckedAt: ISOInstant | null; // attempt, including failed fetch
+  lastValidObservedAt: ISOInstant | null; // latest validated observation (may be stale)
   notificationTargetSummary: string; // no auth secrets or chat IDs
 };
 type ApprovalView = ResourceMeta & {
@@ -296,7 +298,7 @@ type WatchPatchInput = {
   schedule?: { timezone: string; expression: string };
   notificationDestinationRef?: string;
 };
-type WatchControlInput = { action: "pause" | "resume" | "cancel"; reason?: string };
+type WatchControlInput = { action: "pause" | "resume" | "retire"; reason?: string };
 type ApprovalDecisionInput = {
   decision: "approve" | "deny";
   reason?: string;                          // no client-provided canExecute/policy override
@@ -484,7 +486,7 @@ async function acceptCommand(ctx, route, rawBody, headers) {
 ## 12. UI・外部チャネルへの影響
 
 - Web chatは TaskView/RunView/EvidenceSummaryを読む。CommandAckを「完了」と描画しない。202のあとSSE/GETを併用、SSEの契約は realtime-events.md。
-- Dashboardはrun step/costとWatch nextCheckAt/lastObservedAt、paused/uncertain/needs-approvalを表示。削除と停止を混同しない。
+- Dashboardはrun step/costとWatch nextCheckAt/lastCheckedAt/lastValidObservedAt、paused/uncertain/needs-approvalを表示。削除と停止を混同しない。
 - Approval UIはaction summary/対象URL・費用・期限・irreversible副作用を確認し、GETでETag取得→decisionへIf-Match付与。期限切れ409はユーザーに理由表示。
 - Browser takeover UIは短命handoffの表示だけ。raw credentials/automation endpointは出さない。
 - Telegram adapterもRESTまたは等価のCommand application serviceを利用し、**同じDB principal/idempotency/permissions** を通過。通知重複はCHAT_07のNotification Outbox、チャネル跨ぎSteerの整合はCHAT_02と共同設計。
@@ -636,3 +638,5 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 **REST-R2-T09 (designed, not run; SC-05/07/08)**: snapshot GET vs worker Event commit vs SSE stream handshake, slow projection barrier, cursor expiration and cross-tenant replay: assert no event loss, no double billing/step UI, 410 resnapshot, access denied on revoked principal. Complements REST-T19 and SSE-T02.
 
 **Round 2 latest shared schema update (2026-10-30):** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) now specifies `RecordVersion`, `Revision`, `LeaseEpoch` as lossless int64 **decimal strings** (initial `"1"`, `"1"`, `"0"`). [CHAT_01 PR #23](https://github.com/choko510/aiagent-md/pull/23) defines `aggregateSequence` vs tenant `deliveryOffset`, Task/Run state and `StreamCursorV1.lastDeliveryOffset`. The REST proposal adopts their wire serialization, while physical DDL/owner mapping and released schema remain [PROVISIONAL]. Any earlier illustrative TypeScript numeric field/comment in this Draft that conflicts with the current shared logical model must be interpreted according to this paragraph and the edited DTO above; do not ship such an inconsistency into OpenAPI.
+
+**CHAT_07 PR #16 reconciliation:** Watch service uses `retire` (not Task `cancel`) as terminal operation, with `recordVersion` CAS distinct from `definitionRevision` (immutable condition generation). REST projects Watch `nextCheckAt` from owner `nextDueUtc`, `lastCheckedAt` and `lastValidObservedAt` separately; a failed fetch cannot update lastValidObservedAt or produce a 0 price. REST-T09/T21 (designed) test pause, retire, stale definition revision, failed acquisition and notification destination revocation. Physical Watch revision/DDL remains [PROVISIONAL: CHAT_07/10].
