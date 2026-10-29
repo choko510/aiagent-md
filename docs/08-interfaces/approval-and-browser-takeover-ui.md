@@ -252,3 +252,20 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 **[PR-HITL-01]** [Mastra PR #27760](https://github.com/mastra-ai/mastra/pull/27760)（2026-10-30確認、**Open / 未マージ**）の `packages/core/src/workflows/evented/workflow-event-processor/index.ts` 差分を読んだ。同PRはlease acquireの待機を5秒で制限し、backend timeout時にstepを**fenceなしで進行**させる既存fallbackを用いる。本Harnessでは**外部副作用/BrowserSessionのownership fence失敗時に実行を許可しない**ため、timeoutでunfenced executionへ進む案は明確に却下する。HITL-T04/T06にLeaseProvider hang、late grant、stale ownerを注入し、**副作用実行0**、暫定WAITING_INPUT/UNKNOWN、限定的recoveryを検証する。Mastra PRの修正の有効性/取り込み状態は本Harnessに移植していない。
 
 **Round2 shared integer amendment:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) supersedes earlier number wire types: approval recordVersion and goalRevision are validated int64 **decimal strings**, leaseEpoch is a separate server-only decimal string initially "0". BrowserSession control cannot accept arbitrary leaseEpoch. HITL-T02/T03/T06 include values >2^53-1 and reject float/leading-zero/exponent to prevent CAS and owner bypass.
+
+## Formal Round 2 MUST Traceability (full stable IDs; designed tests only)
+
+| MUST REQ-ID | TEST-ID(s) | SC-ID(s) |
+|---|---|---|
+| HITL-001 | HITL-T01 | SC-04, SC-06, SC-07 |
+| HITL-002 | HITL-T02 | SC-06, SC-07, SC-08 |
+| HITL-003 | HITL-T03 | SC-07, SC-08 |
+| HITL-004 | HITL-T04, HITL-T06 | SC-06, SC-08 |
+| HITL-005 | HITL-T05 | SC-06, SC-08 |
+| HITL-006 | HITL-T06 | SC-06, SC-07 |
+| HITL-007 | HITL-T07 | SC-04, SC-06, SC-08 |
+| HITL-008 | HITL-T08 | SC-06, SC-07 |
+| HITL-009 | HITL-T09 | SC-07, SC-08 |
+| HITL-010 | HITL-T10 | SC-04, SC-06 |
+
+**Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
