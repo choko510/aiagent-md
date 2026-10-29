@@ -109,23 +109,23 @@ type MissedPolicy =
 interface ScheduleIntentV1 {
   version:1; tenantId:string; principalId:string; scheduleId:string;
   targetKind:'watch'|'goal'|'task'; targetRef:string;
-  revision:number; enabled:boolean; spec:TimeSpec; missed:MissedPolicy;
+  definitionRevision:number; recordVersion:number; enabled:boolean; spec:TimeSpec; missed:MissedPolicy;
   validFromUtc:string; validUntilUtc?:string;
   nextDueUtc:string|null; maxConcurrency:number;
   budgetPolicyRef:string; ratePolicyRef:string;
 }
 interface OccurrenceRefV1 {
   version:1; occurrenceId:string; tenantId:string; scheduleId:string;
-  revision:number; scheduledForUtc:string;
+  definitionRevision:number; scheduledForUtc:string;
   reason:'on_time'|'catchup_coalesced'|'manual';
   dispatchIntentId:string; admissionRef?:string;
   resultRef?:string; // Task/Run/Observation contract owner is elsewhere
 }
 interface SchedulerPort {
   create(intent:ScheduleIntentV1, requestId:string):Promise<ScheduleIntentV1>;
-  update(id:string, expectedRevision:number, patch:unknown):Promise<ScheduleIntentV1>;
-  pause(id:string, expectedRevision:number):Promise<ScheduleIntentV1>;
-  resume(id:string, expectedRevision:number):Promise<ScheduleIntentV1>;
+  update(id:string, expectedRecordVersion:number, patch:unknown):Promise<ScheduleIntentV1>;
+  pause(id:string, expectedRecordVersion:number):Promise<ScheduleIntentV1>;
+  resume(id:string, expectedRecordVersion:number):Promise<ScheduleIntentV1>;
   preview(spec:TimeSpec, fromUtc:string, count:number):Promise<string[]>;
   scanDue(max:number):Promise<number>;
   dispatchPending(max:number):Promise<number>;
@@ -438,3 +438,36 @@ Evidence grade:
 - [ ] Independent review, Reviewed/Locked gates passed.
 
 **Author status: Draft only.**
+
+## 18. Round 2 contract audit — 優先される補正事項（2026-10-30）
+
+この節は旧記述に優先する。関連一次資料は未mergeの [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) / [CHAT_10 PR #10](https://github.com/choko510/aiagent-md/pull/10) / [CHAT_08 PR #8](https://github.com/choko510/aiagent-md/pull/8) / [CHAT_09 PR #9](https://github.com/choko510/aiagent-md/pull/9) / [CHAT_02 PR #1](https://github.com/choko510/aiagent-md/pull/1)。これらはDraftであり正本としてLockedではない。
+
+| Conflict | 発見した具体的差分 | CHAT_07の解決規約・他Ownerへの提案 | 新しい確認条件 |
+|---|---|---|---|
+| C07-01 UUID | CHAT_01は公開domain IDがUUIDv7、CHAT_10の生成Defaultはgen_random_uuid()。旧07-01のoccurrenceKey SHA-256はそのままUUIDとして使用できない | [PROVISIONAL: CHAT_01/10] WatchId/ScheduleId/OccurrenceId/TaskIdは信頼されたserverで発行し、CHAT_01が決めるUUIDv7検証に適合させる。**SHA-256は内部dedupeKeyであり公開Entity IDではない**。DB default・legacy ID migrationはCHAT_10に依頼 | SCH-T23: 生成IDは共有UUIDv7 validatorを通過、異種ID取り違えなし |
+| C07-02 Tenant | CHAT_01/09はtenantId + ownerUserId、CHAT_10はworkspace_id、旧07-01はprincipalIdを保存。principal/owner/tenant/workspaceは同一とは限らない | [PROVISIONAL: CHAT_09/10] JWT/API principalではなくserver-verified tenant & ownerからWatchを作成。WorkerはWatch→owner identityVersionを再取得。workspace mappingはAuth ownerが合意するまで保存形式を確定しない | SCH-T24: tenant越境または権限失効なら発火/通知0 |
+| C07-03 Revision | CHAT_01 recordVersion 1開始、DB revision 0開始。旧07-01単一revisionを全更新とスケジュール定義世代に併用 | **recordVersion**（全行変更で増加、API If-Match/ETag対応）と **definitionRevision**（予定/条件/通知の意味的変更でのみ増加）を分離する提案。どちらも初期値はCHAT_01/10合意を待つ。scheduler cursor更新はrecordVersion CASを進めるがdefinitionRevisionは変えない。競合HTTPはCHAT_08仕様に合わせ412（missing 428）、409は業務遷移不正 | SCH-T25: timer tick後の条件変更でCAS競合を解消、旧定義slot二重起動0 |
+| C07-04 Lease | CHAT_01/02はRun leaseEpoch/fencing、DB側のRun保存と一致未確認。Schedulerが発行したLeaseでTool権限を代用してはならない | occurrence claim tokenはローカルoutbox処理所有権。RunのleaseEpochはCHAT_01/02/10に委譲し、Tool実行前にcurrent run leaseEpoch + goalRevision + auth generationを別途検証。number/bigint wireはOwnerが決める、JS safe integerを越えるとreject | SCH-T26: old occurrence claimもold run leaseEpochも効果を起こせず、unknownはreconcile |
+| C07-05 Conversation | CHAT_01 Task.conversationId nullable、CHAT_10 tasks.conversation_id NOT NULL、CHAT_08 TaskView必須 | Watch/外部Event起点Taskは**conversationId=nullを合法**とする共有ドメイン案に従う。Schedulerは架空Conversationを作らない。別Ownerへ nullable DDL と REST nullable projection を提案 | SCH-T27: Watchから会話なしTaskを作成/再起動/取得、エラー・越境なし |
+| C07-06 Outbox | CHAT_10がwatch/observation/notification/outboxを定義するが、旧07-01のSchedule/Occurrence/Dispatch Outbox専用の一意性が未反映 | [PROVISIONAL: CHAT_10] Watch triggerKey・occurrenceKey・dispatch keyとTask作成を同じトランザクションで書ける物理配置が必要。外部queue enqueueとは最終的整合のみ。二重outboxが送達されてもTask作成一意制約で抑止 | SCH-T28: commit前後/Queue ACK loss、Watch→Task最大1 |
+| C07-07 Expansion | 新規SC-11 Event-driven X、SC-12 Change intelligence、SC-16 Notification rankingでEventとTimerの統合点が増加 | CHAT_13はEvent ingestionの正本、CHAT_07は共通Watch条件/triggerとnotification outboxの正本。外部EventのsourceId/providerEventIdはタイマーslotと混ぜず別namespace、Subscription専用状態を勝手に作らない | SCH-T29: polling/stream同一eventの重複Task/通知0 |
+
+**運用上の厳密な区別**:
+- 公開 domain ID（UUIDv7候補）、冪等キー（canonical hash）、通知delivery id、HTTP Idempotency-Key、Event envelope IDは**別物**。表現変換は明示Adapterのみ。
+- definitionRevision と shared recordVersion は数字でも意味が違う。Run leaseEpoch、Task goalRevision、Watch definitionRevisionを混同しない。UUIDは認可の根拠ではなく、tenant/ownerのDB参照再照合が必要。
+- この仕様の旧句「競合409」はRESTの厳密な扱いでは更新If-Match不一致412、If-Match欠落428、業務状態不許可409を優先。
+- 新SC-11/12/16に対するSchedulerの責務は、正しく認可された外部イベントによる新しい有限Task実行の受付、共通Watchの停止/予算条件の適用であり、イベント監視自体はCHAT_13の責務。
+- **Round2追加TEST** SCH-T23〜T29は設計のみ/未実行。拡張SC-11,12,16および既存SC-02,07,08に対応し、実装前のCross-team Contract Gateとする。
+
+| Requirement追加 | TEST-ID | SC | Expected |
+|---|---|---|---|
+| SCH-023 MUST | SCH-T23 | 02,07 | IDを共有UUIDv7 Validatorで検査し、dedupe SHAと混同しない |
+| SCH-024 MUST | SCH-T24 | 02,08 | Worker認可を永続ownerから再照合し、無効Watchの新規Tool/通知0 |
+| SCH-025 MUST | SCH-T25 | 02,07 | definitionRevisionとrecordVersionを混同せず、競合/古いslotに拒否 |
+| SCH-026 MUST | SCH-T26 | 07 | Run leaseEpoch別管理、旧epochの新規副作用0 |
+| SCH-027 MUST | SCH-T27 | 02,07,11 | nullable ConversationのWatch起点Taskが合法 |
+| SCH-028 MUST | SCH-T28 | 07 | Transactional dispatch、ACK lossでも二重logical Task 0 |
+| SCH-029 MUST | SCH-T29 | 11,12,16 | 外部event/Timer namespaceを分離し重複発火0 |
+
+**Cross-team proposalはPR本文にも提出**。このブランチから他担当ファイルへ書き込まない。
