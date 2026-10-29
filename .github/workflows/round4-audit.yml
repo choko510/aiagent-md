@@ -34,6 +34,8 @@ jobs:
           set -euxo pipefail
           which google-chrome || which chromium || which chromium-browser
           python3 audit/round4/browser_smoke.py
+      - name: Real Chromium local click/fill POST side-effect trap (threat repro only)
+        run: python3 audit/round4/browser_post_trap.py
 
   full-spec-matrix:
     runs-on: ubuntu-latest
