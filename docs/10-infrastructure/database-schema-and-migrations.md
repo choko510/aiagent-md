@@ -179,6 +179,7 @@ CREATE TABLE agent.tasks (
   owner_user_id uuid NOT NULL,
   origin_thread_id uuid,
   parent_task_id uuid,
+  retry_of_task_id uuid,
   created_from_watch_id uuid,
   trigger_key text,
   goal_revision bigint NOT NULL DEFAULT 1 CHECK(goal_revision BETWEEN 1 AND 9007199254740991),
@@ -196,8 +197,10 @@ CREATE TABLE agent.tasks (
     REFERENCES agent.conversations(tenant_id,id),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
  FOREIGN KEY(tenant_id,parent_task_id) REFERENCES agent.tasks(tenant_id,id),
+ FOREIGN KEY(tenant_id,retry_of_task_id) REFERENCES agent.tasks(tenant_id,id),
  FOREIGN KEY(tenant_id,conversation_id,origin_thread_id) REFERENCES agent.threads(tenant_id,conversation_id,id),
- CHECK(origin_thread_id IS NULL OR conversation_id IS NOT NULL)
+ CHECK(origin_thread_id IS NULL OR conversation_id IS NOT NULL),
+ CHECK(retry_of_task_id IS NULL OR retry_of_task_id <> id)
 );
 CREATE INDEX tasks_by_conversation ON agent.tasks
   (tenant_id,conversation_id,created_at DESC);
