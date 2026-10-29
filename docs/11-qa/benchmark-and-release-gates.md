@@ -310,3 +310,19 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 - [S4 Code verified] Playwright 38fb53bf4c181abb91f1ca2a2ab741983c5d177c: [JSONReporter.onEnd](https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/packages/playwright/src/reporters/json.ts)、[reporter-json.spec](https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/tests/playwright-test/reporter-json.spec.ts)、[License Apache-2.0](https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/LICENSE)。
 - [S5 Hypothesis] 比較統計手法・Gate policy・schema・initial resource limitsは本Harness向け提案。既存コード参照や上流のベンチ数値を自製品の実証と見なさない。
 - [S6 Project normative Draft] [SC-01〜16](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/acceptance-scenarios.md)、[Round2](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/prompts/ROUND2_AUTHOR_CONTINUE.md)、[Fixtures PR #7](https://github.com/choko510/aiagent-md/pull/7)、[E2E PR #13](https://github.com/choko510/aiagent-md/pull/13)、[Fault PR #24](https://github.com/choko510/aiagent-md/pull/24)。
+
+## 17. Round 3 — P0/P1 contract integration release gate
+
+仕様設計のレビューで`Locked`にする条件と、実装を`Verified`にする条件を厳密に区別する。以下は**実装後に実行するblocking tests**であり、現時点は設計のみ。
+
+| Gate | Owners / PRs | Passing oracle |
+|---|---|---|
+| GATE-R3-01 | CHAT_01 #23; CHAT_10 #10; CHAT_08 #17 | Domain Event per-aggregate sequence + tenant delivery offset, Watch Task-null合法, Snapshot/SSE auth replay欠落0 |
+| GATE-R3-02 | CHAT_02 #27; CHAT_10 #10; CHAT_03 #31 | Multi-phase append-only Checkpoint+head CAS with 2 workers, stale writes 0, UNKNOWN effect blind retry 0 |
+| GATE-R3-03 | CHAT_01 #2; CHAT_02 #21; CHAT_03 #20/#31; CHAT_07 #16; CHAT_10 #10 | Int64 decimal string roundtrip (2^53 boundary, signed BIGINT max), invalid JSON number rejected |
+| GATE-R3-04 | CHAT_01 #2/#23; CHAT_02 #21; CHAT_08 #8; CHAT_10 #10 | Terminal Task retry creates new Task+lineage, Run retry only if Task nonterminal, immutable history |
+| GATE-R3-05 | CHAT_10 #26/#10; CHAT_09 #41; CHAT_11 #24 | PostgreSQL migration executes, Docker non-root/sandbox, SSRF across HTTP/Browser/MCP fail closed on actual fixed images |
+| GATE-R3-06 | CHAT_11 #13/#24; CHAT_10 #22 | Queue/Outbox fail/ACK loss/replay: no unauthorized/duplicate external effect; explicit unknown outcomes |
+
+**Gate rules:** all GATE-R3-01..06 have runnable fixtures, independent assert against DB/network observations, version-pinned environment, recorded evidence SHA and nonzero process exit on failure; zero P0/P1 unaccepted conflicts before `Locked`; actual executed green tests plus rollout/restore for `Verified`. Any skipped required test is **not pass**. Runtime/DB schema may remain Draft until named owners reconcile; this spec's list is not a substitute for executing tests.
+
