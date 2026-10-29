@@ -558,3 +558,16 @@ SHOULD LOOP-017 → TEST-006/029、LOOP-018 → TEST-020/029。LATER/EXPERIMENT�
 | LOOP-R2-008 | UNKNOWNの盲目的再発行防止（SC-07） | R2-LOOP-T10: 予約Tool実行直後kill→provider lookupかUNCERTAIN、実行回数1 |
 
 **実行はしていない**。横断Contract Testの正本化とE2E実行はCHAT_11へ依頼。全MUSTがTestとSCに対応し、旧LOOP-001〜016と整合することをレビューで確認するまで本書はDraftのままとする。
+
+
+## Round 3 — AgentLoop, append-only checkpoint and terminal Retry integration (2026-10-30)
+
+The earlier AgentLoop pseudocode is a *domain-level port contract*: `commitModelStep`, `prepareIntent`, `commitToolOutcome` may all persist **multiple immutable checkpoint revisions for the same step ordinal**. The physical source of truth is CHAT_10 PR #10 `runs.current_checkpoint_id`→`run_checkpoints(checkpoint_revision)`; CHAT_02 PR #27 supplies the head CAS/reclaim semantics. A committed model reply **must not** be regenerated on resume; a persisted effect whose outcome is UNKNOWN is never blindly resent.
+
+- Claim/Recover preserves same RunID and increments current Run leaseEpoch. Snapshot.writerLeaseEpoch is historical evidence, not equal-to-current requirement; each new checkpoint writer must hold current lease.
+- All versions/goalRevision/leaseEpoch crossing a service boundary are canonical signed-int64 decimal strings per CHAT_01; convert to BigInt internally, never JSON number.
+- Task terminal is immutable; user Retry creates a new Task with retryOfTaskId lineage, and a new Run may be created on the **same Task only while Task is nonterminal** after earlier Run terminal. CHAT_01 PR #23, CHAT_02 PR #21, CHAT_08 PR #8 are referenced.
+- Event publication uses CHAT_01 generic DomainEvent and CHAT_10 `domain_events` tenant deliveryOffset, not Task-only event_sequence.
+- **Tests designed, NOT executed**: `LOOP-R3-T01` model committed→crash→same reply ref reused; `LOOP-R3-T02` five checkpoints at one step + recovery no duplicate effects; `LOOP-R3-T03` old worker lease settles late→0 writes; `LOOP-R3-T04` two simultaneous Retry controls terminal vs nonterminal→correct Task/Run immutable mapping; `LOOP-R3-T05` interleaved Watch+Run events→SSE no lost Task events.
+
+Cross-team source of truth: #23 Event, #27 Checkpoint, #10 DDL, #21 Task/Run, #8 REST. These remain Draft pending actual implementation and fault tests.
