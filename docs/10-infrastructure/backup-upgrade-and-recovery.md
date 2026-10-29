@@ -389,3 +389,10 @@ All tests **designed but 0 executed**. Upstream code/tests were read, no release
 [S13] `https://github.com/choko510/aiagent-md/pull/10`, `/pull/22`, `/pull/26`, `/pull/36`, `/pull/1`, `/pull/2`, `/pull/9` — project Draft contracts, not merged Locked.
 
 **Research boundaries:** git source and tests read, but pgBackRest/WAL-G binary, local PostgreSQL version, S3 implementation and restore tool compatibility were **not run** in this project. No RPO/RTO promises; no external side effects.
+
+
+### 17.1 Upstream Issue / Pull Request review (reports are not verified current behavior)
+[S14] https://github.com/pgbackrest/pgbackrest/issues/2549 — **Issue report**, opened 2025-02, still open at investigation: user alleges external S3 outage during restore could leave requested WAL unapplied while restore appeared complete. This is an external report, not independently reproduced or a claim about current pgBackRest. Requires explicit target-LSN coverage check and REC-T02/T19.
+[S15] https://github.com/pgbackrest/pgbackrest/pull/2544 — **PR verified** merged: adds `verify --set` targeting selected backup and negative tests in `test/src/module/command/verifyTest.c`. Include selected-backup verification in backup adapter conformance suite (REC-T03).
+[S16] https://github.com/wal-g/wal-g/issues/1578 — **Issue report**, opened 2023-10, still open: PostgreSQL 9.6 / WAL-G 2.0.1 user reported a missing WAL segment following S3 timeout. Not a proof of a modern release defect; motivates WAL gap alert and REC-T02/T17.
+[S17] https://github.com/wal-g/wal-g/pull/2722 — **PR verified** open/unmerged at 2026-10-30: proposes waiting until backup-required WAL is archived, touches `cmd/pg/backup_push.go`, `internal/databases/postgres/backup_push_handler.go` and test. **Do not assume this unmerged behavior is available**; enforce coverage in our adapter and test with release-locked source.
