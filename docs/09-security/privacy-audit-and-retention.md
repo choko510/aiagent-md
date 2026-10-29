@@ -106,7 +106,7 @@ type DataClass = "IDENTITY_SECRET"|"RAW_ARTIFACT"|"EVIDENCE"|"TASK_HISTORY"|"TRA
 type RetentionMode = "EXPIRE_AT"|"EPHEMERAL"|"KEEP_UNTIL_DELETED"|"HOLD_WITH_EXPIRY";
 type DeletionState = "REQUESTED"|"SUPPRESSED"|"SWEEPING"|"VERIFYING"|"PARTIAL"|"COMPLETED"|"BLOCKED_HOLD";
 type DeleteTarget = Readonly<{kind:"task"|"conversation"|"watch"|"artifact"|"account"; id:string}>;
-type PrivacyCommand = Readonly<{target:DeleteTarget; requestKey:string; expectedRecordVersion:number;
+type PrivacyCommand = Readonly<{target:DeleteTarget; requestKey:string; expectedRecordVersion:string;
   purpose:"USER_DELETE"|"EXPIRY"|"OPERATOR_APPROVED"; authenticatedSessionRef:string}>;
 type DeletionManifest = Readonly<{operationId:string; ownerUserId:string; tenantId:string;
   workspaceRef:string; target:DeleteTarget; deletionEpochDecimal:string; policyVersion:string;
@@ -376,3 +376,7 @@ All fixture stores/emulated providers; **no real user data, credentials or produ
 - **[PR inspected, open/unmerged]** Langfuse [#19453](https://github.com/langfuse/langfuse/pull/19453) reports deduplicated media whose first `created_at` is old but a recent trace still references it; deleting only by media age can remove a retained trace's attachment. A parallel prior proposed fix [#17838](https://github.com/langfuse/langfuse/pull/17838) additionally describes a concurrency race between reuse and cleanup. These are **PR reports**, not evidence of a merged current fix; our `PRIV-T20/T23` must enforce owner-scoped reference link age, a race-safe reference/lease snapshot and per-object deletion receipts before shared blob removal.
 - **[Merged upstream PR]** Langfuse [#19126](https://github.com/langfuse/langfuse/pull/19126) groups retention discovery by exact cutoff, retaining strict `timestamp < cutoff` semantics. The upstream PR's benchmark is environment-specific and **not transferable** to this Harness. Use this as a correctness test motivation for `PRIV-T11/T17`, not a performance claim.
 - **License warning**: the relevant Langfuse paths have mixed MIT/core and Enterprise terms; inspect actual [LICENSE](https://github.com/langfuse/langfuse/blob/71ddcb9094f53d19176a262f107871d8b2950fb0/LICENSE) and [ee/LICENSE](https://github.com/langfuse/langfuse/blob/71ddcb9094f53d19176a262f107871d8b2950fb0/ee/LICENSE). No source copying or Enterprise code inclusion is authorized.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
