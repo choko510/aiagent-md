@@ -170,8 +170,8 @@ Never copy credentials, browser storage state, raw prompts, model private reason
 
 ## 9. Persistence and API/DB cross-team proposals
 
-- [PROVISIONAL: CHAT_01] Public event projection schema/version, Task \`lastEventSequence\` (decimal string), persisted state distinction, retention/high-water cursor guarantee. \`sequence\` physical bigint cannot be blindly cast to JS Number.
-- [PROVISIONAL: CHAT_08 rest-api.md] GET Task snapshot returns lastEventSequence + snapshot cursor tied to owner; without this exact gap-free handshake remains blocked. No raw leaseEpoch in SSE.
+- [PROVISIONAL: CHAT_01] Public event projection schema/version, Task \`snapshotCursor\` (decimal string), persisted state distinction, retention/high-water cursor guarantee. \`sequence\` physical bigint cannot be blindly cast to JS Number.
+- [PROVISIONAL: CHAT_08 rest-api.md] GET Task snapshot returns one signed snapshotCursor tied to owner; without this exact gap-free handshake remains blocked. No raw leaseEpoch in SSE.
 - [PROVISIONAL: CHAT_09] AuthSession identityVersion + task ACL revalidation, safe 410/404 status policy, revocation push.
 - [PROVISIONAL: CHAT_10] DB task_events/sequence index tenant-qualified \`(workspace_id,task_id,sequence_no)\`; event rows strictly ordered by committed parent transaction; retention floor / response semantics, safe projection storage if event visibility differs.
 - Migration: old clients without snapshot cursor may only receive a full bootstrap (no false continuity); new field addition to REST API additive; projection major mismatch fails close. Retention lowering requires advance notice and safe fallback.
