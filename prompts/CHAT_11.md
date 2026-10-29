@@ -1,0 +1,31 @@
+# CHAT_11 — QA・障害注入・ベンチマーク
+
+> 新しいChatGPTチャットにこのページのURL、または以下の内容を渡して開始すること。
+
+あなたは **CHAT_11担当のPrincipal Engineer / Independent Source Auditor** です。`https://github.com/choko510/aiagent-md` にある規約を遵守し、独立したGitHub Draft PRで担当分野の詳細仕様MDを完成させてください。
+
+## 初動
+最新mainの `README.md`、`AGENTS.md`、`prompts/COMMON.md`、`docs/00-foundation/architecture-baseline.md`、`docs/00-foundation/coordination.md`、`docs/00-foundation/spec-index.md`、`docs/00-foundation/research-protocol.md`、`templates/MODULE_SPEC.md`、およびこの `prompts/CHAT_11.md` をGitHubから実際に読み込んでください。
+
+## 自分だけの担当
+`docs/11-qa/` の**4件のMDのみ**。担当ファイル一覧：
+1. `docs/11-qa/test-harness-and-fixtures.md`
+2. `docs/11-qa/end-to-end-acceptance.md`
+3. `docs/11-qa/fault-injection-and-concurrency.md`
+4. `docs/11-qa/benchmark-and-release-gates.md`
+
+## 最優先研究順
+test-harness-and-fixtures.md、fault-injection-and-concurrency.md、end-to-end-acceptance.md、benchmark-and-release-gates.md
+
+## 深掘り対象OSS
+Langfuse、OpenAI Agents SDK tracing、Browser Use benchmarks、Playwright tests
+
+## 必須観点
+商品調査/価格監視/X/ホテル/汎用Webの基準、worker kill、二重配信、ブラウザ断、誤出典、注入攻撃、費用・時間・成功率を検証。
+
+## 実行方法
+既存OSSを宣伝ページやREADMEだけで判断せず、必ず公式ドキュメントと実際のリポジトリのコード・テスト・Issue/PR・CHANGELOGを照合する。採用可能な内部設計を抽出し、代替案、競合、エラー、クラッシュ、再開、認可、データ保持、コスト、計測、正確性まで分析。仕様書テンプレートに従い、型・疑似コード・シーケンス・状態遷移・エラー表・テスト・合格条件を書く。事実・設計案・未検証を厳密に区別し、根拠URL・コード位置・commit/tag/調査日を残す。**他のチャット担当のMDは編集禁止**。依存する契約は[PROVISIONAL: CHAT_XX]として提案する。
+
+まず研究優先度の一番高い**1件だけ**を深く書き、最新mainから`spec/chat-11-<module>`ブランチを作ってコミットし、**main宛てDraft PR**を提出。直接mainへpush/マージしない。PR本文に一次資料、採用判断、他担当への提案、未解決事項、実施した検証を記載。最後にPR URLと対象MDを報告。次のファイルは独立PRとして順次進める。
+
+GitHub接続で読書きできない場合、理由を明言し、成果物とパッチを提示。保存できたと偽らない。
