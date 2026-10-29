@@ -272,3 +272,7 @@ TG-P1 bot/webhook verification + owner pairing/unpair + security tests; TG-P2 du
 **[I-TG-02]** [Mastra issue #22340](https://github.com/mastra-ai/mastra/issues/22340)（2026-10-30、Open、Issue report）ではscheduled fire dispatch成功とrun終端が異なる。Telegramも`Watch fire accepted`を`research completed`とは通知せず、Run終端イベントとEvidence実時刻がある場合だけ終了報告。TG-T07にdispatch後にRunがsuspend/restartするfixtureを加える。
 
 Issue報告は本Harnessの再現実績ではなく、設計時のadversarial test動機として記録する。
+
+## 17. Upstream PR差分：callbackの所有権を混同しない
+
+**[PR-TG-01]** [OpenClaw PR #169504](https://github.com/openclaw/openclaw/pull/169504)（2026-10-30確認、**Open / 未マージ**）の `extensions/telegram/src/bot-handlers.callback-router.ts` 実diffを閲覧。agent-authored callbackとplugin-owned callbackを区別するreserved prefixと所有権判定が追加提案されている。本Harnessも **Approval callback / User choice callback / bot navigation callback** を異なるnamespaceと用途で分離し、callback_textの`/`接頭辞から管理者Commandを起動させない。TG-T06/T10にagent choicesが承認として処理されないこと、malformed reserved callbackが無害にterminalizeされることを追加。OpenClaw提案を既存main実装として誤認しない。
