@@ -246,7 +246,7 @@ All tests local/mock with fake sites/tools; no live irreversible operation. **No
 - [S5] **Test source verified, not run** Playwright `tests/mcp/config-resolve.spec.ts` sandbox cases lines 137-201: https://github.com/microsoft/playwright/blob/38fb53bf4c181abb91f1ca2a2ab741983c5d177c/tests/mcp/config-resolve.spec.ts#L137-L201
 - [S6] **Docs verified** Docker Engine security: https://docs.docker.com/engine/security/ ; resource constraints: https://docs.docker.com/engine/containers/resource_constraints/
 - [S7] **Hypothesis** Docker Compose exact flags/runtime support, compute limits and browser compatibility untested for user's Ubuntu host.
-- [S8] **Issue/PR not source-verified** upstream issue review for Docker/Chromium sandbox mode; Code and tests above are primary technical evidence.
+- [S8] **Merged upstream PR inspected** Playwright #42490 changes MCP sandbox default handling; see appended PR investigation. Actual Chrome/Compose integration remains unverified.
 
 ## Review gate self-check
 
