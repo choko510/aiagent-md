@@ -63,6 +63,9 @@ with tempfile.TemporaryDirectory() as temp:
  make_zip(root,'traversal.xlsx',[('../etc/cron.d/attacker',b'* * * * * root attacker')])
  make_zip(root,'external.xlsx',[('xl/externalLinks/externalLink1.xml',b'http://127.0.0.1/')])
  make_zip(root,'formula.xlsx',[('xl/worksheets/sheet1.xml',b'<f>WEBSERVICE("https://example.invalid")</f>')])
+ # tempfile uses 0700; explicit read/search perms are required for numeric non-root uid 65534.
+ root.chmod(0o755)
+ for file in root.iterdir():file.chmod(0o644)
  cmd=['docker','run','--rm','--network','none','--read-only','--cap-drop=ALL',
   '--security-opt','no-new-privileges','--user','65534:65534','--pids-limit','64',
   '--memory','128m','--cpus','0.5','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m',
