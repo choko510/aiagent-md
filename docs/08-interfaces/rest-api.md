@@ -259,6 +259,85 @@ Response **202** は決定要求が永続化されたことのみを示す。**2
 - 全routeにrate limit、concurrency cap、body read timeout、request deadline、server requestId生成。正式な公平性/値はCHAT_09/10の正本に提案。429はRetry-After秒を返す。Budgetと認可の正本はUIの表示値でなくServer。
 - **Direct model-specified tools、unbounded free-form JSON、opaque SQL filter、client-controlled actor/tenant、global includeSecrets=trueは禁止。**
 
+### 5.6 Command payload discriminants and public validation schema [PROVISIONAL]
+
+**入力は「指示内容」と「権限・状態要求」を分離する。** 以下の構造はAPIコントローラ用DTO提案で、CHAT_01のdomain型、CHAT_02のstate/event正本、CHAT_07のWatch Conditionを再定義するものではない。Wire schemaを変更する際はこのMDとOpenAPI・contract testsを同時変更する。
+
+~~~typescript
+type CreateTaskInput = {
+  conversationId?: string;                  // must be owned/visible if supplied
+  goal: string;                             // 1..8192 UTF-8 bytes after normalization
+  timezone: string;                         // IANA TZ ID, e.g. "Asia/Tokyo"
+  constraints?: Record<string, unknown>;    // max 16KiB, owner-defined codec + revision
+  constraintSchemaId?: string;              // registered only; no arbitrary executable code
+  requestedModel?: string;                  // allowlisted, availability checked server-side
+  budget?: { maxCost: MoneyWire };          // server clamps to principal limits
+};
+type TaskControlInput =
+  | { action: "pause"; reason?: string }
+  | { action: "resume"; reason?: string }
+  | { action: "cancel"; reason?: string }
+  | { action: "steer"; instruction: string; reason?: string };
+type RunRequestInput = {
+  reason: string;                           // create a new attempt, never erase older runs
+  // use existing Task constraints by default; override requires CHAT_02 policy
+};
+type WatchCreateInput = {
+  observationTargetRef: string;             // normalized provider locator, not arbitrary host fetch
+  condition: Record<string, unknown>;       // CHAT_07 validated discriminated union
+  conditionSchemaId: string;
+  schedule: { timezone: string; expression: string }; // only registered finite cadence
+  notificationDestinationRef: string;      // bound to authorized user, not arbitrary URL
+};
+type WatchPatchInput = {
+  condition?: Record<string, unknown>;
+  schedule?: { timezone: string; expression: string };
+  notificationDestinationRef?: string;
+};
+type WatchControlInput = { action: "pause" | "resume" | "cancel"; reason?: string };
+type ApprovalDecisionInput = {
+  decision: "approve" | "deny";
+  reason?: string;                          // no client-provided canExecute/policy override
+};
+// POST browser-sessions/{id}/handoff: {} or {reason?: string}; content model
+// intentionally lacks cookies/CDP URL/credential/client-specified expiry.
+~~~
+
+- **CreateTask:** goalは任意の自然言語を許すが、numeric constraintsの検証をLLMに任せない。未認識の constraintSchemaId は422。未指定時は汎用 constraint codec（文字列/数値と日付を検証する登録済みcodec）へ正規化する提案 [PROVISIONAL: CHAT_01/02]。Unknown keysは各body top-levelで拒否。制約内で実行不可の値はvalid schemaでも422。
+- **TaskControl:** pause/resume/cancelにinstructionの紛れ込みは422。steer以外のactionは禁止。steerのinstructionは8KiB以下、先行する条件を無言で破棄せずRuntimeが有効化versionを記録。取消が待機中ならAckにeffective stateを偽らない。
+- **WatchCreate:** canonicalized condition/schedule、有限な頻度、tenant内notification bindingの存在確認を保存前に行う。任意URLをチェックなしにWatchとして登録することは禁止（SSRFと無制限巡回防止）。Validation semanticsのOwnerはCHAT_07/09。
+- **ApprovalDecision:** decisionでは別のaction payloadやURLへのすり替えを許さない。承認対象のserver-side immutable digestを照合（CHAT_03契約待ち）。expired/consumed/revokedなら拒否。理由はUTF-8 0..2048 bytesの提案。
+- **Run:** userが任意のrunIdを指定したり、過去runをdelete/updateしたりできない。再実行対象のTaskをversionでlockし、CHAT_02の再実行条件を検査。
+- **BrowserSession:** release/handoffのみで、sessionId以外の内部識別子は利用者には見せない。
+
+### 5.7 Error envelope and response examples
+
+エラーは全routeで **application/problem+json**。RFC 9457の基本フィールド(type/title/status/detail/instance)と拡張(code, requestId, issues?, retryable?, currentResourceVersion?)を用いる。instanceは**当該error occurrence IDを指す安全な相対URI**であり内部stack/secretを公開しない。Error codesはCHAT_01のerror-taxonomy正本にmapする。
+
+~~~http
+HTTP/1.1 412 Precondition Failed
+Content-Type: application/problem+json
+Cache-Control: no-store
+X-Request-Id: req_123
+
+{
+  "type": "https://agent.local/problems/precondition-failed",
+  "title": "Resource version changed",
+  "status": 412,
+  "detail": "対象の状態が更新されています。最新情報を取得して操作を確認してください。",
+  "instance": "/api/v1/problems/req_123",
+  "code": "RESOURCE_VERSION_MISMATCH",
+  "requestId": "req_123",
+  "currentResourceVersion": 8,
+  "retryable": false
+}
+~~~
+
+- typeのhostは配置環境のpublic API originへ生成し、内部IP・サーバ名を漏洩しない。ローカルHTTPでも外部URIを偽らない。実装では設定済みpublic base URLまたは相対URI typeを採用。
+- 完全同一のIdempotency-Key replayは**元response body/status/Location/ETagをそのまま返す**。必要なら Idempotency-Replayed: true のヘッダのみ追加し、CommandAck.dispositionも元値から変更しない。進捗はGET Resourceで追跡。
+- 同じkeyの異なるpayloadは409、同じkeyの受付処理がlock待ちtimeoutなら503/409 REQUEST_IN_PROGRESSとRetry-Afterを示し、**同keyの有限retryのみ**許す（serverでpending/noncommittedを区別）。
+- 400=malformed syntax、401=no/expired auth、403=capability不足、404=not visible/not found、409=state/idem conflict、410=expired one-time token（採用はCHAT_03と調整）、412=failed If-Match、413=payload、415=media type、422=semantic schema、428=missing If-Match、429=rate、503=temporary admission。内部Error instanceはstackや未加工DB情報へ展開しない。
+
 ## 6. 状態遷移・HTTP sequence・実行境界
 
 ~~~text
@@ -328,7 +407,7 @@ async function acceptCommand(ctx, route, rawBody, headers) {
 
 **Creation routes:** Target entity absent by design; authorize capability on parent conversation/tenant, then insert resource and its initial command atomically. fetch-before-begin only acts as preliminary check, **must revalidate inside fenced transaction**。If-Matchは既存resourceのmutationにのみ要求。DB異常時、idempotency receiptとresource/outboxを別々のcommitで保存するのは禁止。
 
-**Idempotency race:** 동일 keyの2requestはDB UNIQUEとrow lockでlinearize; winnerがtransactionをroll backするとloserがreserveする。winner commit後loserは同じreceiptを得る。既にin-flightのnontransactional workを発生させず先にDB commitする。別keyによる同resourceのPATCHはIf-Match/version fenceで1件のみ成立。
+**Idempotency race:** 同一 keyの2requestはDB UNIQUEとrow lockでlinearize; winnerがtransactionをroll backするとloserがreserveする。winner commit後loserは同じreceiptを得る。既にin-flightのnontransactional workを発生させず先にDB commitする。別keyによる同resourceのPATCHはIf-Match/version fenceで1件のみ成立。
 
 **Approvalの追加条件:** Approval token/decision nonceなど機密状態はBody任せにせずCHAT_03の保存側で検査。approved by API はexternal side effect実行の免罪符ではなくTool Gatewayの最終許可。Policy変更・権限失効・期限切れならdeny優先。取得済みのRead DTOにcanDecide:trueと表示されても再検査を省略しない。
 
@@ -364,7 +443,7 @@ async function acceptCommand(ctx, route, rawBody, headers) {
 - 調査対象のWebページ、X投稿、Evidenceから得た文言は**非信頼データ**。URL/Titleはencode/sanitizeし、HTMLをrenderせず、redirectされた添付URLを任意fetchしない。secretを原文で返すようなAgent textもprojection firewallで除去/検証。
 - Browser handoffの資格情報、cookie、localStorage、CDP websocket、cloud credentialをRESTレスポンス、SSE、ログ、trace、OpenAPIサンプルに含めない。Secret accessorはCHAT_09のみ所有。
 - SSRF/egressはCHAT_09とBrowser Worker側でチェック。URLが内向き/private IPへredirectした場合にAPIサーバが直接取得しない。read evidenceのsourceUrlは表示用テキストでありfetch capabilityではない。
-- Reverse proxy構成ではtrusted proxy listからのみForwarded/X-Forwarded-*を受理。CORS origin allowlist、cookie-mode CSRF、SameSite、TLS、request limits、secure headersをCHAT_09レビューで確定する。PUT/PATCH/POSTはOrigin検証、認証のみで安全とは判定しない。
+- Reverse proxy構成ではtrusted proxy listからのみForwarded/X-Forwarded-*を受理。CORS origin allowlist、cookie-mode CSRF、SameSite、TLS、request limits、secure headersをCHAT_09レビューで確定する。ブラウザのCookie認証付きPUT/PATCH/POSTはOrigin/CSRF検証を必須とし、機械クライアントBearer認証でOriginがない場合はCHAT_09が定める代替ポリシーとtoken-bound認可を必須とする。認証のみで安全とは判定しない。
 - Result URLにはtenant-private resource id以外の認証情報を埋め込まない。API logへAuthorization、Cookie、Idempotency-Key全文、approval proof、raw user prompt、External URL query secretを保存しない。Auditは requestId/actorId/resourceId/action/decision/reason code/resultのみ（data retentionはCHAT_09）。
 - **未承認の購入・予約・投稿・送金は禁止**。ApprovalのREST decisionはポリシーを飛び越える「万能許可」ではない。
 
