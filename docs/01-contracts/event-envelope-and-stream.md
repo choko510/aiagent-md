@@ -16,7 +16,7 @@ Own: Envelopeの必須属性、append/sequence/ordering/schema evolution、Event
 |---|---|---|
 | LangGraph / ffc3336367e8139668d11e5f0b0e6def57e7c762 / MIT | libs/langgraph/langgraph/pregel/_loop.py の PregelLoop.put_writes/_put_checkpoint/_emit; libs/langgraph/tests/test_stream_events_v3.py の TestV2Stream/stream eventsケース [S1] | 実行中のstream更新・checkpointを別処理で扱う。StreamPartの内部形式はアプリ固有の永続SSE cursor/tenant認可を代替しない |
 | OpenAI Agents SDK Python / cd26bbbc52847845fde73b9952b51e62e2bcbdc0 / MIT | src/agents/stream_events.py の RawResponsesStreamEvent / RunItemStreamEvent / AgentUpdatedStreamEvent と tests/test_stream_events.py の event order/handoff/tool search [S2] | raw model deltaと処理済みRun itemが異なる。これをpreviewとcommit済みdomain eventの区別に採用。SDK自身のstreamをreconnect可能な履歴正本にしない |
-| MCP TypeScript SDK / 39ae8e6192cf43273aaaf2de4169dfa9f7216e28 / MIT（対象repoの各package LICENSEの再確認は実装前必須） | packages/core-internal/src/types/spec.types.2025-11-25.ts の JSONRPCRequest/Notification/ProgressToken、test/e2e/scenarios/dynamic.test.ts [S3] | external protocol request/progress tokenは内部event IDでも認可の根拠でもない。protocol revisionの変化をadapterで吸収 |
+| MCP TypeScript SDK / 39ae8e6192cf43273aaaf2de4169dfa9f7216e28 / repo MIT→Apache-2.0 transition、core-internal package.json=Apache-2.0 | packages/core-internal/src/types/spec.types.2025-11-25.ts の JSONRPCRequest/Notification/ProgressToken、test/e2e/scenarios/dynamic.test.ts [S3] | external protocol request/progress tokenは内部event IDでも認可の根拠でもない。protocol revisionの変化をadapterで吸収 |
 
 Issue [S4] LangGraph #8115 のcheckpoint書込競合報告はIssue report、当Harnessで未再現。独立SSE outbox transaction採用の理由の一つだが問題発生率は不明。
 
@@ -49,7 +49,8 @@ Task/Run/Watch/ExternalEventを所有するServiceは自分が管理するEntity
 ## 5. Canonical Event 型・validation
 
 ~~~ts
-type DecimalInt64 = string; // exact canonical unsigned integer; 1..INT64_MAX
+type EventId = Brand<string, "EventId">; // trusted server UUIDv7
+type DecimalInt64 = string; // exact canonical positive signed-int64 decimal, 1..INT64_MAX
 type EventKind =
   | "task.created" | "task.state_changed" | "task.goal_changed"
   | "run.claimed" | "run.progress_committed" | "run.state_changed"
@@ -224,9 +225,11 @@ No Team owner change is performed in this document.
 
 [S1] Code verified: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py and https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/tests/test_stream_events_v3.py — PregelLoop.put_writes/_put_checkpoint/_emit and TestV2Stream. MIT LICENSE in this commit.  
 [S2] Code verified: https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/src/agents/stream_events.py and https://github.com/openai/openai-agents-python/blob/cd26bbbc52847845fde73b9952b51e62e2bcbdc0/tests/test_stream_events.py — event classes and streaming tests. MIT LICENSE.  
-[S3] Code verified: https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/src/types/spec.types.2025-11-25.ts and https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/dynamic.test.ts — JSONRPC/Progress request types and fixture. License verification of package versions pending.  
+[S3] Code verified: https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/src/types/spec.types.2025-11-25.ts and https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/dynamic.test.ts — JSONRPC/Progress request types and fixture. At this pinned commit, packages/core-internal/package.json declares Apache-2.0; root LICENSE preserves older MIT contributions and says license transition. Reuse requires per-file provenance check.  
 [S4] Issue report only: https://github.com/langchain-ai/langgraph/issues/8115.  
 [S5] Docs verified: project-brief, review-gates and acceptance-scenarios in current main.  
 [S6] Hypothesis: independent persisted tenant delivery cursor, MAC-protected viewer cursor, cap values, transaction design. Neither implemented nor benchmarked.
 
 **Review gates:** P0 cross-team contracts unresolved. Test suite designed but not executed. This document remains Draft.
+
+**MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
