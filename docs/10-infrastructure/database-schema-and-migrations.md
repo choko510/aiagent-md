@@ -302,6 +302,13 @@ CREATE TABLE agent.tenant_event_counters (
  next_delivery_offset bigint NOT NULL DEFAULT 1
   CHECK(next_delivery_offset BETWEEN 1 AND 9223372036854775807)
 );
+-- The tenant-wide replay cutoff is durable metadata, not inferred from filtered SSE results.
+CREATE TABLE agent.event_retention_floors (
+ tenant_id uuid PRIMARY KEY REFERENCES agent.tenants(id),
+ earliest_replayable_offset bigint NOT NULL DEFAULT 1
+  CHECK (earliest_replayable_offset BETWEEN 1 AND 9223372036854775807),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE agent.domain_events (
  tenant_id uuid NOT NULL REFERENCES agent.tenants(id),
  id uuid NOT NULL,
@@ -649,7 +656,7 @@ COMMIT;
 
 | Physical table | 正本Owner | 何を**このMDでは決めない**か |
 |---|---|---|
-| conversations / tasks / runs / task_events | CHAT_01, CHAT_02 | state enum、Event envelope、Task完了判定、Steer semantics |
+| conversations / tasks / runs / domain_events | CHAT_01, CHAT_02 | state enum、Event envelope、Task完了判定、Steer semantics |
 | run_checkpoints | CHAT_01, CHAT_02 | context snapshotの内容、safe boundary、replay |
 | tool_intents / tool_attempts / approval_records / side_effect_records | CHAT_03 | approval authorization、effect category、Tool retry許可 |
 | artifacts / evidence_records | CHAT_01, CHAT_04/05 | Evidence contract、source interpretation、Artifact store adapter |
@@ -740,6 +747,24 @@ COMMIT
 ```
 
 古いWorkerが`lease_epoch`変更後にHEADを進めることは不可。復帰直後に古いsnapshot内のwriter_lease_epochが新epochと違うこと自体は正常なので、復旧時はRunの**現在epoch**を認可し、snapshotは適用済みGoal/Hash/Revisionを検証した後、新epochで次revisionを書く。コミット成功直前にArtifactが欠落した場合は破損として中断。Append-only revisionが途中で失敗した場合はROLLBACKし、同じrevisionを安全にリトライ可能（外部副作用の再実行とは独立）。Checkpoint Phase変更とRun/Tool Effectの状態変更は原子的。検証試験DB-R3-T04/05。
+
+### 7.1.2 Tenant Event retention floor / Replay 410の正本
+
+`agent.event_retention_floors.earliest_replayable_offset`はTenantごとの**現在保持している再生可能な範囲の下限**。Task/owner filter後の最小Event offsetや、`domain_events MIN`の有無から勝手に推測しない。初期値1は「まだGCで削除していない」を示す。新しいtenantの初回Eventと同TX、またはGC開始前に`INSERT ... ON CONFLICT DO NOTHING`で行を確保する。
+
+Retention GCは、(1) event holder/backup/cursor契約の保持期限、(2) OutboxのRelay/Downstream重複確認・処理済み、(3) Artifact/監査参照が終了、を満たす**連続した先頭prefix**のみ削除可能。GCは`tenant_event_counters`行をlockしてoffset割当と直列化し、参照中の`outbox_messages`を送信処理完了と重複ウィンドウ期限を照合して先に消去したうえで、旧`domain_events`の連続prefixをdeleteし、**同一TX**で`earliest_replayable_offset`を前進させる。途中の未完了Eventを飛び越して水位だけ上げない。Watermarkの縮小は禁止。GC直後の参照を期待するClientは`410 STREAM_CURSOR_EXPIRED`→GET Snapshotから再開。
+
+```sql
+-- In a trusted GC transaction with tenant_event_counters row locked:
+UPDATE agent.event_retention_floors
+ SET earliest_replayable_offset=$new_floor, updated_at=now()
+ WHERE tenant_id=$tenant
+   AND earliest_replayable_offset <= $new_floor
+   AND $new_floor BETWEEN 1 AND 9223372036854775807;
+-- Atomic with deletion of contiguous old domain_events after safe Outbox cleanup.
+```
+
+`$new_floor`は正規10進整数をtrusted driverでbindする説明用値。SQLの条件だけではGC安全性を証明しないため、保持期間・DB Lock・Outbox/Artifact referenced rows・証拠参照・監査ポリシーのGuardをCHAT_09/10/11が必ずContract Testする。`DB-R4-T08`: 非認可で隠れたoffsetがあってもfalse 410なし、期限切れcursorは410、pending outboxがあるprefixはGC拒否、Tx kill中も整合したfloorのみ残る。試験設計のみ。正式Cleanup Worker実装は未存在。
 
 ### 7.2 Tool Attempt fencing
 
@@ -1032,7 +1057,7 @@ UPDATE agent.runs SET lease_epoch=lease_epoch+1,
 |---|---|---|
 | DB-T026 | trusted generator v7 / v4注入 → UUIDv7 validatorはv7のみ許可、全保存経路でdefault v4に戻らない | 07,08 |
 | DB-T027 | Conversation NULLのWatch Task作成成功、originThreadだけ指定はvalidation/FKで拒否 | 02,07,11 |
-| DB-T028 | 新規recordVersion=1、CAS +1、旧If-Match 412、safe integer overflow拒否 | 07,08 |
+| DB-T028 | 新規recordVersion=1、CAS +1、旧If-Match 412、signed BIGINT overflow拒否 | 07,08 |
 | DB-T029 | 2 WorkersがRun resume、旧epochのCheckpoint/Result更新0、generation単調 | 07 |
 | DB-T030 | Steerとcheckpoint並行、old goal適用なし、他TaskのactiveRun FK拒否 | 01,04,07 |
 | DB-T031 | 同tenantの別ownerと別tenantの全resourceのread/list/stream拒否 | 06,08 |

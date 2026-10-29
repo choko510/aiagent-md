@@ -36,6 +36,7 @@ INSERT INTO agent.event_aggregate_counters(tenant_id,aggregate_type,aggregate_id
 VALUES('01900000-0000-7000-8000-000000000001','watch','01900000-0000-7000-8000-000000000005',2);
 INSERT INTO agent.tenant_event_counters(tenant_id,next_delivery_offset)
 VALUES('01900000-0000-7000-8000-000000000001',2);
+INSERT INTO agent.event_retention_floors(tenant_id) VALUES ('01900000-0000-7000-8000-000000000001');
 INSERT INTO agent.domain_events
  (tenant_id,id,aggregate_type,aggregate_id,aggregate_sequence,delivery_offset,event_kind,
   schema_version,payload_schema_version,payload_json,actor_json,audience_code,owner_user_id,

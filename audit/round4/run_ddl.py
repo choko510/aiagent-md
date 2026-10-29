@@ -39,6 +39,7 @@ try:
          "run_checkpoints":"SELECT to_regclass('agent.run_checkpoints') IS NOT NULL",
          "generic_counters":"SELECT to_regclass('agent.event_aggregate_counters') IS NOT NULL",
          "tenant_counters":"SELECT to_regclass('agent.tenant_event_counters') IS NOT NULL",
+         "retention_floors":"SELECT to_regclass('agent.event_retention_floors') IS NOT NULL",
          "old_task_event_absent":"SELECT to_regclass('agent.task_events') IS NULL"}
  for key,sql in checks.items():
   z=run(['docker','exec',name,'psql','-X','-A','-t','-U','postgres','-d','agent_test','-c',sql])
