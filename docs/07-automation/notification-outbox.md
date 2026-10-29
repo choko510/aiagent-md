@@ -306,3 +306,18 @@ NOT-PR1: immutable intent/eventKey/Verified Binding validation + safe renderer +
 **不変条件**: Notificationの一意性は「ある出来事を誰へ何の目的で通知するか」で定義する。Policyや表示形式のversion、単なる宛先bindingのcredential rotationは**同じ出来事をもう一度届ける新しいイベントではない**。Versionを一意キーに含めた旧案はFormat変更で重複通知を生むため撤回した。新しい通知先へ過去イベントを再送したければ明示的なCommandに基づく新semantic resendEventKeyを発行する。
 
 **追加テスト NOT-T20**: 送信済みEventに対しFormat/Policy/Binding credential Versionをそれぞれ更新→同じsource EventをリプレイしてもIntent/Outbox/配送呼出は増えない。新たな翌日Scheduled occurrenceは別semantic Eventとして1件生成される。**NOT-020 MUST → NOT-T20 → SC-02/07/16**。未実施。
+
+
+### Round 2 concurrency correction: opt-out vs send admission (P0)
+
+「送信直前に同意確認した」だけでは、確認完了と外部send開始の間にopt-outがcommitし得る。**同意解除完了後の新規送信0**を約束するなら、次の状態・線形化が必要。共有認可/DB契約は [PROVISIONAL: CHAT_09/10/08]。
+
+1. opt-out Commandは認証後にVerified Bindingをtenant scopeの行ロックで**STOPPING**へCAS更新し、新規delivery admissionを直ちに禁止する（受付receiptは「解除処理中」であり、完了通知ではない）。
+2. Workerは同じBindingを直列化するgateで、consentVersion・stopping・leaseEpochを検査してからsendを開始する。gateの維持中は当該Bindingの送信を直列化し、Provider RPCのtimeoutを有限化する。**DB TransactionをネットワークI/O中保持してよいかはCHAT_10の決定事項**であり、単なる短い事前DB照合を完全な排他とみなさない。
+3. 解除サービスはSTOPPING前に既に始まった配送を観測し、すべてsettledまたはUNKNOWNとして隔離した後のみ**REVOKED**を確定し「解除完了」を返す。未終了/不明の送信が残る間はPendingRevocationを明示し、完了したと主張しない。実送信済みメッセージのProvider内部配送・到着は取り消せない。
+4. Worker/解除の片方がcrashした場合は永続SEND_RESERVED/SENDING attemptとfencingを再照合する。解消不能なSENDINGはUNKNOWNへ移すが、ネットワーク呼出がなお継続し得る旧Workerをリース切れだけで「物理送信終了」と推定しない。必要ならChannel Adapter ownerからの停止確認/worker process fencingを要求し、完了不能なら解除の保証を明確に限定する。
+5. したがって既存のNOT-008/013とNOT-T08/13の**厳密な期待値**は「STOPPING確定以降の新規配送権限の発行0。REVOKED完了通知後の新規Provider send開始0（事前in-flightを収束した場合のみ）。既存in-flightのProvider配信結果はUNKNOWNあり」とする。
+
+**NOT-021 MUST / NOT-T21 / SC-07,08,16**: Delivery Workerを同意確認直後・Provider送信前のbarrierで停止し、同時にopt-out開始、次にWorkerを再開するFault Test。受信側で無効Bindingの送信開始が0、最終解除ackが未収束のin-flightを隠さない、かつ旧worker leaseEpochのDB settlementが0であること。実テスト未実行。Cross-team proposal: CHAT_09/10に配送開始の厳密な線形化とBinding revoke barrierの所有権・phase/state/DDL、CHAT_08にPendingRevocationのUI契約を提案する。
+
+**注意**: 強いrevocation保証が初期実装で成立しなければ、仕様を弱めて「最善努力」だと曖昧に隠すのではなく、個別Channelで完了確認できないことを明示してP0 blockerとして残す。
