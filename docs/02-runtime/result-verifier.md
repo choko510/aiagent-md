@@ -47,12 +47,12 @@ Goalの入力をプロンプトから保存する場合もAuth/tenant/ownerを�
 ~~~ts
 type Verdict="PASS"|"NEED_MORE_EVIDENCE"|"PARTIAL"|"UNCERTAIN"|"REJECTED";
 interface CriterionEvaluation {
- criterionId:string;status:Verdict;goalRevision:number;
+ criterionId:string;status:Verdict;goalRevision:string;
  evidenceIds:string[];reasonCode:string;observedAt:string|null;
  confidence:"CONFIRMED"|"CONDITIONAL"|"ESTIMATED"|"UNKNOWN";
 }
 interface ResultVerification {
- taskId:string;runId:string;goalRevision:number;
+ taskId:string;runId:string;goalRevision:string;
  evaluations:CriterionEvaluation[];verdict:Verdict;
  additionalToolProposalIds:string[];verifiedAt:string;schemaVersion:1;
 }
