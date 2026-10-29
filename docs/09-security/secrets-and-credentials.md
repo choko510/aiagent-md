@@ -250,7 +250,7 @@ Tests use fake providers and canary secrets; no live provider account or real OA
 - [S8] **Code verified** Better Auth `getSession` and `session-api.test.ts`: https://github.com/better-auth/better-auth/blob/95d158b04cd8217cc17443e809c700f3b6969f97/packages/better-auth/src/api/routes/session.ts
 - [S9] **Docs only** OWASP Cryptographic Storage: https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html ; Secrets Management: https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html
 - [S10] **Hypothesis** Broker/Vault, particular AEAD selection, default timeouts, schema and pricing are original proposed design **not externally verified**.
-- [S11] **Issue/PR check incomplete** No specific upstream issue/PR was validated for the exact proposed broker-vault integration; upstream code/tests cited above are the evidence and integration remains unverified.
+- [S11] **PR reports inspected** OpenClaw #178361 and #173635 (see appended upstream PR investigation) describe exact-value secret redaction and bounded refresh races; neither is integrated or product-verified here.
 
 ## Review gates
 
