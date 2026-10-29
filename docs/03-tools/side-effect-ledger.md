@@ -105,7 +105,7 @@ interface EffectObservation {
   outputArtifactRef?: OpaqueRef; confidence?: string;  // scalar confidence not proof of effect
 }
 interface ReconcileCommand {
-  intentId: IntentId; commandId: string; expectedRecordVersion: number;
+  intentId: IntentId; commandId: string; expectedRecordVersion: string; // canonical int64 decimal
   decision: "RETRY_VERIFIED_SAFE"|"MARK_CONFIRMED_SUCCESS"|"MARK_CONFIRMED_FAILURE"|
             "KEEP_UNCERTAIN"|"ABANDON_FUTURE_ATTEMPTS";
   observationRef?: OpaqueRef;
