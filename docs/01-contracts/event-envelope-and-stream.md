@@ -221,6 +221,29 @@ EV-PR1 schema/registry, reader compatibility, validation, event kind fixtures; E
 - EVT-P07 P0 CHAT_01 self: payload eventKind registry must consume state enums after 01-03; not Locked until reconciliation.
 No Team owner change is performed in this document.
 
+## 16.1 Round 3 — Canonical Event ↔ SQL ↔ SSEの統一契約（2026-10-30 / Draft）
+
+**既存契約の再定義ではなく、CHAT_10 PR #10の物理設計を正本Envelopeへ合わせるための解決仕様。** `agent.domain_events`には `aggregate_type/aggregate_id/aggregate_sequence`, `delivery_offset`, `event_kind`, `schema_version`, `payload_schema_version`, `task_id/run_id/watch_id`, `owner_user_id/audience_code`, `causation_event_id`, `correlation_id`, `occurred_at/committed_at` を保存する。旧`task_events`単独の設計は全Eventを表現できないため不可。
+
+- `aggregateSequence`は`(tenantId, aggregateType, aggregateId)`ごとに正の連続BIGINT。TXでAggregate counter rowをlock/advanceしEvent+Outboxと原子的にcommit。User/External Event IDを流用して採番しない。
+- `deliveryOffset`はtenantごとに連続した正のBIGINT。独立した`tenant_event_counters`をdomain mutationと同一TXでlock/advance。異なるaggregateでも同じtenantのコミット順のCursorで配信し、未commit TXの値は公開しない。単一counterの争奪が性能上のtradeoffであり、実測前にシャード化しない。
+- Event IDはtrusted server UUIDv7。Wireの`aggregateSequence`/`deliveryOffset`は`1..9223372036854775807`の正規10進文字列（先頭ゼロなし）。DBの`bigint`↔内部`bigint`↔JSON stringをlossless codecで変換。**Run leaseEpoch/recordVersion等に使うsafe integer制限は別契約**であり、Event offsetに誤って適用しない。JSON numberへの変換禁止。
+- `taskId`が`null`の正規Watch/Notification等のEventを許す。`runId`がある場合は同tenantの正しいTaskに属することを必須とし、Task向けSSEへ関連づけて表示する。owner/audienceとpayloadの型整合はServer side Event registryと認可レイヤーが強制する。`operator_audit`を一般Userへ投影しない。Eventの内容自体はuntrusted stringとして処理。
+- Domain state/Event/outboxを**同じDBトランザクション**でcommit。Outbox配送成功だけをdomain mutation完了の根拠にしない。リレー重複・順不同は永続Event logからoffset昇順に再生、Client側はeventIdで重複抑制する。
+- `GET /tasks/:id`の公開Task/Run/Evidence projectionとtenant event high-waterは同一MVCC snapshot（例 `REPEATABLE READ READ ONLY`）または証明済みmaterialized projection barrierで取得。`snapshotCursor`がprojectionより未来を指した場合、初回SSE再接続でEventが**永久に欠落する**ので絶対に署名しない。
+- SSEの署名Cursorはtenant/viewer/Task filter/lastDeliveryOffset/expiryを含み、暗号学的認証と最新の認可を両方行う。Filterによるoffsetの飛びは正常。最古保持範囲外・期限切れは`410`→Snapshot再取得。
+- **移行**: 初期導入前なら`0001_initial`を新設計で生成可能。すでに初期migrationを適用した環境では過去SQLを破壊変更せず、新番号のexpand/dual-read/backfill/switch/contractにすること。
+
+| New contract test (designed, not executed) | Acceptance |
+|---|---|
+| EVT-R3-T01 | TaskとWatchを同時発火、Task非所属のEventも保存され、tenant deliveryOffsetが重複しない |
+| EVT-R3-T02 | 2 aggregateの多Writer/rollback/faultで、Event+Outboxがall-or-noneかつ連番gapなし |
+| EVT-R3-T03 | snapshotとSSE開始間の新Event/異User非可視Eventを混在→Authorized Event欠損0/漏洩0 |
+| EVT-R3-T04 | `2^53`超のEvent offsetをDB+JSON+Client間で往復し完全一致、JSON number reject |
+| EVT-R3-T05 | outbox逆順/再配信/retention expiry→DB offset replay、Client重複0、Expiredは410 |
+
+**Cross-owner pending**: CHAT_10が物理DDLとCounter allocationを実装案へ反映、CHAT_08がSnapshot/SSE契約を照合、CHAT_09がauthorizationを監査、CHAT_11がcontract/fault casesへ追加。全てレビューと実装テスト前はDraft。
+
 ## 17. Sources and evidence grade
 
 [S1] Code verified: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py and https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/tests/test_stream_events_v3.py — PregelLoop.put_writes/_put_checkpoint/_emit and TestV2Stream. MIT LICENSE in this commit.  
