@@ -19,7 +19,7 @@ Web調査では、検索候補URLの取得が最も広いネットワーク侵�
 ## 2. 実ソース横断調査・代替比較
 
 [S1] **undici** `1b7b18e59f6c1e9d59af188bb0488890166a0c84` / MIT, Code verified 2026-10-30: [`lib/interceptor/redirect.js — createRedirectInterceptor`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/lib/interceptor/redirect.js); [`lib/handler/redirect-handler.js — RedirectHandler`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/lib/handler/redirect-handler.js); [`test/redirect-request.js — HTTP 300/redirect chain and origin tests`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/test/redirect-request.js).
-[S2] **Scrapling** `26dc85a4fa307257fb5c669c80aa44b15acb84c4` / MIT（採用時再確認）, Code verified 2026-10-30: [`scrapling/fetchers/requests.py — Fetcher/AsyncFetcher`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/fetchers/requests.py); [`scrapling/engines/static.py — FetcherSession`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/engines/static.py); [`tests/fetchers/sync/test_requests_session.py — session/retry/proxy/header tests`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/tests/fetchers/sync/test_requests_session.py).
+[S2] **Scrapling** `26dc85a4fa307257fb5c669c80aa44b15acb84c4` / BSD-3-Clause（固定SHAのLICENSE確認済み）, Code verified 2026-10-30: [`scrapling/fetchers/requests.py — Fetcher/AsyncFetcher`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/fetchers/requests.py); [`scrapling/engines/static.py — FetcherSession`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/engines/static.py); [`tests/fetchers/sync/test_requests_session.py — session/retry/proxy/header tests`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/tests/fetchers/sync/test_requests_session.py).
 **Undici**のredirect interceptorはmaxRedirectionsとhandlerを分離し、test/redirect-request.jsはorigin跨ぎ等を試験しているがSSRF対策を自動保証しない。**Scrapling**のFetcher/AsyncFetcherはcurl_cffiで静的HTTP、Sessionはretries/headers/proxyを持つが、このHarnessのPolicy所有者ではない。両者は直接importで無条件にネットワークを開かせず、制限されたtransportへ包む。
 これらのソースとテストは**読解したが実行していない**。参照元の性能やサイト成功率を本Harnessへ流用しない。コードコピーせず、公開APIまたは独立したAdapterで利用する。対象OSSのlicenseと導入時のupstream変更は運用前再確認。Issue/PRの網羅調査は未完であり、未確認の事項をCode verifiedと呼ばない。
 
@@ -181,7 +181,7 @@ FetchAttemptと每hop network grant、status/headers subset/ETag/cache metadata�
 ## 17. Sources / Evidence grade
 
 [S1] **undici** `1b7b18e59f6c1e9d59af188bb0488890166a0c84` / MIT, Code verified 2026-10-30: [`lib/interceptor/redirect.js — createRedirectInterceptor`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/lib/interceptor/redirect.js); [`lib/handler/redirect-handler.js — RedirectHandler`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/lib/handler/redirect-handler.js); [`test/redirect-request.js — HTTP 300/redirect chain and origin tests`](https://github.com/nodejs/undici/blob/1b7b18e59f6c1e9d59af188bb0488890166a0c84/test/redirect-request.js).
-[S2] **Scrapling** `26dc85a4fa307257fb5c669c80aa44b15acb84c4` / MIT（採用時再確認）, Code verified 2026-10-30: [`scrapling/fetchers/requests.py — Fetcher/AsyncFetcher`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/fetchers/requests.py); [`scrapling/engines/static.py — FetcherSession`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/engines/static.py); [`tests/fetchers/sync/test_requests_session.py — session/retry/proxy/header tests`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/tests/fetchers/sync/test_requests_session.py).
+[S2] **Scrapling** `26dc85a4fa307257fb5c669c80aa44b15acb84c4` / BSD-3-Clause（固定SHAのLICENSE確認済み）, Code verified 2026-10-30: [`scrapling/fetchers/requests.py — Fetcher/AsyncFetcher`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/fetchers/requests.py); [`scrapling/engines/static.py — FetcherSession`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/engines/static.py); [`tests/fetchers/sync/test_requests_session.py — session/retry/proxy/header tests`](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/tests/fetchers/sync/test_requests_session.py).
 - **[Design hypothesis]** 本書のstate machine、API、上限値、timeout、transaction/fencing提案は本プロジェクト固有で実装・実測は未検証。
 - **[Docs verified]** Playwright: https://playwright.dev/docs/browser-contexts 、https://playwright.dev/docs/auth 、https://playwright.dev/docs/actionability （参照版は上記SHAで固定）。
 - **[Unverified]** 外部サイトごとのTerms/API契約/認証画面相性は本検証とは別。導入時に再確認。
@@ -189,3 +189,9 @@ FetchAttemptと每hop network grant、status/headers subset/ETag/cache metadata�
 ## Review gate
 
 Owned pathのみ。Sourceコードとテストを参照したがHarness test未実施、依存共有契約未Lockedにつき**Draft**。Cross-team合意がない部分を確定APIとして配布してはならない。
+
+
+### Round 2 Source audit: upstream Issue（2026-10-30）
+
+- **[Issue report / not reproduced]** Undici [#1462](https://github.com/nodejs/undici/issues/1462) はContent-Encodingが付いたHTTP応答でraw compressed bytesとtransparent decompressionの区別が重要であることを報告。本仕様の `maxCompressedBytes` と `maxDecodedBytes` は別カウンタとして必ず計測し、`Content-Length`（転送表現）をuncompressed sizeとして扱わない。T-FETCH-006でテストする。
+
