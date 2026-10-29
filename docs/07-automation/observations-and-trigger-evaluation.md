@@ -81,7 +81,7 @@ Connector/Search/Browser CHAT_04/05, Image CHAT_15
 ~~~ts
 type ObservationResult = {
   schemaVersion:"1.0"; observationId:string; tenantId:string;
-  watchId:string; definitionRevision:number;
+  watchId:string; definitionRevision:string;
   origin:"scheduled"|"external-event"|"manual";
   sourceRef:string; evidenceRef:string|null; providerEventRef?:string;
   entityRef:string; entityMappingRevision:number|null;
@@ -102,7 +102,7 @@ type Predicate =
 type Decision =
  {kind:"fire"|"no_match"|"unknown"|"stale"|"suppressed"|"needs_research";
   reasonCode:string; observationRef:string; previousRef:string|null;
-  definitionRevision:number; triggerKey:string|null; evidenceRefs:string[]};
+  definitionRevision:string; triggerKey:string|null; evidenceRefs:string[]};
 ~~~
 
 正式Observation/Evidence envelopeとEventはCHAT_01の正本に合わせて変換する。価格は浮動小数のJSON numberでなく**正規化された整数最小単位文字列**を提案（JPY=整数、USD=cent等、ISO通貨exponentを検証）。異なる通貨は直接比較不可、換算が必要なら同一時刻の根拠あるFX観測を別Evidenceとして保存（ユーザーの条件が固定JPYなら勝手な換算禁止）。容量/色/型番/商品の状態/購入条件が異なれば別系列。Entity matchingの判断はCHAT_12のversioned mappingを参照し、unknown matchはconfirmed triggerを作らない。
