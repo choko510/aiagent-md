@@ -276,3 +276,21 @@ Issue報告は本Harnessの再現実績ではなく、設計時のadversarial te
 ## 17. Upstream PR差分：callbackの所有権を混同しない
 
 **[PR-TG-01]** [OpenClaw PR #169504](https://github.com/openclaw/openclaw/pull/169504)（2026-10-30確認、**Open / 未マージ**）の `extensions/telegram/src/bot-handlers.callback-router.ts` 実diffを閲覧。agent-authored callbackとplugin-owned callbackを区別するreserved prefixと所有権判定が追加提案されている。本Harnessも **Approval callback / User choice callback / bot navigation callback** を異なるnamespaceと用途で分離し、callback_textの`/`接頭辞から管理者Commandを起動させない。TG-T06/T10にagent choicesが承認として処理されないこと、malformed reserved callbackが無害にterminalizeされることを追加。OpenClaw提案を既存main実装として誤認しない。
+
+## Formal Round 2 MUST Traceability (full stable IDs; designed tests only)
+
+| MUST REQ-ID | TEST-ID(s) | SC-ID(s) |
+|---|---|---|
+| TG-001 | TG-T01 | SC-06, SC-08 |
+| TG-002 | TG-T02 | SC-06, SC-08 |
+| TG-003 | TG-T03 | SC-02, SC-07, SC-11 |
+| TG-004 | TG-T04 | SC-02, SC-07 |
+| TG-005 | TG-T05 | SC-06, SC-08 |
+| TG-006 | TG-T06 | SC-04, SC-06, SC-07, SC-08 |
+| TG-007 | TG-T07 | SC-02, SC-03, SC-11, SC-14 |
+| TG-008 | TG-T08 | SC-07 |
+| TG-009 | TG-T09, TG-T12 | SC-09 |
+| TG-010 | TG-T10 | SC-08 |
+| TG-011 | TG-T11 | SC-06, SC-07 |
+
+**Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
