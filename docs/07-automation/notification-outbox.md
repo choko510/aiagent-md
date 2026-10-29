@@ -321,3 +321,9 @@ NOT-PR1: immutable intent/eventKey/Verified Binding validation + safe renderer +
 **NOT-021 MUST / NOT-T21 / SC-07,08,16**: Delivery Workerを同意確認直後・Provider送信前のbarrierで停止し、同時にopt-out開始、次にWorkerを再開するFault Test。受信側で無効Bindingの送信開始が0、最終解除ackが未収束のin-flightを隠さない、かつ旧worker leaseEpochのDB settlementが0であること。実テスト未実行。Cross-team proposal: CHAT_09/10に配送開始の厳密な線形化とBinding revoke barrierの所有権・phase/state/DDL、CHAT_08にPendingRevocationのUI契約を提案する。
 
 **注意**: 強いrevocation保証が初期実装で成立しなければ、仕様を弱めて「最善努力」だと曖昧に隠すのではなく、個別Channelで完了確認できないことを明示してP0 blockerとして残す。
+
+## 18. Round 4 — Digest coverage accepted by the only sender
+CHAT_13's digest is a ranking/layout step, **not** a new delivery path. CHAT_10 proposes `notification_digest_envelopes` / `notification_digest_members`; CHAT_07 is sole owner of provider send, attempt ledger, reconciliation and notification status. Before sending, CAS-reserve digest + member original intents with fresh owner/consent/Watch/policy/revision checks and semantic Event dedupe.
+`reserved` members cannot be sent individually; `provider_accepted` aggregate maps to `covered_accepted` **not delivered/read**; `UNKNOWN` maps to `coverage_unknown` and blocks blind individual resend. After a *proven pre-send reject*, release member reservations atomically. If digest disabled until verified, use original individual delayed sends only. No UI result may claim every member delivered just because one digest was generated.
+Tests NOT-R4-T01 concurrent digest vs individual send→one transport intent; T02 ACK lost→UNKNOWN all included and zero automatic resend; T03 revoke between reservation and send→0 new dispatch; T04 digest rejected before send→members released; T05 cross-tenant membership/recipient mismatch rejected. SC-02/07/16. **Design only, awaiting real worker tests.**
+
