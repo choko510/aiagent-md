@@ -96,6 +96,7 @@ Web UI / Telegram Adapter / API client
 | REST-016 | MUST | ApprovalとBrowser操作は対象owner/current actorの権限を**決定直前にも再評価** | 06,07,08 |
 | REST-017 | SHOULD | If-None-Match ETag・gzip/br・PATCH read-model diffを導入してポーリングを抑える | 07,09 |
 | REST-018 | SHOULD | OpenAPI typeをフロントとAPI clientで共有し、契約破壊をCIで検出 | 01,05 |
+| REST-021 | MUST | GET Task snapshotとSSE subscriptionの間にEvent欠落が生じないよう、consistent high-waterとsigned snapshotCursorを同じread projectionに提供する | 05,07,08 |
 | REST-019 | LATER | 運用者向けbatch read export（監査付き、rate capped） | 05 |
 | REST-020 | EXPERIMENT | 通知チャネル差の少ないread-through cache。tenant leak test後に検討 | 02,09 |
 
@@ -169,6 +170,8 @@ type TaskView = ResourceMeta & {
   conversationId: Id | null;      // direct API / Watch / event Task may be conversationless
   state: string;                   // from CHAT_01, not enumerated here
   currentRunId?: Id;
+  lastEventSequence: string;       // canonical Task event high-water as decimal bigint string
+  snapshotCursor: string;          // signed, task+actor+projection bound SSE resume marker
   goalSummary: string;
   budget: {
     configured?: MoneyWire;
@@ -309,6 +312,15 @@ type ApprovalDecisionInput = {
 - **ApprovalDecision:** decisionでは別のaction payloadやURLへのすり替えを許さない。承認対象のserver-side immutable digestを照合（CHAT_03契約待ち）。expired/consumed/revokedなら拒否。理由はUTF-8 0..2048 bytesの提案。
 - **Run:** userが任意のrunIdを指定したり、過去runをdelete/updateしたりできない。再実行対象のTaskをversionでlockし、CHAT_02の再実行条件を検査。
 - **BrowserSession:** release/handoffのみで、sessionId以外の内部識別子は利用者には見せない。
+
+### 5.6.1 Durable Snapshot / SSE Handoff (own API contract)
+
+\`GET /api/v1/tasks/{id}\` **MUST** provide \`lastEventSequence\` and \`snapshotCursor\` in the same snapshot as \`recordVersion\` and projected Task state. \`lastEventSequence\` is the latest committed Task Event sequence represented by that state (base10 decimal string, not a JS number); \`snapshotCursor\` is a scoped opaque signed cursor for \`GET /api/v1/tasks/{id}/events\` from [realtime-events.md](realtime-events.md). The GET must read Task view and Event high-water under one documented consistent DB snapshot (or an equivalent projection log barrier). **Do not sign the current Event high-water if the returned Task state has not actually incorporated those Events**; doing so would permanently skip results on reconnect. If materialized projection lags, return its *applied* cursor, not the DB's newer raw Event maximum. New Task with no Events uses seq "0" only for initial snapshot marker (public recordVersion still starts 1). \`snapshotCursor\` is not an auth token and is checked against the current principal on SSE subscribe; neither the cursor nor Event sequence grants resource access.
+
+- Browser frontend uses \`fetch\` streaming to send signed \`Last-Event-ID\` as a request header even on the first subscription; standard native \`EventSource\` cannot set arbitrary headers. URL query cursor/bearer token is disallowed in v1.
+- SSE replay returns canonical Event projections strictly *after* the signed high-water. On logout/tenant switch the frontend discards both snapshot and cursor. If cursor expired (410), it reGETs a fresh consistent snapshot, then resubscribes.
+- \`REST-T19\` (design only; SC-05/07/08): concurrent Event commit across GET snapshot response / SSE handler start / DB materialization delay; assert each Event applied **at least once** and visible state exactly once, including when \`conversationId=null\`; assert no sequence gap and no exposure across tenant.
+- **[PROVISIONAL: CHAT_01/10]** Canonical Event sequence, projection commit barrier, and retention lower bound require explicit owner contract. The *wire form* and requirement to make the snapshot/stream gap-free are CHAT_08-owned and are specified here.
 
 ### 5.7 Error envelope and response examples
 
@@ -532,6 +544,7 @@ async function acceptCommand(ctx, route, rawBody, headers) {
 | REST-014 | T09, T16 | 02,07 |
 | REST-015 | T11, T12, T18 | 06,08 |
 | REST-016 | T10, T11, T17 | 06,07,08 |
+| REST-021 | T19, REST-R2-T09 | 05,07,08 |
 
 TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpected通りの0 unauthorized effects/0 duplicate commands、no exposed secrets。性能は環境別ベースラインのレビュー承認まで未固定。
 
@@ -616,3 +629,5 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 
 **Cross-team requested actions:** CHAT_01 enforce canonical logical types; CHAT_02 lease/goals; CHAT_03 approvals and UNKNOWN; CHAT_09 tenant mapping and revocation; CHAT_10 physical DDL and transaction; CHAT_11 automated contract/fault tests. **Nothing in this section changes another owner's file.**
 
+
+**REST-R2-T09 (designed, not run; SC-05/07/08)**: snapshot GET vs worker Event commit vs SSE stream handshake, slow projection barrier, cursor expiration and cross-tenant replay: assert no event loss, no double billing/step UI, 410 resnapshot, access denied on revoked principal. Complements REST-T19 and SSE-T02.
