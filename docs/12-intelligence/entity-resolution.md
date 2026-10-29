@@ -144,18 +144,27 @@ ER-PR1 normalize/typed validators/GTIN checks + fixtures。ER-PR2 blocking/candi
 |ER-T13 Contract|旧mappingを使ったWatch再評価 → stale result非通知|
 |ER-T14 Fault|cancel/expiry/Steer while processing → 未承認変更0|
 |ER-T15 Security|注入HTML＋SNS人物名 → instruction実行0|
-## 15. Traceability
-|MUST|TEST|SC|pass oracle|
+## 15. MUST requirement → TEST → SC 追跡（全ID・省略表記なし）
+
+|Requirement|Designed TEST (未実行)|Acceptance Scenario|確認可能な合格条件|
 |---|---|---|---|
-|ER-001,ER-002|T01,T02|01,10|invalid拒否、属性保持|
-|ER-003,ER-004|T02,T05,T12|01,10|pair漏れ計測、誤統合0 fixture|
-|ER-005,ER-006|T03,T04|04,10|property/rate独立・人物自動同定0|
-|ER-007,ER-008|T06,T12|10,14|calibration不在でreview|
-|ER-009,ER-010|T07,T09|07,10|履歴付きCAS|
-|ER-011,ER-012|T07,T09,T13|02,10|stale下流抑止|
-|ER-013|T08,T14|07|中途半端なmatch 0|
-|ER-014,ER-015|T01,T12|09,10|独立誤差指標と根拠|
-|ER-016|T10,T15|08|権限漏れ0|
+|ER-001|ER-T01|SC-01, SC-10|不正入力拒否/原本参照維持|
+|ER-002|ER-T01, ER-T02|SC-01, SC-10|SKU属性とchecksum維持|
+|ER-003|ER-T05, ER-T12|SC-10|候補上限/漏れ指標|
+|ER-004|ER-T02|SC-01, SC-10|異容量/condition自動統合0|
+|ER-005|ER-T03|SC-04, SC-10|ホテル物件/プラン分離|
+|ER-006|ER-T04|SC-08, SC-10|公的ID不明の人物自動照合0|
+|ER-007|ER-T06|SC-10, SC-14|三値評価と理由/版が保存|
+|ER-008|ER-T06, ER-T12|SC-10, SC-14|未校正auto-match0|
+|ER-009|ER-T09|SC-07, SC-10|人間による監査付き判定|
+|ER-010|ER-T09|SC-07, SC-10|CAS履歴・split/undo|
+|ER-011|ER-T13|SC-02, SC-10|旧mappingの下流判定STALE|
+|ER-012|ER-T07|SC-07, SC-10|並行pairの一意判定receipt|
+|ER-013|ER-T08, ER-T14|SC-07|crash/cancel時未確定を確定扱いしない|
+|ER-014|ER-T12|SC-09, SC-10|誤統合/未統合/recall別計測|
+|ER-015|ER-T01, ER-T12|SC-01, SC-10|識別子正規化と証拠整合|
+|ER-016|ER-T10, ER-T15|SC-08|撤回後Evidence開示0|
+
 
 ## 16. Cross-team proposals/未決
 P0-ER-01 [PROVISIONAL: CHAT_01] CanonicalEntity relation・mappingRevision・invalidationの論理共通型/ID UUIDv7、Evidence claim link。P0-ER-02 [PROVISIONAL: CHAT_09/10] owner→workspace scope、tenant unique FK、history/split CAS・retention。P0-ER-03 [PROVISIONAL: CHAT_05] listing item vs rate plan、provider stable identifiers and conditional ASIN/GTIN interpretation。P1-ER-04 [PROVISIONAL: CHAT_08/11] reviewer audit UIとprecision/recall別テスト。P1-ER-05 [PROVISIONAL: CHAT_07/12-04] split時Watch/Decision invalidation atomic delivery。各オーナー承認とschema version compatibility testまではDraft維持。未知の人物同定はPhase1除外してもよい。
