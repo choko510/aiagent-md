@@ -130,18 +130,28 @@ SRC-PR1 attempt/provenance validators+fixtures。SRC-PR2 window aggregation + nu
 |SRC-T14|30d window 100k events→budget/CPU metrics, timeout fail bounded|
 |SRC-T15|retention delete + export→redact provenance and deny deref|
 |SRC-T16|SC-14 degradation→trend reliability update triggers stale|
-## 15. Traceability
-|MUST|TEST|SC|oracle|
+## 15. MUST requirement → TEST → SC 追跡（全ID・省略表記なし）
+
+|Requirement|Designed TEST (未実行)|Acceptance Scenario|確認可能な合格条件|
 |---|---|---|---|
-|SRC-001,002,003|T01,T13|01,14|counts/keys separated|
-|SRC-004,005|T02,T04|03,14|timestamp & null|
-|SRC-006,007|T03,T12|03,14|reposts not independent|
-|SRC-008,012|T02,T11|09,14|interval only if enough samples|
-|SRC-009,013|T05,T10|08,14|no authority escalation|
-|SRC-010,011|T06,T12|07,14|versioned revision|
-|SRC-014,017|T09,T15|08|no secret/private leakage|
-|SRC-015|T07,T08|07|idempotent receipt|
-|SRC-016|T06,T16|10,14|dependent stale|
+|SRC-001|SRC-T01, SRC-T09|SC-08, SC-14|sourceKey粒度・tenant隔離|
+|SRC-002|SRC-T01|SC-01, SC-14|3母数が独立|
+|SRC-003|SRC-T13|SC-02, SC-14|失敗をzero priceとしない|
+|SRC-004|SRC-T04|SC-03, SC-14|時刻誤同一化なし|
+|SRC-005|SRC-T02|SC-14|sample不足unknown|
+|SRC-006|SRC-T03, SRC-T12|SC-03, SC-14|根拠と反証を分離|
+|SRC-007|SRC-T03|SC-03, SC-14|転載は独立支持0|
+|SRC-008|SRC-T02, SRC-T11|SC-09, SC-14|区間/件数を明示|
+|SRC-009|SRC-T05|SC-08, SC-14|policyとquality独立|
+|SRC-010|SRC-T06|SC-07, SC-14|schema/revision履歴|
+|SRC-011|SRC-T06|SC-07, SC-14|訂正で新revision|
+|SRC-012|SRC-T11|SC-09, SC-14|source低Nから偽の確定0|
+|SRC-013|SRC-T05, SRC-T10|SC-08, SC-14|高scoreでも権限拡大0|
+|SRC-014|SRC-T09, SRC-T15|SC-08|秘密ログ0|
+|SRC-015|SRC-T07, SRC-T08|SC-07|再送統計加算1回|
+|SRC-016|SRC-T16|SC-10, SC-14|下流STALE再計算|
+|SRC-017|SRC-T09, SRC-T15|SC-08|撤回後非公開Evidenceへの参照拒否|
+
 
 ## 16. Cross-team proposals
 P0-SRC-01 [PROVISIONAL: CHAT_01] SourceKey, Claim Verification, provenance relation, source version invalidationをEvidence/Observation契約に追加提案。P0-SRC-02 [PROVISIONAL: CHAT_05/09] ProviderEntitlementとSourceQualityを完全分離; policy epochs/ToS evidence required。P0-SRC-03 [PROVISIONAL: CHAT_10] idempotent attempt receiptsとaggregates、tenant unique index＋retention。P1-SRC-04 [PROVISIONAL: CHAT_07/08/11] drift中のWatch/Trend再計算と説明UI＋calibration E2E。Unresolved: truth labels source, n threshold, multi-tenant data sharing entitlement、IP/licenses; Locked不可。
