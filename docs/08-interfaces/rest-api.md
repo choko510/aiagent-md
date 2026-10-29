@@ -147,7 +147,7 @@ Web UI / Telegram Adapter / API client
 以下は **wire上の構造案**。TaskState / RunState / ApprovalStatus / WatchStatus 等のenum自体は [PROVISIONAL: CHAT_01 / CHAT_07 / CHAT_03] である。ここに実装して同名domain型を正本化してはいけない。
 
 ~~~typescript
-type Id = string;                 // opaque; parse as server-generated only
+type Id = string;                 // canonical lowercase UUIDv7, CHAT_01 server-generated
 type ISOInstant = string;         // validated RFC3339 UTC
 type MoneyWire = { amount: string; currency: string };
 type PublicRef = { id: Id; href: string };
@@ -161,12 +161,12 @@ type EvidenceSummary = {
 };
 type ResourceMeta = {
   id: Id;
-  resourceVersion: number;        // strictly increasing, domain-owner supplied
+  recordVersion: number;          // CHAT_01 safe positive integer; initial 1; CAS
   createdAt: ISOInstant;
   updatedAt: ISOInstant;
 };
 type TaskView = ResourceMeta & {
-  conversationId: Id;
+  conversationId: Id | null;      // direct API / Watch / event Task may be conversationless
   state: string;                   // from CHAT_01, not enumerated here
   currentRunId?: Id;
   goalSummary: string;
@@ -207,7 +207,7 @@ type CommandAck = {
   commandId: Id;
   resource: PublicRef;
   acceptedAt: ISOInstant;
-  observedVersion: number;
+  observedVersion: number;        // wire alias of recordVersion, never DB revision without mapping
   disposition: "accepted" | "already_recorded"; // accepted != performed
 };
 type Page<T> = {
@@ -265,7 +265,7 @@ Response **202** は決定要求が永続化されたことのみを示す。**2
 
 ~~~typescript
 type CreateTaskInput = {
-  conversationId?: string;                  // must be owned/visible if supplied
+  conversationId?: string | null;           // absent/null supported; scoped if nonnull
   goal: string;                             // 1..8192 UTF-8 bytes after normalization
   timezone: string;                         // IANA TZ ID, e.g. "Asia/Tokyo"
   constraints?: Record<string, unknown>;    // max 16KiB, owner-defined codec + revision
@@ -375,7 +375,8 @@ async function acceptCommand(ctx, route, rawBody, headers) {
   const principal = await authn(ctx);                      // CHAT_09
   await checkOriginCsrfRateAndAdmission(principal, ctx);   // CHAT_09
   const body = route.strictSchema.parseBounded(rawBody);   // reject extras
-  const target = await repository.findTenantScoped(route.target(body), principal.tenantId);
+  const target = route.isCreate ? await repository.resolveOptionalParentScoped(body, principal.tenantId) :
+    await repository.findTenantScoped(route.target(body), principal.tenantId);
   await authz(principal, route.capability, target);        // deny before mutation
   const key = parseStructuredIdempotencyHeader(headers);
   const fingerprint = sha256(canonicalEncode({
@@ -460,7 +461,7 @@ async function acceptCommand(ctx, route, rawBody, headers) {
 - idempotency receipt: (tenant, principal, operation, key_hash), fingerprint, reserved/committed, response_status, response_body_redacted, location, createdAt, expiresAt, traceId。UNIQUE keyとtimeout recoveryを要する。
 - command: commandId, targetResource, targetVersion, actorId, requestedAt, acceptedAt, outcome, correlation IDs。DomainのCommand/Runテーブルに対応付け、独自のState enumを増やさない。
 - outbox: UNIQUE commandId、dispatch attempts、nextRetryAt、processedAt（メッセージ単位のat-least-once）。DBトランザクションでresource mutationとreceiptとoutboxをatomically commit。
-- Resource version: 行更新ごとstrict monotonic増加、fencingを支える。Listには (tenantId, createdAt DESC, id DESC) 相当の索引。ApprovalのCASはCHAT_03/10。
+- RecordVersion: CHAT_01の1開始・更新毎+1。DB `revision`はCHAT_10が1開始へ修正するか明示的な双方向変換層を用意する。LeaseEpochをRecordVersionに代用しない。Listには (tenantId, createdAt DESC, id DESC) 相当の索引。ApprovalのCASはCHAT_03/10。
 - DB障害復旧: reserved未commitなら消え、committed receiptは再生。receiptと実体が不整合な場合は503と監査/修復対象、黙って新規コマンド作成禁止。
 - Migration: 初回はv1新設 → feature flag shadow read (外部非公開) → internal adapter契約テスト → v1 route公開 → idempotency/permission alerts。後方互換変更はprojection additive-only、破壊変更はversioned routes。migrationで旧pending approvalを暗黙auto-approveしない。
 - retention時の削除順: ユーザー要求/監査保持期間/個人情報配慮に従う。idempotency receipt expiresAt経過後のretry不確定は明記。purgeしながら動作中Run参照を壊さない。
@@ -572,3 +573,46 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 - **[S14] Docs verified (draft, not RFC):** [IETF Idempotency-Key header draft-08](https://www.ietf.org/ietf-ftp/internet-drafts/draft-ietf-httpapi-idempotency-key-header-08.html) — structured header format, uniqueness/expiry/fingerprint。2026-10-30閲覧、仕様変動リスクあり。
 
 **未検証:** upstreamテストの実行結果、Mastra/OpenClawの当該commitとrelease tagの対応、他環境での互換性、本ハーネスへの統合、Postgres index設計の性能、本人認証実装方式。文書検査・引用参照以上をVerifiedと主張しない。
+
+
+## 18. Round 2: Canonical Contract Reconciliation Ledger (2026-10-30)
+
+**This section supersedes any contradictory provisional examples above.** The following is a **proposal**, not a cross-owner Locked decision. Source pins: [PR #2 core-domain-models](https://github.com/choko510/aiagent-md/blob/spec/chat-01-core-domain-models/docs/01-contracts/core-domain-models.md), [PR #1 agent-loop](https://github.com/choko510/aiagent-md/blob/spec/chat-02-agent-loop/docs/02-runtime/agent-loop.md), [PR #9 authentication](https://github.com/choko510/aiagent-md/blob/spec/chat-09-authentication-and-user-isolation/docs/09-security/authentication-and-user-isolation.md), [PR #10 database](https://github.com/choko510/aiagent-md/blob/spec/chat-10-database-schema-and-migrations/docs/10-infrastructure/database-schema-and-migrations.md); read their current Draft branch heads, not main. PR #6 tool registry and PR #11 scheduler were also inspected. The draft remains Draft until each owner accepts/rejects these changes.
+
+| Conflict / priority / exact inputs | Canonical owner and **recommended resolution** | Required file/behavior and tests | Status |
+|---|---|---|---|
+| **CR-01 P0**: CHAT_01 core §5 \`UUIDv7\` vs CHAT_10 SQL §5.2 \`gen_random_uuid()\` | CHAT_01 owns ID contract, CHAT_10 owns DDL: **server-assigned canonical lowercase UUIDv7** for all public resource IDs; DB defaults on public tables removed or explicitly UUIDv7-compliant with same validator, not v4 fallback. Public ID is not a security capability | CHAT_10 \`database-schema-and-migrations.md\` migration/ID defaults; CHAT_08 \`rest-api.md\` request/route/query ID validation; test REST-R2-T01 using server-created ID including Task/Run/Watch/Evidence/Workspace, accept v7/reject v4/uppercase and client-specified IDs | [PROVISIONAL: CHAT_01/10] |
+| **CR-02 P0**: CHAT_01 Task.conversationId nullable (§3/5) vs CHAT_10 \`tasks.conversation_id uuid NOT NULL\` (§5.2) vs old REST TaskView required | CHAT_01 owns relationship: **nullable permitted** for direct API/Watch/Event Task. Presence of originThread mandates scoped conversation match. No synthetic conversation on non-chat task | CHAT_10 drop NOT NULL, composite FK retains nullable semantics and add source/owner columns; CHAT_08 TaskView \`Id|null\`, create body absent/null, /tasks filter explicit null predicate. REST-R2-T02 for Watch/Event/direct Task + ACL/cursor | REST DTO fixed; SQL [PROVISIONAL: CHAT_10] |
+| **CR-03 P0**: CHAT_01 \`recordVersion\` initial 1 vs CHAT_10 \`revision bigint default 0\`; REST former \`resourceVersion\` | CHAT_01 owns logical CAS: **one canonical recordVersion starting 1**; CHAT_10 should persist same integer with CHECK >=1 and explicit monotonic bump. Prefer same DB name; if physical revision remains, adapter must map exactly at read/compare/write without losing +1/integer precision | CHAT_10 all revision columns and migration; CHAT_08 projection \`recordVersion\`/ETag; REST-R2-T03 initial ETag "1", single mutation "2", concurrency returns 412, no false 0 ETag | REST DTO fixed; DB [PROVISIONAL: CHAT_10] |
+| **CR-04 P0**: CHAT_01 \`LeaseEpoch=number\` (§5) vs CHAT_02 agent loop references a \`bigint\` internal epoch/fence, CHAT_10 Run SQL lacks \`lease_epoch\` | CHAT_01 type & CHAT_02 lease protocol, CHAT_10 storage: **DB bigint nonnegative**, increment under exclusive transaction; at JS boundary encode as decimal string or guarded safe integer (prefer string to avoid >2^53-1), never unsafe JS number coercion. HTTP never accepts a leaseEpoch and never exposes it as user operation authority | CHAT_01 shared serialization/compat; CHAT_02 claim/checkpoint fences; CHAT_10 runs \`lease_epoch bigint\`, \`lease_owner\`, \`lease_expires_at\`, fence in UPDATE WHERE; REST-R2-T04 old-worker stale write after new owner, result rejected | [PROVISIONAL: CHAT_01/02/10] |
+| **CR-05 P0**: Task \`goalRevision\`, \`goalRevisionRef\`, \`activeRunId\`, \`ownerUserId\` present CHAT_01 but not dedicated CHAT_10 tasks columns; Run inputGoalRevision absent | CHAT_01 logical model, CHAT_02 transitions, CHAT_10 physical: immutable goal revisions table per task/version; task current goal_revision + active_run_id with same tenant/task FK or deferred consistency, run input_goal_revision (FK to snapshot) and ownership reference. Keep Run immutable goal snapshot, do not silently rewrite after Steer | CHAT_10 columns/index and goal revision storage; CHAT_02 steering/recovery; REST-R2-T05 concurrent Steer+approval old revision denied, activeRun foreign-task rejected, restore preserves goal revision | [PROVISIONAL: CHAT_01/02/03/10] |
+| **CR-06 P0**: CHAT_01/09 tenantId/ownerUserId vs CHAT_10 workspace_id physical key only | CHAT_09 identity is authority; CHAT_01 Tenant+User domain; CHAT_10 physical: **explicit tenant ↔ workspace mapping and owner/membership** from authenticated principal, never infer \`tenantId===workspace_id\` without ADR. Scope every SQL read/write and every channel/UI/SSE stream; no default-owner fallback | CHAT_09 \`authentication-and-user-isolation.md\`, CHAT_10 user/tenant/workspace mapping and migration, REST api auth query; REST-R2-T06 cross-tenant tasks, artifacts, browser, notification incl stale SSE cursor | [PROVISIONAL: CHAT_01/09/10] |
+| **CR-07 P0**: POST Task/Watch/Approval and outbox atomicity | CHAT_02/03/07 own command transitions; CHAT_10 owns atomic store: receipt, domain mutation, TaskEvent, outbox entry **single DB commit**. Approval is generated by Tool Gateway, client only decides existing proposal; no public create-approval | CHAT_10 SQL outbox & idempotency, CHAT_07 Watch uniqueness, CHAT_03 approval/ledger; REST-R2-T07 kill immediately before/after commit and after response lost, one durable command/event/intention, duplicate accepted request replays original receipt | [PROVISIONAL: CHAT_02/03/07/10] |
+| **CR-08 P0**: Run replay and UNKNOWN external side effects | CHAT_03 owns side-effect classification/ledger, CHAT_02 recovery, CHAT_01 terminal/uncertain states: if execution result might have occurred but ACK lost, **do not replay non-idempotent external effect**; reconcile/read/provider-specific status or require new human approval. API must not hide unknown as failed/zero/complete | CHAT_03 ledger and owner status, CHAT_02 checkpoint + retry, CHAT_08 uncertain presentation; REST-R2-T08 crash at effect ACK boundary, duplicate delivery, no second side effect | [PROVISIONAL: CHAT_01/02/03/10] |
+
+**Migration priority/order:** (1) CHAT_09+01 owner/tenant model and CHAT_10 mapping → (2) nullable relationships and GoalRevision/activeRun persisted layout → (3) UUIDv7 and RecordVersion+LeaseEpoch DB contract → (4) ACL+outbox event alignment → (5) crash/replay and API/stream contract tests. Any existing v4 IDs/zero revisions must be inventoried and migrated with explicit mapping/rewrite of all foreign keys, not silently reinterpreted; whether early database is empty is an explicit migration precondition, not assumed in code.
+
+**Impact on this REST specification:**
+1. Public URI path segments must be parsed with the **CHAT_01 validated UUIDv7 helper** (not fabricated \`t_abc\`/\`c_abc\` IDs). Existing synthetic examples with \`t_abc\`, \`c_abc\`, \`a_123\` are **non-valid schematic placeholders**; replace before OpenAPI contract tests. Never accept arbitrary prefix IDs in production. The UUID in \`Idempotency-Key\` is a *different client-generated intent identifier* and need not be UUIDv7.
+2. \`GET /tasks?conversationId=...\` accepts explicit \`conversationId=null\` as scoped filter for conversationless Tasks, plus absent means no filter; empty string is invalid. POST Task allows missing/null conversation and no originThread; any nonnull link requires verified tenant/owner and optionally Thread match.
+3. \`recordVersion\` (starts 1) is the only public ETag/CAS source. \`If-Match: "n"\` means canonical version n; do not serialize raw DB revision if mapped differently. If-Match zero/negative is 400; stale is 412, state conflict 409. JavaScript arithmetic after MAX_SAFE_INTEGER is refused; consider decimal string external form after CHAT_01 schema decision.
+4. GoalRevision is not recordVersion. Steer command should include expected recordVersion, owner validates and updates immutable goal snapshot, runtime worker revalidates applied revision at safe boundary; old approval cannot authorize changed parameters.
+5. \`LeaseEpoch\` and DB physical fence are INTERNAL to runtime, never a claim token in REST/SSE/Telegram. The HTTP layer only sends authenticated, versioned commands.
+6. The REST pseudocode must **not transact around an external network authz call** while holding row locks: prior identity check may precede transaction, transaction should verify stored identityVersion/owner epoch from transaction snapshot or readonly indexed data, with fail-closed behavior. The \`target\` may be absent on creation; authorize parent/tenant instead. Design assumes consistent lock order \`tenant/member → task/watch → command receipt → outbox\`, to be agreed with CHAT_10.
+7. PR #8 \`ApprovalView\` may reference immutable \`goalRevision\` and \`actionDigest\` **only once CHAT_03 canonical contract confirms their semantics**, not guessed client authority.
+
+**Round 2 Contract tests (planned, not run):**
+
+| Test | Setup / action | Observable acceptance | Scenarios |
+|---|---|---|---|
+| REST-R2-T01 | Server-generated IDs across Task, Run, Watch, Artifact with UUIDv7 validator; submit v4/mixed-case URI | All generated IDs pass v7; rejected IDs are 400, no DB mutation | SC-07,08 |
+| REST-R2-T02 | Watch/Event/direct Task creation with null conversation, optional Conversation+Thread mismatch | Null allowed; no phantom conversation; mismatch 422/404; tenant isolation enforced | SC-02,07,11 |
+| REST-R2-T03 | New record with ETag, update CAS 1→2; parallel PATCH; wrong 0 | First 201/202 uses canonical 1; update 2; one wins, stale 412, zero 400 | SC-07,08 |
+| REST-R2-T04 | A claims Run, B reclaims, A checkpoint tries stale leaseEpoch | A fails fence; no overwritten checkpoint, JS roundtrip keeps bigint exact | SC-07 |
+| REST-R2-T05 | Steer increments immutable goalRevision, old approval arrives, external action attempted | Wrong-goal approval rejected, changed action requires new authorization | SC-06,07 |
+| REST-R2-T06 | A and B in different tenant/workspace, query Task/Watch/Artifact/Notification and reconnect SSE | Zero cross-tenant results/IDs/payload, including cursor replay | SC-07,08,16 |
+| REST-R2-T07 | Worker/API kill just before and after receipt+event+outbox commit, duplicate key replay | Logical Task/Watch/command exactly once, original receipt replay, outbox at-least-once safe | SC-02,07,11 |
+| REST-R2-T08 | Tool external effect succeeded but ACK lost, retry/Cancel/Steer and restart | UNKNOWN until reconcile; zero blind repeated irreversible operations | SC-07,08 |
+
+**Cross-team requested actions:** CHAT_01 enforce canonical logical types; CHAT_02 lease/goals; CHAT_03 approvals and UNKNOWN; CHAT_09 tenant mapping and revocation; CHAT_10 physical DDL and transaction; CHAT_11 automated contract/fault tests. **Nothing in this section changes another owner's file.**
+
