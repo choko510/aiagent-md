@@ -277,3 +277,8 @@ CHAT_08 Dashboard view: Task spending broken into estimated / reported / billed 
 [S9] `https://opentelemetry.io/docs/languages/js/sampling/` — sampling official docs, **Docs verified**.  
 [S10] `https://github.com/choko510/aiagent-md/pull/1`, `/pull/2`, `/pull/9`, `/pull/10` — project Draft contracts.  
 Unknown: OTel version installed in future implementation, SDK exporter compatibility, billed-vs-reported precision for providers, Langfuse backend resource cost, performance measurements, and real receipt availability. **No test run**.
+
+
+### 16.1 Issue / PR evidence
+[S11] https://github.com/open-telemetry/opentelemetry-js/issues/4184 — **Issue report**, 2023-10, closed: user reported `maxQueueSize` overflow/dropped spans despite changing setup options; issue is not measured in this Harness and does not prove a currently unfixed defect. Ensure instrumentation config is passed to the actual processor, with overflow counters and no effect on usage ledger (OBS-T07/T15).
+[S12] https://github.com/open-telemetry/opentelemetry-js/pull/3458 — **PR evidence**, closed **unmerged**: proposed eager export to address dropped batch spans. Do not claim this fix is present in released SDK; current pinned `BatchSpanProcessorBase.ts` source is the behavior to inspect. OBS-T07 must induce exporter backpressure under the chosen installed version.
