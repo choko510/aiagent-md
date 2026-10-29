@@ -138,3 +138,185 @@ interface SchedulerPort {
 - Cronは5フィールド限定、秒/年/非決定性表現/空欄は拒否。TZは明示IANA ID必須（未指定のserver TZは使わない）。intervalは正整数msとUTC anchorが必須。24hのelapsed intervalは壁時計の日次09時とは別。onceはoffset付き日時のみ。Date overflow/NaNは禁止。
 - [PROVISIONAL: CHAT_00/02/03/09/10] 初期運用値の提案：Web監視最短5分、1tenant active Schedule最大1000、同一Watch並列1、tenant並列2/全体8、scan batch 100、missed window 24h、bounded replay最大20、outbox retry最大5。値は**未実測・未承認**で設定可能な上限として実装。Cron計算・preview件数/探索期間にも有限上限を設定。
 - [PROVISIONAL: CHAT_08] Web/Telegramで同じscheduleを表示。GET detail/preview、POST create/pause/resume/update/manual trigger。競合409、無権限403、validation422等の最終HTTP表現はCHAT_08へ。成功応答はDB commit後のみ。登録時にID/条件/周期/TZ/nextDue/通知許諾を示す。
+
+## 6. 状態・sequence・ライフサイクル
+
+業務的なWatchのcreate/pause/resume/deleteは07-02が正本。このSchedulerの局所的な運用上の分類は「enabled」「invalid_definition」「budget_blocked」「rate_deferred」「expired」であり、CHAT_01のTask/Run stateを再定義するものではない。
+
+~~~text
+CREATE/RESUME:
+UI/Telegram -> Auth/Watch owner -> Scheduler validate + preview
+ -> DB transaction (schedule + nextDue + revision)
+ -> commit -> receipt(scheduleId,revision,nextDue,TZ,policy)
+
+DUE:
+DB clock -> scanDue locks definition -> evaluate missed policy
+ -> capacity/rate/budget admission -> occurrence + outbox + cursor (one TX)
+ -> outbox relay -> queue -> worker claims occurrence with fencing token
+ -> verify current revision/rights/cancel/budget
+ -> Task/Run Manager -> Tool Gateway -> Provider/Browser
+ -> Observation/Trigger -> Notification owner
+ -> settle occurrence projection (scheduledFor remains original logical slot)
+
+PAUSE/UPDATE:
+authorized revision CAS -> invalidate not-yet-started old occurrence
+ -> in-flight Task behavior delegated to CHAT_02
+ -> no new Tool started from stale revision
+
+RESTART:
+reopen DB -> load nextDue -> reconcile outbox/expired claims
+ -> apply bounded missed policy -> normal dispatch
+~~~
+
+**状態遷移と判定時点**:
+- create: 正式な権限検証→Schema検証→TZ/DST preview→容量/サイト許容周期の検証→保存→受付。保存の前に「監視登録済み」を返さない。
+- update/pause/resume: 同じSchedule行をロックしrevisionをCAS。過去revisionの未開始jobはrunnerの再検証で抑止。すでに始まったHTTP/API/Browserの取り消しはベストエフォートであり、結果が不確定ならTool台帳へ。
+- one-shot: 最初のslotのみ作成、その後はスケジューリング上終端。未確定外部結果がある場合でも二度目のone-shotを自動で生成しない。
+- active Watch: 同一targetRefで1 runが進行中なら次回は多重起動せず、既存run完了後の現状再チェックへcoalesceまたはskipを記録。長時間停止の全slotを同時起動しない。
+- manual trigger: time-based slotとは別namespace。別のPOSTの再送で実行数が増えないようrequestIdを必須にし、権限・budget・rateを同様に検査。
+- dequeue時のpause/delete: enqueueが成功していても実行直前にrevision/ownerを照合。Pause/更新のcommitより前にToolが始まったケースだけin-flightとして残り、取消はCHAT_02の安全境界に従う。
+
+**競合順序**: Scheduler Aが行ロックを持ってslot確定中にBがpauseする場合、A commit後にBが旧revisionを無効にする。Bが先にcommitした場合Aは新revisionを再読する。二重Scheduler A/Bは同一schedule行とOccurrence unique制約で1論理slot。古いWorkerがlease失効後にresultを確定しようとしてもfencingToken一致のCASに失敗する。**ただし実際の外部HTTP副作用はCASでは取り消せない**のでTool intent ledgerと疑義状態が必須。
+
+## 7. 内部アルゴリズム・擬似コード
+
+### 7.1 next occurrence / DST
+
+**時刻の正本**はPostgreSQLのclock_timestamp。Worker自身の時計で「今」という不可逆判断をせず、ローカルtimerはDB再走査のwakeに限定。scheduler入力に明示されたIANA TZとともに、parserの固定バージョン/候補生成契約を保存または移行検証する。
+
+- Cron: TZ-aware evaluatorで未来候補を得てUTCに正規化。ローカルhour/minute/dayが式の意図と一致するか再確認する。DST spring-gapでは存在しないローカルslotをskip。fall-foldでは同一local occurrenceに対応する早いUTC instantのみ採用し後方の重複候補を除外。UTC単調増加と有限探索を強制する。
+- Interval: anchorMs + (floor((cursorMs-anchorMs)/everyMs)+1)*everyMs。整数/日付範囲を確認し、cursorより厳密に大きい次回を計算。elapsed 24hと「ローカル毎朝9時」は異なる仕様。
+- Once: once.atUtc > cursorUtcかつ有効期間内で1回。過去のonceを再設定で勝手に再発火しない。必要なら新しい改訂/明示手動trigger。
+- 登録時の初回cursorはmax(DBNow,validFromUtc)とし、最初の予定を**未来**に置く。即時一回チェックは明示のmanual triggerとして別の識別子にする。
+- 例: America/New_York 2026-03-08 02:30はgap→その日skip。2026-11-01 01:30は05:30Zと06:30Zの2候補から05:30Zを1回のみ。Europe/Oslo 2026-03-29 02:30もskip。Australia/Lord_Howeの30分foldもfixtureで確認する。
+- 探索回数/CPU時間上限を超える、または5年先まで適格時刻がない場合は未解決/nextDue=nullとしてUI・運用へ警告。他のScheduleのscanは継続。実パーサが必要なgap/fold規約を満たさなければWrapperで除外する（未実装）。
+
+### 7.2 atomic due scan / dispatch outbox
+
+~~~text
+scanDue(maxBatch):
+  dbNow := SELECT clock_timestamp()
+  for i in 1..maxBatch:
+    BEGIN
+    s := SELECT next eligible schedule
+         ORDER BY nextDueUtc, fairTenantOrder
+         FOR UPDATE SKIP LOCKED
+    if none: COMMIT; break
+    if disabled/invalid/expired:
+      record terminal/deferred reason; COMMIT; continue
+    due := computeDue(s, dbNow, s.missedPolicy)  # finite list
+    for slot in due:
+      if target already active and concurrency=1:
+        record coalesced/deferred decision; continue
+      permit := policyReserve(tenant, provider, token/USD/rate/concurrency)
+      if !permit.ok:
+        record blocked reason, finite nextRecheck; break
+      key := sha256(lengthPrefixed(tenant,s.id,s.revision,slot.utc))
+      INSERT logical occurrence(key,...)
+        ON CONFLICT DO NOTHING
+      INSERT dispatch_outbox(key, payload)
+        ON CONFLICT DO NOTHING
+    update schedule cursor and nextDue with expected revision
+    # unprocessed due work MUST have explicit defer/disposition
+    # never move cursor over a pending slot without its durable disposition
+    COMMIT # occurrence, outbox, cursor, same-DB reservations all-or-nothing
+
+dispatchPending(maxBatch):
+  lease ready outbox rows with DB locks/fencing, finite TTL
+  queue.enqueue(payload, deterministic occurrenceKey)  # adapter
+  if queue call succeeded: mark accepted by compare-and-swap
+  if timeout/unknown: retain outbox, recheck queue if supported
+  # after enqueue but before ACK, duplicate physical enqueue is possible
+
+runner(payload):
+  BEGIN
+    read schedule & occurrence with lock
+    reject if duplicate completed, stale revision, paused,
+      revoked principal, invalid grant, expired, not admitted
+    reject/defer if active target exceeds concurrency policy
+    increment fencingToken, claim with DB-time lease
+    COMMIT
+  before new Tool operation:
+    verify current token + cancellation + Tool Gateway policy/budget
+  call shared Task/Run manager, never call external site autonomously
+  if Tool outcome is ambiguous: ledger records UNCERTAIN, no blind retry
+  settle outcome with CAS(fencingToken)
+  # stale worker may finish actual HTTP despite failed settle;
+  # external effects require Tool ledger reconciliation
+
+reconcile():
+  bounded scan of committed-but-undispatched outbox and expired leases
+  if no external effect started can be proven: enqueue same key
+  else: mark needs-reconciliation; consult Tool ledger / user approval
+  release/refund unconsumed reservations only with idempotent accounting
+  alert operator for persistent errors; no secret/raw HTML in logs
+~~~
+
+**設計の微妙な点**:
+1. Policy reservationがPostgresと**同じtransaction**で永続化できない場合、原子性は成立しない。CHAT_02/03/10にcompensating reservation protocolとdouble-spendテストを依頼し、原子コミットがあると偽らない。
+2. キューのenqueueが非transactionalの場合、outboxとqueueの間はat-least-once。queue jobIDで重複抑止できても最終防御はOccurrenceのDB一意制約・claim CAS。
+3. Leaseは所有権の有効期間であり、既に完了した外部副作用を巻き戻す機能ではない。fencingはDB resultを保護するが、ネットワーク外部サービスがfencingに対応しないときはTool台帳が必要。
+4. 予約段階で予算不足を検出したら、**予定を架空の成功として前進させない**。期限切れ/延期/skipと利用者への説明を1つの監査可能な決定にする。
+5. Backlogを大量に読み込まず、tenantの公平性とbatch/timeoutを制限。重いパーサと1行のinvalid scheduleが他スケジュールを停止させない。
+
+### 7.3 missed runs / catch-up policy
+
+| Policy | 再起動後の厳密な意味 | 適用上の注意 |
+|---|---|---|
+| skip | 過去に発火しなかったslotをmissedとして記録し、次の未来予定から再開 | 過去の観測を捏造しない |
+| **coalesce_latest (Watch既定案)** | outage中のslotを一つにまとめ、現在の情報を**一回だけ新たに取得**。元のmissed時刻と実際のobservedAtを分ける | 最大age超過時は古いslotを期限切れ記録にしてnow-checkを生成。過去価格を再現したとは言わない |
+| bounded_replay | allowlistに属する冪等targetのみ、age/count/budget/provider rateの上限以内の過去slotを再生 | 既定無効。長いoutageで無制限LLM/外部アクセス禁止 |
+
+初期案: coalesce-latestのmaxAgeは24h、replay max20、同時Watch 1、rateに余裕がない場合は有限backoff。監視登録を停止した間のmissedは**resumeで勝手に遡及しない**。定義のrevision変更で旧仕様に対する過去slotを新仕様の根拠として扱わない。
+
+## 8. 障害マトリクス
+
+| 故障位置 / 検出 | Recovery | 最終状態・副作用危険 |
+|---|---|---|
+| API受領→DB commit前に切断 | requestIdで保存を照会 | 成功未確認を登録済と言わない |
+| occurrence insertとoutbox insertの間でkill | DB transaction丸ごとrollback、同じslotを再scan | 論理喪失なし |
+| commit直後→queue送信前にkill | committed outboxを再配送 | 同一keyを保持 |
+| queue送信後→outbox ack前にkill | queueへ重複配送あり得る。runner claimで論理一意 | exactly-once物理実行は非保証 |
+| claim後→Tool Intent前にkill | 未実行を証明し同じOccurrenceを再claim | fencingToken新しくする |
+| Toolの送信途中に通信断 | Tool LedgerへUNCERTAIN、結果照会/承認で解消 | 不可逆副作用を盲目的に再試行しない |
+| 取得HTTP 500/空/parse失敗 | 失敗Observationとして扱う、0円Observationを作らない | false price alertを抑止 |
+| pause/updateとdispatch競合 | scheduleの行ロック+revision CAS、runner再check | 未開始旧jobの開始0、既開始は取消境界へ |
+| 許可変更/token失効/403 | policy reject、手動入力待ちなどOwner状態へ | secretを表示しない |
+| DST gap/fold | 明示skip/first、UTC slotへ正規化 | 重複時刻/架空時刻を防止 |
+| Clock skew/DB failover | DB clock優先、DB障害時は新規発火停止、再接続後reconcile | 独断のローカル発火0 |
+| cron expression不正/DB旧データ破損 | 行単位隔離、error codeと警告を記録 | 正常な他行のschedule継続 |
+| budget枯渇/429/queue congested | hard stop/deferred＋有限再試行、次回評価時刻を保存 | 無制限費用・AI loopなし |
+| 同じWatchで前回Run未終了 | 新しいRunを重複開始せずcoalesce/skip | 同一Watch active最大1 |
+| stale Workerが結果保存 | fencing token一致CASで拒否 | 外部不確定性はTool Ledgerへ |
+
+## 9. セキュリティ・privacy・trust boundary
+
+- Schedulerが持つのは**時間の決定権**だけ。登録時、run起動直前、各Tool開始直前にowner/capability/approval/scope/予算を再照合。定期実行そのものが外部副作用の事前承認にならない。
+- scheduleRef、queue payload、log、traceにはOAuth token、Cookie、API key、生HTML、取得した秘密のquery string、ユーザーの機密promptを埋め込まない。secretの保管と使用はCHAT_09/Providerが管理。
+- HTML/X投稿/検索結果に含まれる「監視間隔を1秒に変更」「通知先を攻撃者へ」「鍵を送信」はDataでしかない。Watch条件の変更は信頼された認証済みAPIの操作だけを許す。
+- 監視サイトの規約/robots/API資格とrate制約を優先し、明示した最短周期未満への設定や認可外アクセスを拒否。SSRF/DNS rebinding/redirect/egressはCHAT_09/Tool Gatewayの正本で防ぐ。
+- Tenant/owner分離、監査ログ・保存期間・削除時の個人情報処理はCHAT_09/10へ。Schedulerは別tenantのSchedule照会/trigger/pauseができないようpolicyを必須にする。
+
+## 10. 計測・Trace・性能評価条件
+
+推奨metrics: scheduler_due_lag_seconds、scheduler_scan_duration_seconds、schedule_invalid_total、schedule_misfire_total{policy}、schedule_coalesced_total、occurrence_created_total、occurrence_duplicate_suppressed_total、occurrence_budget_denied_total、outbox_pending_age_seconds、outbox_retry_total、runner_lease_expired_total、runner_uncertain_total、provider_rate_limited_total、llm_calls_per_watch_check、model_usd_per_check、DB CPU/IO、RSS。scheduleId/raw URLをメトリクスラベルに使わず高cardinality/機密漏洩を防ぐ。
+
+Trace連結キー: scheduleId/revision/occurrenceId/dispatchIntentId、Task/Run ID、Tool ledger ID、Observation/Evidence ref。scheduledFor, dispatchedAt, startedAt, observedAt, finishedAtを別属性にする。
+
+**実測計画**: Postgres＋1/2/4 Scheduler/Worker replicas、1k/10k/100k schedule、周期1/5/15/60分、Mock HTTP 100ms/500ms、長時間run、429、DB停止、Queue停止、24h outage、DST変化、budget exhausted。各条件のdue lag p50/p95/p99、誤重複、計算コスト、DB負荷、RSS、USD/日を測る。**p95や最大スループットの値は未測定であり採用目標を捏造しない**。5分最短周期などはプロダクト政策値で性能保証ではない。
+
+## 11. 永続化・Transaction・Migration提案 [PROVISIONAL: CHAT_10]
+
+物理DDLは作成しない。以下の論理要求だけをCHAT_10へ依頼する。
+
+1. Schedule Definition: scheduleId PK、tenant/principal/target/ref、revision、enabled、spec/TZ、missed policy、cursor/nextDue、有効期間、budget/rate refs、created/updated。
+2. Occurrence Ledger: occurrenceId PK、UNIQUE(tenant,scheduleId,revision,scheduledForUtc)、reason、admissionRef、claim lease/fencingToken、結果参照（結果型はCHAT_01）。
+3. Dispatch Outbox: dispatchIntentId PK＋UNIQUE occurrenceId、status、attempt数、lease、nextRetryUtc、error code、queue responseRef。
+4. Tool LedgerはCHAT_03、Budget ReservationはCHAT_02/03/10の正本を**参照**する。これらの偽の重複台帳は作らない。
+5. Transaction: cursor advance/Occurrence/Outbox/同一DB Reservationをatomic。Queueへの非原子的送信はoutbox relayで回復。Ack後もretention期限までは同一slotの論理一意証拠を保持。
+
+**移行/ロールアウト**: Additive schema→read-only dry-run preview比較→少数tenant canary→worker機能flag→監視→段階展開。同一Watchを旧/新Schedulerが同時発火しないよう排他。旧scheduleのtimezone/次回/last slot/停止/tenantを検証し、変換不能なら隔離・管理者確認。RollbackはOccurrence/Outboxを削除せず、新旧二重起動を阻止する。RetentionとGDPR等の削除方針はCHAT_09/10が確定。
+
+## 12. UI・外部APIへの影響 [PROVISIONAL: CHAT_08]
+
+同一Watch IDと保存済Scheduleの画面・Telegram表示に、対象/条件/周期、IANA TZ、次回予定のUTCとローカル時刻、最後の**実際の観測**と最後の予定実行、missed/coalesced/blocked/uncertain原因、費用上限/通知同意を分けて返す。成功応答前のDB commit確認が必須。プレビューでDST skip/foldの解釈と制限を確認可能にする。Update/Pause/Resumeはrevision条件付き409競合応答。長時間実行中の停止は「新規実行停止」と「既存Run終了待ち」を区別する。
