@@ -242,3 +242,9 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 [S7] OpenClaw app-host \`subscribeEvents\`, pinned 8b8c33ef, Code verified: https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/ui/src/app/app-host.tsx (MIT)  
 [S8] OpenClaw \`serveAuthorizedSessionHistory\`, Code verified: https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/gateway/sessions-history-http.ts  
 **Hypothesis** all UI file layout, component boundaries, CSS/a11y behavior, performance limits. No SDK feature verified within this specific Harness, no UI/CI tests executed.
+
+## 15. Issue報告による回帰強化
+
+**[I-CHAT-01]** [Vercel AI SDK issue #22358](https://github.com/vercel/ai/issues/22358)（2026-10-30閲覧、**Closed**、Issue report）: Custom ChatTransportの`resumeStreamIsReplay`フラグが`useChat`経由で失われ、全量replayが古いpartial textに重複追加される事象が報告された。本仕様はSDK側が修正済みかどうかに依存せず、**server Event ID/Task seqとabsolute redacted snapshotを正本**とする。CHATUI-T02に「partial assistant output→切断→全量replay→完成」のとき完成テキストは1回のみ、StepとUsageも重複しない試験を追加する。SDK導入時には対象バージョンで同型の回帰テストを実行する。
+
+**[I-CHAT-02]** [Mastra issue #28224](https://github.com/mastra-ai/mastra/issues/28224)（2026-10-30閲覧、Open、Issue report）: terminal event公開前のRun lease喪失。Runが途中で応答を停止してもUIは架空の完了を宣言せず、GETの永続Task/RunとSSEの最後の正常イベントを比較し、uncertain/refreshを表示する。CHATUI-T03/T12へterminal-event欠落時の表示fixtureを追加する。
