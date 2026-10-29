@@ -3,7 +3,7 @@
 > Owner: CHAT_02 | Status: Draft [PROVISIONAL: CHAT_01/03/09/10] | Rev 0.1 | Research date: 2026-10-30 | base main: b45d4e989998663a00ef09673e69ae1f4191f00d
 
 ## 0. 結論と採用案
-DBのTask/RunとCurrent leaseEpochを唯一の正本とし、Queueをat-least-once通知と扱う。1 Task active Runは最大1。クラッシュは同Runを新epochで回復、terminal後の再試行だけ新runId/attemptNo。Cancel/SteerとGateway dispatchをDB上で線形化する。
+DBのTask/RunとCurrent leaseEpochを唯一の正本とし、Queueをat-least-once通知と扱う。1 Task active Runは最大1。クラッシュは同Runを新epochで回復、同Taskが非terminalで旧Runがterminalになった場合に限り新runId/attemptNo。Taskがterminalなら新Taskを作成。Cancel/SteerとGateway dispatchをDB上で線形化する。
 
 ## 1. 目的、責務と非責務、受入シナリオ
 Idempotent Task受付、Run生成、atomic claim/heartbeat/expiry、親子Task admission、cancel/steer/pauseのcommand受付、finished result commit。 Tool Executorそのものは持たない。
@@ -73,7 +73,7 @@ CRASH -> EXPIRED -> RECLAIM same runId, leaseEpoch+1 -> RESTORE
 TERMINAL -> OPTIONAL NEXT ATTEMPT new runId
 ~~~
 Cancel priority > security revoke > Steer > Pause > ordinary dispatch. Lease renewal is internal worker liveness; it never certifies that an external side-effect finished. Exact Task/Run state enum from CHAT_01.
-同じTaskでactive Run最大1。Runを新規作成するのは前Runのterminal以降の再試行だけ、Worker crashは既存runIdを維持しleaseEpochを増やす。Cancel/Steerのcommit後は新しいTool dispatchを拒否、既発生の外部副作用はGateway ledgerから照会する。
+同じTaskでactive Run最大1。Runを新規作成できるのはTaskが非terminalかつ前Runがterminalのときだけ。Taskがterminalなら新Task（retryOfTaskId lineage）を作成。Worker crashは既存runIdを維持しleaseEpochを増やす。Cancel/Steerのcommit後は新しいTool dispatchを拒否、既発生の外部副作用はGateway ledgerから照会する。
 
 ## 7. 実装可能なアルゴリズム
 ~~~ts
@@ -104,7 +104,25 @@ async function requestCancel(auth,taskId,version) {
 ~~~
 transaction中にLLM/外部HTTPを呼ばず、acquire/commitを短く保つ。Epoch mismatchまたはowner変更時はcallbackやStreamを破棄し確定結果を上書きしない。
 
-## 8. 障害・競合・Timeout matrix
+### 7.1 Round 3 — Terminal Task RetryとRun Retryの明確な境界
+
+正本はCHAT_01 `task-run-state-machines.md`：Taskの`SUCCEEDED/PARTIAL/FAILED/CANCELLED/EXPIRED/BUDGET_EXHAUSTED`はimmutable terminal。失敗したTaskへ同一TaskでRunを無制限に増やしてTerminalを取り消さない。
+
+- **Task非terminal、直前のRun terminal**: Recovery/Retry policyが許すときだけ同Taskの**新Run**（新RunId, attemptNo++）を作る。Task.activeRunIdはCASで新Runへ置換。残る外部副作用UNKNOWNは必ず解決まで再実行しない。
+- **Task terminal**: そのTaskと既存Runは不変。再実行ボタンまたはPOST retryは認証済み`CreateTask`で**新TaskId**を発行し、`retryOfTaskId`をlineageとして記録する提案[PROVISIONAL: CHAT_01/10]。承認済み旧副作用を新Taskが暗黙に継承しない。新しいBudget/Policy/Source Freshnessを検証。
+- **Worker crash**: Run非terminalかつleaseが期限切れの場合は**同runId/attemptNo**のleaseEpochを上げて復旧。新Runを作って既存Tool Intentの状態を無視しない。
+- **Task terminalだがUNKNOWN side-effectが残る場合**: 旧Taskは履歴としてterminal、旧効果は別途監査/照会状態を維持。終端の証拠はUncertain/partialを明示し、復旧不能なのにSucceededと表示しない。
+- **API gate**: `POST /tasks/{id}/runs`はTaskが非terminalで前Run terminalの場合のみ202。Task terminalなら`409 TASK_TERMINAL_NEW_TASK_REQUIRED`。Terminal Taskの再実行用Commandは新Task生成であり既存Run作成APIと区別する。Idempotency-KeyとIf-Match/同一Owner認可は両方必要。
+
+| Test (designed) | Expected |
+|---|---|
+| TRM-R3-T01 | Terminal TaskにRun Create →409、Task state変更0 |
+| TRM-R3-T02 | terminal TaskをRetry →新TaskId（lineage保持）、既存Task/Run不変 |
+| TRM-R3-T03 | nonterminal Task+FAILED Run+安全policy →同Taskの新Run、attemptNo単調 |
+| TRM-R3-T04 | crash復旧→same RunId、新leaseEpoch、外部UNKNOWN blind retry 0 |
+| TRM-R3-T05 | RetryとCancel/Steer並列→Task/Run CASで一方のみ、旧Goalは適用しない |
+
+
 | Condition | Action |
 |---|---|
 | Concurrent claims | one CAS success; loser no Tool |
