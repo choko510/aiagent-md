@@ -288,3 +288,19 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 - [S4] **Code verified** Langfuse commit 71ddcb9094f53d19176a262f107871d8b2950fb0: [ScoresApiService.createScore](https://github.com/langfuse/langfuse/blob/71ddcb9094f53d19176a262f107871d8b2950fb0/web/src/features/public-api/server/scores-api-service.ts)。特定の点数が正答を意味するとは限らず、導入は別検証。一般MIT・ee/は別ライセンス。
 - [S5] **Project normative / Draft sources** [SC-01〜16](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/acceptance-scenarios.md)、[feature expansion](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/feature-expansion-2026-10.md)、[PR #2 Core](https://github.com/choko510/aiagent-md/pull/2)、[PR #1 AgentLoop](https://github.com/choko510/aiagent-md/pull/1)、[PR #8 REST](https://github.com/choko510/aiagent-md/pull/8)、[PR #9 Auth](https://github.com/choko510/aiagent-md/pull/9)、[PR #10 DB](https://github.com/choko510/aiagent-md/pull/10)、[PR #11 Scheduler](https://github.com/choko510/aiagent-md/pull/11)。Draftsは確定根拠ではない。
 - [S6] **Hypothesis** QA case schema / scoring semantics / limits / suite composition / CI gates は本書の独立設計。実Harnessベンチ結果や上流CI実行結果は**確認していない**。
+
+## 17. Round 3 — End-to-end acceptance for unified contracts (Design only)
+
+`SC-07` の中断復旧に、`SC-11`（X投稿イベント）および`SC-02`（Watch通知）を組み合わせた検証を追加。Taskに紐づかないWatch Eventも`agent.domain_events`で保存し、同tenantの`deliveryOffset`順にEvent/Outboxを再送可能とする。TaskのSSEはownerが見られるTask関連Eventだけを投影し、隠れたEventのoffset欠番を欠損と誤認しない。
+
+| E2E ID | Setup / action | Acceptance |
+|---|---|---|
+| E2E-R3-T01 | Watch trigger → Domain Event + Outbox; kill Relay before/after publish | 保存済みWatch Event一意、通知の重複実行0またはProvider ACK不確定として明示 |
+| E2E-R3-T02 | Task+Watch mixed events while UI disconnects; restart SSE with signed cursor | 進捗と最終結果は完全に再現、秘密情報と他User Eventの流出0、過去previewの二重加算0 |
+| E2E-R3-T03 | Tool prepared+approved, checkpoint rev1..rev5 at same step, then worker crash | newest Run headから継続、既存Intentを再利用、外部不可逆効果のblind retry 0 |
+| E2E-R3-T04 | terminal FAILED Task → retry | new TaskId + retryOfTaskId lineage、旧Task immutable、new budget/approval |
+| E2E-R3-T05 | nonterminal Task+FAILED Run → new attempt; user Cancel racing | one Run attempt at most per authorized CAS, old Goal tools do not dispatch |
+| E2E-R3-T06 | 2^53を超えるtenant offset/revision fixture | lossless decimal serialization, JSON number拒否, no stale-event skip |
+
+**注意:** これらは受入試験の要求であり、現在の仕様書repoから実装実行できるテストではない。実際のHarnessコードと固定PostgreSQL/browser fixture環境の導入後に実行して初めてVerifiedとする。対応する契約はCHAT_01/02/08/10の各Draft PRでレビューが必要。
+
