@@ -320,3 +320,121 @@ Trace連結キー: scheduleId/revision/occurrenceId/dispatchIntentId、Task/Run 
 ## 12. UI・外部APIへの影響 [PROVISIONAL: CHAT_08]
 
 同一Watch IDと保存済Scheduleの画面・Telegram表示に、対象/条件/周期、IANA TZ、次回予定のUTCとローカル時刻、最後の**実際の観測**と最後の予定実行、missed/coalesced/blocked/uncertain原因、費用上限/通知同意を分けて返す。成功応答前のDB commit確認が必須。プレビューでDST skip/foldの解釈と制限を確認可能にする。Update/Pause/Resumeはrevision条件付き409競合応答。長時間実行中の停止は「新規実行停止」と「既存Run終了待ち」を区別する。
+
+## 13. 実装フェーズ・依存PR順序
+
+| PR | 実装範囲 / 先行条件 | 完了判定 |
+|---|---|---|
+| SCH-PR1 | TimeSpec validator / TZ+cron evaluator / DST gap-fold wrapper / preview。独立pure functions | fake clockと固定DST fixtureが合格 |
+| SCH-PR2 | CHAT_10 DDL、revision CAS、Occurrence unique constraint、cursor/outbox単一Transaction、DB clock | 同時4 schedulersで論理slotが1件。故障注入 |
+| SCH-PR3 | Queue adapter（pg-boss第一候補）、outbox relay、lease+fencing、reconciler | Queue ack loss/crash、stale workerテストが合格 |
+| SCH-PR4 | CHAT_02/03のBudget、rate、Task/Tool ledger、owner revocation連携 | 予算枯渇/不確定外部副作用/取消で安全 |
+| SCH-PR5 | CHAT_08のREST/UI/Telegram、運用metrics、CHAT_11 E2E/benchmark、canary | SC-02/07/08/09でE2E/負荷結果と移行手順が明示 |
+
+このMDは設計だけであり、上記PRを実装済みと主張しない。依存の契約が未決ならmock/adapter境界を作ってから当該Ownerの正本確定を待つ。Provider接続・Watch条件・Notificationは別MDで具体化する。
+
+## 14. テスト設計（このHarnessでは**全件未実行**）
+
+| TEST-ID | 種類 / setup → action | Expected（自動判定条件） |
+|---|---|---|
+| SCH-T01 | Unit: 正常5-field cronと空欄/秒欄/未知TZ/invalid interval/NaN/overflow/invalid revisionをsubmit | 不正登録0、正しいtimezone保存、合法条件だけpreview |
+| SCH-T02 | Unit fake clock: NY 2026-03-08 02:30と2026-11-01 01:30、Oslo 2026-03-29 02:30、Lord Howe fold | Gap 0、Fold初回のみ、UTCは単調で重複0 |
+| SCH-T03 | Property: 1000種類の時刻/interval/cronを異なるhost TZでcomputeNext | 同一入力の結果一致、strictly future、有限反復で終了 |
+| SCH-T04 | Integration: schedule登録→Worker kill→Postgres/Worker再起動 | scheduleId/revision/TZ/nextDueが保存、missed政策どおり再開 |
+| SCH-T05 | Concurrency: 4 Schedulerが同じ100件のdueを同時scan | 各(tenant,schedule,revision,instant)のOccurrence=1/outbox=1 |
+| SCH-T06 | Fault injection: Occurrence insert直後、Outbox insert直後、commit直後にkill | commit前はrollback、commit後はreconcileで同一logical slot=1 |
+| SCH-T07 | Fault injection: queue enqueue成功後・ack前にkillして再配送 | runner active claim最大1、重複はno-op、無条件外部effect増加0 |
+| SCH-T08 | Fault injection: claim直後、Tool Intent前、Tool送信結果不明の各境界でkill | 未実行と証明できる場合だけ再claim。送信疑義ではUNCERTAIN/approval |
+| SCH-T09 | Race: due transaction中pause、update先commit、旧revision enqueue、旧worker到着 | Pause/改訂commit以降、旧未開始Tool新規開始0 |
+| SCH-T10 | Integration: 1分周期Watchを24h停止、coalesce_latestで復旧 | 過去1440件再実行0、現在check最大1、scheduledFor≠observedAt |
+| SCH-T11 | Unit: skipとbounded_replay(max=3,age=1h)を相互比較 | skip過去0、replayは冪等許可済みslotのみ最大3、経費上限内 |
+| SCH-T12 | Integration: daily USD budget exhausted、429、target既にactive | 新規Tool 0、正しいBLOCKED/DEFERRED分類、同一Watch並列最大1 |
+| SCH-T13 | Fault: worker時計+120s、DB一時停止、timer遅延、復帰 | DB clockで正常slot選択、論理重複0・過去値捏造0 |
+| SCH-T14 | Unit/integration: 破損cron/TZを1レコード挿入、極端に疎なcron | 隔離・warning、他の正常100予定が処理を継続、CPU探索有限 |
+| SCH-T15 | Integration: Provider HTTP500/parse失敗/空返答 | error Observation。価格0の正常観測と誤分類しない |
+| SCH-T16 | Security: 別tenantのcreate/update/pause/trigger、失効owner token | 拒否・監査、別tenantデータ/secret表示0 |
+| SCH-T17 | Security: 取得ページに「毎秒監視・通知先変更・tokenを送れ」を埋め込む | Schedule/Approval/Network policyが不変、漏洩0 |
+| SCH-T18 | Contract: OccurrenceとTask、Observation、UIに異なる時刻を付与しJSON version違反も投入 | timestamp意味は分離、version incompatibleはreject |
+| SCH-T19 | Concurrency: lease expiry後に新worker claim、旧workerがlate complete | 旧fencing tokenのDB settlement 0、Tool不確定性は可視 |
+| SCH-T20 | E2E Mock: SC-02 Watch登録→再起動→価格閾値到達→通知ownerへ | ID/条件/TZ/nextDue保持、Source+observedAtつき通知意図1件 |
+| SCH-T21 | E2E Mock: SC-07のQueue/DB/Tool save各段階でkill + cancel/steer | 一意slot、retriable/uncertain/completedのいずれかに収束、不可逆再試行0 |
+| SCH-T22 | Benchmark: 1k/10k/100k schedules、replicas 1/2/4、429/budget/external mock | lag p50/p95/p99、LLM USD/job、RSS、DB負荷を測定し保存。数値目標は事前合意待ち |
+
+**実行状況**: SCH-T01〜SCH-T22はすべて設計のみで未実行。OSS上の既存テストはソースを読んだだけで、本プロジェクトのテストを走らせたわけではない。実外部サイトへの監視・購入・通知・予約は無承認テストしない。
+
+## 15. Acceptance Criteria / REQ→TEST→SC Traceability
+
+| MUST REQ | TEST-ID | 確認できる合格条件 | SC |
+|---|---|---|---|
+| SCH-001 | T04,T20 | Schedule/TZ/nextDueをrestart後も保持 | 02,07 |
+| SCH-002 | T16 | 他tenant/無権限からの変更0 | 02,08 |
+| SCH-003 | T01,T02,T18 | 明示TZの解釈・保存一貫 | 02,07 |
+| SCH-004 | T02,T03 | nonexistent slot 0 / fold同一日次slot重複0 | 02,07 |
+| SCH-005 | T05,T06,T07 | 同じslotでOccurrence/Outboxそれぞれ1 | 02,07 |
+| SCH-006 | T07,T08,T19,T21 | 不確定外部副作用の盲目的再試行0 | 07 |
+| SCH-007 | T06 | cursorとslotとoutboxが同一TXで全成功/rollback | 02,07 |
+| SCH-008 | T09,T21 | pause/改訂後の旧未開始Tool開始0 | 02,07 |
+| SCH-009 | T10,T11 | unbounded backfill 0、過去値捏造0 | 02,07 |
+| SCH-010 | T12,T22 | budget/rate/target並列越えで新規Tool 0 | 02,09 |
+| SCH-011 | T10,T12,T15 | failure/skip/blocked/uncertainの誤成功0 | 02,07 |
+| SCH-012 | T13 | skew後も論理重複0 | 07 |
+| SCH-013 | T06,T07,T08,T21 | unfinished workをrecoverまたはuncertain化 | 07 |
+| SCH-014 | T18,T20 | scheduledFor/observedAtを混同0 | 02,07 |
+| SCH-015 | T12,T20 | 同一Watch active最大1 | 02,07 |
+| SCH-016 | T16,T17 | prompt injectionによる権限変更0/secret出力0 | 08 |
+| SCH-017 | T01,T03 | 無効な時刻/式/Date保存0 | 02,07 |
+| SCH-018 | T14 | 異常1件でも他正常予定を処理 | 02,07 |
+
+## 16. 未決事項・Cross-team proposals
+
+全件、正本を持つ他担当への**提案**であり、このPRで担当外仕様を編集しない。必要なレビューでは変更前後挙動/互換性、対応するREQ/TEST、移行/取消への影響を確認する。
+
+| ID / Owner | Severity | 何を確定してほしいか / 合格条件 |
+|---|---|---|
+| P07-01 / CHAT_01 | **P0** | Schedule↔Task/Run/Event参照とreconcile時のUNCERTAIN/RETRYABLE/CANCELLEDの共有型・version。contract test SCH-T18/T21 |
+| P07-02 / CHAT_10 | **P0** | Schedule/Occurrence/Outbox物理DDL、一意索引、同一TX、DB clock、claim lease/fencing、admissionのtransaction境界。SCH-T05〜T08,T19 |
+| P07-03 / CHAT_02/03 | **P0** | Budget reservation（同一TXが不可能なら補償プロトコル）、Run起動/取消、Tool side-effect ledgerの不確定結果照会。SCH-T08,T12,T21 |
+| P07-04 / CHAT_09 | **P0** | Tenant隔離、資格失効と再照合、secret/egress/provider rate/監査retentionの正本。SCH-T16,T17 |
+| P07-05 / CHAT_00 | P1 | Cron DST gap skip/fold first、監視min5分、coalesce既定とbudget上限のADR/UX判断。SCH-T02,T10 |
+| P07-06 / CHAT_08 | P1 | preview/detail・scheduleId/revision・pause/resume/blockedReason・通知許諾、409と422表現。SCH-T18,T20 |
+| P07-07 / CHAT_11 | P1 | multi-worker/DST/Queue-ack-loss/DB-failover/Tool未知結果のfixtureとfault test、測定系。SCH-T02,T05〜T08,T22 |
+| P07-08 / CHAT_07 07-02 | P1 | Watchのcreate/pause/resume/deleteとSchedule revision、manual trigger、登録確認の整合 |
+| P07-09 / CHAT_07 07-03/04 | P1 | 価格と取得失敗・実測時刻、観測品質、通知event dedupe/送達遅延の別仕様 |
+| P07-10 / CHAT_10/11 | P1 | pg-boss 12.38.0とDB/Node現実環境の互換、Queue Adapter・障害テストを実施して採否判断 |
+| P07-11 / CHAT_00/07 | P2 | sparse cronの探索上限、bounded replayの許可対象、手動triggerのpolicy |
+
+**Draft維持理由**: P0のShared Contracts/DDL/Quota/Tool Side Effect/Securityが未Locked。CronのDST挙動も本Harnessの実コードでは未検証。レビュー後に契約Ownerが合意するまではCodexによる本番統合実装の確定仕様とは扱わない。
+
+## 17. Sources — precise evidence and inspection date 2026-10-30
+
+Evidence grade:
+- **Code verified**: Github上の該当ソース/テストの関数・振る舞いを実際に読んだ（実行した意味ではない）。
+- **Docs verified**: 公式ガイド/READMEの記述を確認した。
+- **Issue report**: 報告者の条件付きでのIssueであり最新版の欠陥を証明しない。
+- **Hypothesis**: このHarnessの未実装提案。
+- **Unverified**: 対応実テストや運用環境を確認していない。
+
+- **[S1] pg-boss, Code verified** — master SHA 71ea068b144c75b014a1eb90327aaa4a92da1cf2; package 12.38.0, Node >=22.12; functions onCron, cron, missedOccurrence, readOccurrences, onSendIt: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/src/timekeeper.ts ; missed kinds: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/src/plans.ts ; runtime/version: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/package.json
+- **[S2] pg-boss, Code verified** — test/scheduleTest.ts（DB-time clock skew、duplicate keys、malformed schedule isolation、send-it error、missed behavior）: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/test/scheduleTest.ts ; scheduleDbTest.ts（schedule/unschedule transaction commit/rollback）: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/test/scheduleDbTest.ts
+- **[S3] pg-boss, Docs verified / License verified** — scheduling docs https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/docs/api/scheduling.md ; MIT https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/LICENSE
+- **[S4] OpenClaw, Code verified** — main SHA 8b8c33ef334b3754f42afe2a2e212418abfa80f4; package 2026.10.9; TZ-aware cron parsing src/cron/schedule.ts https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/cron/schedule.ts ; restart/error/backoff functions https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/cron/service/jobs-scheduling.ts
+- **[S5] OpenClaw, Code verified** — daylight-saving tests https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/cron/schedule.test.ts ; restart slot ownership tests https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/cron/service.restart-catchup.test.ts ; MIT https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/LICENSE
+- **[S6] Hermes Agent, Code verified** — main SHA fcc26fbd9f1641755e49793d7ed608f3b7214c3d; functions pending_slot_stamp, unclaimed_pending_slot, completed_occurrence https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/cron/occurrences.py ; tick, _advance_or_drop_recurring https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/cron/scheduler_tick.py ; MIT https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/LICENSE ; **対応テストは未確認**
+- **[S7] BullMQ, Code verified** — master SHA 4d1631f9f74e258779ff1fa2c29de23577248147, package 6.5.1; upsertJobScheduler/getNextJobOpts/removeJobScheduler: https://github.com/taskforcesh/bullmq/blob/4d1631f9f74e258779ff1fa2c29de23577248147/src/classes/job-scheduler.ts ; tests: https://github.com/taskforcesh/bullmq/blob/4d1631f9f74e258779ff1fa2c29de23577248147/tests/job_scheduler.test.ts ; MIT https://github.com/taskforcesh/bullmq/blob/4d1631f9f74e258779ff1fa2c29de23577248147/LICENSE
+- **[S8] BullMQ, Docs verified** — Job Schedulers / job generation when previous job begins processing: https://docs.bullmq.io/guide/job-schedulers/ ; cron/interval options: https://docs.bullmq.io/guide/job-schedulers/repeat-options ; v5 repeatable removal in v6: https://docs.bullmq.io/guide/jobs/repeatable
+- **[S9] pg-boss, Issue report** — issue #914, cron pass timing gap on instance stop (closed; report condition pg-boss 12.33.3): https://github.com/timgit/pg-boss/issues/914
+- **[S10] BullMQ, Issue report** — issue #3272, JobScheduler sometimes stops (closed; reporter used v5.52.0, not evidence of v6 defect): https://github.com/taskforcesh/bullmq/issues/3272
+- **[S11] Hypothesis** — this document's independent PostgreSQL Occurrence/Outbox/fencing architecture, proposed operational constants, DST gap/fold policy; not tested in this harness.
+- **[S12] Unverified** — Temporal API/source and Hermes corresponding tests not audited; cannot be called Code verified.
+
+## Author self-review / Review Gates
+
+- [x] Latest main, Project Brief, Architecture Rules, Acceptance Scenarios, AGENTS, COMMON, CHAT_07, spec-index, research protocol, gates and template inspected.
+- [x] Four relevant OSS source functions and three sets of actual test files inspected; commit/version, license, evidence grade, Issue report distinguished.
+- [x] Scope/non-scope/owner, alternative designs, failure/restart/race/lease/cancel, budget, security/Privacy, migration/ops/observability covered.
+- [x] All 18 MUST REQ mapped to concrete TEST-ID and SC-ID; tests designed vs tests actually run explicit.
+- [ ] Contract Owners agree on P0, migration/DDL/Tool/Budget/tenant policy.
+- [ ] Real library integration, scheduler performance, unit/E2E/fault tests run.
+- [ ] Independent review, Reviewed/Locked gates passed.
+
+**Author status: Draft only.**
