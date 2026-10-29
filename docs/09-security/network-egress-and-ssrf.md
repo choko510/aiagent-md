@@ -68,7 +68,7 @@ LLM/External HTML/Doc/MCP -> Tool proposal (untrusted URL)
 ```ts
 type EgressKind = "http_read"|"connector"|"browser"|"mcp_remote"|"compute_fetch";
 type EgressRequest = Readonly<{taskId:string;runId:string;intentId:string;ownerUserId:string;tenantId:string;
- goalRevision:number;runLeaseEpochDecimal:string;purpose:EgressKind;canonicalUrl:string;method:"GET"|"HEAD"|"POST";
+ goalRevision:string;runLeaseEpochDecimal:string;purpose:EgressKind;canonicalUrl:string;method:"GET"|"HEAD"|"POST";
   expectedOrigin?:string;maxBytes:number;timeoutMs:number;maxRedirects:number}>;
 type EgressDecision = Readonly<{grantId:string; policyVersion:string; origin:string; hostname:string;
   allowedAddresses:ReadonlyArray<{address:string;family:4|6}>; expiresAt:string; bindingHash:string}>;
@@ -263,3 +263,7 @@ All tests operate synthetic DNS/HTTP/Chromium/local private targets in isolated 
 - **[PR inspected, closed/unmerged]** OpenClaw [#103041](https://github.com/openclaw/openclaw/pull/103041) describes a proxy/redirect path where a hostname was checked but the resolved IP was not revalidated, enabling the proposed DNS-rebinding bypass; the PR author's reported passing tests are **not** independent verification and the PR is not evidence of a shipped fix. Our `EGR-T04/T05/T14` must pin DNS at actual dispatch and fail closed on any unsafe re-resolution.
 - **[Open issues inspected]** browser-use [#5879](https://github.com/browser-use/browser-use/issues/5879) documents the default URL/IP protections being permissive; [#6218](https://github.com/browser-use/browser-use/issues/6218) reports configuration parse errors potentially resetting restrictive browser profiles to allow-all. Issue allegations must be tested against the selected version, but justify fail-closed startup, immutable effective profile validation and network-level egress controls (`EGR-T01/T09/T14`).
 - These are **Issue/PR reports** separate from pinned code/test verification. browser-use [MIT license](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/LICENSE) is verified at pinned ref.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
