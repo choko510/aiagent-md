@@ -289,3 +289,14 @@ P0が未決のためDraft。目標が継続できるという宣言は実運用�
 
 - [x] Scope, owner, real OSS code/test/license, rejected alternatives, types/state/sequence/pseudocode, race/restart/quotas/security, 17 MUST traceability/SC.
 - [ ] P0 cross team contract agreement, implementation tests and performance results, independent review. Remain Draft.
+
+
+### Round 2 adversarial review: parked goals and stale active owners
+
+- **[S10] PR report**, Hermes #134751（調査時Open/Draftかどうかは本仕様の実装証明としない）: Goalがwait barrier完了後、外部イベントが来ずidleのままなら継続を再開しないという問題と、persisted stateをpollして**1 wake per session**を再度検査する解決方針。https://github.com/NousResearch/hermes-agent/pull/134751
+- **[S11] Issue report**, Hermes #71175（旧v0.19.0環境）: budget exhaustionがclaimを解放する一方で実Workerがなお生存し、次のDispatcherが二人目を開始する競合。現在headの未修正バグを断定しない。https://github.com/NousResearch/hermes-agent/issues/71175
+- **[S12] Issue report**, Hermes #98299（旧API server）：slash commandのGoalManagerとstructured API run経路が異なる可能性。Goal ingressをUI/Telegram/APIで統一するための検査材料。https://github.com/NousResearch/hermes-agent/issues/98299
+
+**追加要件 GOL-021 MUST**: WAIT_DEPENDENCYが時間満了または許可済みdependency resolvedとなった場合、外部user turnを待たず**決定的な1回のwake admission**を行う。旧rev・owner失効・まだbusyのRunはその場で拒否する。**GOL-T21 → SC-05/07**: 無入力のGoalをpark→deadline通過→4worker tick→1Wake、LLM起動はpolicy gate合格後だけ。
+
+**追加要件 GOL-022 MUST**: Budget枯渇・iteration上限などによってRun claimが解除されても、旧workerが持つTool実行権限はRun leaseEpoch＋goalRevision再検証で確実に無効化し、後続の新Workerと同時に副作用を実行しない。**GOL-T22 → SC-07/09**: 旧workerをbarrierで保持しRun fence切替、後継runを起動して旧workerを解放→旧worker新Tool0・古いsettlement0、UNKNOWNはTool ledgerへ。テスト未実施。
