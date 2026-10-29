@@ -50,9 +50,9 @@ Runtimeが署名済みのidentity/ownerとcurrent leaseEpochをDBで検証し、
 ~~~ts
 interface RunClaim {
  tenantId:string;ownerUserId:string;taskId:string;runId:string;
- attemptNo:number;inputGoalRevision:number;
- leaseEpoch:number;ownerWorkerId:string;leaseExpiresAt:string;
- expectedTaskRecordVersion:number;
+ attemptNo:number;inputGoalRevision:string; // canonical int64 decimal string
+ leaseEpoch:string;ownerWorkerId:string;leaseExpiresAt:string; // canonical int64 decimal
+ expectedTaskRecordVersion:string; // canonical int64 decimal string
 }
 interface TaskRunManager {
  createTask(actor:TrustedPrincipal, command:CreateTaskCommand):Promise<TaskReceipt>;
@@ -62,7 +62,7 @@ interface TaskRunManager {
  finish(c:RunClaim,resultRef:string,expectedRecordVersion:number):Promise<void>;
 }
 ~~~
-公開IDはCHAT_01 UUIDv7 validator、Run.leaseEpochは安全なJS number (0..Number.MAX_SAFE_INTEGER) とDB bigintのlossless変換。recordVersionはCAS用（初期1提案）、goalRevisionは条件世代、Tool Attempt fenceは別トークンであり**相互代用不可**。すべて[PROVISIONAL: CHAT_01/10]。Owner/tenant/workspaceはサーバー照会で結合する。Task.activeRunIdはそのTaskのRun以外へ向けられない。
+公開IDはCHAT_01 UUIDv7 validator、Run.leaseEpoch/inputGoalRevision/recordVersionはCHAT_01の正本の正規int64十進文字列として公開・Port連携し、内部でBigInt比較、DB bigintへlossless変換する。JSON number/IEEE754丸めは禁止。recordVersionはCAS用（初期1提案）、goalRevisionは条件世代、Tool Attempt fenceは別トークンであり**相互代用不可**。すべて[PROVISIONAL: CHAT_01/10]。Owner/tenant/workspaceはサーバー照会で結合する。Task.activeRunIdはそのTaskのRun以外へ向けられない。
 
 ## 6. 状態遷移と正常Sequence
 ~~~text
@@ -72,7 +72,7 @@ CREATE_TASK(tx receipt, task goal revision1, outbox) -> QUEUED
 CRASH -> EXPIRED -> RECLAIM same runId, leaseEpoch+1 -> RESTORE
 TERMINAL -> OPTIONAL NEXT ATTEMPT new runId
 ~~~
-Cancel priority > security revoke > Steer > Pause > ordinary dispatch. Lease renewal is internal worker liveness; it never certifies that an external side-effect finished. Exact Task/Run state enum from CHAT_01.
+Security/authority revoke > Cancel > deadline/budget > Pause > approval > Resume > Steer > ordinary dispatch; identical to CHAT_01 01-03. After revoke, even a pending Cancel must not authorize new effect. Lease renewal is internal worker liveness; it never certifies that an external side-effect finished. Exact Task/Run state enum from CHAT_01.
 同じTaskでactive Run最大1。Runを新規作成できるのはTaskが非terminalかつ前Runがterminalのときだけ。Taskがterminalなら新Task（retryOfTaskId lineage）を作成。Worker crashは既存runIdを維持しleaseEpochを増やす。Cancel/Steerのcommit後は新しいTool dispatchを拒否、既発生の外部副作用はGateway ledgerから照会する。
 
 ## 7. 実装可能なアルゴリズム
