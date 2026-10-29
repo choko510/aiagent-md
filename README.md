@@ -52,3 +52,9 @@ mainへ直接pushしたり、他担当のMDを変更したり、無断マージ�
 
 ## References
 前バージョンの大きな統合マスターv0.2は会話で作成した歴史的な設計案。**このrepoへ未転記の内容を、AIが読んだことにしてはいけない。** 現時点では本repoのProject Brief・Architecture Rules・Individual Specsを正式な作業起点とし、必要な情報は一次資料で再検証する。
+
+## Optional audit chats (separate from the 12 authors)
+- [COORDINATOR — 12チャット横断の契約照合・PR統合監査](prompts/COORDINATOR.md)
+- [INDEPENDENT_REVIEWER — 1 PRずつの詳細監査](prompts/INDEPENDENT_REVIEWER.md)
+
+**推奨：12執筆チャット + 1統合コーディネータ**。74件のMDが全て揃っても、横断レビューで契約を整合させるまでは仕様確定としない。
