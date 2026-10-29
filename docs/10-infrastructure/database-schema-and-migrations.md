@@ -1122,6 +1122,15 @@ CREATE TABLE agent.external_event_subscriptions (
  UNIQUE(tenant_id,id,generation),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id)
 );
+-- Immutable generation records keep old receipts valid when current subscription generation increments.
+CREATE TABLE agent.external_subscription_generations (
+ tenant_id uuid NOT NULL, subscription_id uuid NOT NULL,
+ generation bigint NOT NULL CHECK(generation BETWEEN 1 AND 9223372036854775807),
+ created_at timestamptz NOT NULL DEFAULT now(), transition_reason text NOT NULL,
+ PRIMARY KEY(tenant_id,subscription_id,generation),
+ FOREIGN KEY(tenant_id,subscription_id)
+ REFERENCES agent.external_event_subscriptions(tenant_id,id)
+);
 CREATE TABLE agent.external_event_cursors (
  tenant_id uuid NOT NULL, subscription_id uuid NOT NULL,
  generation bigint NOT NULL,
@@ -1131,7 +1140,7 @@ CREATE TABLE agent.external_event_cursors (
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,subscription_id,generation),
  FOREIGN KEY(tenant_id,subscription_id,generation)
- REFERENCES agent.external_event_subscriptions(tenant_id,id,generation)
+ REFERENCES agent.external_subscription_generations(tenant_id,subscription_id,generation)
 );
 CREATE TABLE agent.external_event_receipts (
  tenant_id uuid NOT NULL, id uuid NOT NULL, subscription_id uuid NOT NULL,
@@ -1146,7 +1155,7 @@ CREATE TABLE agent.external_event_receipts (
  PRIMARY KEY(tenant_id,id),
  UNIQUE(tenant_id,subscription_id,provider_code,native_event_kind,native_event_id),
  FOREIGN KEY(tenant_id,subscription_id,subscription_generation)
- REFERENCES agent.external_event_subscriptions(tenant_id,id,generation),
+ REFERENCES agent.external_subscription_generations(tenant_id,subscription_id,generation),
  FOREIGN KEY(tenant_id,payload_artifact_id) REFERENCES agent.artifacts(tenant_id,id),
  FOREIGN KEY(tenant_id,task_id) REFERENCES agent.tasks(tenant_id,id),
  FOREIGN KEY(tenant_id,domain_event_id) REFERENCES agent.domain_events(tenant_id,id)
@@ -1242,3 +1251,6 @@ COMMIT;
 
 **Rollout:** `0002_expand` deployed before adapters; enable feature gates only after DB tests + migrations and full Tool/Browser/Parser egress tests; `0002_contract` later only after data backfill/reconciliation. Tests: `DB-R4-E01..05` subscription dedup/revoke/cursor; `DB-R4-ENT01..04` store identity/invalidated mapping; `DB-R4-D01..05` digest coverage and ACK loss; `DB-R4-P01..05` artifact hash/locator/quarantine/cancel. **NOT RUN against an implemented Agent Harness.**
 
+
+### 20.3 Round 4 — Generation update conflict discovered during FK review
+Initially the v2 proposal attached the cursor and receipt composite FK to `external_event_subscriptions(tenant_id,id,generation)`. **That is invalid for an actual subscription generation advance**: updating the parent current generation would be rejected if any old cursor/receipt existed. Revised physical model adds **immutable `external_subscription_generations`** and references it from receipts/cursors. New status generation requires inserting a row into the generation ledger and updating current subscription generation/status in one TX. Historical receipts remain resolvable. The new generation is not permission to dispatch unless the current subscription is ACTIVE, consent/credential valid, version and generation match. Old-generation late events remain audit-only. `DB-R4-E06` must execute 1→2 generation advance after committed old receipt and prove no FK failure, then reject stale generation dispatch in guarded application transaction. SQL FK alone does not implement dispatch authorization. This supersedes the preliminary v2 FK model. Tests not yet re-executed against the new version.
