@@ -148,7 +148,7 @@ CREATE TABLE agent.conversations (
   owner_user_id uuid NOT NULL,
   root_thread_id uuid,
   created_at timestamptz NOT NULL DEFAULT now(),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   PRIMARY KEY(tenant_id,id),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id)
 );
@@ -182,14 +182,14 @@ CREATE TABLE agent.tasks (
   retry_of_task_id uuid,
   created_from_watch_id uuid,
   trigger_key text,
-  goal_revision bigint NOT NULL DEFAULT 1 CHECK(goal_revision BETWEEN 1 AND 9007199254740991),
+  goal_revision bigint NOT NULL DEFAULT 1 CHECK(goal_revision BETWEEN 1 AND 9223372036854775807),
   active_run_id uuid,
   status_code text NOT NULL,
   canonical_schema_version integer NOT NULL CHECK (canonical_schema_version > 0),
   request_json jsonb NOT NULL CHECK (jsonb_typeof(request_json)='object'),
   constraint_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   deadline_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -210,7 +210,7 @@ CREATE INDEX tasks_by_status ON agent.tasks
 CREATE UNIQUE INDEX task_trigger_once ON agent.tasks(tenant_id,created_from_watch_id,trigger_key) WHERE created_from_watch_id IS NOT NULL AND trigger_key IS NOT NULL;
 CREATE TABLE agent.task_goal_revisions (
  tenant_id uuid NOT NULL, task_id uuid NOT NULL,
- revision bigint NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
+ revision bigint NOT NULL CHECK(revision BETWEEN 1 AND 9223372036854775807),
  goal_ref text NOT NULL, goal_sha256 char(64) NOT NULL CHECK(goal_sha256 ~ '^[0-9a-f]{64}$'),
  created_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,task_id,revision),
@@ -224,11 +224,11 @@ CREATE TABLE agent.runs (
   task_id uuid NOT NULL,
   attempt_no integer NOT NULL CHECK (attempt_no > 0),
   input_goal_revision bigint NOT NULL CHECK(input_goal_revision>0),
-  lease_epoch bigint NOT NULL DEFAULT 0 CHECK(lease_epoch BETWEEN 0 AND 9007199254740991),
+  lease_epoch bigint NOT NULL DEFAULT 0 CHECK(lease_epoch BETWEEN 0 AND 9223372036854775807),
   lease_owner_ref text, lease_expires_at timestamptz,
   status_code text NOT NULL,
   state_schema_version integer NOT NULL CHECK (state_schema_version > 0),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   started_at timestamptz,
   ended_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -263,11 +263,11 @@ CREATE TABLE agent.artifacts (
 CREATE TABLE agent.run_checkpoints (
  tenant_id uuid NOT NULL, id uuid NOT NULL,
  task_id uuid NOT NULL, run_id uuid NOT NULL,
- checkpoint_revision bigint NOT NULL CHECK(checkpoint_revision BETWEEN 1 AND 9007199254740991),
+ checkpoint_revision bigint NOT NULL CHECK(checkpoint_revision BETWEEN 1 AND 9223372036854775807),
  step_no bigint NOT NULL CHECK(step_no >= 0),
  phase_code text NOT NULL CHECK(length(phase_code) BETWEEN 1 AND 64),
- writer_lease_epoch bigint NOT NULL CHECK(writer_lease_epoch BETWEEN 0 AND 9007199254740991),
- applied_goal_revision bigint NOT NULL CHECK(applied_goal_revision BETWEEN 1 AND 9007199254740991),
+ writer_lease_epoch bigint NOT NULL CHECK(writer_lease_epoch BETWEEN 0 AND 9223372036854775807),
+ applied_goal_revision bigint NOT NULL CHECK(applied_goal_revision BETWEEN 1 AND 9223372036854775807),
  checkpoint_schema_version integer NOT NULL CHECK(checkpoint_schema_version > 0),
  checkpoint_json jsonb, artifact_id uuid,
  snapshot_sha256 char(64) NOT NULL CHECK(snapshot_sha256 ~ '^[0-9a-f]{64}$'),
@@ -353,7 +353,7 @@ CREATE TABLE agent.tool_intents (
   policy_decision_ref text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   PRIMARY KEY(tenant_id,id),
   UNIQUE(tenant_id,run_id,invocation_key),
   FOREIGN KEY(tenant_id,task_id,run_id)
@@ -369,7 +369,7 @@ CREATE TABLE agent.approval_records (
   request_sha256 char(64) NOT NULL,
   decision_code text NOT NULL,
   expires_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   requested_at timestamptz NOT NULL DEFAULT now(),
   decided_at timestamptz,
   PRIMARY KEY(tenant_id,id),
@@ -479,7 +479,7 @@ CREATE TABLE agent.watches (
   schedule_json jsonb NOT NULL CHECK (jsonb_typeof(schedule_json)='object'),
   timezone_id text NOT NULL,
   next_due_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -544,7 +544,7 @@ CREATE TABLE agent.outbox_messages (
   dispatched_at timestamptz,
   dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
-  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9007199254740991),
+  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9223372036854775807),
   relay_owner_ref text,
   relay_lease_until timestamptz,
   last_error_code text,
@@ -995,8 +995,8 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 |---|---|---|---|
 | CC10-01 P0 | PR #2は公開IDをserver-issued UUIDv7、旧PR #10はDB `gen_random_uuid()`（PG16/17でv4） | CHAT_01がIdentity正本。DB側UUID defaultを削除しtrusted serverがUUIDv7を生成/validate。DB `uuid`型だけではversion検証不可 | 全ID列、DB-T026: v7成功、v4 validator拒否 |
 | CC10-02 P0 | PR #2 Task.conversationId nullable、PR #8 TaskView required、旧DDL NOT NULL | CHAT_01論理契約を採用、CHAT_08へnullable REST projection提案 | `tasks.conversation_id NULL`、同ConversationのみoriginThread可能。DB-T027 |
-| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsafe integer上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
-| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはsafeInteger変換 | `runs`+Checkpoint repository、DB-T029 |
+| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsigned BIGINT上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
+| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはlossless bigint/string codec | `runs`+Checkpoint repository、DB-T029 |
 | CC10-05 P0 | PR #2 Task.goalRevision, activeRunId, Run.inputGoalRevisionが旧DDLにない | CHAT_01/02。 `task_goal_revisions` immutable、Task goal_revision/active_run_id、Run input_goal_revision、TaskのactiveRun複合FK。Steer新goalとoutbox同一Tx | `tasks/runs/checkpoints`、DB-T030 |
 | CC10-06 P0 | PR #2と#9はTenantIdとownerUserId、旧DDLはworkspaceのみ | CHAT_01 identity、CHAT_09 authorization。物理scopeは`tenant_id`へ統一し`tenant_memberships`とowner_user_id複合FK。**membershipだけでは別ownerにアクセス不可**。現行のworkspace独立概念は撤回 | 全tenant付き表、DB-T031 |
 | CC10-07 P0 | PR #8 API idempotencyはtenant+principal+endpoint+key、旧DBはtenant+operationKeyのみ | CHAT_08 HTTP契約、CHAT_03 tool。 `api_idempotency`複合PKにactor/operation/keyとresponse status、request hash。Task+Event+Outbox+receipt同Tx | DB-T032 |
@@ -1013,14 +1013,14 @@ SELECT active_run_id,record_version,goal_revision FROM agent.tasks
 UPDATE agent.runs SET lease_epoch=lease_epoch+1,
  lease_owner_ref=$3,lease_expires_at=$5,record_version=record_version+1
  WHERE tenant_id=$1 AND id=$2 AND lease_epoch=$4
-   AND $4 BETWEEN 0 AND 9007199254740990
+   AND $4 BETWEEN 0 AND 9223372036854775806
  RETURNING lease_epoch;
 -- 0行 => STALE_OWNER。checkpoint/ToolResult/new effectは絶対にcommitしない。
 ```
 
 上記resumeの識別子は`$2=runId`、先行Task SELECTの`$2`はtaskIdとして**別SQL statementでbindし直す**。実装では同一変数名を流用しない。Claim時に同tenantかつTask.activeRunId=Run.idを検証。fresh RunならTask.activeRunId NULLを検証→新Run attemptNo→Task.activeRunIdを同Tx更新。checkpoint/side effect ledgerに入る前もRun lease+Task activeRun+最新GoalRevisionを再検証する。DB fencingは外部HTTPの取り消しを保証しない。
 
-- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS safe integerのnumber（上限9007199254740991）に限定。pg driverのint8 stringを無検証Number化しない。
+- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS 正規10進文字列（最大9223372036854775807、内部BigInt）に限定。pg driverのint8 stringを無検証Number化しない。必ず正規10進文字列として検証しBigIntで演算。
 - `task_goal_revisions`をappend-onlyで保存。SteerでTask.goal_revisionを上げるTxは新revision行とEvent/Outboxを含める。既存Run.input_goal_revisionは変更しない。旧GoalRevision承認はCHAT_03 gatewayで不許可。
 - `tenants`は認可の単位でもUserそのものではない。アプリAPIでprincipalからtenant/userを復元し、全SELECTとSSE等でowner照合。将来RLSはCHAT_09指示で防御層として追加。
 - migration runnerは `:'migration_checksum_sha256'` を実ファイルのSHA256（psql変数）に置換。Driverのprepared SQLなら別statementへ切り出す。**SQL例はDB-T025実行前なので未検証**。循環hash回避のためrunner側でhashを記録する方式を最終採用する。
@@ -1111,7 +1111,7 @@ CREATE TABLE agent.tool_intents (
   policy_decision_ref text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   PRIMARY KEY(tenant_id,id),
   UNIQUE(tenant_id,run_id,invocation_key),
   FOREIGN KEY(tenant_id,task_id,run_id)
@@ -1127,7 +1127,7 @@ CREATE TABLE agent.approval_records (
   request_sha256 char(64) NOT NULL,
   decision_code text NOT NULL,
   expires_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   requested_at timestamptz NOT NULL DEFAULT now(),
   decided_at timestamptz,
   PRIMARY KEY(tenant_id,id),
@@ -1237,7 +1237,7 @@ CREATE TABLE agent.watches (
   schedule_json jsonb NOT NULL CHECK (jsonb_typeof(schedule_json)='object'),
   timezone_id text NOT NULL,
   next_due_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -1302,7 +1302,7 @@ CREATE TABLE agent.outbox_messages (
   dispatched_at timestamptz,
   dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
-  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9007199254740991),
+  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9223372036854775807),
   relay_owner_ref text,
   relay_lease_until timestamptz,
   last_error_code text,
@@ -1733,8 +1733,8 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 |---|---|---|---|
 | CC10-01 P0 | PR #2は公開IDをserver-issued UUIDv7、旧PR #10はDB `gen_random_uuid()`（PG16/17でv4） | CHAT_01がIdentity正本。DB側UUID defaultを削除しtrusted serverがUUIDv7を生成/validate。DB `uuid`型だけではversion検証不可 | 全ID列、DB-T026: v7成功、v4 validator拒否 |
 | CC10-02 P0 | PR #2 Task.conversationId nullable、PR #8 TaskView required、旧DDL NOT NULL | CHAT_01論理契約を採用、CHAT_08へnullable REST projection提案 | `tasks.conversation_id NULL`、同ConversationのみoriginThread可能。DB-T027 |
-| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsafe integer上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
-| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはsafeInteger変換 | `runs`+Checkpoint repository、DB-T029 |
+| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsigned BIGINT上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
+| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはlossless bigint/string codec | `runs`+Checkpoint repository、DB-T029 |
 | CC10-05 P0 | PR #2 Task.goalRevision, activeRunId, Run.inputGoalRevisionが旧DDLにない | CHAT_01/02。 `task_goal_revisions` immutable、Task goal_revision/active_run_id、Run input_goal_revision、TaskのactiveRun複合FK。Steer新goalとoutbox同一Tx | `tasks/runs/checkpoints`、DB-T030 |
 | CC10-06 P0 | PR #2と#9はTenantIdとownerUserId、旧DDLはworkspaceのみ | CHAT_01 identity、CHAT_09 authorization。物理scopeは`tenant_id`へ統一し`tenant_memberships`とowner_user_id複合FK。**membershipだけでは別ownerにアクセス不可**。現行のworkspace独立概念は撤回 | 全tenant付き表、DB-T031 |
 | CC10-07 P0 | PR #8 API idempotencyはtenant+principal+endpoint+key、旧DBはtenant+operationKeyのみ | CHAT_08 HTTP契約、CHAT_03 tool。 `api_idempotency`複合PKにactor/operation/keyとresponse status、request hash。Task+Event+Outbox+receipt同Tx | DB-T032 |
@@ -1751,14 +1751,14 @@ SELECT active_run_id,record_version,goal_revision FROM agent.tasks
 UPDATE agent.runs SET lease_epoch=lease_epoch+1,
  lease_owner_ref=$3,lease_expires_at=$5,record_version=record_version+1
  WHERE tenant_id=$1 AND id=$2 AND lease_epoch=$4
-   AND $4 BETWEEN 0 AND 9007199254740990
+   AND $4 BETWEEN 0 AND 9223372036854775806
  RETURNING lease_epoch;
 -- 0行 => STALE_OWNER。checkpoint/ToolResult/new effectは絶対にcommitしない。
 ```
 
 上記resumeの識別子は`$2=runId`、先行Task SELECTの`$2`はtaskIdとして**別SQL statementでbindし直す**。実装では同一変数名を流用しない。Claim時に同tenantかつTask.activeRunId=Run.idを検証。fresh RunならTask.activeRunId NULLを検証→新Run attemptNo→Task.activeRunIdを同Tx更新。checkpoint/side effect ledgerに入る前もRun lease+Task activeRun+最新GoalRevisionを再検証する。DB fencingは外部HTTPの取り消しを保証しない。
 
-- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS safe integerのnumber（上限9007199254740991）に限定。pg driverのint8 stringを無検証Number化しない。
+- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS 正規10進文字列（最大9223372036854775807、内部BigInt）に限定。pg driverのint8 stringを無検証Number化しない。必ず正規10進文字列として検証しBigIntで演算。
 - `task_goal_revisions`をappend-onlyで保存。SteerでTask.goal_revisionを上げるTxは新revision行とEvent/Outboxを含める。既存Run.input_goal_revisionは変更しない。旧GoalRevision承認はCHAT_03 gatewayで不許可。
 - `tenants`は認可の単位でもUserそのものではない。アプリAPIでprincipalからtenant/userを復元し、全SELECTとSSE等でowner照合。将来RLSはCHAT_09指示で防御層として追加。
 - migration runnerは `:'migration_checksum_sha256'` を実ファイルのSHA256（psql変数）に置換。Driverのprepared SQLなら別statementへ切り出す。**SQL例はDB-T025実行前なので未検証**。循環hash回避のためrunner側でhashを記録する方式を最終採用する。
@@ -1848,7 +1848,7 @@ CREATE TABLE agent.tool_intents (
   policy_decision_ref text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   PRIMARY KEY(tenant_id,id),
   UNIQUE(tenant_id,run_id,invocation_key),
   FOREIGN KEY(tenant_id,task_id,run_id)
@@ -1864,7 +1864,7 @@ CREATE TABLE agent.approval_records (
   request_sha256 char(64) NOT NULL,
   decision_code text NOT NULL,
   expires_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   requested_at timestamptz NOT NULL DEFAULT now(),
   decided_at timestamptz,
   PRIMARY KEY(tenant_id,id),
@@ -1974,7 +1974,7 @@ CREATE TABLE agent.watches (
   schedule_json jsonb NOT NULL CHECK (jsonb_typeof(schedule_json)='object'),
   timezone_id text NOT NULL,
   next_due_at timestamptz,
-  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9007199254740991),
+  record_version bigint NOT NULL DEFAULT 1 CHECK (record_version BETWEEN 1 AND 9223372036854775807),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(tenant_id,id),
@@ -2039,7 +2039,7 @@ CREATE TABLE agent.outbox_messages (
   dispatched_at timestamptz,
   dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
-  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9007199254740991),
+  relay_lease_epoch bigint NOT NULL DEFAULT 0 CHECK (relay_lease_epoch BETWEEN 0 AND 9223372036854775807),
   relay_owner_ref text,
   relay_lease_until timestamptz,
   last_error_code text,
@@ -2470,8 +2470,8 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 |---|---|---|---|
 | CC10-01 P0 | PR #2は公開IDをserver-issued UUIDv7、旧PR #10はDB `gen_random_uuid()`（PG16/17でv4） | CHAT_01がIdentity正本。DB側UUID defaultを削除しtrusted serverがUUIDv7を生成/validate。DB `uuid`型だけではversion検証不可 | 全ID列、DB-T026: v7成功、v4 validator拒否 |
 | CC10-02 P0 | PR #2 Task.conversationId nullable、PR #8 TaskView required、旧DDL NOT NULL | CHAT_01論理契約を採用、CHAT_08へnullable REST projection提案 | `tasks.conversation_id NULL`、同ConversationのみoriginThread可能。DB-T027 |
-| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsafe integer上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
-| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはsafeInteger変換 | `runs`+Checkpoint repository、DB-T029 |
+| CC10-03 P0 | PR #2 recordVersionは初期1、旧DDL revision=0 | CHAT_01 CAS正本。物理は`record_version bigint default 1`とsigned BIGINT上限。Task goalRevision、Watch definitionRevision、Run leaseEpochと分離 | `tasks/runs/conversations/tool_intents/watches`、DB-T028 |
+| CC10-04 P0 | PR #2 Run.leaseEpoch number nonnegative、PR #1 runtime uses generation、旧DDL Run lease欠落 | CHAT_01/02正本。 `runs.lease_epoch bigint default 0`、leaseOwner/Expiry保存。同Run resume時 epoch++、current Task.activeRunの一致をCAS。DB bigint→JS numberはlossless bigint/string codec | `runs`+Checkpoint repository、DB-T029 |
 | CC10-05 P0 | PR #2 Task.goalRevision, activeRunId, Run.inputGoalRevisionが旧DDLにない | CHAT_01/02。 `task_goal_revisions` immutable、Task goal_revision/active_run_id、Run input_goal_revision、TaskのactiveRun複合FK。Steer新goalとoutbox同一Tx | `tasks/runs/checkpoints`、DB-T030 |
 | CC10-06 P0 | PR #2と#9はTenantIdとownerUserId、旧DDLはworkspaceのみ | CHAT_01 identity、CHAT_09 authorization。物理scopeは`tenant_id`へ統一し`tenant_memberships`とowner_user_id複合FK。**membershipだけでは別ownerにアクセス不可**。現行のworkspace独立概念は撤回 | 全tenant付き表、DB-T031 |
 | CC10-07 P0 | PR #8 API idempotencyはtenant+principal+endpoint+key、旧DBはtenant+operationKeyのみ | CHAT_08 HTTP契約、CHAT_03 tool。 `api_idempotency`複合PKにactor/operation/keyとresponse status、request hash。Task+Event+Outbox+receipt同Tx | DB-T032 |
@@ -2488,14 +2488,14 @@ SELECT active_run_id,record_version,goal_revision FROM agent.tasks
 UPDATE agent.runs SET lease_epoch=lease_epoch+1,
  lease_owner_ref=$3,lease_expires_at=$5,record_version=record_version+1
  WHERE tenant_id=$1 AND id=$2 AND lease_epoch=$4
-   AND $4 BETWEEN 0 AND 9007199254740990
+   AND $4 BETWEEN 0 AND 9223372036854775806
  RETURNING lease_epoch;
 -- 0行 => STALE_OWNER。checkpoint/ToolResult/new effectは絶対にcommitしない。
 ```
 
 上記resumeの識別子は`$2=runId`、先行Task SELECTの`$2`はtaskIdとして**別SQL statementでbindし直す**。実装では同一変数名を流用しない。Claim時に同tenantかつTask.activeRunId=Run.idを検証。fresh RunならTask.activeRunId NULLを検証→新Run attemptNo→Task.activeRunIdを同Tx更新。checkpoint/side effect ledgerに入る前もRun lease+Task activeRun+最新GoalRevisionを再検証する。DB fencingは外部HTTPの取り消しを保証しない。
 
-- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS safe integerのnumber（上限9007199254740991）に限定。pg driverのint8 stringを無検証Number化しない。
+- AppのID validatorはUUIDv7を強制しDBの型/uniqueは最後の防御。 `record_version` と `lease_epoch` はPostgreSQL bigint、wireではJS 正規10進文字列（最大9223372036854775807、内部BigInt）に限定。pg driverのint8 stringを無検証Number化しない。必ず正規10進文字列として検証しBigIntで演算。
 - `task_goal_revisions`をappend-onlyで保存。SteerでTask.goal_revisionを上げるTxは新revision行とEvent/Outboxを含める。既存Run.input_goal_revisionは変更しない。旧GoalRevision承認はCHAT_03 gatewayで不許可。
 - `tenants`は認可の単位でもUserそのものではない。アプリAPIでprincipalからtenant/userを復元し、全SELECTとSSE等でowner照合。将来RLSはCHAT_09指示で防御層として追加。
 - migration runnerは `:'migration_checksum_sha256'` を実ファイルのSHA256（psql変数）に置換。Driverのprepared SQLなら別statementへ切り出す。**SQL例はDB-T025実行前なので未検証**。循環hash回避のためrunner側でhashを記録する方式を最終採用する。
@@ -2544,3 +2544,9 @@ This is the **CHAT_10-owned physical integration** with the new module specifica
 | DB-R3-T06 | Retention cutoff/署名cursor期限切れ: 410再Snapshot、重複適用0 |
 
 Cross-team proposals: CHAT_01が物理Eventの`schema_version`とactor/audience codecを確認、CHAT_02がRun checkpoint pointer CAS順序を確認、CHAT_08がsnapshot barrier、CHAT_09がTask外Event owner-scope、CHAT_11が以上のContract/Faultテストを追加。これらの承認まで**Lockedではない**。
+
+### 20.1 Round 3 int64 contract finalization (pending owner review)
+
+CHAT_01 `core-domain-models.md`のCanonical整数は、`recordVersion`, `goalRevision`, `leaseEpoch`ほかを**signed PostgreSQL BIGINT 0..9223372036854775807の正規十進文字列**として表現する。上記DDLの旧`Number.MAX_SAFE_INTEGER`上限をBIGINT full rangeへ訂正。内部は`bigint`、wireは`string`、PostgreSQLは`bigint`で、JavaScript`Number`へ変換しない。`0`許容はleaseEpoch等の明示された初期値に限定、recordVersion/goalRevision/checkpointRevision/aggregateSequence/deliveryOffsetは正の値。SQL incrementは必ずMAX未満を前置条件とする（またはoverflowをTX全体rollbackして明示のExhaustedエラー）。`uint64`やfloatを用いない。
+
+`DB-R3-T07`（テスト設計のみ）：version/epochを2^53-1、2^53、BIGINT_MAX-1でwrite/read/ETag/CASし全く同じ文字列に復帰、JSON numberはreject、BIGINT_MAX+1はTX rollback、旧workerのCASは失敗。正式実装のUnit/DB Integration未実行。
