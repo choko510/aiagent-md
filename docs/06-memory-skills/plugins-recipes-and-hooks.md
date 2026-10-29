@@ -111,7 +111,7 @@ type PluginBinding = {
   pluginId:string;releaseId:string;scopeRef:string;
   state:"quarantined"|"awaiting_review"|"installed_disabled"|"enabled"|
         "suspended"|"revoked";
-  recordVersion:number; // starts 1, CHAT_01 physical mapping provisional
+  recordVersion:string; // starts 1, CHAT_01 physical mapping provisional
   approvalDigest?:string;policyVersion:string;
 };
 type HookResult = {
@@ -339,3 +339,7 @@ PH-6 Review UI rollout, rollback, restore, benchmark and operator incident contr
 - [S3] [Hermes approval](https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/tools/write_approval.py) — **Code verified**, MIT。
 - [S4] [Project Brief](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/project-brief.md) / [SC-01..16](https://github.com/choko510/aiagent-md/blob/b45d4e989998663a00ef09673e69ae1f4191f00d/docs/00-foundation/acceptance-scenarios.md) — **Docs verified**。
 - [S5] Harness Hook Contract、schema、quota、DB/API、execution orderは **Hypothesis/Proposed design**, 実測・OSSテスト実行・独立安全審査は**未実施**。OpenClawのHookやHost Installerの存在を本Harnessでの採用・安全保証と混同しない。
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
