@@ -109,23 +109,23 @@ type MissedPolicy =
 interface ScheduleIntentV1 {
   version:1; tenantId:string; principalId:string; scheduleId:string;
   targetKind:'watch'|'goal'|'task'; targetRef:string;
-  definitionRevision:number; recordVersion:number; enabled:boolean; spec:TimeSpec; missed:MissedPolicy;
+  definitionRevision:string; recordVersion:string; enabled:boolean; spec:TimeSpec; missed:MissedPolicy;
   validFromUtc:string; validUntilUtc?:string;
   nextDueUtc:string|null; maxConcurrency:number;
   budgetPolicyRef:string; ratePolicyRef:string;
 }
 interface OccurrenceRefV1 {
   version:1; occurrenceId:string; tenantId:string; scheduleId:string;
-  definitionRevision:number; scheduledForUtc:string;
+  definitionRevision:string; scheduledForUtc:string;
   reason:'on_time'|'catchup_coalesced'|'manual';
   dispatchIntentId:string; admissionRef?:string;
   resultRef?:string; // Task/Run/Observation contract owner is elsewhere
 }
 interface SchedulerPort {
   create(intent:ScheduleIntentV1, requestId:string):Promise<ScheduleIntentV1>;
-  update(id:string, expectedRecordVersion:number, patch:unknown):Promise<ScheduleIntentV1>;
-  pause(id:string, expectedRecordVersion:number):Promise<ScheduleIntentV1>;
-  resume(id:string, expectedRecordVersion:number):Promise<ScheduleIntentV1>;
+  update(id:string, expectedRecordVersion:string, patch:unknown):Promise<ScheduleIntentV1>;
+  pause(id:string, expectedRecordVersion:string):Promise<ScheduleIntentV1>;
+  resume(id:string, expectedRecordVersion:string):Promise<ScheduleIntentV1>;
   preview(spec:TimeSpec, fromUtc:string, count:number):Promise<string[]>;
   scanDue(max:number):Promise<number>;
   dispatchPending(max:number):Promise<number>;
@@ -471,3 +471,7 @@ Evidence grade:
 | SCH-029 MUST | SCH-T29 | 11,12,16 | 外部event/Timer namespaceを分離し重複発火0 |
 
 **Cross-team proposalはPR本文にも提出**。このブランチから他担当ファイルへ書き込まない。
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
