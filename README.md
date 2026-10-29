@@ -65,3 +65,11 @@ mainへ直接pushしたり、他担当のMDを変更したり、無断マージ�
 
 ## Approved expansion: Autonomous Discovery & Events (2026-10-30)
 The user additionally selected 11 functions, including "start an agent when a specified X account posts". Read **[feature-expansion-2026-10.md](docs/00-foundation/feature-expansion-2026-10.md)** before new functionality planning. Four newly assigned chats are CHAT_12–15 (5+3+2+1 specs). All specs are investigation/draft until reviewed; no agent code exists here. The existing authors' open PRs are not overwritten.
+
+## Round 2 — 全仕様完成に向けた継続プロンプト (2026-10-30)
+- [各CHATの継続執筆指示 — 初回1件で終了しない](prompts/ROUND2_AUTHOR_CONTINUE.md)
+- [重要な共通契約不整合の解消](prompts/ROUND2_CONTRACT_RECONCILIATION.md)
+- [横断統合COORDINATOR指示](prompts/ROUND2_COORDINATOR.md)
+- [CHAT_00 Foundation専用開始指示](prompts/ROUND2_CHAT_00_FOUNDATION.md)
+
+**必ずmainだけでなく各担当ブランチ/Draft PRを確認**。11初回PRの提出は全85仕様完成ではない。各カテゴリの全MDを1〜2件ずつDraft PRで継続し、他Ownerの契約は提案で協調する。マージ・Locked化はreview gatesを通過してから。
