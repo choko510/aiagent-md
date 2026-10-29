@@ -122,8 +122,8 @@ type RestorePoint = Readonly<{
   lastRestoreDrillAt?: string;
 }>;
 type RecoveryDecision = Readonly<{
-  runId: string; taskId: string; expectedLeaseEpoch: number;
-  restoredGoalRevision: number;
+  runId: string; taskId: string; expectedLeaseEpoch:string;
+  restoredGoalRevision:string;
   effectReconciliation: "SAFE" | "UNKNOWN" | "NEEDS_APPROVAL";
   action: "RESUME" | "BLOCK" | "MANUAL_REVIEW";
   reviewEvidenceRefs: string[];
@@ -396,3 +396,7 @@ All tests **designed but 0 executed**. Upstream code/tests were read, no release
 [S15] https://github.com/pgbackrest/pgbackrest/pull/2544 — **PR verified** merged: adds `verify --set` targeting selected backup and negative tests in `test/src/module/command/verifyTest.c`. Include selected-backup verification in backup adapter conformance suite (REC-T03).
 [S16] https://github.com/wal-g/wal-g/issues/1578 — **Issue report**, opened 2023-10, still open: PostgreSQL 9.6 / WAL-G 2.0.1 user reported a missing WAL segment following S3 timeout. Not a proof of a modern release defect; motivates WAL gap alert and REC-T02/T17.
 [S17] https://github.com/wal-g/wal-g/pull/2722 — **PR verified** open/unmerged at 2026-10-30: proposes waiting until backup-required WAL is archived, touches `cmd/pg/backup_push.go`, `internal/databases/postgres/backup_push_handler.go` and test. **Do not assume this unmerged behavior is available**; enforce coverage in our adapter and test with release-locked source.
+
+
+### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
+Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
