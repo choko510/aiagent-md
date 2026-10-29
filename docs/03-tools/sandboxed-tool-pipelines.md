@@ -95,12 +95,12 @@ type PipelineNode =
       outputTypeId: string };
 interface PipelineDefinition {
   schemaVersion: "1.0"; pipelineRef: string; taskRef: EntityId; runRef: EntityId;
-  expectedGoalRevision: number; nodes: readonly PipelineNode[];
+  expectedGoalRevision:string; nodes: readonly PipelineNode[];
   requestedOutputNodeIds: readonly string[];
 }
 interface CompiledPlan {
   planHash: string; immutableNodeOrder: readonly string[];
-  runRef: EntityId; goalRevision: number; policyEpoch: string;
+  runRef: EntityId; goalRevision:string; policyEpoch: string;
   toolRevisionBindings: readonly {nodeId:string; toolId:string; revision:string}[];
   maxQuoteUsd: string; expiresAt: string;
 }
@@ -108,7 +108,7 @@ interface NodeReceipt {
   planHash:string; nodeId:string; intentRef?:string; toolRevision?:string;
   status:"PENDING"|"RUNNING"|"DONE"|"FAILED"|"PARTIAL"|"UNCERTAIN";
   argsHash:string; outputArtifactRef?:string; sourceRefs:readonly string[];
-  observedAt?:string; recordVersion:number;
+  observedAt?:string; recordVersion:string;
 }
 interface PipelinePort {
   compile(untrusted:unknown,runRef:EntityId):Promise<CompiledPlan>;
@@ -283,7 +283,7 @@ Logical stores: `pipeline_plan` (version, immutable hash, run/task owner, goalRe
 
 T1 validated immutable Plan+budget reservation/outbox commit before any Tool. T2 each Tool node invokes Gateway (which persists intent and effect ledger before external request), pure transforms commit local data only. T3 node CAS commit with `leaseEpoch`, goalRevision, expectedRecordVersion; never overwrite newer checkpoint. T4 fan-in consumes only confirmed node receipts with same planHash, propagates Uncertain/Partial and preserves source timestamp. Data artifacts persisted separately with orphan cleanup; missing Artifact does not become a confirmed value.
 
-**Known cross-team P0 inconsistencies (not silently repaired):** CHAT_01 public Entity UUIDv7 vs CHAT_10 default `gen_random_uuid()`; logical `recordVersion=1` vs SQL `revision DEFAULT 0`; nullable `Task.conversationId` vs SQL NOT NULL/CHAT_08 required; CHAT_01 `leaseEpoch:number` vs CHAT_02 bigint and incomplete DB fencing; `tenantId`/`ownerUserId` vs SQL `workspace_id`. Requires owner-approved migration/codec and integration tests before Locked. No SQL tables redefined here.
+**Known cross-team P0 inconsistencies (not silently repaired):** CHAT_01 public Entity UUIDv7 vs CHAT_10 default `gen_random_uuid()`; logical `recordVersion=1` vs SQL `revision DEFAULT 0`; nullable `Task.conversationId` vs SQL NOT NULL/CHAT_08 required; CHAT_01 `leaseEpoch:string` vs CHAT_02 bigint and incomplete DB fencing; `tenantId`/`ownerUserId` vs SQL `workspace_id`. Requires owner-approved migration/codec and integration tests before Locked. No SQL tables redefined here.
 
 ## 12. UI/API proposals [PROVISIONAL: CHAT_08]
 Read-only per Task: pipeline list, node status, provenance/source/time, partial/unavailable reason, estimated vs actual usage, conditional resume/cancel commands. User interface must distinguish Plan accepted from external calls started and Evidence confirmed. Telegram only controls approved Task state and cannot submit arbitrary executable code. Expose Artifacts via authenticated bounded read, not raw signed private URLs in model/chat. The actual REST routes/types belong CHAT_08.
@@ -375,3 +375,7 @@ Cannot be Locked until P0 contracts and cross-PR acceptance checked. All ownersh
 - [S4] [LangGraph `PregelRunner.tick`](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_runner.py#L132-L250), MIT, [Issue #9397](https://github.com/langchain-ai/langgraph/issues/9397) = **Issue report only**, not reproduced.
 - [S5] [Project Brief](../00-foundation/project-brief.md), [Architecture Rules](../00-foundation/architecture-rules.md), [SC-01..16](../00-foundation/acceptance-scenarios.md), [Round 2 prompt](../../prompts/ROUND2_AUTHOR_CONTINUE.md). These are requirements, not OSS runtime evidence.
 - [S6] DSL shape, numerical caps, concurrency, cost and performance are **design hypotheses** only, require implementation and test. Project runtime tests actually run: **0**.
+
+
+### Round 4 cross-owner int64 reconciliation (2026-10-30)
+Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
