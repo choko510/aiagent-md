@@ -11,7 +11,7 @@ Amazon商品情報の取得を **(A) Keepa公式有料APIの履歴と検索、(B
 - Scope: marketplace domain選択、ASIN/GTIN等の入力validation、商品候補検索、Keepa価格系列/集計/買い物条件への紐付け、Creator APIカタログ検索、Provider cost token budgeting、provenance保持、監視向け価格観測の作成。
 - Non-scope: 類似商品を同一SKUと確定（CHAT_12 Entity Resolver）、期待利益と査定リスクの最終判断（CHAT_12 Decision Risk）、HTTP/Browser実行権限（CHAT_04/09）、Watchと通知（CHAT_07）、DB DDL（CHAT_10）、購入（承認なしなら常に不可）。
 - In: Gateway-approved read-only call with opaque tenant + RunFence + cost reservation。Out: Provider-specific observation draft → CHAT_01 Evidence。実データ/価格の正本は外部サイトであり、DBには証跡と時点を保存。
-- SC-01, SC-02, SC-05, SC-07〜10, SC-12/14。
+- SC-01, SC-02, SC-05, SC-07〜10, SC-12, SC-14。
 
 ## 2. 実ソース調査・代替比較（2026-10-30）
 | Source | 確認箇所・事実 | 採否 |
@@ -201,7 +201,7 @@ source capability, region, query kind, token reserved/consumed/unknown, item cou
 
 ## 15. Open issues
 - **P0 / CHAT_09/03** API credential and URL query secret masking, rights verification, entitlement plan check; no active provider until implemented.
-- **P0 / CHAT_01/10** External evidence/native ID vs UUIDv7 internal, owner mapping, price history storage and atomic receipt; ``SC-01/07`。
+- **P0 / CHAT_01/10** External evidence/native ID vs UUIDv7 internal, owner mapping, price history storage and atomic receipt; ``SC-01, SC-07`。
 - **P1 / CHAT_12** JAN/ASIN identity, costs and coupon condition verification; not this Provider's domain.
 - **P1 / CHAT_07** watch stale vs failed vs zero and scheduling tokens.
 - **P1 / CHAT_05** Keepa specific plan price/token max option behavior, Creators program acceptance, locale support must be revalidated with real credentials. Application not connected; no price benchmark.
