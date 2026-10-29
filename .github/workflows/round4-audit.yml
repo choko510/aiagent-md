@@ -40,13 +40,13 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Retrieve and analyze all 58 Draft PRs / 80 MD files at their current HEAD
+      - name: Retrieve and analyze all 61 Draft PRs / 85 MD files at their current HEAD
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 audit/round4/full_spec_audit.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: round4-58prs-80specs-matrix
+          name: round4-61prs-85specs-matrix
           path: audit/round4/output/
           if-no-files-found: warn

@@ -17,8 +17,8 @@ def get(url):
    if attempt==2:raise
    time.sleep(2**attempt)
 prs=get(API+"/pulls?state=all&per_page=100")
-prs=[x for x in prs if re.fullmatch(r"spec/chat-(?:0[1-9]|1[0-5])-.+",x["head"]["ref"])]
-assert len(prs)==58,f"expected 58 Draft PRs got {len(prs)}"
+prs=[x for x in prs if re.fullmatch(r"spec/chat-(?:0[0-9]|1[0-5])-.+",x["head"]["ref"])]
+assert len(prs)==61,f"expected 61 Draft PRs got {len(prs)}"
 records=[];done=[]
 for p in sorted(prs,key=lambda z:z["number"]):
  n=p["number"]; owner=re.search(r"chat-(\d+)",p["head"]["ref"]).group(1)
@@ -47,18 +47,18 @@ for p in sorted(prs,key=lambda z:z["number"]):
   records.append(rec)
  done.append({"pr":n,"owner":owner,"files":len(docs),"draft":p["draft"],"head":p["head"]["sha"]})
 counts=collections.Counter(z["owner"] for z in records)
-expected={"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6,"10":5,"11":4,"12":5,"13":3,"14":2,"15":1}
+expected={"00":5,"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6,"10":5,"11":4,"12":5,"13":3,"14":2,"15":1}
 assert dict(counts)==expected,(counts,expected)
-assert len(records)==80,len(records)
-assert len({r["path"] for r in records})==80,"overlap file paths"
-assert all(x["draft"] for x in done),"all 49 must remain Draft at audit time"
+assert len(records)==85,len(records)
+assert len({r["path"] for r in records})==85,"overlap file paths"
+assert all(x["draft"] for x in done),"all 61 must remain Draft at audit time"
 out=ROOT/"audit/round4/output";out.mkdir(parents=True,exist_ok=True)
 jsonfile=out/"full_spec_matrix.json"
 jsonfile.write_text(json.dumps({"generated_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),
  "pr_count":len(prs),"spec_count":len(records),"owner_counts":dict(counts),"pr_status":done,"specs":records},ensure_ascii=False,indent=2))
 md=["# Round 4 / all-PR / all-MD latest-HEAD scanner","",
  "Scan is structural/static, not a substitute for independent semantics/OSS verification.",
- f"**PRs: {len(prs)}, specs: {len(records)}, unique paths: {len(set(r['path'] for r in records))}; all 85 planned specs minus CHAT_00's 5 Foundation docs.**","",
+ f"**PRs: {len(prs)}, specs: {len(records)}, unique paths: {len(set(r['path'] for r in records))}; all 85 planned specs including CHAT_00 Foundation docs.**","",
  "| PR | Owner | MD | Lines | Pinned source refs | Unsafe int64 fields |",
  "|---:|---|---|---:|---:|---:|"]
 for r in records:md.append(f"| #{r['pr']} | CHAT_{r['owner']} | `{r['path']}` | {r['lines']} | {r['pinned_source_urls']} | {len(r['unsafe_version_number'])} |")
@@ -72,10 +72,10 @@ for r in records:
  if r["historical_conflict_text"]:
   md.append(f"### PR #{r['pr']} — {r['path']}")
   md.extend([f"- L{x['line']}: `{x['text']}`" for x in r["historical_conflict_text"]])
-md+=["","## Review limitations","- Reader fetched all 80 raw Markdown texts from each live PR HEAD on GitHub API.","- Warnings are pattern matches; historical references can be benign.","- Source URLs were counted, not all independently verified against upstream code.","- PostgreSQL/Docker/Browser checks are in other jobs and are NOT actual Agent Harness runtime checks.","- An actual implementation repository/agent deployment does not yet exist in this specs repository."]
+md+=["","## Review limitations","- Reader fetched all 85 raw Markdown texts from each live PR HEAD on GitHub API.","- Warnings are pattern matches; historical references can be benign.","- Source URLs were counted, not all independently verified against upstream code.","- PostgreSQL/Docker/Browser checks are in other jobs and are NOT actual Agent Harness runtime checks.","- An actual implementation repository/agent deployment does not yet exist in this specs repository."]
 (out/"full_spec_matrix.md").write_text("\n".join(md)+"\n")
 print("AUDIT_MATRIX_STATUS",json.dumps({"prs":len(prs),"specs":len(records),"owners":dict(counts),
  "unsafeDocs":len(bad),"sourcePinned":sum(r["pinned_source_urls"] for r in records),
  "missingFailure":sum(not r["mentions_failure"] for r in records),
  "missingTests":sum(not r["mentions_tests"] for r in records),
- "minLines":min(r["lines"] for r in records),"maxLines":max(r["lines"] for r in records),"historicalMentions":sum(bool(r['historical_conflict_text']) for r in records),"provisionalP0Mentions":sum(r['integration_proposals'] for r in records)},ensure_ascii=False))
+ "minLines":min(r["lines"] for r in records),"maxLines":max(r["lines"] for r in records),"foundationDocs":sum(r['owner']=='00' for r in records),"historicalMentions":sum(bool(r['historical_conflict_text']) for r in records),"provisionalP0Mentions":sum(r['integration_proposals'] for r in records)},ensure_ascii=False))
