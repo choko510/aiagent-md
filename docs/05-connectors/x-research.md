@@ -149,13 +149,13 @@ async function readRecentX(grant, query, signal) {
 API outgoing URL (no internal IP), TLS, OAuth bearer scoping, PII/user queries, data redistribution/retention must comply with X developer terms and CHAT_09. Cursor/token stored per tenant, credential, query hash, start/end, subscription revision with CAS/fencing; do not return raw bearer/Cookie. Proposed limits: max500 posts/task, max10 pages, page <=100, max60sec for one read Task call, max2 concurrent X reads/tenant, max1 stream per enabled project unless verified enterprise contract; **not measured defaults, server policy may further restrict**.
 
 ## 8. Storage / interfaces / proposal
-- [PROVISIONAL CHAT_01] Post Evidence needs native post/user IDs, quote/repost ancestry, source/permalink, authoredAt/retrievedAt, unverified claim, coverage.
-- [PROVISIONAL CHAT_13] stable account lookup, event source as typed X capability, replay dedup/cursors, subscriptions and dispatch, signing/webhook validation, event budget and disable generation. CHAT_05 does NOT redefine ExternalEvent.
-- [PROVISIONAL CHAT_07] source events may trigger Watch/Task; notification via existing outbox only, not Provider.
-- [PROVISIONAL CHAT_12] trend fusion treats correlated quote/reposts as non-independent, source reliability and sampled coverage.
-- [PROVISIONAL CHAT_10] tenant-scoped cursor/snapshot/attempt receipt/store, atomic event checkpoint with leaseEpoch and goalRevision, mapping to workspace ID.
-- [PROVISIONAL CHAT_03/09] Tool intent/secret scopes, signed incoming events by CHAT_13, no auto-post; billing per returned resources, not request count only.
-- [PROVISIONAL CHAT_08] show query UTC window, “coverage incomplete”, rate status, createdAt/source URL, official corroboration and estimated API cost.
+- [PROVISIONAL: CHAT_01] Post Evidence needs native post/user IDs, quote/repost ancestry, source/permalink, authoredAt/retrievedAt, unverified claim, coverage.
+- [PROVISIONAL: CHAT_13] stable account lookup, event source as typed X capability, replay dedup/cursors, subscriptions and dispatch, signing/webhook validation, event budget and disable generation. CHAT_05 does NOT redefine ExternalEvent.
+- [PROVISIONAL: CHAT_07] source events may trigger Watch/Task; notification via existing outbox only, not Provider.
+- [PROVISIONAL: CHAT_12] trend fusion treats correlated quote/reposts as non-independent, source reliability and sampled coverage.
+- [PROVISIONAL: CHAT_10] tenant-scoped cursor/snapshot/attempt receipt/store, atomic event checkpoint with leaseEpoch and goalRevision, mapping to workspace ID.
+- [PROVISIONAL: CHAT_03/09] Tool intent/secret scopes, signed incoming events by CHAT_13, no auto-post; billing per returned resources, not request count only.
+- [PROVISIONAL: CHAT_08] show query UTC window, “coverage incomplete”, rate status, createdAt/source URL, official corroboration and estimated API cost.
 - No cross-owner file edited. Need historical archive and costs validated at runtime before unlock.
 
 ## 9. Implementation PR sequence
@@ -182,19 +182,19 @@ API outgoing URL (no internal IP), TLS, OAuth bearer scoping, PII/user queries, 
 ## 11. Full MUST → TEST → SC
 | REQ | TEST | SC |
 |---|---|---|
-| XRS-001 | T01 | SC-03/08 |
-| XRS-002 | T02 | SC-03 |
-| XRS-003 | T03 | SC-03/11 |
-| XRS-004 | T04 | SC-03/14 |
-| XRS-005 | T05 | SC-03 |
-| XRS-006 | T06 | SC-09 |
-| XRS-007 | T07 | SC-11 |
-| XRS-008 | T08 | SC-11 |
-| XRS-009 | T09 | SC-07/11 |
-| XRS-010 | T10 | SC-08 |
-| XRS-011 | T11 | SC-07 |
-| XRS-012 | T12 | SC-03/14 |
-| XRS-013 | T13 | SC-03 |
+| XRS-001 | XRS-T01 | SC-03, SC-08 |
+| XRS-002 | XRS-T02 | SC-03 |
+| XRS-003 | XRS-T03 | SC-03, SC-11 |
+| XRS-004 | XRS-T04 | SC-03, SC-14 |
+| XRS-005 | XRS-T05 | SC-03 |
+| XRS-006 | XRS-T06 | SC-09 |
+| XRS-007 | XRS-T07 | SC-11 |
+| XRS-008 | XRS-T08 | SC-11 |
+| XRS-009 | XRS-T09 | SC-07, SC-11 |
+| XRS-010 | XRS-T10 | SC-08 |
+| XRS-011 | XRS-T11 | SC-07 |
+| XRS-012 | XRS-T12 | SC-03, SC-14 |
+| XRS-013 | XRS-T13 | SC-03 |
 
 ## 12. Evidence sources (2026-10-30)
 - [X1] **Docs verified**, X Search Introduction, 7d, last24h, query and pagination: https://docs.x.com/x-api/posts/search/introduction
