@@ -31,14 +31,18 @@ VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000
 INSERT INTO agent.notification_records(tenant_id,id,watch_id,notification_key,destination_ref,delivery_status_code)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000106',
  '01900000-0000-7000-8000-000000000005','notification-1','binding-1','queued');
+INSERT INTO agent.notification_intent_ownership
+ (tenant_id,notification_id,owner_user_id,destination_ref)
+VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000106',
+ '01900000-0000-7000-8000-000000000002','binding-1');
 INSERT INTO agent.notification_digest_envelopes(tenant_id,id,owner_user_id,
  destination_ref,policy_revision,send_state_code)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000107',
  '01900000-0000-7000-8000-000000000002','binding-1','1','reserved');
-INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,owner_user_id,destination_ref,
  member_state_code,rank_decision_ref)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000107',
- '01900000-0000-7000-8000-000000000106','reserved','decision-1');
+ '01900000-0000-7000-8000-000000000106','01900000-0000-7000-8000-000000000002','binding-1','reserved','decision-1');
 INSERT INTO agent.artifacts(tenant_id,id,object_key,sha256_hex,bytes,media_type,
  classification_code,object_state_code)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000108',
@@ -77,9 +81,9 @@ BEGIN
  '01900000-0000-7000-8000-000000000002','x','222','cred','x_timeline_poll','active','1.0','{}','{}','consent');
  EXCEPTION WHEN foreign_key_violation THEN got_fk:=true; END;
  BEGIN
- INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,member_state_code,rank_decision_ref)
+ INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,owner_user_id,destination_ref,member_state_code,rank_decision_ref)
  VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000107',
- '01900000-0000-7000-8000-000000000106','reserved','decision-dup');
+ '01900000-0000-7000-8000-000000000106','01900000-0000-7000-8000-000000000002','binding-1','reserved','decision-dup');
  EXCEPTION WHEN unique_violation THEN got_member_unique:=true; END;
  IF NOT (got_unique AND got_fk AND got_member_unique)
  THEN RAISE EXCEPTION 'R4 negative FK/dedupe failure: %,%,%',got_unique,got_fk,got_member_unique; END IF;
@@ -123,10 +127,10 @@ DO $$
 DECLARE active_collision boolean:=false;
 BEGIN
  BEGIN
-  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,owner_user_id,destination_ref,
   member_state_code,rank_decision_ref)
   VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000114',
-  '01900000-0000-7000-8000-000000000106','reserved','dup-before-release');
+  '01900000-0000-7000-8000-000000000106','01900000-0000-7000-8000-000000000002','binding-1','reserved','dup-before-release');
  EXCEPTION WHEN unique_violation THEN active_collision:=true; END;
  IF NOT active_collision THEN RAISE EXCEPTION 'active reservation duplicate not denied'; END IF;
  RAISE NOTICE 'PASS active duplicate digest member denied';
@@ -135,10 +139,10 @@ UPDATE agent.notification_digest_members SET member_state_code='released'
 WHERE tenant_id='01900000-0000-7000-8000-000000000001'
  AND digest_id='01900000-0000-7000-8000-000000000107'
  AND notification_id='01900000-0000-7000-8000-000000000106';
-INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,owner_user_id,destination_ref,
  member_state_code,rank_decision_ref)
 VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000114',
- '01900000-0000-7000-8000-000000000106','reserved','new-reservation-after-release');
+ '01900000-0000-7000-8000-000000000106','01900000-0000-7000-8000-000000000002','binding-1','reserved','new-reservation-after-release');
 UPDATE agent.notification_digest_members SET member_state_code='coverage_unknown'
 WHERE tenant_id='01900000-0000-7000-8000-000000000001'
  AND digest_id='01900000-0000-7000-8000-000000000114';
@@ -146,11 +150,51 @@ DO $$
 DECLARE unknown_collision boolean:=false;
 BEGIN
  BEGIN
-  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,
+  INSERT INTO agent.notification_digest_members(tenant_id,digest_id,notification_id,owner_user_id,destination_ref,
   member_state_code,rank_decision_ref)
   VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000115',
-  '01900000-0000-7000-8000-000000000106','reserved','should-not-retry-unknown');
+  '01900000-0000-7000-8000-000000000106','01900000-0000-7000-8000-000000000002','binding-1','reserved','should-not-retry-unknown');
  EXCEPTION WHEN unique_violation THEN unknown_collision:=true; END;
  IF NOT unknown_collision THEN RAISE EXCEPTION 'UNKNOWN digest member incorrectly re-reserved'; END IF;
  RAISE NOTICE 'PASS digest release allows new reservation; UNKNOWN blocks retry';
+END $$;
+
+-- Round5: same-tenant different-owner and different-destination must not join a digest.
+INSERT INTO agent.users(id) VALUES('01900000-0000-7000-8000-000000000020');
+INSERT INTO agent.tenant_memberships(tenant_id,user_id) VALUES
+ ('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000020');
+INSERT INTO agent.notification_records (tenant_id,id,notification_key,destination_ref,delivery_status_code)
+VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000116',
+ 'other-owner-msg','binding-1','queued');
+INSERT INTO agent.notification_intent_ownership
+ (tenant_id,notification_id,owner_user_id,destination_ref)
+VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000116',
+ '01900000-0000-7000-8000-000000000020','binding-1');
+DO $$
+DECLARE bad_owner boolean:=false; bad_destination boolean:=false; bad_identity boolean:=false;
+BEGIN
+ BEGIN
+ INSERT INTO agent.notification_digest_members
+ (tenant_id,digest_id,notification_id,owner_user_id,destination_ref,member_state_code,rank_decision_ref)
+ VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000115',
+ '01900000-0000-7000-8000-000000000116','01900000-0000-7000-8000-000000000020',
+ 'binding-1','reserved','should-fail-owner');
+ EXCEPTION WHEN foreign_key_violation THEN bad_owner:=true; END;
+ BEGIN
+ INSERT INTO agent.notification_digest_members
+ (tenant_id,digest_id,notification_id,owner_user_id,destination_ref,member_state_code,rank_decision_ref)
+ VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000115',
+ '01900000-0000-7000-8000-000000000116','01900000-0000-7000-8000-000000000002',
+ 'binding-2','reserved','should-fail-destination');
+ EXCEPTION WHEN foreign_key_violation THEN bad_destination:=true; END;
+ BEGIN
+ INSERT INTO agent.notification_intent_ownership
+ (tenant_id,notification_id,owner_user_id,destination_ref)
+ VALUES('01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000106',
+ '01900000-0000-7000-8000-000000000002','wrong-destination');
+ EXCEPTION WHEN unique_violation OR foreign_key_violation THEN bad_identity:=true; END;
+ IF NOT (bad_owner AND bad_destination AND bad_identity) THEN
+ RAISE EXCEPTION 'Digest isolation failed owner=%, dest=%, intent=%,',bad_owner,bad_destination,bad_identity;
+ END IF;
+ RAISE NOTICE 'PASS Round5 tenant-local owner/destination digest composite FK isolation';
 END $$;

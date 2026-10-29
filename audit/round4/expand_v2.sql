@@ -81,6 +81,21 @@ CREATE TABLE agent.entity_source_links (
 CREATE INDEX entity_links_active ON agent.entity_source_links
  (tenant_id,canonical_entity_id,mapping_revision) WHERE invalidated_at IS NULL;
 -- Ranker never sends: only the canonical CHAT_07 delivery sender sends a digest.
+-- A committed notification intent must carry an owner/destination binding before any digest grouping.
+-- Existing v1 rows require authorized backfill; feature flag remains OFF until done.
+ALTER TABLE agent.notification_records ADD CONSTRAINT notification_destination_identity_key
+ UNIQUE (tenant_id,id,destination_ref);
+CREATE TABLE agent.notification_intent_ownership (
+ tenant_id uuid NOT NULL, notification_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, destination_ref text NOT NULL,
+ established_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,notification_id),
+ UNIQUE(tenant_id,notification_id,owner_user_id,destination_ref),
+ FOREIGN KEY(tenant_id,notification_id,destination_ref)
+   REFERENCES agent.notification_records(tenant_id,id,destination_ref),
+ FOREIGN KEY(tenant_id,owner_user_id)
+   REFERENCES agent.tenant_memberships(tenant_id,user_id)
+);
 CREATE TABLE agent.notification_digest_envelopes (
  tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,
  destination_ref text NOT NULL, policy_revision text NOT NULL,
@@ -89,18 +104,22 @@ CREATE TABLE agent.notification_digest_envelopes (
  ('draft','reserved','queued','sending','provider_accepted','unknown','failed','cancelled')),
  outbox_id uuid, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,id,owner_user_id,destination_ref),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
  FOREIGN KEY(tenant_id,outbox_id) REFERENCES agent.outbox_messages(tenant_id,id)
 );
 CREATE TABLE agent.notification_digest_members (
  tenant_id uuid NOT NULL, digest_id uuid NOT NULL, notification_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, destination_ref text NOT NULL,
  member_state_code text NOT NULL CHECK(member_state_code IN
  ('reserved','covered_accepted','coverage_unknown','released','blocked')),
  rank_decision_ref text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,digest_id,notification_id),
- FOREIGN KEY(tenant_id,digest_id) REFERENCES agent.notification_digest_envelopes(tenant_id,id),
- FOREIGN KEY(tenant_id,notification_id) REFERENCES agent.notification_records(tenant_id,id)
+ FOREIGN KEY(tenant_id,digest_id,owner_user_id,destination_ref)
+   REFERENCES agent.notification_digest_envelopes(tenant_id,id,owner_user_id,destination_ref),
+ FOREIGN KEY(tenant_id,notification_id,owner_user_id,destination_ref)
+   REFERENCES agent.notification_intent_ownership(tenant_id,notification_id,owner_user_id,destination_ref)
 );
 -- A cancelled/proven unsent membership is historical, not a permanent lock.
 -- Accepted/UNKNOWN digest coverage remains locked against duplicate individual sends.
