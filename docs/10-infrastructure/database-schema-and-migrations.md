@@ -1207,10 +1207,14 @@ CREATE TABLE agent.notification_digest_members (
  rank_decision_ref text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,digest_id,notification_id),
- UNIQUE(tenant_id,notification_id),
  FOREIGN KEY(tenant_id,digest_id) REFERENCES agent.notification_digest_envelopes(tenant_id,id),
  FOREIGN KEY(tenant_id,notification_id) REFERENCES agent.notification_records(tenant_id,id)
 );
+-- A cancelled/proven unsent membership is historical, not a permanent lock.
+-- Accepted/UNKNOWN digest coverage remains locked against duplicate individual sends.
+CREATE UNIQUE INDEX digest_active_member_only ON agent.notification_digest_members
+ (tenant_id,notification_id)
+ WHERE member_state_code IN ('reserved','covered_accepted','coverage_unknown');
 -- Source bytes and derived artifacts must retain provenance and bounded parser budgets.
 CREATE TABLE agent.parser_jobs (
  tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,
@@ -1412,3 +1416,6 @@ COMMIT;
 
 **Physical/schema constraints do not substitute for authorizations, CAS and cross-entity semantic validation.** Reproducible `0001→0002→0003` PostgreSQL test, reapply/upgrade and negative integration fixtures required. These schemas are Provisional until CHAT_01/06/07/09/12/13 and CHAT_10 accept compatibility.
 
+
+### 20.5 Round 4 — Digest reservation constraint corrected
+Previously `UNIQUE(tenant_id,notification_id)` on all `notification_digest_members` prevented **future valid digest reservation after a provably unsent cancelled digest was released**. It is now a partial unique index only for `reserved/covered_accepted/coverage_unknown`, preserving immutable released/blocked history and preventing a second active covering digest. Atomic transitions under CHAT_07 delivery sender must check current owner consent/policy and only move to `released` when a provider request was certainly NOT sent; ACK lost cannot be released automatically. `DB-R4-D06` must assert: second reservation of reserved member fails; transition first member to released permits new digest reservation; covered_accepted/coverage_unknown deny second. This is a physical design fix, not Runtime confirmation.
