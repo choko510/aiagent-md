@@ -68,7 +68,7 @@ BEGIN
  BEGIN
   UPDATE agent.runs SET current_checkpoint_id='01900000-0000-7000-8000-000000000011'
    WHERE id='01900000-0000-7000-8000-000000000008';
-  SET CONSTRAINTS runs_checkpoint_head_fk IMMEDIATE;
+  SET CONSTRAINTS agent.runs_checkpoint_head_fk IMMEDIATE;
  EXCEPTION WHEN foreign_key_violation THEN
   violated := true;
  END;
