@@ -76,8 +76,8 @@ All UI views must come from authoritative GET \`/api/v1/approvals/{id}\` and \`/
 
 ~~~typescript
 type PublicApprovalDetail = {
-  approvalId:string; recordVersion:number;      // canonical CAS, initial 1
-  taskId:string; runId:string; goalRevision:number;
+  approvalId:string; recordVersion:string;      // canonical int64 decimal CAS, initial "1"
+  taskId:string; runId:string; goalRevision:string;
   actionKind:"read"|"write"|"purchase"|"reservation"|"post"|"other";
   actionSummary:string;                       // server projected safe text
   actionDigest:string;                        // immutable server-side semantic digest
@@ -95,7 +95,7 @@ type ApprovalDecisionInput = {
 type PublicTakeoverDetail = {
   browserSessionId:string; taskId:string; runId:string|null;
   sessionOwner:"worker"|"human"|"none";         // CHAT_04-owned semantics
-  recordVersion:number; handoffAvailable:boolean;
+  recordVersion:string; handoffAvailable:boolean;
   expiresAt:string|null; warning:string|null;
   // no tenantId, credential, cookies, storageState, CDP/WebSocket endpoint
 };
@@ -250,3 +250,5 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 ## 16. Upstream PR差分：lease障害時の安全性
 
 **[PR-HITL-01]** [Mastra PR #27760](https://github.com/mastra-ai/mastra/pull/27760)（2026-10-30確認、**Open / 未マージ**）の `packages/core/src/workflows/evented/workflow-event-processor/index.ts` 差分を読んだ。同PRはlease acquireの待機を5秒で制限し、backend timeout時にstepを**fenceなしで進行**させる既存fallbackを用いる。本Harnessでは**外部副作用/BrowserSessionのownership fence失敗時に実行を許可しない**ため、timeoutでunfenced executionへ進む案は明確に却下する。HITL-T04/T06にLeaseProvider hang、late grant、stale ownerを注入し、**副作用実行0**、暫定WAITING_INPUT/UNKNOWN、限定的recoveryを検証する。Mastra PRの修正の有効性/取り込み状態は本Harnessに移植していない。
+
+**Round2 shared integer amendment:** [CHAT_01 PR #2](https://github.com/choko510/aiagent-md/pull/2) supersedes earlier number wire types: approval recordVersion and goalRevision are validated int64 **decimal strings**, leaseEpoch is a separate server-only decimal string initially "0". BrowserSession control cannot accept arbitrary leaseEpoch. HITL-T02/T03/T06 include values >2^53-1 and reject float/leading-zero/exponent to prevent CAS and owner bypass.
