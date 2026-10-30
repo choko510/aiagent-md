@@ -518,9 +518,9 @@ Scope/所有者/REQ-ID/追跡/State/Error/Cancel/Crash/Secret/費用上限/OSS l
 
 | 論点 | 確認した不一致とSearch Router側のルール | 正本Owner / 提案する検証 |
 |---|---|---|
-| UUID | CHAT_01 #2の公開IDはcanonical lowercase **UUIDv7**。CHAT_10 #10はDB \`gen_random_uuid()\` を多用（通常v4）。RouterはQuery-local IDと公開Task/Run/ToolAttempt UUIDを混同しない。永続公開IDは正本Validatorを必須にし、DB defaultだけを信頼しない。 | [PROVISIONAL: CHAT_01/10] public ID fixtureでinsert→read→REST schemaまで往復検証 |
-| Task/Conversation | #2 \`Task.conversationId: ... | null\`、#10はNOT NULL、#8 DTOはrequired。Watcher/外部イベント起点TaskのSearchをConversationなしで実行できる必要がある。RouterはConversation有無を検索許可の条件にせず、owner/Task scopeをGatewayから取得。 | CHAT_01/08/10: nullable Contract+DB E2E |
-| recordVersion | #2 recordVersion初期1、#10 revision初期0。Routerの\`planVersion\`、Task goalRevision、recordVersion、leaseEpochは**別概念**。混同してCASせず、Gateway提供のopaque conditional tokenで更新。 | CHAT_01/02/10: DB CAS一致試験 |
+| UUID | CHAT_01 #2の公開IDはcanonical lowercase **UUIDv7**。旧Round1 CHAT_10 #10はDB v4 \`gen_random_uuid()\` を利用したが、現行DDLでは撤去済み。RouterはQuery-local IDと公開Task/Run/ToolAttempt UUIDを混同しない。永続公開IDは正本Validatorを必須にし、DB defaultだけを信頼しない。 | [PROVISIONAL: CHAT_01/10] public ID fixtureでinsert→read→REST schemaまで往復検証 |
+| Task/Conversation | #2 \`Task.conversationId: ... | null\`、旧Round1の#10 NOT NULL/#8 required案は現行Draftでnullableへ修正済み。Watcher/外部イベント起点TaskのSearchをConversationなしで実行できる必要がある。RouterはConversation有無を検索許可の条件にせず、owner/Task scopeをGatewayから取得。 | CHAT_01/08/10: nullable Contract+DB E2E |
+| recordVersion | #2 recordVersion初期1、#10は現行Draftでrecord_version初期1に修正済み。Routerの\`planVersion\`、Task goalRevision、recordVersion、leaseEpochは**別概念**。混同してCASせず、Gateway提供のopaque conditional tokenで更新。 | CHAT_01/02/10: DB CAS一致試験 |
 | Run leaseEpoch/fencing | #2はnumber、#1はbigint、#10のRun保存にはRun leaseEpoch/owner/expiry未確定。Routerは子検索の結果保存前に**owner Task + Run lease + goalRevision**をDB authoritativeに再照合。stale workerの返答は歴史的artifactへ隔離し、現行成功/新規外部呼出しは不可。 | [PROVISIONAL: CHAT_01/02/03/10] 64-bit epochのdecimal wire定義とfenced commit試験 |
 | Tenant/User/Workspace | #2 tenantId/ownerUserId、#9 actorとownerの厳格検証、#10 workspace_id。Routerは\`workspaceId === tenantId\` を前提にしない。サービス側の明示的mapper + owner認可をGateway毎callで要求。 | CHAT_09/10: cross-tenant ProviderAttempt/Artifact read拒否 |
 | Retry/通知 | #1/03のTool ledger/Run lifecycle確定前はGateway配下の外部検索再試行だけ認める。検索の重複請求は起こり得る。Task状態の自己完了/外部副作用の再試行は行わない。 | CHAT_02/03/10: crash-before/after dispatchとcost uncertainty試験 |
