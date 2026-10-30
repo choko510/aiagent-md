@@ -234,9 +234,9 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-T15N | OCR不明数値を捏造、PDFページ/セル参照の混同、式実行→FAIL | mandatory negative oracle が検出してFAIL、実副作用0 | SC-15 |
 | QA-E2E-T16P | user Aが低利益否定・店除外、Undo、静音時間、user B同時run、高優先alert → フィードバックを保存して推薦と通知を再評価 | PreferenceとFact分離・Undo可能、Aだけに適用、静音/priority・重複に整合 | SC-16 |
 | QA-E2E-T16N | 観測事実の上書き、Bへの混入、高優先ユーザーtriggerの暗黙drop→FAIL | mandatory negative oracle が検出してFAIL、実副作用0 | SC-16 |
-| QA-E2E-T33 | 公開UUID生成(v7) vs gen_random_uuid()、Schema Validator | どちらか不一致ならFAIL_CONTRACT、正本Ownerへ差し戻す | SC-07/08 |
+| QA-E2E-T33 | server UUIDv7生成→DB保存→API Validator往復（旧DB v4 defaultは現行PR #10から撤去） | 全経路v7、v4入力が拒否されなければFAIL_CONTRACT | SC-07/08 |
 | QA-E2E-T34 | conversationId nullable TaskをDB/API作成・参照 | DB NOT NULL等で喪失ならFAIL_CONTRACT | SC-02/11 |
-| QA-E2E-T35 | recordVersion初期1とDB revision default0、CAS交錯 | 1成功/1競合、双方の概念が同一と誤仮定しない | SC-07/08 |
+| QA-E2E-T35 | recordVersion初期1（PR #10物理）とCAS競合、2^53+1無損失wire | 1成功/1競合、BigInt→string変換に丸めなし | SC-07/08 |
 | QA-E2E-T36 | leaseEpoch stale write + goalRevision/activeRunId競合、int64境界 | 旧leaseのDB更新/新規副作用0、unsafe number変換をreject | SC-07 |
 | QA-E2E-T37 | tenantId/ownerUserId vs workspace_idを別principalで照会 | クロステナントTask/Artifact/SSE/WebSocket漏洩0 | SC-06/08 |
 | QA-E2E-T38 | 成功回答からsource URL/timestampを1件抜く | critical evidence factのmissingでFAIL_PRODUCT | SC-01/05/10 |
