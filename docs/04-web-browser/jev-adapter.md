@@ -83,13 +83,13 @@ async function jevSuggest(req, ctx) {
 | Jev provider unavailable | transport request_failed | alternate judgment or deterministic fallback | PARTIAL |
 | invalid answer | InvalidJevAnswer | reject/replan once | INVALID_OUTPUT |
 | DOM changed | generation diff | fresh snapshot | STALE |
-| bot wall | page evidence + challenge signal | human handoff | WAITING_INPUT |
+| bot wall | page evidence + challenge signal | CHAT_04 challenge eligibility gate → permitted CapSolver or human handoff/safe stop | SOLVING or WAITING_INPUT |
 | injected page closed | Page.isClosed | owner recovery | NO_PAGE |
 | limit expired | AbortSignal | no new action | CANCELLED |
 Network送信/外部クリックとDB commitはatomicではない。送信後lost ack・browser killはTool Ledgerへ`UNKNOWN`を報告し、不可逆操作の無条件再実行は禁止。
 
 ## 9. Security / privacy / Budget
-Jevリポジトリの`password.ts` redaction等は参考だが、本Harnessのsecret managerを置換しない。JevにTaskの全HTMLと資格情報を自由送信しない。サイトが要求するCAPTCHA/Turnstileは人間へ。外部typing generatorを投入する場合もGatewayがTool budgetを固定。
+Jevリポジトリの`password.ts` redaction等は参考だが、本Harnessのsecret managerを置換しない。JevにTaskの全HTMLと資格情報を自由送信しない。サイトが要求するCAPTCHA/Turnstileは、`login-challenges-human-handoff.md`の適格性審査を通過した場合に限りBrowser Worker管理のCapSolver Adapterへ委譲し、それ以外は人間へ引き継ぐか安全停止する。Jev Adapter自体はCapSolverへ直結せず、Agent判断で独立した外部solveを開始しない。外部typing generatorを投入する場合もGatewayがTool budgetを固定。
 - URL、iframe、popup、subresourcesのegressはCHAT_09/04-02に再検査を要求する。Web文面/DOMはuntrusted、system命令として実行しない。
 - Cookie/API key/認証画面の秘密・スクリーンショットはmodel-visible Artifactに自動露出させない。記録ポリシーが秘匿できない場合はscreenshot禁止。
 - 初期提案上限はmaxSteps<=8、maxSeconds<=30、maxChars<=1500 per judgment、provider使用token/attemptはGateway Budget内、1 Run Jev judgment <=6（いずれも仮値）。**最終値はTool Gateway全体BudgetとサイトPolicyのmin**。時間/メモリ/トークン/外部API出費に必ず有限の上限。計測はtask,run,leaseEpoch,actionId,DOM generation,attempt,status,latencyMs,RSS,tokenCost,sideEffectClass,artifactRef。
@@ -147,3 +147,6 @@ Jevの判断候補と理由は提案として表示。ステップ実行/サイ�
 
 `JevJudgment.kind` は候補の**結果状態**（candidate/no_action/blocked/uncertain）であって、`allowedActions` が保持する**操作種別**（observe/propose_click/propose_fill）ではない。比較するのは `classifyProposedAction` によって明示的に復元したAction種別のみ。**T-JEV-003/007/008** は `candidate.kind='candidate', allowedActions=['propose_click']` の正常提案を許可済み操作として識別し、禁止候補の拒否・`no_action`非実行・old DOMの拒否をassertする。
 
+## 17. CapSolver integration boundary (user-requested policy, 2026-10-30)
+
+この文書の「bot wall → handoff」は無条件ではない。判定の正本は `docs/04-web-browser/login-challenges-human-handoff.md §18`。CAPTCHA/Turnstileと認証/2FA、WAFによるアクセス拒否を別分類する。確定した許可済みCAPTCHAだけをTool Gatewayで保護されたBrowser Workerの単一solveフローへ送り、Jevのモデル判断・ページ内コンテンツがAPIキー、Solver task type、送信対象、追加費用を自由に指定できないようにする。Provider `ready`後もブラウザ側の再観測で検証する。未許可・不明・予算超過・失敗ならHuman Handoffまたは安全停止。E2Eテスト未実施、CHAT_00/03/09の契約調停が完了するまではPROVISIONAL。
