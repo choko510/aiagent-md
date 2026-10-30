@@ -189,7 +189,7 @@ interface FrozenToolProposal {
 
 ```json
 {
-  "runId": "run-123", "stepOrdinal": 3, "goalRevision": 2,
+  "runId": "run-123", "stepOrdinal": 3, "goalRevision": "2",
   "proposals": [
     {"proposalOrdinal": 0, "toolName": "web.search", "argumentsArtifactRef": "art-100", "mode": "read"},
     {"proposalOrdinal": 1, "toolName": "hotel.book", "argumentsArtifactRef": "art-101", "mode": "effect"}
