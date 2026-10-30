@@ -4,8 +4,12 @@ import pathlib,re,json,sys,subprocess,collections,os,urllib.request,time
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 text=(ROOT/"docs/00-foundation/spec-index.md").read_text()
 required=re.findall(r"\|\s*\d{2}-\d{2}\s*\|\s*"+chr(96)+r"(docs/[0-9]{2}-[^"+chr(96)+r"]+\.md)"+chr(96),text)
-found=sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/"docs").glob("[0-9][0-9]-*/*.md"))
+found_all=sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/"docs").glob("[0-9][0-9]-*/*.md"))
+found=sorted(set(found_all)&set(required))
+baseline_extras=sorted(set(found_all)-set(required))
 err=[];broken=[];numeric=[]
+if len(baseline_extras)!=10 or any(not x.startswith("docs/00-foundation/") for x in baseline_extras):
+ err.append("unexpected pre-existing documents outside 85 module inventory: "+str(baseline_extras))
 if len(required)!=85 or len(set(required))!=85 or set(required)!=set(found):err.append(f"inventory wrong {len(required)}, found {len(found)}, missing={set(required)-set(found)}")
 counts=dict(collections.Counter(p.split("/")[1][:2] for p in found))
 expected={"00":5,"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6,"10":5,"11":4,"12":5,"13":3,"14":2,"15":1}
@@ -54,5 +58,5 @@ if os.getenv("VERIFY_SOURCE_HEADS","0")=="1":
    checked+=1
  if checked!=85:err.append(f"expected 85 source blobs: {checked}")
 print("ROUND7_INTEGRATED_STATUS",json.dumps({"required":len(required),"localDocs":len(found),"sourceBlobs":checked,
-"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
+"preexistingFoundation":len(baseline_extras),"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
 sys.exit(1 if err else 0)
