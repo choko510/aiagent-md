@@ -42,6 +42,20 @@ for f,terms in obligations.items():
  content=(ROOT/f).read_text()
  absent=[q for q in terms if q not in content]
  if absent:err.append("cross-owner contract markers "+f+": "+str(absent))
+# Ensure PostgreSQL smoke tests execute the SQL currently authored in the merged
+# CHAT_10 specification, not an old audit snapshot of migration 0002/0003.
+db_text=(ROOT/"docs/10-infrastructure/database-schema-and-migrations.md").read_text()
+sql_blocks=re.findall(r"(?:`{3}|~~~)sql\s*\n(.*?)(?:`{3}|~~~)",db_text,re.S|re.I)
+for version,fragment,fixture in (
+ (2,"CREATE TABLE agent.external_event_subscriptions","audit/round4/expand_v2.sql"),
+ (3,"CREATE TABLE agent.source_attempt_receipts","audit/round4/expand_v3.sql"),
+):
+ matching=[x for x in sql_blocks if fragment in x]
+ if len(matching)!=1:err.append(f"missing/ambiguous SQL v{version} in canonical DB spec")
+ else:
+  fixture_bytes=(ROOT/fixture).read_text().strip()
+  if matching[0].strip()!=fixture_bytes:
+   err.append(f"tested SQL fixture v{version} diverges from canonical PR #10 spec; refresh audit fixture and checksum tests")
 if numeric:err.append("JSON int64 numeric "+str(numeric))
 print("ROUND7_RELATIVE_LINK_WARNINGS",json.dumps(broken[:50],ensure_ascii=False))
 # Relative links are collected for targeted correction; external providers may be missing locally.
@@ -75,5 +89,5 @@ if os.getenv("VERIFY_SOURCE_HEADS","0")=="1":
    checked+=1
  if checked!=85:err.append(f"expected 85 source blobs: {checked}")
 print("ROUND7_INTEGRATED_STATUS",json.dumps({"required":len(required),"localDocs":len(found),"sourceBlobs":checked,
-"preexistingFoundation":len(baseline_extras),"crossOwnerContractMarkers":len(obligations),"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
+"preexistingFoundation":len(baseline_extras),"crossOwnerContractMarkers":len(obligations),"ddlSourceBlocksChecked":2,"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
 sys.exit(1 if err else 0)
