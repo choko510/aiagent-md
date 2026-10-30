@@ -290,7 +290,7 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 
 | ID | Owner | Severity | 決めることと合格証拠 |
 |---|---|---|---|
-| BEN-X01 | CHAT_01/10/08 | P0 | UUIDv7とDB default・nullable Task Conversation・recordVersion=1とrevision0、wire schema統合。QA-B-T16/27 |
+| BEN-X01 | CHAT_01/10/08 | P0 Runtime実証 | UUIDv7・nullable Task Conversation・recordVersion初期1は現行PR #10に物理修正済み。shared validatorと実装API/DB/If-Matchで無損失動作を実証する。QA-B-T16/27 |
 | BEN-X02 | CHAT_01/02/10 | P0 | leaseEpoch/fence/goalRevision/activeRunIdの保存、BigInt wireとstale write拒否。QA-B-T03/16 |
 | BEN-X03 | CHAT_09/10 | P0 | tenantId/ownerUserId/workspace_id mapping、隔離証拠、redaction/retention。G2/G6 |
 | BEN-X04 | CHAT_02/10 | P1 | Instrumentation timestamps, usage/cost provider adaptation、CI hardware fixture and image digest。T06/10/19 |
