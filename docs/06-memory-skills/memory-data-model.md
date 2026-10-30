@@ -224,7 +224,7 @@ type MemoryRejection =
 
 ### 5.3 バリデーションと不変条件
 
-1. **ID規約:** 外部公開Memory ID/Task ID/Message ID/tenant/user IDはCHAT_01のUUIDv7正本に合わせ生成/検証（DBの`gen_random_uuid()` defaultはそのまま公開IDに用いない）。Memoryの独自prefix形式を公開しない。内部短縮ID・sourceRefのopaque参照は別途型と所有者を確認。`workspace_id`と`tenantId/ownerUserId`の一対一または別写像は未決のため、DB adapterで権限照合が確立するまではfail closed。
+1. **ID規約:** 外部公開Memory ID/Task ID/Message ID/tenant/user IDはCHAT_01のUUIDv7正本に合わせ生成/検証（DBの`gen_random_uuid()` defaultはそのまま公開IDに用いない）。Memoryの独自prefix形式を公開しない。内部短縮ID・sourceRefのopaque参照は別途型と所有者を確認。旧Round1のworkspace-only DDLは現行PR #10でtenant_idとowner_user_idの複合FKに変更済み。WorkspaceはTenant/Userを代替しない任意の共有グループであり、実際のprincipal・tenant membership・個別ownerおよびscopeをDB adapterで権限照合できない場合はfail closed。
 2. `scope.tenantId/subjectUserId` はサーバーでAuthContextより強制。LLMやMCPが任意のprincipal/scopeを与えても拒否。異なるscope間の推測による自動共有を禁止。
 2. `task_note` は `scope.level="task"` と `taskId` 必須。`project` は許可対象のprojectId必須。`profile`をtask scopeに留めることは可能だが、user scopeへの自動コピーは禁止。
 3. `active` は非空の`claim`、少なくとも1個の検証可能なsourceRef、同意根拠、取得時刻を要求する。sourceは存在確認とprincipal認可を通す。取得できないsourceは `candidate`/ `uncertain` に保留。
