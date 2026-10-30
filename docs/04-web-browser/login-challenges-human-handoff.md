@@ -3,11 +3,11 @@
 > CHAT_04 | `docs/04-web-browser/login-challenges-human-handoff.md` | Status: **Draft / PROVISIONAL** | Rev 0.1 | 2026-10-30 JST | Main `b45d4e989998663a00ef09673e69ae1f4191f00d` | **Harness tests executed: 0**
 
 ## 0. 採用設計・非目標・理由
-ログイン画面、2FA、CAPTCHA、Turnstileなどは自動突破しない。BrowserSessionが認証チャレンジを検知したとき、Agent操作を一時停止し、認証済みユーザーに隔離ブラウザの**短期/単回Takeover ticket**を渡す。人間が操作を終えたあと、Session/Owner/Fence/タブ/権限を再確認してTaskへ復帰する。Cookieや認証画面の入力値はモデルへ共有しない。
+ログイン資格情報・2FA/OTPはHuman Handoffを維持する。一方、CAPTCHA/Turnstileは**利用規約・サイト側の許可・権限・予算を事前検証できるサイトのみ**CapSolverによる自動解決を第一候補とし、失敗・非対応・許可不明の場合はHuman Handoffまたは安全停止へフォールバックする。BrowserSession/Owner/Fence/Tabとユーザー承認の境界は維持し、取得したトークンやCookieをLLMへ渡さない。CapSolver成功応答だけではサイト通過・ログイン成功とみなさずBrowser Workerが事後確認する。
 
-**採用:** Browser Worker所有のContextを保持し、Human-only modeへDB CASでlease切替、one-time ticket with audience/user/tenant/task/session binding、expire/revoke、state再観測。
-**却下:** Agentが2FA/CAPTCHAを勝手に処理することを成功保証、CDP remote endpointをユーザーに公開、HumanとAgentが同時に同じTab操作、CookieをLLM/RESTへ返す。
-**非目標:** ログイン資格を収集してモデルに保存すること、OTP/TOTP/Turnstile自動回答、ユーザーの承認なしの予約/購入、サーバー管理権限の貸与。
+**採用:** Browser Worker所有のContextを保持し、Challenge Policy Gateで適格性を判定。許可済みCAPTCHAは秘密分離したCapSolver Adapterに委譲し、成功後は再観測。2FA/OTP・対象外・解決失敗はHuman-only modeへのDB CAS lease切替、one-time ticket with audience/user/tenant/task/session binding、expire/revokeを使う。
+**却下:** サイト許可を確認せずCAPTCHAを外部サービスへ送信すること、自動成功保証、Agentによる2FA/OTP処理、CDP remote endpointの公開、HumanとAgent/solverの同時Tab操作、Cookie/SecretをLLM/RESTへ返すこと。
+**非目標:** ログイン資格をモデルに保存、OTP/TOTP自動回答、無許可の防御回避やサイトアクセス、ユーザー承認なしの予約/購入、サーバー管理権限の貸与。Turnstileも利用許可とAdapter対応が確認できた場合に限り対象。
 
 ## 1. Scope / Goal / Ownership / SC
 Challenge detectionはDOM/HTTP/header/視覚表示を根拠として確度付きで扱う。Skyvernのtyped evidence carrierとJevのbot-protection観測を参考にするが「チャレンジが表示された」ことと「正規ログインできた」ことは別。Human takeoverの画面配信技術/REST API詳細はCHAT_08が所有し、ChatGPTへのスクリーンショットなどは明示したredaction後以外禁止。
@@ -22,7 +22,9 @@ Code verifiedは**ソースの内容を確認した**の意であり、元の自
 
 ## 3. 依存図 / Trust Boundaries
 ```text
-Agent / Tool Gateway → BrowserSession ACTIVE_AGENT → detect challenge → WAITING_INPUT(DB checkpoint)
+Agent / Tool Gateway → BrowserSession ACTIVE_AGENT → detect challenge → Challenge Policy Gate
+Authorized CAPTCHA → SOLVING (exclusive Browser Worker fence) → provider result → fresh site verification → ACTIVE_AGENT or WAITING_INPUT
+Unauthorized/unknown CAPTCHA or 2FA/OTP → WAITING_INPUT(DB checkpoint)
 Verified User (CHAT_09) → REST (CHAT_08) one-time ticket → Browser Worker HUMAN mode
 Release/expire/revoke → epoch CAS+auth probe → ACTIVE_AGENT or WAITING_INPUT/EXPIRED
 ```
@@ -40,7 +42,7 @@ Release/expire/revoke → epoch CAS+auth probe → ACTIVE_AGENT or WAITING_INPUT
 | HND-005 | MUST | Handoff中TaskはWAITING_INPUTし新Action発火しない | Background click0 | SC-06/SC-07 |
 | HND-006 | MUST | Ticket/URLにCookie/Password/CDP endpointを含めない | 認証情報/endpoint露出0 | SC-08 |
 | HND-007 | MUST | Human操作はisolated Browserに閉じ、host OSアクセス不可 | ファイル/シェル特権なし | SC-08 |
-| HND-008 | MUST | 2FA/CAPTCHA/Turnstile処理は人間へ委譲し自動成功と断定しない | challengeの成功率保証なし | SC-06/SC-08 |
+| HND-008 | MUST | 2FA/OTPは人間へ。CAPTCHA/Turnstileは許可済みのみCapSolver経路を選択、結果の通過保証なし | 無許可solve=0、2FA自動処理=0 | SC-06/SC-08 |
 | HND-009 | MUST | release時に本人/epoch/auth state/Tab/Goalを再検証 | 未ログインならTask再開0 | SC-06/SC-07 |
 | HND-010 | MUST | logout/revoke/cancel/expiry時にTicket/lease失効 | 失効後Human action0 | SC-07/SC-08 |
 | HND-011 | MUST | Steer中の旧承認やTakeover ticketをinvalidate | 旧revisionでrelease不可 | SC-07 |
@@ -49,6 +51,13 @@ Release/expire/revoke → epoch CAS+auth probe → ACTIVE_AGENT or WAITING_INPUT
 | HND-014 | MUST | Login完了後も元Taskの要求/費用/外部副作用承認を維持 | loginを支払い承認に転換しない | SC-04/SC-08 |
 | HND-015 | SHOULD | Takeover中に見えた秘密の画面録画/スクショを既定無効 | PII artifact 0 | SC-08 |
 | HND-016 | LATER | 自動challenge classifiersを実測で改善 | positive/false rates報告後採用 | SC-09 |
+| HND-017 | MUST | CapSolver実行前に対象origin/tenant/task/purposeのサイト許可・ToS/robots・権限・対象種別を決定的に審査 | 許可不明・禁止サイトの外部API送信0 | SC-06/SC-08 |
+| HND-018 | MUST | 認証済み設定で有効化したCapSolverを専用Adapterで実行し、APIキー・トークンはLLM/ログから遮断 | LLM/Trace/RESTでsecret露出0 | SC-08 |
+| HND-019 | MUST | セッション/タブ/goalRevision/leaseEpoch/challenge identityを束縛し、同時solveと古い結果の注入を拒否 | stale result適用0 | SC-06/SC-07 |
+| HND-020 | MUST | CapSolverのreadyは成功確定ではなく、対象サイトの再観測後のみresume | 未検証resume=0 | SC-06/SC-07 |
+| HND-021 | MUST | API費用・時間・試行回数・同一origin反復・キャンセルを有限に制限 | budget超過の外部solve要求0 | SC-07/SC-09 |
+| HND-022 | MUST | 不許可・非対応・失敗・不確定・2FAは既存Human Handoffまたは安全停止 | 無限自動再試行0 | SC-06/SC-07 |
+| HND-023 | MUST | 外部へ送るChallengeパラメータをallowlistで最小化、cookie/session/PIIを原則渡さない | 無関係HTML/資格情報送信0 | SC-08 |
 
 ## 5. Type/API/Event/Validation (CH04 local)
 ```typescript
@@ -63,8 +72,11 @@ Ticketのnonceは予測不能な暗号学的random、DBにはhashのみ、5分TT
 
 ## 6. 正常Sequence / 状態遷移
 ```text
-ACTIVE_AGENT → CHALLENGE_DETECTED → WAITING_INPUT → HUMAN_ACTIVE → REVALIDATING → ACTIVE_AGENT
-WAITING_INPUT/HUMAN_ACTIVE → EXPIRED|CANCELLED|REVOKED
+ACTIVE_AGENT → CHALLENGE_DETECTED → ELIGIBILITY_CHECK
+ELIGIBILITY_CHECK (authorized captcha) → SOLVING → REVALIDATING → ACTIVE_AGENT
+ELIGIBILITY_CHECK (2FA/unknown/denied) → WAITING_INPUT → HUMAN_ACTIVE → REVALIDATING → ACTIVE_AGENT
+SOLVING (timeout/error/failed verification) → WAITING_INPUT or SAFE_STOP
+WAITING_INPUT/HUMAN_ACTIVE/SOLVING → EXPIRED|CANCELLED|REVOKED
 HUMAN_ACTIVE→WORKER_CRASH→REVALIDATING_or_WAITING_INPUT
 EXPIRED/CANCELLED terminal for ticket, new ticket requires new approval
 ```
@@ -150,7 +162,7 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 | HND-T05 | Worker attempts action in WAITING_INPUT | Background click0 | HND-005→SC-06/SC-07 |
 | HND-T06 | Ticket leaked in URL query attempt | 認証情報/endpoint露出0 | HND-006→SC-08 |
 | HND-T07 | request host path from browser UI | ファイル/シェル特権なし | HND-007→SC-08 |
-| HND-T08 | fixture 2FA/challenge human only | challengeの成功率保証なし | HND-008→SC-06/SC-08 |
+| HND-T08 | 2FA/OTPと許可済み/無許可CAPTCHAのfixture | 2FAはHuman限定、無許可solve=0、成功保証なし | HND-008→SC-06/SC-08 |
 | HND-T09 | release before login success | 未ログインならTask再開0 | HND-009→SC-06/SC-07 |
 | HND-T10 | revoke and expiry | 失効後Human action0 | HND-010→SC-07/SC-08 |
 | HND-T11 | Steer during ticket pending | 旧revisionでrelease不可 | HND-011→SC-07 |
@@ -159,6 +171,13 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 | HND-T14 | purchase without approval during handoff | loginを支払い承認に転換しない | HND-014→SC-04/SC-08 |
 | HND-T15 | redaction/recording disabled | PII artifact 0 | HND-015→SC-08 |
 | HND-T16 | classifier false-positive benchmark | positive/false rates報告後採用 | HND-016→SC-09 |
+| HND-T17 | denied/unknown/allowed origin fixture | denied/unknown site CapSolver call=0 | HND-017→SC-06/SC-08 |
+| HND-T18 | malicious DOM reads API key / trace dumps token | model-visible secret=0 | HND-018→SC-08 |
+| HND-T19 | Cancel/Steer/lease change during delayed provider ready | stale token applied=0 | HND-019→SC-07 |
+| HND-T20 | provider ready but website still challenges | resume=0, fallback | HND-020→SC-06 |
+| HND-T21 | repeated CAPTCHA / rate-limit / charge cap | bounded cost/attempt, no storm | HND-021→SC-09 |
+| HND-T22 | unsupported type, API error, timeout, offline | human or safe stop, no loop | HND-022→SC-06/SC-07 |
+| HND-T23 | malicious external-content/cookie-injection attempt | allowlisted parameters only; secret disclosure=0 | HND-023→SC-08 |
 
 ## 14. Acceptance
 上表で各MUSTに安定REQ-ID→TEST-ID→SC-IDを設定。Userのgoal条件に対する完了・原典検証、跨Tenant保護、cancel/steer/failure matrix、有限予算の試験に合格するまで`Locked`を主張しない。
@@ -180,3 +199,56 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 ### Round 2 ticket consumption / side-effect self-audit（2026-10-30）
 
 初稿は`releaseHandoff(ticket)`に`consumeAtomically`を呼び、TicketがTakeover開始時に**既に消費されている**場合release不能になる矛盾があった。修正版は`requestHandoff`の短いDB transactionでWAITING_INPUT+HUMAN_PENDING+新epoch+ticket hashを一貫コミットし、**開始時にだけconsume**、終了時は認証済Takeover connectionに紐づく使用済grantを検証する。人間の操作がブラウザを通じて外部サイトへ送る行為はAgentの承認付きTool実行とは別だが、本Harnessが人間操作の全副作用を技術的に必ず阻止すると保証してはならない。**HND-T03/04/09/10/12/14**にはOne-shot reuse拒否、開始済connection release成功、古いepoch/Steer拒否、cancelとの競合、ユーザー自身の操作をAI Toolの承認に昇格させない負のテストを追加する。
+
+## 18. User-approved policy proposal (2026-10-30) — CapSolver opt-in for authorized CAPTCHA
+
+> **Status: PROPOSED / NOT IMPLEMENTED.** User requested that CAPTCHA encounters prefer CapSolver. This is a change from the prior human-only policy, not proof that every destination allows outsourcing verification. **Cross-owner ADR-009/CHAT_00 and CHAT_03/09 approval is required before marking Locked.**
+
+### 18.1 Eligibility / priority
+
+1. Detect a confirmed CAPTCHA/Turnstile with stable evidence; a generic 403/WAF block is **not** automatically a solvable CAPTCHA. Login credential, MFA, OTP, TOTP, device verification and access-denied remain Human Handoff or safe stop.
+2. Browser Worker asks Tool Gateway/CHAT_09 site-policy authority: destination origin and purpose are explicitly authorized for automation **and** third-party CAPTCHA processing. Unknown, absent, prohibited or revoked permission fails closed. Robots/ToS and user authorization are evaluated separately; user direction alone does not override site constraints.
+3. An authenticated operator configures `capsolver.enabled`, a site-specific allowlist, a dedicated secret reference and finite `maxSolveAttempts/maxSolveSpend/maxSolveSeconds`. Configuration alone creates no authority for an origin.
+4. If permitted and supported, call the **deterministic** CapSolver adapter inside the existing Tool Gateway executor; never expose direct provider tools or API keys to the model. If not permitted/supported, use existing Human Handoff only where authorized, otherwise stop with a machine-readable reason.
+5. CAPTCHA resolution grants no purchase/booking/posting/login privilege and cannot elevate Task policy or bypass rate limits.
+
+### 18.2 Adapter and state contract (CHAT_04 proposal; Shared types belong to CHAT_01/03)
+
+```typescript
+type CaptchaDecision = "ELIGIBLE"|"NOT_AUTHORIZED"|"UNSUPPORTED"|"DISABLED"|"BUDGET_EXCEEDED"|"NEEDS_HUMAN";
+type CaptchaAttempt = {
+  schemaVersion: 1;
+  attemptId: string; taskId: string; runId: string;
+  sessionId: string; tabId: string; goalRevision: string; leaseEpoch: string;
+  origin: string; challengeFingerprint: string; kind: "captcha";
+  provider: "capsolver"; permissionRef: string; budgetReservationRef: string;
+  state: "ELIGIBILITY_CHECK"|"SOLVING"|"PROVIDER_READY"|"REVALIDATING"|"PASSED"|"FALLBACK"|"DENIED"|"UNKNOWN"|"CANCELLED";
+  providerTaskIdRef?: string; // encrypted / restricted, not model-visible
+  evidenceRef?: string; verificationRef?: string; errorCategory?: string;
+};
+```
+
+- Browser Worker alone owns the live Context/Page and the solver application. Start `SOLVING` after a checkpoint and a **single solver-exclusive fenced lease**, with agent/human page actions blocked. Double-solve of the same challenge fingerprint in the same session must coalesce or reject. Never keep a DB row lock open during provider polling.
+- Provider request assembly is server-side from validated visible challenge metadata. Only mandatory, type-specific parameters (for example CAPTCHA type, approved page origin/site key) are allowlisted. No arbitrary DOM, cookies, auth tokens, history, storageState, credentials or screenshots are automatically sent to an external service. Any additional personal/session data requires separate policy and consent review.
+- CapSolver's documented API uses `createTask` and, for async jobs, `getTaskResult`; task type and response shape vary. The adapter normalizes `processing`, `ready`, API errors, timeouts and UNKNOWN. Provider `ready` is **only a provider observation**, not proof that the destination accepted verification. Test locally against permitted fixtures, not an unapproved real target.
+- With a live matching epoch/goal/origin/challenge fingerprint, Browser Worker may apply the provider result **only in the explicitly authorized flow**, then re-observe the original page and required authentication condition. If the challenge remains, classify failure; do not retry indefinitely or treat page transition as authorization for further actions.
+- Fixed, configurable initial *proposals* (not benchmarks): 1 paid attempt per challenge fingerprint, maximum 2 per Task, 30-second provider deadline per attempt, per-Task spend cap set by operator, and per-origin circuit breaker on repeated challenges. Tool Gateway's stricter global/site budgets always win. The vendor documents task result retention as bounded (5 minutes) and polling as limited (120 queries per task); do not poll near those limits.
+- Crash/lost ACK after `createTask`: persist the task reference and reconcile existing attempt before further charging. Never blindly issue a new paid task if create status is ambiguous. Cancel/Steer/logout/owner or epoch change: forbid new outgoing request/result injection and fence old callbacks; provider-side in-flight charges may still occur and are recorded as uncertain costs.
+- Persist safe audit metadata only: attempt ID, redacted origin key, permission reference, provider task reference protected as secret, result category, spend/latency, challenge evidence/verification refs and why fallback occurred. No raw token/cookie/PII in evidence or telemetry.
+
+### 18.3 Integration boundaries / acceptance
+
+- **CHAT_00**: ADR-009 currently rejects CAPTCHA evasion. Update its approved scope to distinguish *explicitly permitted verification assistance* from unauthorized access-control circumvention. Do **not** silently change the ADR from CHAT_04.
+- **CHAT_03/09**: provider billing/approval, allowlisted egress and secret management; capability and site-policy decisions must not be controlled by webpage text or an LLM.
+- **CHAT_01/02/10**: typed lifecycle, BrowserSession lease fencing, durable attempt ledger and migration, crash recovery.
+- **CHAT_08**: show `Solving with CapSolver` (not `verified`) and explicit fallback action. Redact API key/token, billing data and screenshot.
+- **CHAT_04**: Browser Worker integrates eligibility and per-page exclusive solver; Jev/Scrapling adapters must not start independent, uncontrolled solving.
+- **CHAT_11**: extend SC-06/07/08/09 fixtures with HND-T17…T23. All tests listed are **designs only**, no Harness/CapSolver live API verification was executed.
+
+Vendor documentation reviewed 2026-10-30 (**Docs verified**, not integration tested):
+- [CapSolver API: createTask](https://docs.capsolver.com/en/guide/api-createtask/)
+- [CapSolver API: getTaskResult](https://docs.capsolver.com/en/guide/api-gettaskresult/)
+- [CapSolver: supported task types](https://docs.capsolver.com/en/guide/api-support/)
+- [CapSolver for AI agents](https://docs.capsolver.com/en/guide/ai/capsolver-for-ai-agents/)
+
+**Definition of Done:** HND-T08 and HND-T17…T23 pass in approved fixtures; no provider call for unapproved origin; no cross-tenant token or API-key leak; no duplicate spend under replay; no stale result after revoke; provider-ready-but-page-blocked never resumes; cross-owner ADR/permissions contract is approved. Until then Draft / PROVISIONAL.
