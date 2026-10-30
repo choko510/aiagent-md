@@ -202,7 +202,7 @@ async function runFaultPlan(plan:FaultPlanV1):Promise<FaultOutcome> {
 
 ## 10. 永続化、Migration、UI/API、Monitoring
 
-DBの本番DDL/Task状態を再定義しない。[PROVISIONAL: CHAT_01/08/10] UUIDv7 validator vs gen_random_uuid default、Task.conversationId null vs NOT NULL、recordVersion初期1 vs DB revision0をContract Testとして検証する。[PROVISIONAL: CHAT_01/02/10] leaseEpoch/goalRevision/activeRunId物理永続化、CASとsafe number/bigint encoding。[PROVISIONAL: CHAT_09/10] tenantId+ownerUserId vs workspace_idにより異tenant越境0。[PROVISIONAL: CHAT_03/07/10] Tool intent/result/outboxとACK lossの原子境界を決める。
+DBの本番DDL/Task状態を再定義しない。旧Round1のv4 DB default/Conversation NOT NULL/revision0/Workspace-only差は、現行CHAT_10 PR #10の設計では修正済み。[PROVISIONAL: CHAT_01/08/10] UUIDv7 Validatorとサーバー生成、nullable Conversation、recordVersion初期1・int64十進文字列の**実装Contract Test**を行う。[PROVISIONAL: CHAT_01/02/10] leaseEpoch/goalRevision/activeRunIdのCAS・復旧時Fenceの実Runtime試験。[PROVISIONAL: CHAT_09/10] 同一Tenant内の別Ownerも含め認可越境0。[PROVISIONAL: CHAT_03/07/10] Tool intent/result/outboxとACK lossの原子境界を決める。
 
 Trace fields: fixtureHash、seed、testRunId、taskId/runId、leaseEpoch、goalRevision、recordVersion、tenant scope、barrierId、fault ordinal、queueAttempt、toolIntent/outcome、outboxId、observedAt、before/after snapshotHash（secret redacted）。SSE disconnect後のイベント重複/欠落、UIの誤った完了・未認可副作用もfail。DB clockとvirtual timeを混同しない。
 
