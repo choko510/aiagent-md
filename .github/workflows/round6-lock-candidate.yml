@@ -1,7 +1,7 @@
 name: round6-lock-candidate-audit
 on:
   push:
-    branches: [review/round6-shared-contract-lock-candidate]
+    branches: [main, review/round6-shared-contract-lock-candidate]
   pull_request:
     paths:
       - 'governance/round6/**'
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Verify all 61 pinned Draft PR HEAD SHAs and 85 owner MD paths
+      - name: Verify all 61 merged source PR HEADs and 85 main module blobs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 governance/round6/validate_candidate.py

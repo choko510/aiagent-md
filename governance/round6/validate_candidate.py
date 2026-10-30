@@ -1,55 +1,54 @@
 #!/usr/bin/env python3
-"""Verify a SHA-bound *unapproved* contract lock candidate against live GitHub.
-Passing proves inventory freshness only; no authority or runtime proof.
+"""Check archived source-PR SHA map and 85 spec blobs on merged main.
+This verifies documentation provenance, not cross-owner Locked approval or runtime.
 """
-import json, pathlib, os, urllib.request, time, re, sys, collections
+import json,pathlib,collections,os,urllib.request,time,sys,re
 repo="choko510/aiagent-md";api=f"https://api.github.com/repos/{repo}"
 root=pathlib.Path(__file__).resolve().parent
-m=json.loads((root/"contract-lock-candidate.json").read_text())
-token=os.environ.get("GH_TOKEN","")
-def get(url):
- hdr={"Accept":"application/vnd.github+json","User-Agent":"round6-candidate-gate"}
- if token:hdr["Authorization"]="Bearer "+token
+manifest=json.loads((root/"contract-lock-candidate.json").read_text())
+token=os.getenv("GH_TOKEN","")
+def get(path):
+ headers={"Accept":"application/vnd.github+json","User-Agent":"round6-merged-source-audit"}
+ if token:headers["Authorization"]="Bearer "+token
  for attempt in range(4):
   try:
-   with urllib.request.urlopen(urllib.request.Request(url,headers=hdr),timeout=40) as f:return json.loads(f.read())
+   req=urllib.request.Request(api+path,headers=headers)
+   with urllib.request.urlopen(req,timeout=50) as f:return json.loads(f.read())
   except Exception:
    if attempt==3:raise
    time.sleep(2**attempt)
-prs=[p for p in get(api+"/pulls?state=open&per_page=100")
- if re.fullmatch(r"spec/chat-(?:0[0-9]|1[0-5])-.+",p["head"]["ref"])]
-listed=m["prs"]
-assert len(prs)==61 and len(listed)==61,(len(prs),len(listed))
-byid={p["number"]:p for p in prs}
-assert len(set(p["number"] for p in listed))==61
+prs=get("/pulls?state=all&per_page=100")
+by={p["number"]:p for p in prs}
+tree=get("/git/trees/main?recursive=1")
+main_blobs={x["path"]:x["sha"] for x in tree["tree"] if x["type"]=="blob"}
+rows=manifest["prs"]
 errors=[]
-for p in listed:
- actual=byid.get(p["number"])
- if not actual: errors.append(f"PR #{p['number']} not present/open");continue
- if (p["headSha"]!=actual["head"]["sha"] or p["branch"]!=actual["head"]["ref"]):
-  errors.append(f"PR #{p['number']} HEAD changed: manifest={p['headSha']} actual={actual['head']['sha']}")
- if actual["base"]["ref"]!="main" or not actual["draft"]:errors.append(f"PR #{p['number']} no longer draft/main")
- if p["locked"] or p["approvedBy"] or p["approvalEvidence"]:errors.append(f"PR #{p['number']} falsely pre-approved")
- if p["gate"] not in ["CROSS_OWNER_CONTRACT_REVIEW","OWNER_REVIEW"]:errors.append(f"bad gate #{p['number']}")
+if len(rows)!=61 or len({p["number"] for p in rows})!=61:errors.append("61 unique PR rows missing")
+if manifest["status"]!="INTEGRATED_DOCUMENTS_CONTRACTS_UNRATIFIED":errors.append("incorrect governance state")
+if manifest["ownerApprovalStatus"]!="NOT_GRANTED" or manifest["runtimeStatus"]!="NOT_IMPLEMENTED":errors.append("false contract/runtime approval")
+if manifest["mergePolicy"]!="NO_AUTOMERGE":errors.append("unsafe automatic merge claim")
+owners={};source_paths={}
+for p in rows:
+ n=p["number"]
+ actual=by.get(n)
+ if not actual:errors.append(f"PR #{n} missing");continue
+ if not actual.get("merged_at"):errors.append(f"PR #{n} not actually merged")
+ if actual["head"]["sha"]!=p["headSha"]:errors.append(f"PR #{n} HEAD changed")
+ if actual["head"]["ref"]!=p["branch"]:errors.append(f"PR #{n} branch drift")
+ if not p.get("merged") or p.get("locked") or p.get("approvedBy") or p.get("approvalEvidence"):
+  errors.append(f"PR #{n} manifest misstates merge/approval")
+ for entry in get(f"/pulls/{n}/files?per_page=100"):
+  path=entry["filename"]
+  if not path.startswith("docs/") or not path.endswith(".md"):continue
+  if path in source_paths:errors.append(f"duplicate module source path {path}")
+  source_paths[path]=n
+  owners[path]=p["owner"]
+  if main_blobs.get(path)!=entry["sha"]:errors.append(f"main blob SHA mismatch {path}")
 expected={"00":5,"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6,"10":5,"11":4,"12":5,"13":3,"14":2,"15":1}
-# 61 PR file listings to prevent confusing a PR inventory with 85 unique spec files.
-owned_files={}
-for p in listed:
- actual=byid[p["number"]]
- files=get(api+f"/pulls/{p['number']}/files?per_page=100")
- for f in files:
-  path=f["filename"]
-  if not path.endswith(".md") or not path.startswith("docs/"):continue
-  if path in owned_files:errors.append(f"overlapping spec file {path}")
-  owned_files[path]=p["owner"]
-counts=collections.Counter(owned_files.values())
-if dict(counts)!=expected: errors.append(f"count mismatch {dict(counts)}")
-if len(owned_files)!=85:errors.append(f"expected 85 docs, got {len(owned_files)}")
-if m["status"]!="UNAPPROVED_REVIEW_CANDIDATE" or m["ownerApprovalStatus"]!="NOT_GRANTED" or m["runtimeStatus"]!="NOT_IMPLEMENTED":
- errors.append("Manifest is not an unapproved candidate")
-if m["mergePolicy"]!="NO_AUTOMERGE":errors.append("Unsafe merge policy")
-print("ROUND6_RATIFICATION_CANDIDATE_CHECK",json.dumps({"prs":len(prs),"docs":len(owned_files),
- "ownerCounts":dict(counts),"headMismatchCount":len([e for e in errors if "HEAD changed" in e]),
- "errors":errors[:30],"lockStatus":"NOT_APPROVED","runtimeStatus":"NOT_IMPLEMENTED"}))
+counts=dict(collections.Counter(owners.values()))
+if len(source_paths)!=85 or counts!=expected:
+ errors.append(f"85 spec owner counts: {len(source_paths)}, {counts}")
+print("MERGED_SPEC_PROVENANCE",json.dumps({"mergedSourcePRs":len(rows),"moduleBlobs":len(source_paths),"mainSha":tree["sha"],"ownerCounts":counts,
+ "governance":"UNRATIFIED","runtime":"NOT_IMPLEMENTED","errors":errors[:25]}))
 if errors:sys.exit(1)
-print("PASS SHA-bound PR inventory; human owner reviews and signatures remain mandatory.")
+print("PASS merged original PRs and all 85 identical module content blobs on main.")

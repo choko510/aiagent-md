@@ -1,5 +1,5 @@
-# Round 6 — PR-level lock readiness / all 61 Drafts
-**No PR is LOCKED or authorized for automatic merge.** This assessment pins one HEAD per PR in `contract-lock-candidate.json` and distinguishes blockers:
+# Round 6 — 61 merged specification PRs: contract Lock readiness
+**All original 61 documentation PRs have been merged into main. None of their shared design contracts is LOCKED or Runtime Verified.** This assessment pins one HEAD per PR in `contract-lock-candidate.json` and distinguishes blockers:
 - `CROSS_OWNER_CONTRACT_REVIEW`: changed or consumed shared semantics, requires sign-off on CL-01..12.
 - `OWNER_REVIEW`: module itself has a documented Owner and may be internally coherent, but no actual Owner/independent reviewer approval at exact HEAD was available.
 - `SPEC_LOCK_CANDIDATE` is a **future** state only after evidence of cross-owner approval; current none are marked so.
@@ -7,21 +7,21 @@
 
 | Owner | PR(s) | Lock state | Needed next evidence |
 |---|---|---|---|
-| CHAT_10 |  | REVIEW REQUIRED | DB/migrations/Docker/operations; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_11 |  | REVIEW REQUIRED | QA/fault/benchmarks; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_12 |  | REVIEW REQUIRED | Radar/Entity/Trend/Risk/Source Reliability; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_13 |  | REVIEW REQUIRED | Event ingress/change/digest; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_14 |  | REVIEW REQUIRED | Learned Browser Actions/Feedback; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_15 |  | REVIEW REQUIRED | Multimodal parser; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_00 |  | REVIEW REQUIRED | Foundation: product requirements, architecture, glossary, ADR; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_01 |  | REVIEW REQUIRED | Canonical Domain / Events / State / Tool and Evidence types; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_02 |  | REVIEW REQUIRED | Agent runtime, checkpoints, lease and model orchestration; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_03 |  | REVIEW REQUIRED | Tool Registry / Gateway / Approval / Ledger / MCP; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_04 |  | REVIEW REQUIRED | HTTP, Browser Worker, Jev/Lightpanda/Scrapling; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_05 |  | REVIEW REQUIRED | Connectors: Amazon/Keepa, resale price, X, hotel; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_06 |  | REVIEW REQUIRED | Memory and Skill write authority; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_07 |  | REVIEW REQUIRED | Scheduler/Watch/Observation/Outbox; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_08 |  | REVIEW REQUIRED | REST/SSE/Web UI/Telegram; reviewed HEAD and cross-owner contract acceptance |
-| CHAT_09 |  | REVIEW REQUIRED | Auth/secrets/isolation/SSRF/prompt injection; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_10 | [#10](https://github.com/choko510/aiagent-md/pull/10), [#22](https://github.com/choko510/aiagent-md/pull/22), [#26](https://github.com/choko510/aiagent-md/pull/26), [#36](https://github.com/choko510/aiagent-md/pull/36), [#45](https://github.com/choko510/aiagent-md/pull/45) | REVIEW REQUIRED | DB/migrations/Docker/operations; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_11 | [#7](https://github.com/choko510/aiagent-md/pull/7), [#13](https://github.com/choko510/aiagent-md/pull/13), [#24](https://github.com/choko510/aiagent-md/pull/24), [#38](https://github.com/choko510/aiagent-md/pull/38) | REVIEW REQUIRED | QA/fault/benchmarks; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_12 | [#51](https://github.com/choko510/aiagent-md/pull/51), [#55](https://github.com/choko510/aiagent-md/pull/55), [#56](https://github.com/choko510/aiagent-md/pull/56) | REVIEW REQUIRED | Radar/Entity/Trend/Risk/Source Reliability; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_13 | [#50](https://github.com/choko510/aiagent-md/pull/50), [#53](https://github.com/choko510/aiagent-md/pull/53), [#57](https://github.com/choko510/aiagent-md/pull/57) | REVIEW REQUIRED | Event ingress/change/digest; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_14 | [#52](https://github.com/choko510/aiagent-md/pull/52), [#58](https://github.com/choko510/aiagent-md/pull/58) | REVIEW REQUIRED | Learned Browser Actions/Feedback; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_15 | [#54](https://github.com/choko510/aiagent-md/pull/54) | REVIEW REQUIRED | Multimodal parser; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_00 | [#59](https://github.com/choko510/aiagent-md/pull/59), [#60](https://github.com/choko510/aiagent-md/pull/60), [#61](https://github.com/choko510/aiagent-md/pull/61) | REVIEW REQUIRED | Foundation: product requirements, architecture, glossary, ADR; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_01 | [#2](https://github.com/choko510/aiagent-md/pull/2), [#23](https://github.com/choko510/aiagent-md/pull/23), [#33](https://github.com/choko510/aiagent-md/pull/33), [#43](https://github.com/choko510/aiagent-md/pull/43) | REVIEW REQUIRED | Canonical Domain / Events / State / Tool and Evidence types; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_02 | [#1](https://github.com/choko510/aiagent-md/pull/1), [#21](https://github.com/choko510/aiagent-md/pull/21), [#27](https://github.com/choko510/aiagent-md/pull/27), [#35](https://github.com/choko510/aiagent-md/pull/35), [#42](https://github.com/choko510/aiagent-md/pull/42), [#46](https://github.com/choko510/aiagent-md/pull/46), [#48](https://github.com/choko510/aiagent-md/pull/48) | REVIEW REQUIRED | Agent runtime, checkpoints, lease and model orchestration; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_03 | [#6](https://github.com/choko510/aiagent-md/pull/6), [#20](https://github.com/choko510/aiagent-md/pull/20), [#31](https://github.com/choko510/aiagent-md/pull/31), [#40](https://github.com/choko510/aiagent-md/pull/40), [#49](https://github.com/choko510/aiagent-md/pull/49) | REVIEW REQUIRED | Tool Registry / Gateway / Approval / Ledger / MCP; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_04 | [#3](https://github.com/choko510/aiagent-md/pull/3), [#12](https://github.com/choko510/aiagent-md/pull/12), [#19](https://github.com/choko510/aiagent-md/pull/19), [#28](https://github.com/choko510/aiagent-md/pull/28), [#37](https://github.com/choko510/aiagent-md/pull/37) | REVIEW REQUIRED | HTTP, Browser Worker, Jev/Lightpanda/Scrapling; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_05 | [#5](https://github.com/choko510/aiagent-md/pull/5), [#14](https://github.com/choko510/aiagent-md/pull/14), [#25](https://github.com/choko510/aiagent-md/pull/25), [#34](https://github.com/choko510/aiagent-md/pull/34), [#44](https://github.com/choko510/aiagent-md/pull/44) | REVIEW REQUIRED | Connectors: Amazon/Keepa, resale price, X, hotel; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_06 | [#4](https://github.com/choko510/aiagent-md/pull/4), [#15](https://github.com/choko510/aiagent-md/pull/15), [#30](https://github.com/choko510/aiagent-md/pull/30) | REVIEW REQUIRED | Memory and Skill write authority; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_07 | [#11](https://github.com/choko510/aiagent-md/pull/11), [#16](https://github.com/choko510/aiagent-md/pull/16), [#32](https://github.com/choko510/aiagent-md/pull/32) | REVIEW REQUIRED | Scheduler/Watch/Observation/Outbox; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_08 | [#8](https://github.com/choko510/aiagent-md/pull/8), [#17](https://github.com/choko510/aiagent-md/pull/17), [#29](https://github.com/choko510/aiagent-md/pull/29), [#39](https://github.com/choko510/aiagent-md/pull/39) | REVIEW REQUIRED | REST/SSE/Web UI/Telegram; reviewed HEAD and cross-owner contract acceptance |
+| CHAT_09 | [#9](https://github.com/choko510/aiagent-md/pull/9), [#18](https://github.com/choko510/aiagent-md/pull/18), [#41](https://github.com/choko510/aiagent-md/pull/41), [#47](https://github.com/choko510/aiagent-md/pull/47) | REVIEW REQUIRED | Auth/secrets/isolation/SSRF/prompt injection; reviewed HEAD and cross-owner contract acceptance |
 
-**Gates before removing Draft:** SHA-bound Owner acceptance; reject/accept alternatives, no inconsistent schemas; independent reviewer, meaningful real tests where spec depends on actual security semantics; main/rebase conflict check. All 61 are **HOLD** until recorded approvals and valid base compatibility. No merges performed.
+**Gates before removing Draft:** SHA-bound Owner acceptance; reject/accept alternatives, no inconsistent schemas; independent reviewer, meaningful real tests where spec depends on actual security semantics; main/rebase conflict check. All 61 are **MERGED AS DRAFT DOCUMENTS**. Their design contracts remain **UNRATIFIED** until actual Owner acceptance; no Runtime Verified claims.
