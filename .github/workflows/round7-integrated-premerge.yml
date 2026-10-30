@@ -1,0 +1,40 @@
+name: round7-integrated-premerge
+on:
+  push:
+    branches: [main, integration/round7-all-specs-premerge]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  integrated-spec-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check 85 integrated MDs and exact 61 Draft PR blob SHAs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERIFY_SOURCE_HEADS: "${{ github.ref == 'refs/heads/integration/round7-all-specs-premerge' && '1' || '0' }}"
+        run: python3 audit/round7/check_integrated.py
+  postgres-ddl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run 0001-0003 migrations, FKs, 24-worker and 32-writer tests
+        run: python3 audit/round4/run_ddl.py
+  browser-reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 audit/round4/ssrf_reference_fixture.py
+      - run: python3 audit/round4/browser_smoke.py
+      - run: python3 audit/round4/browser_post_trap.py
+  parser-reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 audit/round5/parser_sandbox_fixture.py
