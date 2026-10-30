@@ -60,3 +60,19 @@ jobs:
           name: round4-61prs-85specs-matrix
           path: audit/round4/output/
           if-no-files-found: warn
+
+  round6-semantic-fingerprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read 61 PRs and 85 MDs, validate wire JSON and cross-layer semantic fingerprints
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 audit/round6/semantic_fingerprint.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: round6-contract-semantic-findings
+          path: audit/round6/output/
+          if-no-files-found: warn
