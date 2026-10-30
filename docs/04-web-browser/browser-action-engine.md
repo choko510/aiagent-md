@@ -100,7 +100,7 @@ Cross-origin iframeの混同とdocument.writeで偽ボタン挿入は非信頼�
 
 ## 10. 永続化・Transaction / Migration
 Before/After snapshot artifacts・page generation・action intent/receipt・fence・sideEffectClass・observedAt、failure categoryを論理保存提案。Raw DOMはArtifact Storeに置きLLM contextに全文を送らない。
-[PROVISIONAL: CHAT_10] Browser Session/Task/Run UUIDv7とSession/Run leaseEpochのDB CAS、nullable Conversation、recordVersion初期値1とrevision0の差、tenant-to-workspace mappingの統合はP0。物理DDLを本書で勝手に作らない。操作意図commit→外部操作→Result/Artifact commit→outboxの境界を守る。
+[PROVISIONAL: CHAT_03/09/10] 現行PR #10にtrusted UUIDv7・nullable Conversation・recordVersion初期1・Run leaseEpoch/Task GoalRevisionの物理修正は提案済み。Browser Session fence（Run leaseとは別）、実認可のtenant+ownerとTool Gateway後の外部操作・UNKNOWN resultのRuntime試験はなおP0。物理DDLを本書で勝手に作らない。操作意図commit→外部操作→Result/Artifact commit→outboxの境界を守る。
 
 ## 11. UI/REST/他モジュール
 対象URL、Tab、前後の閲覧差分とステータス、不確定actionの再実行確認を表示。Click成功＝購入完了の表示は禁止。
