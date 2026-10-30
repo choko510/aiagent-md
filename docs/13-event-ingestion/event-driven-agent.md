@@ -278,7 +278,7 @@ Prefix all abbreviated test IDs with `EDA-` and SC with `SC-`. Human confirmatio
 | EDA-P07 | CHAT_08 P1 | `rest-api.md`/`task-and-watch-dashboard.md`: subscription command DTO, eligibility, latency/gap and source evidence display | EDA-T01/T14 |
 | EDA-P08 | CHAT_11 P1 | `end-to-end-acceptance.md`: SC-11 source/receipt Task chain, fake X quota, stream gap, killpoints | EDA-T03..16 |
 
-Blocking: tenant↔workspace ACL+nullable conversation Task, UUIDv7 / recordVersion / goalRevision / leaseEpoch / outbox atomicity reconciliation remain unresolved in Draft owner PRs. **No Locked claim**.
+Blocking **Runtime/Owner evidence**, not a claim of old DDL: current PR #10 already proposes tenant+owner FK, nullable Conversation, trusted UUIDv7 and recordVersion/Run fence storage. Remain unverified: authenticated external subscription owner, source provider identity/consent, Task+GoalRev+DomainEvent+Outbox transaction, GoalRevision and lease checks, webhook signature and X connector entitlement. SQL-only receipt+Task concurrency test does NOT establish full external trigger. **No Locked/Verified claim.**
 
 ## 17. Primary sources / evidence grade
 
