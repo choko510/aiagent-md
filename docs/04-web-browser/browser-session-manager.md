@@ -52,6 +52,7 @@ Session/Context/Pageの寿命とtab mutexはCHAT_04が所有。Run leaseはCHAT_
 | BSESS-013 | MUST | Session/TabのTTL、最大数、資源上限を強制 | 上限超過で新規Context0 | SC-09 |
 | BSESS-014 | SHOULD | ストレージ復元のbrowser versionを監査 | 相違時に再ログイン要求 | SC-06 |
 | BSESS-015 | LATER | 多Worker Browser ownership handoffをデータ移管なしに拡張 | 実測と安全試験後のみ有効 | SC-09 |
+| BSESS-016 | MUST | 認可済みCapSolver実行中はSolver専用にPage操作権を排他し、旧epoch/Cancel後の結果を拒否 | solve中Agent/Human操作0、stale token適用0 | SC-06/SC-07/SC-08 |
 
 ## 5. 内部I/O型・Version / Validation
 
@@ -165,6 +166,7 @@ GET /browser-sessions/{id} はredacted stateとTakeover可能/期限だけ。ses
 | BSESS-T13 | resources exceed quota | 上限超過で新規Context0 | BSESS-013 | SC-09 |
 | BSESS-T14 | browser version differs | 相違時に再ログイン要求 | BSESS-014 | SC-06 |
 | BSESS-T15 | cross-worker handoff experiment | 実測と安全試験後のみ有効 | BSESS-015 | SC-09 |
+| BSESS-T16 | solve pending → concurrent click/handoff/cancel/late result | solve中Agent/Human操作0、stale token適用0 | BSESS-016 | SC-06/SC-07/SC-08 |
 
 ## 15. Acceptance Traceability
 
@@ -201,3 +203,11 @@ Owned pathのみ。Sourceコードとテストを参照したがHarness test未�
 ### Round 2 transaction-lock self-audit（2026-10-30）
 
 Browser actionの間に `SELECT ... FOR UPDATE` 行ロックを保持すると、ページ待機や人間HandoffによってDB更新がブロックされ、Cancel/Handoff/lease takeoverのデッドロックや大幅遅延を起こし得る。**旧擬似コードの `getForUpdate` を削除した**。Action開始前にowner+lease mode/epoch/goalRevisionを読取り、Tool Ledgerにdispatch intentをcommit。外部操作中はDB transactionを保持せず、観測保存時に短いtransaction内で `WHERE lease_epoch=:expected AND goal_revision=:expectedGoal AND mode='AGENT'` 相当の条件付き更新/Insertでfenceする。CAS失敗後の遅延結果は現行成功にしない。**BSESS-T03/08/09/12**に、外部操作が長時間待機してもCancel/Human handoffのtransactionが完了し、古いWorkerのcommitだけが0行になる競合fixtureを追加する。物理SQLはCHAT_10の契約提案。
+
+## 18. CapSolver exclusive browser ownership (2026-10-30 policy proposal)
+
+認証済み利用者の許可があり、かつ対象サイトが第三者CAPTCHA解決を許容する場合のみ `login-challenges-human-handoff.md §18` のCapSolver Adapterへ到達する。既存のBrowserSession/Context/Page所有権は移動しない。SolverにCDP URLやBrowser storageStateを渡さず、Workerがローカルでチャレンジを観測し、制限された必要パラメータのみ専用Gateway Executorに渡す。
+
+`SOLVING`はCHAT_04の**内部サブ状態提案**（CHAT_01/02の正本Stateには未採用）であり、同一PageのAgent操作、Human takeover、別Solver実行を同時許可しない。DB checkpoint/Tool Ledger intent→専有lease取得→Provider送信→Provider結果→当該epoch/goalRevision/Tab/origin/challenge再検証→Browser Workerによる結果適用とサイト状態再観測→専有lease解放という順で処理する。長時間のAPI polling中にDB行ロックを保持しない。期限切れ・Cancel・Steer・Owner変更では古い結果の適用を禁止し、外部請求の成否が不明ならUNKNOWNを維持する。
+
+BSESS-T16はFake Providerの遅延応答と2 worker raceを注入し、solve中のAgent click/Human takeoverが発生せず、古いsolve結果の注入が0件であることを証明する。**テスト未実行・跨CHAT契約調停待ち。**
