@@ -122,7 +122,7 @@ selection reason, capability cache age, fallback count, p50/p95 model latency, t
 
 ## 11. Persistence/migration [PROVISIONAL: CHAT_10]
 Model profiles stored as versioned snapshots; ModelAttempt row has provider/model/price/profile hash, status/usage and goalRevision. Resume resolves original adapter/model when continuation pinned. Actual payment records from provider may arrive late; usage reservation not automatically refunded without evidence. Tool intent only after complete normalized reply is persisted.
-Cas records recordVersion=1で開始する提案。UUIDv7を満たさないDB default gen_random_uuid()は改修必要。Task conversation null/activeRunId/goalRevision、Run leaseEpoch/owner/expiryも現在PR #10では整合未完。Schema versionとsnapshot migrationはexpand/contract手順とfallbackの安全停止を用意。Event/Outbox/usage receiptはatomic commit。
+CAS recordVersionは1開始。現在PR #10はtrusted UUIDv7（v4 DB defaultなし）、nullable Task conversation、Task.activeRunId/goalRevisionとRun leaseEpoch/owner/expiryを物理DDLに提案済み。旧Round1不整合を現行P0とはみなさず、Model Routerの実際のfence/usage commit/failover試験を未検証P0として保持する。Schema versionとsnapshot migrationはexpand/contract手順とfallbackの安全停止を用意。Event/Outbox/usage receiptはatomic commit。
 
 ## 12. UI/API [PROVISIONAL: CHAT_08]
 Task details show selected model, factual token/cost receipts, fallback reason and whether estimates are uncertain. User-specified model may be declined if missing required tool/vision capability; never fake support.
