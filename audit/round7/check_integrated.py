@@ -25,6 +25,23 @@ for filename in found:
   if not url or url.startswith(("https:","http:","mailto:","data:","sandbox:")):continue
   target=ROOT/url if url.startswith(("docs/","prompts/")) else p.parent/url
   if not target.exists():broken.append({"file":filename,"target":url})
+# Cross-owner fingerprint gates on the actual combined files, not merely the source PRs.
+obligations={
+"docs/10-infrastructure/database-schema-and-migrations.md":["external_subscription_generations","notification_intent_ownership","digest_active_member_only","parser_jobs","change_baselines","memory_feedback_mutations","schema_migrations"],
+"docs/13-event-ingestion/event-driven-agent.md":["subscriptionGeneration","nativeEventId","receipt","revoke"],
+"docs/13-event-ingestion/notification-intelligence.md":["notification_intent_ownership","coverage_unknown","CHAT_07"],
+"docs/07-automation/notification-outbox.md":["notification_intent_ownership","coverage_unknown","UNKNOWN"],
+"docs/12-intelligence/entity-resolution.md":["retailer_storefront","mappingRevision","REVIEW"],
+"docs/14-adaptive-experience/feedback-learning.md":["retailer_storefront","Memory Writer","Undo"],
+"docs/14-adaptive-experience/learned-browser-actions.md":["read_only_click","read_only_fill","POST"],
+"docs/01-contracts/evidence-artifact-contracts.md":["TransformLocatorV1","sourceSha256","CitationLocator"],
+"docs/15-multimodal/multimodal-ingestion.md":["parser_jobs","sourceSha256","no-network"],
+"docs/13-event-ingestion/change-intelligence.md":["change_baselines","scope_digest","unknown"],
+"docs/11-qa/end-to-end-acceptance.md":["QA-R5-T01","QA-R5-T02","DomainEvent"]}
+for f,terms in obligations.items():
+ content=(ROOT/f).read_text()
+ absent=[q for q in terms if q not in content]
+ if absent:err.append("cross-owner contract markers "+f+": "+str(absent))
 if numeric:err.append("JSON int64 numeric "+str(numeric))
 print("ROUND7_RELATIVE_LINK_WARNINGS",json.dumps(broken[:50],ensure_ascii=False))
 # Relative links are collected for targeted correction; external providers may be missing locally.
@@ -58,5 +75,5 @@ if os.getenv("VERIFY_SOURCE_HEADS","0")=="1":
    checked+=1
  if checked!=85:err.append(f"expected 85 source blobs: {checked}")
 print("ROUND7_INTEGRATED_STATUS",json.dumps({"required":len(required),"localDocs":len(found),"sourceBlobs":checked,
-"preexistingFoundation":len(baseline_extras),"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
+"preexistingFoundation":len(baseline_extras),"crossOwnerContractMarkers":len(obligations),"relativeLinkWarnings":len(broken),"int64JsonErrors":len(numeric),"errors":err},ensure_ascii=False))
 sys.exit(1 if err else 0)

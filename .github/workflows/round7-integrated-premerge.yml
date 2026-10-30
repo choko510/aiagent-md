@@ -1,7 +1,7 @@
 name: round7-integrated-premerge
 on:
   push:
-    branches: [integration/round7-all-specs-premerge]
+    branches: [main, integration/round7-all-specs-premerge]
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,7 +15,7 @@ jobs:
       - name: Check 85 integrated MDs and exact 61 Draft PR blob SHAs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERIFY_SOURCE_HEADS: '1'
+          VERIFY_SOURCE_HEADS: "${{ github.ref == 'refs/heads/integration/round7-all-specs-premerge' && '1' || '0' }}"
         run: python3 audit/round7/check_integrated.py
   postgres-ddl:
     runs-on: ubuntu-latest
