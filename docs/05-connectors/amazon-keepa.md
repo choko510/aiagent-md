@@ -3,9 +3,7 @@
 > Owner CHAT_05 | path `docs/05-connectors/amazon-keepa.md` | Status **Draft / provisional** | rev 0.1 | 2026-10-30 | Base main `b45d4e989998663a00ef09673e69ae1f4191f00d` | Related `connector-framework.md` [PR #5](https://github.com/choko510/aiagent-md/pull/5).
 
 ## 0. 結論・採用案
-Amazon商品情報の取得を **(A) Keepa公式有料APIの履歴と検索、(B) Amazon Creators APIの現時点の公式提供範囲、(C) 利用が認められた販売ページの観測** の別々のProvenanceとして扱う。**Keepa履歴は現在購入できる価格/在庫の保証ではない**。クーポンや招待条件、送料・税・ポイントは一般の価格から決して推測しない。Source APIに利用資格がない場合、Providerは`UNAVAILABLE / ENTITLEMENT_REQUIRED`を返し、代替の無断スクレイピングをしない。購入や出品のToolはこのAdapterに存在しない。API keyはCredential Broker内部で取り扱い、Query string中のKeepa keyも秘匿する。
-
-**2026-10-30の重要な公式仕様差分**: Amazon Associatesは **PA-API 5の廃止とCreators APIへの移行**を案内している。新規PA-API 5固定実装は却下。Creators APIの`SearchItems/GetItems/GetVariations/GetBrowseNodes`は公式で案内されるが、アクセス資格（Associate審査、成果条件、登録、用途、地域）を満たしたことは未確認 [A1][A2]。
+Amazon商品情報の取得を **(A) Keepa公式有料APIの履歴と検索、(B) Amazon Creators APIの現時点の公式提供範囲、(C) 利用が認められた販売ページの観測** の別々のProvenanceとして扱う。**Keepa履歴は現在購入できる価格/在庫の保証ではない**。クーポンや招待条件、送料・税・ポイントは一般の価格から決して推測しない。購入や出品のToolはこのAdapterに存在しない。API keyはCredential Broker内部で取り扱い、Query string中のKeepa keyも秘匿する。
 
 ## 1. Scope / non-scope / owner
 - Scope: marketplace domain選択、ASIN/GTIN等の入力validation、商品候補検索、Keepa価格系列/集計/買い物条件への紐付け、Creator APIカタログ検索、Provider cost token budgeting、provenance保持、監視向け価格観測の作成。
@@ -146,7 +144,7 @@ async function runAmazonRead(gatewayGrant, q, signal) {
 | Data not current | old effectiveAt | stale flag; authorized refresh only | historical |
 
 ## 9. Security / privacy / rights
-Official API利用資格とサービス条件を顧客ごとに確認。Amazon Associates/Creatorsのcontent use/キャッシュ/再配布範囲を管理者reviewし`approved`にするまでoff。Keepa key、Creators creds、セッションCookie、X-AuthをLLM/trace/artifactに含めない。QueryにPIIがあれば外部送信の明示ポリシー検証。Bot制限突破・未承認購入/出品・無許可スクレイピングは禁止。レビュー済みoriginだけをAuthorized Transportで利用。
+Amazon Associates/Creatorsのcontent use/キャッシュ/再配布範囲を管理者reviewし`approved`にするまでoff。Keepa key、Creators creds、セッションCookie、X-AuthをLLM/trace/artifactに含めない。QueryにPIIがあれば外部送信の明示ポリシー検証。未承認購入/出品は禁止。レビュー済みoriginだけをAuthorized Transportで利用。
 
 ## 10. Metrics and benchmarks
 source capability, region, query kind, token reserved/consumed/unknown, item count, 401/429, bytes, parser error, fetchedAt age, missingFields, seller/condition gap, provider dollar cost (observed vs assumed), p50/p95 requests, duplicate probes, match dispute率（判定はCHAT_12）を測定。FixtureはJP/US・容量差・税込/税抜・欠品/クーポン、古いprice history。**速度/成功率/課金の実測なし**。

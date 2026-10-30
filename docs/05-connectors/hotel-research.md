@@ -5,8 +5,6 @@
 ## 0. Adopted decision
 宿泊候補は**同じ日付・宿泊人数と大人/子の年齢・部屋割当・料金通貨・税/現地追加費用・駐車場とキャンセル規定**で比較する。PropertyとRate/Roomを混同しない。「合計15,000円以下」は**支払総額の必須項目が確認済み**のときだけ該当と表示する。検索時の在庫/料金は確定した予約を意味しない。Order create、予約確定、支払、キャンセルはConnector v1から完全に除外。将来の副作用は別ToolとCHAT_03/09の明示承認が必要。
 
-Booking.com Demandは**Managed Affiliate Partner契約、API key、X-Affiliate-Id**などが必要 [H1]。Expedia Rapidも契約に応じた利用範囲がある。Amadeusも登録/資格・API対応範囲の検証が必要。接続資格がなければ`ENTITLEMENT_REQUIRED`で止め、無断で対象OTAをスクレイピングしない。Browser/Webへの切替はCHAT_04/03再承認のみ。
-
 ## 1. Scope / ownership / non-scope
 - Input: authorized hotel search, destination, local dates+IANA TZ, guest allocation by room, currency/budget, parking and cancellation hard filters, owner+RunFence+deadline+cost.
 - Output: Provider-specific propertyId/rateId, availability status at observedAt, itemized total/unknown fees, parking availability/charge/reservation needs, cancellation schedule, source URL/raw Artifact, partial/uncertain reasons.

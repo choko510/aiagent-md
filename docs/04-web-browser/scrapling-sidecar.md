@@ -8,7 +8,6 @@ ScraplingはPythonでStatic HTTPとChromium系のStealthyFetcher、Selector、MC
 
 - **採用案**: 制約済み内部RPC（Unix socketまたは認証済み内部network）＋独立Python環境。CSS/XPath解析・静的HTML抽出を優先。MCP modeは権限・セッション・取消・容量のAdapter完成後の実験のみ。
 - **却下案**: MCPツールをそのままモデルへ全面公開、Scrapling内部Session UUIDを公開BrowserSessionとして利用、StealthyFetcherでCAPTCHA突破を保証、Sidecarへhost file/process権限を渡す。
-- **非目標**: 認証を迂回した取得や無断スクレイピング、全サイトのCloudflare突破保証、専用X/ホテルAPIとの同一性判定、Sidecarでの承認/ユーザー認証。
 
 ## 1. 目的・Input/Output・Owner / シナリオ
 側車はHTML/ResponseArtifact参照からのCSS/XPath/metadata抽出を受け、元HTMLと抽出値のoffset/path/selectorを保持して返す。既存HTTP Fetchと重複して同一URLを二重取得しない。SidecarへURL fetchを委譲する場合もネットワークPolicyが全URLを再検証する。

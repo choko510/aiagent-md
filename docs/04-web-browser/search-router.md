@@ -9,7 +9,7 @@
 
 検索は「検索会社を一つ呼ぶ関数」ではなく、**ユーザーの条件を保持した計画→能力の分かるProviderを選択→認可済みTool実行→応答を検証→出典を保全→重複を整理→Fetch/Browser/専用APIの次の調査へ渡す**決定的なオーケストレーターとする。
 
-- 汎用Webの初期Provider候補は、**管理者が構成したSearXNG JSON API**と**契約済みBrave Web Search API**。どちらも必須とはしない。両者が利用不能な場合は実検索の失敗を返し、検索結果を捏造しない。実行時の資格・規約・quota・価格を確認する。
+- 汎用Webの初期Provider候補は、**管理者が構成したSearXNG JSON API**と**契約済みBrave Web Search API**。どちらも必須とはしない。両者が利用不能な場合は実検索の失敗を返し、検索結果を捏造しない。実行時の資格・quota・価格を確認する。
 - **公式API/特化Connector（CHAT_05）が対象データの正本に近い場合は先にそちらへ委譲**。Search Routerがログイン済みサイト、商品実売価格、SNS全文、空室の実在性を保証することはない。
 - **Search snippet / 検索結果の表示日は観測事実そのものではない**。Provider上の日時条件は検索範囲のヒントであり、公開/更新日や価格・空室・在庫は原典へのアクセスと抽出で確認して初めて確度を上げる。
 - **LLMは検索意図・検索語の作成には使えても、権限・費用・時刻条件・検索結果の存在を決める権威にはしない。** デフォルトはテンプレートによる少数のクエリ。結果不十分な場合のみ有限の再計画。
@@ -365,7 +365,6 @@ Retryは「送信済の外部料金が請求されない」を保証しない。
 4. **プライバシー**: 調査語そのものが本人に関する秘密を含む。Provider毎に第三者送信可否をTask Policyで制御し、ローカルSearXNGでもその先の外部検索エンジンに送信されることを明記する。ログは統計/ハッシュ化し、完全Query/URL保存は利用者アクセス制御付きEvidence内の最小限に。
 5. **ドメイン偽装**: 国際化ドメイン、punycode、偽サブドメイン、ユーザー情報付きURL、javascript:/data:/file:等を無害な候補として表示しない。許可されたURLでも悪意あるページの可能性あり。
 6. **外部副作用**: 検索は読み取り専用に限定。購入、予約、投稿、プロファイル変更、通知送信を勝手に起動しない。認証必要なAPIへ無断エンドポイント探索しない。
-7. **規約**: Providerと対象サイトのAPI資格、rate limit、利用規約、robots/サイトポリシーの遵守は導入時に検証。scraping/Cloudflare/CAPTCHA回避成功を約束しない。
 8. **DoS**: 文字列長/クエリ数/レスポンスサイズ/redirect/timeout/並列度を有限にし、同一User・Task・Providerでquotaを予約して集中制御する。
 
 ## 10. 計測・Trace・性能評価条件
@@ -481,7 +480,7 @@ SHOULD SRCH-023/024/025は T-SR-023/024/025。LATER/EXPERIMENTは T-SR-026 と�
 | X-SR-07 / P1 | [PROVISIONAL: CHAT_08] 08-01/08-03 | partial/coverage/取得時刻/未検証filterの表示 | 実際に検索した範囲をUI/RESTへ正しく提示 |
 | X-SR-08 / P1 | [PROVISIONAL: CHAT_11] 11-01/11-04 | Provider評価fixture・測定基準/許容誤差未確定 | JA/EN・国/期間/一次資料・失敗注入のベンチマークで最適Providerを決定 |
 | X-SR-09 / P1 | CHAT_04 04-02/04-08 | URL canonicalization、Fetcher safe redirect、本文由来のverified date/primary source判定の正本 | 先行基盤契約に合わせて修正。URL構文パースだけでSSRF防御済みとしない |
-| X-SR-10 / P2 | CHAT_00 00-05 | Provider defaultsと利用規約、相対日付を絶対化するTZ/time provider | ADR化。SearXNG JSON有効化・Brave契約は導入決定後に再確認 |
+| X-SR-10 / P2 | CHAT_00 00-05 | Provider defaultsと相対日付を絶対化するTZ/time provider | ADR化。SearXNG JSON有効化・Brave契約は導入決定後に再確認 |
 
 **未確定でも構築可能な部分**: source fixture、local schema validation、Gateway fake、SearXNG/BraveのProvider Adapter mock、dedup/provenance unit tests。**P0解消前にLocked不可**。共有契約を本書内のlocal pseudotypesへ無断移管しない。
 

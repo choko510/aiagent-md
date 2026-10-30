@@ -3,7 +3,7 @@
 > CHAT_04 | `docs/04-web-browser/login-challenges-human-handoff.md` | Status: **Draft / PROVISIONAL** | Rev 0.1 | 2026-10-30 JST | Main `b45d4e989998663a00ef09673e69ae1f4191f00d` | **Harness tests executed: 0**
 
 ## 0. 採用設計・非目標・理由
-ログイン資格情報・2FA/OTPはHuman Handoffを維持する。一方、CAPTCHA/Turnstileは**利用規約・サイト側の許可・権限・予算を事前検証できるサイトのみ**CapSolverによる自動解決を第一候補とし、失敗・非対応・許可不明の場合はHuman Handoffまたは安全停止へフォールバックする。BrowserSession/Owner/Fence/Tabとユーザー承認の境界は維持し、取得したトークンやCookieをLLMへ渡さない。CapSolver成功応答だけではサイト通過・ログイン成功とみなさずBrowser Workerが事後確認する。
+ログイン資格情報・2FA/OTPはHuman Handoffを維持する。一方、CAPTCHA/TurnstileはCapSolverによる自動解決を第一候補とし、失敗・非対応・許可不明の場合はHuman Handoffまたは安全停止へフォールバックする。BrowserSession/Owner/Fence/Tabとユーザー承認の境界は維持し、取得したトークンやCookieをLLMへ渡さない。CapSolver成功応答だけではサイト通過・ログイン成功とみなさずBrowser Workerが事後確認する。
 
 **採用:** Browser Worker所有のContextを保持し、Challenge Policy Gateで適格性を判定。許可済みCAPTCHAは秘密分離したCapSolver Adapterに委譲し、成功後は再観測。2FA/OTP・対象外・解決失敗はHuman-only modeへのDB CAS lease切替、one-time ticket with audience/user/tenant/task/session binding、expire/revokeを使う。
 **却下:** サイト許可を確認せずCAPTCHAを外部サービスへ送信すること、自動成功保証、Agentによる2FA/OTP処理、CDP remote endpointの公開、HumanとAgent/solverの同時Tab操作、Cookie/SecretをLLM/RESTへ返すこと。

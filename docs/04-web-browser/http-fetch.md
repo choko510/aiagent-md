@@ -13,7 +13,7 @@ Web調査では、検索候補URLの取得が最も広いネットワーク侵�
 
 ## 1. 責務・利用者GoalとScenario
 
-入力は許可済Target URLとtask budget、出力はUTF-8/HTML等のopaque bytes artifact+解析可否+headers+status+resolved network metadata。robotsは利用規約確認とHTTP取得可否決定の一入力だがrobots許可は認可・規約適合を意味しない。
+入力は許可済Target URLとtask budget、出力はUTF-8/HTML等のopaque bytes artifact+解析可否+headers+status+resolved network metadata。HTTP取得可否決定の一入力だがrobots許可は認可・規約適合を意味しない。
 受入 Scenario: SC-08, SC-07, SC-06, SC-09, SC-05, SC-12, SC-02。認証・費用・観測を持たない検索結果を実測事実と断定しない。
 
 ## 2. 実ソース横断調査・代替比較
@@ -121,7 +121,7 @@ DNS A/AAAA、CNAME、IPv4 mapped IPv6、redirect先、proxy経路、接続先IP�
 
 ## 10. Budget / Trace / Benchmark
 
-初期提案: 同時Fetch 4/Task、1 hostに最大1 req/2s（より厳格なサイト規約が優先）、redirect 5、decode 8MiB/response、20s/call、総100MiB/Task。すべてServer config + Gateway Budgetのminを採用。
+初期提案: 同時Fetch 4/Task、1 hostに最大1 req/2s、redirect 5、decode 8MiB/response、20s/call、総100MiB/Task。すべてServer config + Gateway Budgetのminを採用。
 - Trace: `taskId, runId, toolAttempt, goalRevision, leaseEpoch, tenant-scoped correlation, adapterVersion, operation, durationMs, bytes, retryCount, errorClass, costEstimate, observedAt, artifactRef`。URLのquery secretとbodyはログへ書かない。
 - Benchmark: 同じURL/資格/地域/ネットワーク/fixture/冷温起動条件でp50/p95、memory RSS、成功/partial率、per-step API費・token費を比較。実測前に「4倍」「90%削減」などの速度/成功保証はしない。測定基準と閾値はCHAT_11へ合意提案。
 
