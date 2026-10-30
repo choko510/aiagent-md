@@ -97,7 +97,7 @@ Jevリポジトリの`password.ts` redaction等は参考だが、本Harnessのse
 
 ## 10. 永続化・Transaction / Migration
 Jev provider/model version、usage tokens、judgment proposal hash、snapshot generationとJev result、action採否/Tool intentを異なるrecordとして保存。秘密の文章とCookieはログ対象外。
-[PROVISIONAL: CHAT_10] Browser Session/Task/Run UUIDv7とSession/Run leaseEpochのDB CAS、nullable Conversation、recordVersion初期値1とrevision0の差、tenant-to-workspace mappingの統合はP0。物理DDLを本書で勝手に作らない。操作意図commit→外部操作→Result/Artifact commit→outboxの境界を守る。
+[PROVISIONAL: CHAT_03/09/10] 現行PR #10にtrusted UUIDv7・nullable Conversation・recordVersion初期1・Run leaseEpochの物理列は提案済み。Jev独立session generation、実Tool Gateway認可・Budget・Browser owner fenceとUNKNOWN送信のRuntime試験はなおP0。物理DDLを本書で勝手に作らない。操作意図commit→外部操作→Result/Artifact commit→outboxの境界を守る。
 
 ## 11. UI/REST/他モジュール
 Jevの判断候補と理由は提案として表示。ステップ実行/サイト障害/認証待ちを区別。結果確定は後続Action observationがある場合のみ。
