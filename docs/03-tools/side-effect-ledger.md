@@ -112,7 +112,7 @@ interface ReconcileCommand {
 }
 ~~~
 
-Types above are **CHAT_03-local projections only**, not CHAT_01 shared Event/Evidence shapes. `IntentState` is Ledger-local; Task/Run states are owned by CHAT_01. All public Entity IDs must conform to canonical UUIDv7, cannot use DB default `gen_random_uuid()` without compatible explicit ID generation. `DecimalFence` ↔ CHAT_01 number / CHAT_02 bigint / DB bigint mapping must reject overflow, negatives and fractional JS numbers. Never use HTTP/LLM `tenantId` to select rows; derive from authenticated WorkerTask lineage.
+Types above are **CHAT_03-local projections only**, not CHAT_01 shared Event/Evidence shapes. `IntentState` is Ledger-local; Task/Run states are owned by CHAT_01. All public Entity IDs must conform to canonical UUIDv7, cannot use DB default `gen_random_uuid()` without compatible explicit ID generation. `DecimalFence`はCHAT_01のcanonical int64 **decimal string** wire ↔ CHAT_02内部BigInt ↔ DB BIGINTを無損失で変換し、JS number/overflow/negative/fractionを拒否する。 Never use HTTP/LLM `tenantId` to select rows; derive from authenticated WorkerTask lineage.
 
 **Proof policy**：
 - `PROVIDER_STATUS_CONFIRMATION` = authenticated read of same provider operation id under same account, with definitive business status.
