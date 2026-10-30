@@ -113,7 +113,7 @@ input tokens by trust tier; summary compression ratio and fidelity failures; har
 
 ## 11. Persistence/migration [PROVISIONAL: CHAT_10]
 Raw Tool bytes/summary/ContextPlan include immutable artifact hashes/GoalRevision/versions and are referenced by durable checkpoint; raw and summary ACL tenant scoped. Summary write+checkpoint pointer commit after artifact durability, not within external HTTP. Retention and encryption decisions CHAT_09/10. Old snapshots support rehydration with schema adapters.
-Cas records recordVersion=1で開始する提案。UUIDv7を満たさないDB default gen_random_uuid()は改修必要。Task conversation null/activeRunId/goalRevision、Run leaseEpoch/owner/expiryも現在PR #10では整合未完。Schema versionとsnapshot migrationはexpand/contract手順とfallbackの安全停止を用意。Event/Outbox/usage receiptはatomic commit。
+CAS recordVersionは1開始。現在PR #10のDDLにはtrusted UUIDv7（v4 DB defaultを廃止）、nullable Task conversation、activeRunId/goalRevisionとRun leaseEpoch/owner/expiryの物理列がある。旧不整合は設計上の修正済みで、実RuntimeのCAS・認可・復旧テストは未完了。Schema versionとsnapshot migrationはexpand/contract手順とfallbackの安全停止を用意。Event/Outbox/usage receiptはatomic commit。
 
 ## 12. UI/API [PROVISIONAL: CHAT_08]
 Show concise retrieval sources and what is older; compaction is internal and never implies new search. Human Handoff and credential artifacts excluded from LLM. Warning when evidence too large and precision uncertain.
