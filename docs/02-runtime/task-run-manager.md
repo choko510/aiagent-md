@@ -146,7 +146,7 @@ Root Shell、SSH、Docker socket、privileged containerをAgentへ与えない�
 Trace metrics: runId/taskId/attemptNo/leaseEpoch/stepCursor, controlVersion, queueWaitMs, claimLatencyMs, executionMs, health/drain time, pending approvals, uncertain effects, tool dispatch denials, checkpoint failures, billed/estimated USD。初期値は同時Run=2、Job buffer=16、deadline=30分（未実測の設計例）。欠測は0として扱わずunknown。テスト前に速度・成功率・費用優位を断言しない。
 
 ## 11. Persistence/transaction/migration提案
-[PROVISIONAL: CHAT_10] UUIDv7 trusted server生成、DB gen_random_uuid() defaultはUUIDv7要件と矛盾するため除去案。Task.conversation_idはnullable。record_version初期1、Run.lease_epoch bigint default0とcurrent owner/expiry、Task.active_run_id、goal_revisionとimmutable revision history、outboxとCommand receiptを原子的に保存。旧schema migrationでは二重active Runと孤児Goalをquarantineし、old Workerを停止してから移行する。
+[PROVISIONAL: CHAT_10 Runtime verification] 現行PR #10のDDLはtrusted UUIDv7（DB側v4 defaultなし）、Task.conversation_id nullable、record_version初期1、Run.lease_epoch bigint初期0・lease owner/expiry、Task.active_run_idとgoal_revision、immutable goal revisions、outbox+command receiptを備える設計へ修正済み。**旧gen_random_uuid()/revision0を現行P0扱いしない**。次の未解決P0は実装WorkerがCASとRun fence/GoalRevisionを送信前・commit前に再検証し、外部副作用UNKNOWN時に盲目的再実行しないこと。旧schema migrationでは二重active Runと孤児Goalを隔離し、古いWorker停止後に移行する。
 
 ## 12. REST/UI proposal
 [PROVISIONAL: CHAT_08] POST commandはreceiptの202/201、GET Task/Runは状態を確定結果と区別。If-MatchはrecordVersionで428/412、idempotency fingerprintにはtenant/actor/operation/payload含む。SSEはdurable event cursorのresume、tentative model deltaは確定状態としてreplayしない。Browser handoff・approvalはredacted action summaryのみ。
