@@ -48,7 +48,7 @@ Authenticated human/API/Telegram -> (CHAT_08 transport/idem)
       -> DB/transaction/outbox CHAT_10
 ~~~
 
-Watch ownerUserId, tenantIdはCHAT_01/09から取得、DB workspace_idとのmappingは**[PROVISIONAL: CHAT_09/10]**。Watchの公開IDはCHAT_01提案UUIDv7、DBの gen_random_uuid()とは矛盾があるため、UUIDv7を作るtrusted adapterと永続一意制約をCHAT_01/10へ提案。**SHAによる重複キーはIDに代えない**。Watch起点TaskにConversationはnullを許す。Task.activeRunId、Run.leaseEpoch/goalRevisionはWatch Serviceが独自に更新しない。
+WatchのtenantIdとownerUserIdはCHAT_01/09契約に従い、現在のCHAT_10 PR #10は`tenant_id`・`owner_user_id`複合FKを提案済み。UUIDv7はtrusted serverが生成し、DBのv4 `gen_random_uuid()` defaultは現行0001 DDLで廃止済み。**旧Round1のworkspace-only/v4衝突を現行未解決P0として再掲しない**。残る未決事項は実Runtime認可、同一Tenant内の別owner制限、revocationと実装テスト。Watch起点TaskはConversation nullを許し、RunのfenceをWatch Serviceが直接更新しない。
 
 ## 4. 要件（MUST/SHOULD/LATER）
 
@@ -101,7 +101,7 @@ HTTP [PROVISIONAL: CHAT_08]: POST /api/v1/watches、GET /watches/:id、PATCH /wa
 JSON例（架空の公開投影、実IDではない）:
 
 ~~~json
-{"watchId":"01956e32-58c5-7a22-8b7c-913aa11c44c1","recordVersion":4,"definitionRevision":2,"status":"paused","target":{"kind":"provider-entity","reference":"provider:sku-a"},"nextDueUtc":null,"lastObservedAtUtc":"2026-10-29T04:00:00.000Z","notificationSummary":"Telegram verified"}
+{"watchId":"01956e32-58c5-7a22-8b7c-913aa11c44c1","recordVersion":"4","definitionRevision":"2","status":"paused","target":{"kind":"provider-entity","reference":"provider:sku-a"},"nextDueUtc":null,"lastObservedAtUtc":"2026-10-29T04:00:00.000Z","notificationSummary":"Telegram verified"}
 ~~~
 
 ## 6. State transitions / シーケンス
@@ -251,10 +251,10 @@ WAT-PR1: Watch domain validation+immutable definition & CAS（shared IDs/version
 
 | ID | Owner | Severity / 判定条件 |
 |---|---|---|
-| WAT-P01 | CHAT_01/10 | P0 UUIDv7公開WatchId vs gen_random_uuid()、recordVersion 1 vs DB revision0。migrationとValidator/T14合意 |
+| WAT-HIST-01 | CHAT_01/10 | 旧Round1のUUIDv4 default / revision0は最新PR #10で修正済み。現行の合格ゲートはshared validator + trusted UUIDv7生成 + CAS + 実装Adapterテスト T14。 |
 | WAT-P02 | CHAT_01/10/08 | P0 nullable Task.conversationId、Watch起点TaskのFK/DTO/T14 |
 | WAT-P03 | CHAT_02/03/10 | P0 trigger→Task+Outbox atomic、Run leaseEpoch/goalRevision、旧定義Tool阻止T03/T06 |
-| WAT-P04 | CHAT_09/10 | P0 ownerUserId/tenantId ↔ workspace_id、IdentityVersion/consent revokeと保存場所T10/T12 |
+| WAT-P04 | CHAT_09/10 | P0 Runtime認可: tenant_idだけでは別ownerアクセスを拒否できない。authenticated principalとWatch.owner、IdentityVersion/consent revoke、全Read/Write/SSEでT10/T12をE2E実行。旧workspace-only DDLは現行問題ではない。 |
 | WAT-P05 | CHAT_08 | P1 If-Match 412/428、Watch cancel vs retire、projection/ETag |
 | WAT-P06 | CHAT_13 | P1 SC-11 X EventSubscriptionのactorId/event identity、SC-12 diff、external eventとschedule triggerKey namespace T08 |
 | WAT-P07 | CHAT_12/14 | P1 EntityRefの同一性と明示feedbackがWatch条件を**暗黙変更しない**規則 |
@@ -291,3 +291,7 @@ Draftの理由: P0 contract調停未了、実装・実テスト未実施。
 
 ### Round 3 — lossless canonical version boundary (2026-10-30)
 All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
+
+
+### Round 6 — Canonical public Watch JSON serialization
+Watch GET/PATCH/SSEの`recordVersion`と`definitionRevision`は正規int64 decimal **string**（例: `"4"`, `"2"`）。既存§5 JSON例はこの表現へ修正済み。Client側でJSON numberへ変換して比較しない。If-Match/ETagとDB BIGINTの変換はlosslessで、User/Watch/Task IDはtrusted UUIDv7。**Tests:** WAT-R6-T01 parse projected JSON without numeric revisions, T02 2^53+1 roundtrip, T03 stale If-Match→412, T04 other owner within same Tenant→read/write deny. These are designed, not executed against Harness.
