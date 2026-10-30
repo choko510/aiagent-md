@@ -80,7 +80,7 @@ WAITING_INPUT/HUMAN_ACTIVE/SOLVING → EXPIRED|CANCELLED|REVOKED
 HUMAN_ACTIVE→WORKER_CRASH→REVALIDATING_or_WAITING_INPUT
 EXPIRED/CANCELLED terminal for ticket, new ticket requires new approval
 ```
-1. BrowserWorkerがchallengeを証拠とともに検出→2. Safe checkpoint/intent保存→3. Agent leaseを停止+epoch更新→4. APIで認証済owner確認→5. one-time ticket発行→6. WebUIがTicketを消費→7. BrowserWorkerにhuman-only secure display/input→8. Human release→9. owner/lease/goalRevision/Tab/Login stateを再検証→10. Agent mode lease再取得しResumeを通知。
+**以下はELIGIBILITY_CHECKでHuman Handoffに振り分けた場合のSequence。** 1. BrowserWorkerがchallengeを証拠とともに検出→2. Safe checkpoint/intent保存→3. Agent leaseを停止+epoch更新→4. APIで認証済owner確認→5. one-time ticket発行→6. WebUIがTicketを消費→7. BrowserWorkerにhuman-only secure display/input→8. Human release→9. owner/lease/goalRevision/Tab/Login stateを再検証→10. Agent mode lease再取得しResumeを通知。許可済みCapSolver経路は§18.2を参照。
 
 ## 7. アルゴリズム（疑似コード）
 ```typescript
@@ -119,6 +119,9 @@ async function releaseHandoff(authenticatedConnection,principal) {
 | 状況 | 検知 | 復旧 | 最終状態 |
 |---|---|---|---|
 | challenge suspected only | low evidence certainty | capture second bounded observation | UNCERTAIN |
+| CapSolver permission missing / denied | site policy or operator configuration not eligible | do not call provider; authorized Human Handoff or safe stop | WAITING_INPUT / DENIED |
+| provider error / timeout / browser still blocked | bounded attempt or failed page verification | never mark passed; human handoff or safe stop | WAITING_INPUT / UNKNOWN |
+| provider task ready after Cancel / goal change | stale epoch/revision/tab | discard old result without application or auto-retry | CANCELLED / UNKNOWN |
 | ticket replay | nonce already consumed | reject, audit | DENIED |
 | different owner | Task/tenant mismatch | no takeover | DENIED |
 | human disconnect | connection dead | lease grace→expire; no agent auto-resume | WAITING_INPUT |
@@ -142,13 +145,15 @@ Ticket hash、issuedAt/consumedAt/expiry/revokedAt、owner+session+goalRevision+
 原子操作: intent/lease reservation commit → 外部Action → result/ref + audit/outbox commit。DB physical schemaとmigrationはCHAT_10、Event/Evidence canonical shapeはCHAT_01。新規型はowner合意までlocal representationに留める。
 
 ## 11. REST/UI/他担当接続
-WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示。人間の終了/取消/期限切れボタン、復帰後に再認証結果と許可済みタスク状態を表示。APIはGET session redacted/POST handoff/POST releaseのみ（CHAT_08のDraftと一致要照合）。
+`SOLVING`中はCapSolverの実行状態・上限費用・取消操作・失敗理由を秘密除去して表示し、ユーザー本人のHuman takeoverは排他終了後にのみ開始できる。WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示。人間の終了/取消/期限切れボタン、復帰後に再認証結果と許可済みタスク状態を表示。既存APIはGET session redacted/POST handoff/POST releaseのみ（CHAT_08のDraftと一致要照合）。Solve状態の表示用API追加はCHAT_08に提案し、本書で新規エンドポイントを確定しない。
 
 ## 12. 実装PR順序
 1. **04-HND-1** Challenge observation typed evidence + simulator
 2. **04-HND-2** Ticket issuance/revoke/atomic consume + auth/lease CAS
 3. **04-HND-3** Secure Browser takeover display/input + resume revalidation
 4. **04-HND-4** Crash/replay/cross-tenant/side-effect adversarial E2E
+5. **04-HND-5 (proposed)** Challenge eligibility gate + CapSolver Adapter + budget/secret isolation
+6. **04-HND-6 (proposed)** Exclusive solve lease + site revalidation + fault/replay tests; cross-owner contracts approved first
 
 ## 13. Test design・REQ→TEST→SC
 **すべてテスト設計、実行なし**。Unit/Contract/Integration/Fault/Security/E2E/BenchmarkのFixtureと期待値。
@@ -188,6 +193,8 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 - **[PROVISIONAL: CHAT_08] P0 takeover UI:** Browser Session GET/handoff/release とTicket consume URL固定。検証: HND-T02/03/10。
 - **[PROVISIONAL: CHAT_03] P0 side-effect during human:** Human loginが外部購入/投稿のTool Approvalを代替しない。検証: HND-T14。
 - **CHAT_11**: Mock auth takeover、悪意あるHTML、複数Worker、照合不能フィールド、SC-05〜16の関係部分のE2E fixtureを正式テスト正本へ追加。
+- **[PROVISIONAL: CHAT_00/03/09] P0 CapSolver policy change:** ADR-009の許容範囲、サイト権限/第三者提供の同意、Provider費用/Secret正本を合意するまでは有効化しない。HND-T17/T18/T21/T23。
+- **[PROVISIONAL: CHAT_01/02/08/10] P1 solving lifecycle:** 状態・checkpoint・試行台帳とUIの共有契約を定義する。HND-T19/T20/T22。
 未解決P0はIdentity/Tenant/DB Epoch/Fencing/Authentication Ticket。全件Draft。
 
 ## 16. Sources / evidence grade（2026-10-30 JST）
@@ -206,7 +213,7 @@ WAITING_INPUTでLogin/2FA/CAPTCHA種別と操作可能な隔離画面を表示�
 
 ### 18.1 Eligibility / priority
 
-1. Detect a confirmed CAPTCHA/Turnstile with stable evidence; a generic 403/WAF block is **not** automatically a solvable CAPTCHA. Login credential, MFA, OTP, TOTP, device verification and access-denied remain Human Handoff or safe stop.
+1. Detect a confirmed CAPTCHA/Turnstile with stable evidence; a generic 403/WAF block is **not** automatically a solvable CAPTCHA. Login credential, MFA, OTP, TOTP, device verification and access-denied remain Human Handoff or safe stop. CapSolver's own Terms prohibit certain activities including automatic ticket purchasing; do not enable the adapter for vendor-prohibited uses.
 2. Browser Worker asks Tool Gateway/CHAT_09 site-policy authority: destination origin and purpose are explicitly authorized for automation **and** third-party CAPTCHA processing. Unknown, absent, prohibited or revoked permission fails closed. Robots/ToS and user authorization are evaluated separately; user direction alone does not override site constraints.
 3. An authenticated operator configures `capsolver.enabled`, a site-specific allowlist, a dedicated secret reference and finite `maxSolveAttempts/maxSolveSpend/maxSolveSeconds`. Configuration alone creates no authority for an origin.
 4. If permitted and supported, call the **deterministic** CapSolver adapter inside the existing Tool Gateway executor; never expose direct provider tools or API keys to the model. If not permitted/supported, use existing Human Handoff only where authorized, otherwise stop with a machine-readable reason.
@@ -250,5 +257,6 @@ Vendor documentation reviewed 2026-10-30 (**Docs verified**, not integration tes
 - [CapSolver API: getTaskResult](https://docs.capsolver.com/en/guide/api-gettaskresult/)
 - [CapSolver: supported task types](https://docs.capsolver.com/en/guide/api-support/)
 - [CapSolver for AI agents](https://docs.capsolver.com/en/guide/ai/capsolver-for-ai-agents/)
+- [CapSolver Terms and acceptable-use restrictions](https://www.capsolver.com/legal/terms)
 
 **Definition of Done:** HND-T08 and HND-T17…T23 pass in approved fixtures; no provider call for unapproved origin; no cross-tenant token or API-key leak; no duplicate spend under replay; no stale result after revoke; provider-ready-but-page-blocked never resumes; cross-owner ADR/permissions contract is approved. Until then Draft / PROVISIONAL.
