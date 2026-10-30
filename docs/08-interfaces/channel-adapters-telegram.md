@@ -16,7 +16,7 @@ Non-goals: independent LLM loop, username-based identity, group-global admin she
 
 Canonical owners: CHAT_01 Task/Run/Conversation/ID/Event/Version; CHAT_02 task commands/safe steer; CHAT_03 Tool Gateway + Approval; CHAT_07 watch and notification outbox; CHAT_09 AuthN/identity/session/secret policy; CHAT_10 channel bindings/outbox/idempotency physical table; CHAT_13 external event ingestion; CHAT_08 adapter/REST/SSE/Web interface.
 
-**Known conflicts:** public IDs UUIDv7 vs DB gen_random_uuid(); Task.conversationId nullable; recordVersion 1 vs DB revision 0; leaseEpoch is internal fenced bigint not Telegram-supplied; GoalRevision/activeRunId persisted by other owners; tenantId↔workspace_id mapping must be explicit. Each remains [PROVISIONAL] until PR #8 reconciliation + owner PRs are merged.
+**Round1 legacy conflicts reconciled in PR #10 Draft:** server-issued UUIDv7 without v4 DB default, nullable Conversation, recordVersion initial1 and Run fence/GoalRevision/activeRun physical columns. Telegram MUST NOT supply leaseEpoch or tenant/owner authorization; it consumes the authenticated CHAT_08/09+CHAT_01 wire contract, rechecking identityVersion/consent. Runtime/UI security and approval replay tests remain P0. Earlier claims of DB revision0, v4 generation and workspace-only tables are no longer current. Each remains [PROVISIONAL] until PR #8 reconciliation + owner PRs are merged.
 
 ## 2. OSS code/test audit (2026-10-30)
 
