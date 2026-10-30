@@ -92,12 +92,12 @@ CHAT_01: Core Models, Event Envelope, State, Evidence, Errors
 
 ### 5.1 ID / スコープ / Time / JSON / トランザクション
 
-- すべての業務テーブルに`tenant_id uuid not null`と`(tenant_id,id)`複合PKを使う（単一ユーザーでも将来の交差参照事故を防ぐ）。UUID生成は**APIのtrusted persistence adapter**で行ってよい。DBのdefault生成は補助。IDsをquery parameterとして渡す（SQL文字列連結禁止）。
+- すべての業務テーブルに`tenant_id uuid not null`と`(tenant_id,id)`複合PKを使う（単一ユーザーでも将来の交差参照事故を防ぐ）。UUIDv7の生成とValidationは**trusted server adapter**のみ。公開IDにDB側のUUIDv4/default生成は使わない（DB uuid型だけではv7を強制しないため、adapterと契約試験で検査）。IDsをquery parameterとして渡す（SQL文字列連結禁止）。
 - `created_at`、`observed_at`、`fetched_at`、`due_at`、`expires_at`はUTC解釈の`timestamptz`、`timezone_id`はIANAのTZ名（CHAT_07正本でvalidate）。実測時刻/サイト表示時刻/DB記録時刻は異なる。`updated_at`はDB triggerに依存させず更新SQLで明示する。
 - `jsonb`は正本Schemaバージョン列と共に使用し、trusted adapterでJSON Schema/Zod等を検証。重要な外部キー、query key、時間、idempotencyはJSONB内部に隠さない。
 - DBは使える限り`READ COMMITTED` + row lock + uniqueで実装。複数Entityをまたぐ不変条件は明示的なlock順序を使用、必要な箇所だけSerializable+`40001`全Transaction再試行。**外部HTTP requestをSQL transaction内に入れない**。
-- 非null status textの値は未決。初期migrationはCHECK enumを付けず、状態validatorがOwner canonicalに一致した時点で`CHECK ... NOT VALID`→validationとして後続migrationで追加する。
-- 並列write時の楽観排他には`record_version bigint NOT NULL DEFAULT 1`を使い、`UPDATE ... WHERE revision = previous RETURNING`で0行なら競合。Event writerはDomain row→aggregate counter→tenant counterの固定順序でTX内でロックする。
+- 非null status textの実値はCHAT_01 state契約合意前は暫定。初期migrationはCHECK enumを付けず、状態validatorがOwner canonicalに一致した時点で`CHECK ... NOT VALID`→validationとして後続migrationで追加する。
+- 並列write時の楽観排他には`record_version bigint NOT NULL DEFAULT 1`を使い、`UPDATE ... SET record_version=record_version+1 WHERE record_version=:expected RETURNING record_version`で0行なら競合。Event writerはDomain row→aggregate counter→tenant counterの固定順序でTX内でロックする。
 
 ### 5.2 Physical v1 proposal（初期migrationのSQL）
 
@@ -1467,3 +1467,9 @@ Prior v2 member FKs verified only `tenant_id`, not that the digest envelope and 
 ### 20.8 Round 5 actual PostgreSQL execution evidence (2026-10-30)
 The **proposed SQL/fixtures**, not the missing Agent Harness runtime, were executed on PostgreSQL 16 in the audit branch's GitHub Actions. Recorded successes: 0001→0002→0003, migration checksum match/skip-vs-mismatch decision, task-less Watch events and checkpoint FK, 32 parallel Event sequence writers, subscription generation rollover, digest owner/destination and active-member partial UNIQUE FKs, v3 Source/Trend/Risk/Feedback rows, 24 simultaneous duplicate X event receipts→one receipt + Task + goalRevision, failed transaction all-or-none rollback, revoked subscription→0 additional Task. See [Round 5 evidence](https://github.com/choko510/aiagent-md/actions/runs/40959094493). This test uses synthetic SQL as the behavioral executor; actual outbox, provider API, browser egress, migration runner concurrency, app-level authorization and human approvals remain NOT EXECUTED. SQL FKs prove only consistency of **claimed** owner binding; CHAT_07/09 sender must establish that binding from real authenticated provenance/consent, never actor-supplied IDs.
 
+
+
+### Round 6 — Canonical DB/HTTP revision mapping and immutable migration constraints
+- RecordVersion/GoalRevision/DefinitionRevision/LeaseEpoch and Event counters are **different dimensions**. Database signed BIGINT, internal BigInt, API/Event wire canonical decimal string; no JSON number, no implicit float. For CAS use `record_version` (not old `revision` symbol), initial `1`; `lease_epoch` may be `0` before claim. UUIDv7 is trusted server-issued and validated before DB insert; historical v4 test-generated IDs do not authorize production IDs.
+- Initial migration 0001 and proposed forward 0002/0003 have SHA256 ledger. They have been exercised against fresh PostgreSQL 16 **independent audit tests** only. `LOCKED` still depends on Domain/Event/Runtime/Authorization owner acceptance; `VERIFIED` depends on real migration driver upgrade/backfill/rollback/driver tests. Never mutate SQL already applied in production to change a checksum; instead issue a new forward migration.
+- **DB-R6-T01** tests trusted UUIDv7 roundtrip, v4 validator reject; **DB-R6-T02** 2^53+1 wire codec and optimistic CAS; **DB-R6-T03** synthetic Test SQL ensures old `revision=0` cannot silently bind a current `record_version=1` resource; **DB-R6-T04** cross-owner same Tenant read and digest enrollment denied. Newly authored R6 tests remain pending Runtime verification.
