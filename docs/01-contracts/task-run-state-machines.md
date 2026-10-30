@@ -201,7 +201,7 @@ Store transitionAttemptId/recordVersion/leaseEpoch/goalRevision/taskId/runId/act
 
 ## 11. Physical persistence [PROVISIONAL: CHAT_10]
 
-DB tables: tasks state_code, current_goal_revision, active_run_id, control_version/record_version, owner; runs task_id/attempt_no/state_code/input_goal_revision/lease_epoch/lease_owner/lease_expires/record_version, immutable checkpoint and effect ledger refs. Use composite Tenant→Workspace owner linkage and FKs. Terminal proof persisted in resource/result refs. State+Event+Outbox commit. DB revision defaults currently conflict (#10 revision 0) and must migrate to initial 1 via explicit compatibility policy. Run lease epoch decimal string maps DB bigint; do not use ToolAttempt fence as substitute.
+DB tables: tasks state_code, current_goal_revision, active_run_id, control_version/record_version, owner; runs task_id/attempt_no/state_code/input_goal_revision/lease_epoch/lease_owner/lease_expires/record_version, immutable checkpoint and effect ledger refs. Use tenant-qualified composite FKs and authenticated owner/active membership checks; Workspace is not an authorization grant. Terminal proof is persisted in resource/result refs, State+Event+Outbox commit atomically. Current PR #10 DDL proposes record_version initial 1; old revision0/default mismatch is historical. Actual CAS and schema compatibility remain unverified Runtime gates. Run lease epoch decimal string maps DB bigint; do not use ToolAttempt fence as substitute.
 
 ## 12. REST/UI/Telegram [PROVISIONAL: CHAT_08]
 
