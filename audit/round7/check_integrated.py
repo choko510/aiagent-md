@@ -8,8 +8,17 @@ found_all=sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/"docs").glob("[0-
 found=sorted(set(found_all)&set(required))
 baseline_extras=sorted(set(found_all)-set(required))
 err=[];broken=[];numeric=[]
-if len(baseline_extras)!=10 or any(not x.startswith("docs/00-foundation/") for x in baseline_extras):
- err.append("unexpected pre-existing documents outside 85 module inventory: "+str(baseline_extras))
+if set(baseline_extras)!={
+ "docs/00-foundation/acceptance-scenarios.md",
+ "docs/00-foundation/architecture-rules.md",
+ "docs/00-foundation/feature-expansion-2026-10.md",
+ "docs/00-foundation/project-brief.md",
+ "docs/00-foundation/research-protocol.md",
+ "docs/00-foundation/research-targets.md",
+ "docs/00-foundation/review-gates.md",
+ "docs/00-foundation/spec-index.md",
+}:
+ err.append("unexpected foundation reference documents outside 85 module inventory: "+str(baseline_extras))
 if len(required)!=85 or len(set(required))!=85 or set(required)!=set(found):err.append(f"inventory wrong {len(required)}, found {len(found)}, missing={set(required)-set(found)}")
 counts=dict(collections.Counter(p.split("/")[1][:2] for p in found))
 expected={"00":5,"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6,"10":5,"11":4,"12":5,"13":3,"14":2,"15":1}
