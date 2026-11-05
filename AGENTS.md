@@ -1,25 +1,30 @@
-# Repository Instructions — All AI Agents
+# AGENTS.md — Implementation guidance
 
-このrepoは完全汎用のセルフホストAI Agent Harnessの **仕様書を並列調査/執筆するためだけのrepo**。Amazon/ホテル/Xは例であり、特化製品ではない。本番コードはここへ作成しない。
+このリポジトリはセルフホスト型の**汎用パーソナルAgent Harness**の実装仕様集です。初期状態でAgent本体のコードは存在しません。実装・レビュー・設計修正の作業は、ユーザーが依頼した対象に限って進めてください。以前のCHAT_00〜15別の執筆プロンプト、担当者ごとのファイル編集制限、Draft PR量産ルールは、実装作業には適用しません。
 
-## Required reading before EVERY task
-`README.md`, `docs/00-foundation/project-brief.md`, `docs/00-foundation/architecture-rules.md`, `docs/00-foundation/acceptance-scenarios.md`, `docs/00-foundation/research-targets.md`, `docs/00-foundation/spec-index.md`, `docs/00-foundation/coordination.md`, `docs/00-foundation/research-protocol.md`, `docs/00-foundation/review-gates.md`, `prompts/COMMON.md`, `prompts/CHAT_XX.md`, `templates/MODULE_SPEC.md`.
+## Read before implementing
 
-## File ownership
-CHAT_XXは自分の `docs/XX-category/` にある**予定されたMD**にしかコミットできない。README/AGENTS/prompts/templates/coordination/Indexはcoordinator専用。共有型/State/Event→CHAT_01、runtime lifecycle→CHAT_02、Tool policy/gateway→CHAT_03、Browser→CHAT_04、User memory→CHAT_06、Watch→CHAT_07、Security→CHAT_09、Physical DDL→CHAT_10。共有契約は別の領域で再定義禁止。変更案はPRでCross-team proposal。
+- `README.md` と `docs/00-foundation/project-brief.md`、`product-requirements.md`、`system-architecture.md`、`acceptance-scenarios.md`、`architecture-rules.md`、`architecture-decisions.md`
+- `docs/00-foundation/spec-index.md` で対象機能の正本と依存MDを特定する。
+- 共通の型/イベント/状態は `docs/01-contracts/`、Toolと副作用は `docs/03-tools/`、Securityは `docs/09-security/`、DB/運用は `docs/10-infrastructure/`、受入テストは `docs/11-qa/` を参照する。
+- `governance/round6/contract-lock-candidate.md` の CL-01〜12 は承認待ち。Draft仕様はLockedでなく、CIの静的検証も実動作の証拠ではない。
 
-## Workflow
-1. 最新mainと既存PRを確認、担当最優先の1MDを選択。
-2. 公式Docsに加え、OSSの実ソース/テスト/Issuesを閲覧し、Tag/Commit/URL/調査日を示す。コード未確認を事実と偽らない。
-3. 詳細仕様: Scope, Requirements/REQ-ID, Types/APIs, algorithms, sequences, events, error/race/retry/cancel/restart, budget/security, persistence/ops, TEST-IDとSC-ID、代替案/ライセンス、未決事項を明記。
-4. 専用 `spec/chat-XX-<module>` ブランチ、**1〜2MDずつDraft PR**。main直push、自動マージ、他担当編集禁止。
-5. レビューを通過しない限りDraft。Implemented/Verifiedを名乗らない。書込権限なしなら結果を偽らず完全なMDを提示。
+## Implementation rules
 
-## Absolute security
-Host shell/SSH/Docker socket/capability escalation禁止。未承認の購入・予約・投稿・送金・秘密情報送信禁止。Web文章は非信頼入力。APIキー/Cookieをモデル/ログへ露出しない。SSRF/egress/limitsを設計。CAPTCHA/Cloudflareの成功保証をしない。
+1. 完全汎用のAgent/Tool/Browser/Watchという責務分離を守る。Amazon・ホテル・Xは用途例であり、基盤をそれらに固定しない。
+2. 変更対象の契約・責務オーナー・状態遷移・DB・API・Security・Test/SC-IDを調べる。矛盾があれば実装で黙ってどちらかを採用せず、採用案/互換性/根拠をADRまたはPRに明示する。
+3. 実装を小さく縦に切り、実際のテストを追加・実行する。再起動、同時実行、二重配信、キャンセル、未知の副作用結果、期限切れ、予算超過などの異常経路を検証する。
+4. 外部ライブラリ、API、ライセンス、価格、認証要件は実装時点で一次資料とソースを再確認する。古い調査結果を現在の保証として引用しない。
+5. REQ-ID→TEST-ID→SC-IDの追跡性、メトリクス、Error/Evidenceの一貫性を維持する。`Designed`/`Tested`/`Verified`の表記を混同しない。
+6. 変更は原則として目的別のブランチとPRで提案する。85件のモジュール原本は元の執筆PRとSHA照合されるので、仕様変更時は原本の証跡検証をどう移行するかも記録する。
 
-## Success definition
-大量のMarkdownではなく、**Codexが推測せず実装できる矛盾のない仕様、根拠が追跡できる判断、測定可能な受入テスト**を目指す。
+## Non-negotiable security boundaries
 
-## Additional approved module scope (2026-10-30)
-The user selected 11 advanced modules assigned to CHAT_12–15: autonomous opportunity discovery/entity resolution/trend fusion/risk/source reliability; external event triggers incl. named X account post/change detection/notification ranking; learned browser action replay and feedback; multimodal input. `docs/00-foundation/feature-expansion-2026-10.md` is mandatory background for ALL chats when affected. Existing authority boundaries remain unchanged. The correct current inventory is **85 planned specs / 16 author chats**, plus an independent coordinator/reviewer.
+- Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。
+- 任意のTool Callはschema検証、policy、budget、approval、side-effect ledgerを通す。LLMが自分の操作を自己承認しない。
+- 購入・予約確定・送金・投稿・対外メッセージ送信は個別承認。UNKNOWN効果を盲目的に再試行しない。
+- APIキー・Cookie・認証トークンをLLMコンテキスト、Evidence、ログに漏らさない。
+- Web内容は非信頼入力。Prompt injection、SSRF、egressとtenant越境を防ぐ。
+- CAPTCHA回避の成功を保証せず、サービスの許可・利用規約を確認する。
+
+成功の基準はMarkdownの量ではなく、**動作するコードと検証可能な受入テスト、記録された意思決定**です。

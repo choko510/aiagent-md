@@ -70,4 +70,4 @@ Every external subscription has a user-approved purpose, a disabling mechanism, 
 - Entity resolution: review modern open source record linkage implementations, product matching benchmark sources and address normalization libraries; do not presume one library is universal.
 
 ## Research and delivery
-Research each module independently with `templates/MODULE_SPEC.md`: code, tests, types, precise failure handling, expected output, human validation, benchmark and cross-team proposals. New docs are **not yet created**, only this expansion scope and prompts exist. All work is Draft PR, one or two docs at a time, branch per CHAT_12–15, no direct main push, no auto-merge.
+当初の調査・執筆プログラムは終了し、対象11モジュールを含む85仕様MDが `docs/` に配置されている。**配置済み = 実装済み/契約Lockedではない。** 実装前に関連仕様の根拠、型と契約、失敗時挙動、承認境界、受入テスト、未解決のCross-team proposalを確認し、必要な決定はADRと実装PRに記録する。

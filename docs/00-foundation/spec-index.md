@@ -92,10 +92,10 @@
 - CHAT_09: `docs/09-security/` (6 MD)
 - CHAT_10: `docs/10-infrastructure/` (5 MD)
 - CHAT_11: `docs/11-qa/` (4 MD)
-**Count: 85 module specs.** README/AGENTS/prompts/template/bootstrap文書は数えない。
+**Count: 85 module specs.** README、AGENTS、補助設計文書および調査履歴はこの件数に含まない。旧CHAT_XXは執筆当時の所有者ラベルで、実装担当を制約しない。
 
 ## Change control
-機能の分割/統合・命名変更は管理担当がADRと参照先を更新し、全担当に通知する。1MDの追加や変更は当該カテゴリに限りDraft PRで行う。 `Locked`化はレビューと契約整合後のみ。
+実装で仕様の変更が必要になったら、関連する正本・契約・依存モジュールを洗い出し、ADR、互換性、要件/テスト対応を含めてPRで更新する。元のCHAT担当区分は設計上の責務境界を示す履歴であり、実装作業を16チャットに分ける必要はない。`Locked`化は契約整合と承認後のみ。
 
 ## 2026-10-30 approved feature expansion — CHAT_12–15
 
