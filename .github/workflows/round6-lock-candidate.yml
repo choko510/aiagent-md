@@ -1,11 +1,6 @@
 name: round6-lock-candidate-audit
 on:
-  push:
-    branches: [main, review/round6-shared-contract-lock-candidate]
-  pull_request:
-    paths:
-      - 'governance/round6/**'
-      - '.github/workflows/round6-lock-candidate.yml'
+  workflow_dispatch:
 permissions:
   contents: read
   pull-requests: read

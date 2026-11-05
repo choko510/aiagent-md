@@ -1,7 +1,5 @@
 name: round7-integrated-premerge
 on:
-  push:
-    branches: [main, integration/round7-all-specs-premerge]
   workflow_dispatch:
 permissions:
   contents: read
