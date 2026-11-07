@@ -170,4 +170,8 @@ LICENSE: LangGraph / PydanticAI / pg-boss はMIT、@mastra/coreはpackage.json�
 
 ## 2026-11-07: Runtime Hostは物理ホストの権限を持たない
 
-論理Runtime Hostと物理Ubuntuホストは別。AgentLoop・Shell・Generated Python/Node/CLIはSecure VM内のUntrusted Runtime Cellだけで実行し、Protected ServicesのAPI/DB/Vault/Sentinel/CDPやホストのSSH/Docker/管理APIを直接使わない。新SandboxExecutionは[02-13](sandbox-execution.md)のCell Admissionでカーネル隔離・実行用image/ポリシーを確認。Run SessionはCellId/ExecutionId/WorkspaceRevision/attestation digestと現行Owner/GoalRevision/LeaseEpochを保持。Worker終了時に全子プロセスとGrantを停止する。外部送信はSentinel以外に出口を設けない。SC-17/18/21。
+論理Runtime Hostと物理Ubuntuホストは別。AgentLoopは別Trusted Control VM、Shell・生成Python/Node/CLIだけがUntrusted Execution VM Runtime Cellで実行し、Protected ServicesのAPI/DB/Vault/Sentinel/CDPやホストのSSH/Docker/管理APIを直接使わない。新SandboxExecutionは[02-13](sandbox-execution.md)のCell Admissionでカーネル隔離・実行用image/ポリシーを確認。Run SessionはCellId/ExecutionId/WorkspaceRevision/attestation digestと現行Owner/GoalRevision/LeaseEpochを保持。Worker終了時に全子プロセスとGrantを停止する。外部送信はSentinel以外に出口を設けない。SC-17/18/21。
+
+## P0-6 runtime process topology correction (2026-11-07)
+
+The term `Runtime Host` is a **logical Orchestrator in Trusted Control VM**, not a generated-code shell process and not the physical Ubuntu host. It owns Task/Run lease, model orchestration, checkpoint and approval references. **Untrusted Execution VM is a separate KVM guest kernel**, whose Supervisor accepts only server-owned signed Admission after Tool Intent commit and returns scoped bounded receipts. Do not give the generated process the Orchestrator's PID/UID namespace, writable rootfs, authenticated Gateway session, model credential or privileged IPC descriptors. Only per-Execution broker RPC may request registered concrete Tools, and each request is fresh owner/Task/Run/Lease/Capability checked. Security tests must prove that generated process cannot read Orchestrator memory/state/socket. SC-18/21.
