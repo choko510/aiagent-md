@@ -671,3 +671,7 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 ## 2026-11-07: SandboxExecutionのRead Projectionとコマンド
 
 POST /tasksが従来通りTaskを作成し、AgentLoop→Gatewayがsandbox.exec Intentを発行する。クライアントから無制限なshell実行可能なREST POST /execを**公開しない**。GET /runs/{id}/executions（提案）とGET /executions/{id}（提案）はowner/tenant認可済みのstatus、imageDigest、elapsed/resources、bounded stdout/stderr Artifact references、effect uncertainty、Cell attestation summaryのみ返す。出力/Artifactのプライベート内容やraw command/env/surrogate keysは原則閲覧権限を別途検証。Cancel/SteerはTask commandの正本を利用し、ExecutionをAPI bodyから直接RUNNINGとセットできない。正式PathとDTOはCHAT_01/08合同レビューまでProvisional。SC-17/18/21/22。
+
+## 2026-11-07: Browser Live Observation API候補 [PROVISIONAL]
+
+[詳細設計](browser-live-observation.md) に従い、既存の`GET /api/v1/browser-sessions/{id}`は権限あるownerに閲覧可否`observationAvailable`と安全な`observationBlockReason`をread-only表示。`browser:observe`は`browser:read`と`browser:takeover`/Approvalから独立した認可。`POST /api/v1/browser-sessions/{id}/observations`で短命閲覧subscriptionを作り、`GET /api/v1/browser-sessions/{id}/observations/{observationId}`で状態照会、`POST /.../offer`で認証済みWebRTC signaling、`POST /.../close`で終了。fallbackは同一origin `wss /.../frames` のbinary video。POSTにIdempotency-Key、終了にIf-Match、認証/Origin/CSRFとgeneration fenceが必要。Token/CDP URL/cookie/raw frameをURL、JSON、SSEに含めない。Replay/Expired/Owner mismatchで拒否。詳細DTOはOwner合意までDraft。BLO-T01/03/04/06/11、SC-23。
