@@ -215,7 +215,7 @@ type ContentTrust = "TRUSTED_POLICY" | "CANONICAL_GOAL" |
   "MEMORY_DATA" | "UNTRUSTED_EXEC_OR_WEB";
 
 type ClaimState = "VERIFIED_WITH_SOURCE" | "USER_ASSERTED" |
-  "HYPOTHESIS" | "CONFLICTED" | "UNKNOWN" | "EXPIRED";
+  "HYPOTHESIS" | "CONFLICTED" | "UNKNOWN" | "UNVERIFIED" | "EXPIRED";
 
 interface ContextCandidate {
   id: string;
@@ -237,12 +237,15 @@ interface ContextCandidate {
   secrecyClass: string;
 }
 interface ConstraintAnchor {
-  canonicalGoalRef: string;
-  goalRevision: string;
-  mandatoryFields: string[]; // Typed validated field references, not summary text
+  canonicalGoalRef: string; goalRevision: string;
+  goalSnapshotDigest: string;    // Hash of current typed GoalRevision
+  hardConstraintRefs: string[];  // Value, operator and unit, NOT just field names
+  softPreferenceRefs: string[];
+  unresolvedConditionRefs: string[]; // UNKNOWN / AMBIGUOUS, not guessed
   unresolvedConflictRefs: string[];
   pendingEffectLedgerRefs: string[];
   approvalStateRefs: string[];
+  trustedProjectionDigest: string; // Minimal model-visible A0/A2, not raw policy
 }
 interface ContextManifest {
   schemaMajor: 1;
@@ -250,26 +253,28 @@ interface ContextManifest {
   goalRevision: string; policyVersion: string; memorySourceEpoch: string;
   modelId: string; modelCapabilityRevision: string; tokenizerId: string;
   rawEventCursor: string; checkpointHeadRef: string;
-  selected: Array<{ref:string; digest:string; role:string; originalTokens:number}>;
+  selected: Array<{ref:string; digest:string; role:string; locatorRef:string; originalTokens:number}>;
   offloaded: Array<{rawRef:string; digest:string; locatorRef:string; reason:string}>;
   omitted: Array<{ref:string; reason:string}>;
   summaryRef?: string; summaryDigest?: string;
   sourceCoverageRef: string;
-  contextDigest: string; // Canonical serialization + hash algorithm version
+  contextDigest: string; // Selection-plan digest, NOT provider payload
+  modelRequestSnapshotRef: string; finalModelPayloadDigest: string;
+  promptTemplateRevision: string; promptTemplateDigest: string;
   estimatedInputTokens: number; reservedOutputTokens: number;
   hardAnchorDigest: string;
 }
 interface GroundedSummaryClaim {
-  text: string;
-  inputSourceRefs: string[];
-  inputLocatorRefs: string[];
-  claimState: ClaimState;
+  text: string; inputSourceRefs: string[]; inputLocatorRefs: string[];
+  derivedTypedFactRefs: string[];
+  semanticCheck: "DETERMINISTIC_MATCH"|"INDETERMINATE"|"CONTRADICTED";
+  claimState: ClaimState; // Citation existence NEVER proves entailment
   observationTime?: string;
 }
 ~~~
 
 - 本文とハッシュは同一の暗号化されたArtifact/DB境界内で取得する。digestだけで認可や真正性を保証しない。ハッシュ方式/長さ/Canonical bytesの仕様はCHAT_01/10で確定する。
-- Manifestは「次のLLM要求を再現できる*選択記録*」であり、Raw Evidence・会話・Tool receiptの正本ではない。選択省略理由は固定enumへ正規化し、秘密本文をTraceへ出さない。
+- Manifestは「次のLLM要求の候補選択に関する*選択記録*」であり、実際のLLM送信本文は別のsealed ModelRequestSnapshotが担う。Raw Evidence・会話・Tool receiptの正本ではない。選択省略理由は固定enumへ正規化し、秘密本文をTraceへ出さない。
 - selected/offloaded/omittedに同じ参照が存在しても理由を区別し、無権限資料は候補リスト自体に出さない。ACLフィルタ前の候補IDや件数を利用者へ漏らさない。
 - 保存するtoken見積はTokenizer versionとModel Capabilitiesに紐付ける。Model切替時に他モデルの推定値をそのまま信頼しない。
 
@@ -291,9 +296,13 @@ relevance = clamp(0.6*goal + 0.25*lexical + 0.15*temporal,0,1)
 rankScore = 5*relevance + 3*urgency + 2*freshness
           + 2*provenanceCompleteness + 2*coverageNovelty
           - 3*redundancy
-utility = rankScore / max(1, tokenEstimate)
-sort by (priority ASC, rankScore DESC, utility DESC,
-         observedAt DESC NULLS LAST, stableRef ASC)
+utility = max(0,rankScore) / max(1,tokenEstimate)
+retain mandatory P0/P1 first
+for pool in (P2,P3):
+  pick highest marginal(coverage + quality - redundancy)/additionalTokens
+  refresh marginal after each selection; enforce remaining token budget
+  tie break: source diversity, observedAt DESC, stableRef ASC
+# NEVER sort primarily by rankScore and make token efficiency only a tie-break
 ~~~
 
 - スコアは**非権限データの配置順**のみ。数値が高くても期限切れ、出典欠落、アクセス失効、goalRevision不一致は除外。Model判断をScoreに混ぜる場合は説明可能なbounded featureとして別Version管理する。
@@ -307,20 +316,28 @@ sort by (priority ASC, rankScore DESC, utility DESC,
 毎回ModelRouterの当該versionからcontextWindow、maxOutput、tokenizer、tool schema/cached input仕様を検証する。実コストの課金とToken上限を混同しない。
 
 ~~~text
-W = verified model context window
-R = max(required structured output / Tool response reserve, user output request)
-H = tokenCount(policy + mandatory tool schema + system framing)
-S = max(1024 tokens, ceil(0.08 * W))  // safety margin, CONFIG provisional
-I = W - R - H - S                  // content input capacity
-A = exact tokenCount(A0+A1+A2 and mandatory P1)
-if W <= 0 or I <= 0 or A > I: BLOCKED_CONTEXT_CAPACITY
-optional = I - A
+W = verified model context window (confirm whether output shares the window)
+R = reserved output / structured-response tokens
+S = max(1024, ceil(0.08 * W))  # provisional margin
+unique disjoint serialized request content buckets:
+  Tsys  = system/developer + model-visible Policy projection (A0 ONCE)
+  Ttool = ordered Tool Schema bytes (ONCE)
+  Tgoal = current typed Goal/User constraints (A1 ONCE)
+  Tctrl = minimal execution/effect state projection (A2 ONCE)
+  Tmust = required P1 content and recent required messages
+  Topt  = optional Evidence/Working/Memory
+  Tframe = role wrappers / metadata / provider framing (ONCE)
+Tmandatory = tokenizeFinalProviderSerialization(with Topt empty)
+Tinput = tokenizeFinalProviderSerialization(all buckets)
+if W<=0 or Tmandatory+R+S>W: BLOCKED_CONTEXT_CAPACITY
+choose Topt subject to Tinput+R+S<=W; recompute after each change
+# disjoint accounting paths prevent A0 Policy double count
 ~~~
 
 - Tokenizer不明時は保守的な上界見積とProvider preflightを用いる。上界を証明できなければ小さいModelへ無理に削って通さず、他Model選択またはPartial。Prompt cacheのhitを入力容量の拡大根拠にしない。
 - 目安の上限: Memoryは min(2,000 tokens, optionalの12%)、直近Working Journalはoptionalの35%、Evidence excerptsはoptionalの45%。未使用枠はEvidence/Workingへ再分配。P1と重要User修正はこの割合で落とさない。これらは**各カテゴリへの初期cap**であって、総量を固定配分して浪費する義務ではない。
 - Tool schema自体が大きい場合は最小の許可済Tool subsetを選び直す。未承認Toolを削除するだけで能力が不足する場合はその理由を表示し、Tool権限を記憶から補完しない。
-- 予防圧縮: 予測入力がIの70%以上でP3/重複Bodyを退避し始める。Iの85%以上で構造化Summaryを優先し、Mandatory/P1を再検査。これは初期の調整値であり、モデル・fixture別測定で変更可能。
+- 予防圧縮: 予測入力が (W-R-S) の70%以上でP3/重複Bodyを退避し始める。(W-R-S) の85%以上で構造化Summaryを優先し、Mandatory/P1を再検査。これは初期の調整値であり、モデル・fixture別測定で変更可能。
 - コンテキスト長と**Run token/cost/time Budget**は独立のハード制限。圧縮に使うsummarizer/rerankモデル費用もTask Budgetへ予約し、予算不足なら無限に圧縮/再検索しない。
 - Model providerのoverflow responseは、同じGoalRevision/Source snapshotで**最大1回だけ**縮小・再推定してリクエストを再発行。無変更入力の再送は不可。失敗なら明示的PARTIAL/モデル切替候補の提示。
 
@@ -328,9 +345,9 @@ optional = I - A
 
 **順序固定**: (1)権限・期限・Goal filter → (2)URL/Tool output/mediaの原本耐久保存・digest → (3)有界chunkとlocator → (4)独立claimのgrounded summary → (5)source coverageとhard anchor検査 → (6)新ManifestをCheckpointへ参照 → (7)LLMへ送信。
 
-要約単位は見出し/段落/表row/page/range/exec stdout offsetなどの**復元できるロケータ**。生のBrowser Cookie、API key、Vault handle、private env、認証ヘッダーはArtifactへ平文で退避せずredaction-before-storeを適用（CHAT_09保持/監査規定）。画像・PDFをテキスト要約した結果はraw locator、ページ、図表のscopeを維持。
+要約単位は見出し/段落/表row/page/range/exec stdout offsetなどの**復元できるロケータ**。正当な原本は暗号化したSealed OriginalとLLM用Redacted Projectionを別々のhash・locator-mapで管理する。Cookie、API key、Vault token、private env、認証ヘッダーは原則保存禁止または隔離し、原本データと混在させない（CHAT_09保持・消去規定）。画像・PDFをテキスト要約した結果はraw locator、ページ、図表のscopeを維持。
 
-Summary claimには最低1個のsource refを要求。sourceがない新しい主張、引用に存在しない価格・日時・人数、承認済みとみなす状態変更はreject。LLMによるclaim整合判定は補助に限り、**typed hard-anchor equality** と source-ref coverage を決定的に検査する。複数sourceの矛盾、未完了作業、否定結果、UNKNOWN/UNVERIFIEDは要約後も明示維持する。
+Summary claimには最低1個のsource refと正確なlocatorを要求するが、**引用が存在するだけでは内容を支持しない**。価格・税/手数料内外、日時/TZ、人数、数量/単位、条件と否定について出典spanと型付きFactで照合し、確証できない主張は`UNVERIFIED`、矛盾は`CONTRADICTED`として結果採用を禁止する。LLMによる整合判定は補助に限り、sourceの意味を機械的に照合できないものを引用だけで`VERIFIED_WITH_SOURCE`に昇格させない。複数sourceの矛盾、未完了作業、否定結果、UNKNOWN/UNVERIFIEDは要約後も明示維持する。
 
 要約品質を自己申告だけでPASSにしない。検証不能なclaimは保留し、原文の該当chunkを少量残すかユーザーへ不確実と表示する。Summaryが壊れた場合は元Artifact+raw eventから再構築し、壊れたsummaryを新しい正本として保存しない。
 
