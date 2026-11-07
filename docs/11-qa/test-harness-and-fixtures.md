@@ -515,3 +515,13 @@ QA OracleはLLM出力テキストの単純一致だけでなく、(a)機械的an
 Required fault injection: Long HTML/PDF+table locator; missing source; malformed embedded instruction; expired data; concurrent memory-delete vs dispatch; old Goal vs Steer; Model 128k→4k; provider overflow; unknown tokenizer; Child×4 conflicting results; Artifact offload killpoint; unsupported snapshot schema; Sandbox stdout attack; Executor process killed; no Network in offline lane; unpriced token usage。各fixtureは予算/時間上限と固有のTest IDを持ち、学習用Promptを使ってoracleを上書きしない。
 
 レポートはtimestamp、git SHA、model/tokenizer/fixture version、pass/fail/degraded、引用source count、delta tokens/cost/p95と匿名化根拠を含める。必要なSource locatorを意図的に省略した場合はunknown/partial扱い。すべて未実行、FakeModel/MockGateway/実PostgreSQLで実装後に回す計画。
+
+## 2026-11-07 P0/P1: ACM-T21〜36 Fixture・Oracle具体化
+
+Source of truth: `Context 18.22`。Fixtureは`testId, fixedClock, tenant, principal, GoalRevision/typed values, Model/Tokenizer/Provider, ordered Tool Schemas, Source original digest/span/locator, redacted projection/map, Memory sourceEpoch/revisions, Adapter/template revisions, expected ContextManifest/ModelRequestSnapshot/dispatchAdmission rows, Parent/Child versions, expected sendAttempts, killpoint, errorCode`を備える。
+
+**独立Oracle**: (1)Source-backed Fact entailment、(2)TypedGoal値/否定とRevision整合、(3)Providerの最終serialized Token量/各区分一意性、(4)Sealed Snapshot/Role/Parts/Tool順序/Template digest、(5)Memory deleteとDispatch AdmissionのDB順序、(6)send STARTING/MAY_HAVE_SENT state、(7)Provider別Consent、(8)Artifact原本/派生hashとGC、(9)ParentのGoal/ACL/Source merge検証、(10)JournalのretryEligibility、(11)Cache invalidation、(12)Evidence Coverage Checker。主張が出典に支持されない場合はContextがフィットしていてもSuccess 0。
+
+**Race fixtures**: DELETE-TX commit前後の2 Gateway dispatch、Model send ACK lost、Template changed during restart、ToolSchema order changed、Artifact GCとactive HEAD/Retention期限が競合、Parent Steerとchild DONE、Source doc "駐車料金別途"をLLMが「込み」と誤要約。SourceRefだけ正しい場合にもFact supportがREFUTEDでなければ失敗。結果期待値はDB行/attempt状態とProviderへの送信記録で照合。
+
+**Static vs Runtime**: Markdown/JSON構造検証は仕様の整合しか保証せず、Semantic Validator/Memory concurrency/Provider/DB/GC/Sentinelの動作成功を意味しない。Harness本体実装後、FakeModel + Real PG + test-only Gateway + denial egressで実行するまではすべてNOT RUN。

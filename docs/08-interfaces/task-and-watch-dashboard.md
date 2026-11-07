@@ -256,3 +256,11 @@ Task detailにExecution count/current command summary/Cell profile/attestation s
 **API proposal**: GET task scoped context summary (manifest id, goal revision, source coverage, selected/omitted reason codes, token-estimate and freshness), GET authorized source locator, POST rebuild-intent (If-Match + idempotency)。Route/SchemaはCHAT_08/01/09のReview前に確定しない。
 
 **Acceptance**: ACM-T02/T05/T09/T10/T12/T17。特に別Tenantや失効Memory本文を一覧・Token集計から推測させず、degraded/partial/uncertainを区別する。SSE tentative tokenをverified Evidenceと表示しない。
+
+## 2026-11-07 P1: Context / Memory / Provider送信の可視化
+
+Context欄ではToken総量をProvider最終シリアライズに基づく`Tinput`と`R/S`で説明し、内訳の二重計上を避ける。Grounded Factは`SUPPORTED_BY_SPAN`/`REFUTED_BY_SPAN`/`UNDETERMINED`と原文Locatorを表示し、資料に書かれているだけで確実な現実の真実と主張しない。Redacted Projectionしか見せない。原本のACL/retentionで非表示になった場合は「参照不可」を出す。
+
+Memory削除後のProvider送信表示は`NOT_ADMITTED`、`ADMITTED_NOT_SENT`、`MAY_HAVE_SENT`、`CONFIRMED_SENT`、`CANCEL_REQUESTED`を区別。『削除済み』は新規送信の遮断の意味であり、既に外部に到達した情報まで取り消したと断言しない。Provider fallbackのRecipient Consent未取得は明示的にブロック表示。
+
+失敗Journalと差分復旧の再利用/除外理由、Context Cacheの失効、Coverage Checkerで見つかった不足資料をTask詳細の監査可能なサマリーとして表示。ユーザー操作はCAS/認可でSteer、Memory更新、Source再取得を分離。モデル用Sealed Prompt、Browser Cookie、Policy秘匿内容はUIに配信しない。ACM-T21〜36の状態表示の受入を追加。

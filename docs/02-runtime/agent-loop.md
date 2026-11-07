@@ -583,3 +583,11 @@ Agent Loopのstepモデル呼出前に[Adaptive Context 18節](context-manager-a
 Model full reply確定→Tool proposal正規化→Gateway intent/approval ledger commitまではToolを実行しない。Steer/Delete/Cancel/Model fallback/Provider overflowで古いContextPlanを流用しない。Context再構築はUser操作や外部副作用の承認ではない。System/Goal/Policyが容量超過ならTool/Modelを止めPartial/blockerを表示する。
 
 Stepごとに ManifestRef、anchorDigest、sourceEpoch、tokenizer revision、source coverage、offload count、failure/degraded reasonをTrace（秘密抜き）へ記録。ACM-T01/T04/T06/T08/T09/T14/T16の受入を追加する。現在は設計のみ。
+
+## 2026-11-07 P0: Model dispatch境界の実行順
+
+旧`Context admission at model boundary`を以下で強化する（既存Tool approvalは維持）。Typed GoalとSourceBackedFactを検証→disjoint Token Accounting→Coverage Checker→ContextManifest→Final Provider serialization→Sealed ModelRequestSnapshot durability→Run HEAD CAS→**Protected Model Gateway DB dispatch admission**（Memory delete/Recipient Policy/Goal/leaseを同一線形化点で確認）→send STARTING/SENT/MAY_HAVE_SENT→full response/usage commit。
+
+Source locatorだけでは意味的検証が不足ならUNVERIFIED、必要Evidenceが足りなければ`COVERAGE_INCOMPLETE`でbounded rehydrateかPartial。古いMemory/Goal/RecipientではAdmissionを拒否する。ACK lossを「確実に未送信」とみなさず、同一Attemptのblind retryを禁止。Provider変更時はPrompt/Role/Schema/Token/Consentを新たに評価する。
+
+Working Context reuse時も実Tool/Modelの権限が増えるわけではない。Tool ResponseとSandbox outputはDataのみ。TaskJournalに`failureCode, effectState, retryEligibility, rejectedApproach, nextPlannerEligibility`を保存し、同じ失敗をPlannerが繰り返さない。ACM-T21〜26/T29/T33/T35が実装後の受入条件。

@@ -307,3 +307,15 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 - 親Cancel/Revocationは子のModel/Tool/Cell/Sentinel grantへ伝播させる。外部操作のUNKNOWNは再実行せず照会/承認へ。親子全階層のBudget reservationは原子的に有限。
 
 **追加検証**: ACM-T05/T11/T12/T14を必須。Handoff時の子数超・親budget不足・private Artifact参照・時点不一致・Child result偽成功・親steerと子commit競合に対するfail closedを確認。親子コンテキストを全文複製する方式は採用しない。
+
+## 2026-11-07 P1: Child Result受入Admission契約
+
+子から返った自然文・STATUS・SourceRefを受け取っただけで、親TaskのGoal達成を決定しない。親Runは現行親GoalRevision/leaseEpoch/PolicyVersion/owner/child lineageをDBで取り、子`ChildResultBundle`のGoalRevision・Budget lineage・artifact digest/locator/source date・current ACL/Source expiry・UNKNOWN effectを順に検証する。各SourceBackedFactは`SemanticVerificationReceipt`を持ち、複数子が同じSourceを引用しても独立根拠件数は増えない。
+
+- Parent SteerとChild DONEが競合: 古いGoalで生まれた結果を`CHILD_STALE`で隔離し、未変更Evidenceだけ現在のACL/validityを通して再利用可。Reused Evidenceから新Goalへ自動Successは禁止。
+- 子のRuntime Cell/Tool Context/Sealed Snapshot/Credentialsは親や兄弟へ直接複製しない。子のsource refsと結果は新たな権限を生まない。
+- Parent Merge Admissionの判定ログには`parentRevision,childRevision,sourceDigest,sourceValidity,dispositionCode,mergeManifestRef`を残し、個人情報は出さない。
+- Admission後からParent HEAD CASまでGoalが変更されたらCommit不可。旧Workerの遅延結果/削除されたSourceの引用は親のfinal resultに入れない。
+- Failures`CHILD_UNAUTHORIZED`/`CHILD_STALE`/`SOURCE_EXPIRED`/`CONFLICTED`/`PARTIAL`は子を黙ってDONEとして扱わずPlannerへ渡す。
+
+ACM-T31とACM-T11/12の同時Steer/期限切れ/重複Source/未知外部副作用を検証（未実装）。

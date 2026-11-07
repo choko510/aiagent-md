@@ -69,3 +69,11 @@ Authoritative local: Project Brief, Architecture Rules, SC-01..16, full Round 5 
 A green static Markdown gate or synthetic PostgreSQL test is **not** Owner acceptance. Technical readiness has two independent axes: **(A) contract convergence** (exact type/schema/API equivalence and no same-name divergent enums) and **(B) authority** (explicit responsible Owner review on the current HEAD). A third axis, Runtime Verified, is separate and cannot be inferred from specification work.
 
 The coordinator may prepare a proposed reconciliation table but cannot impersonate 16 Owner signatures. Candidate states: `NEEDS_RECONCILIATION`, `OWNER_REVIEW_REQUIRED`, `SPEC_LOCK_CANDIDATE`, `LOCKED` (all gate approvals recorded), `IMPLEMENTED`, `VERIFIED`. For a Lock, require accepted canonical revision and corresponding dependent PR HEADs, owner approvals, a signed freeze manifest, conflict resolution disposition, and code/test gate boundaries identified. After any HEAD change, reopen affected acceptance. Never auto-merge merely for statuses. Source: [Round 5 integration review](https://github.com/choko510/aiagent-md/blob/audit/round4-runtime-validation/audit/round5/integration-gate-report_2026-10-30.md).
+
+## 2026-11-07 PR #69 P0/P1レビュー反映（採用提案、NOT LOCKED）
+
+ADR-023〜028の実装条件を次のとおり補強する。`P0-1` Source refだけでは意味照合にならず型付きSourceBackedFactと独立SemanticVerificationReceiptを要求。`P0-2` 最終Serialized Provider Requestの一意Token区分で二重計上を防止。`P0-3` ContextManifestとSealed ModelRequestSnapshotは別資産。`P0-4` MemoryWriter DeleteとModel Gateway DispatchAdmissionはscope row lock + epoch CASで線形化、物理送信は厳密に原子的でない。`P0-5` Goalの条件は演算子・値・単位・否定・強弱・未解決を含むtyped snapshot。
+
+P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Current、Capacity-aware marginal utility、Provider別Recipient Consent、ChildResult再検証、Context GC/HEAD参照、失敗Journal、Context差分復旧、Tenant scoped Cache、Evidence Coverage Checkerを採用提案とする。
+
+**新たなOwner review blockers**: CHAT_01/02/06/10のGoal/MemoryAdmission/ContextSnapshot Schema、CHAT_01/09/10/15のOriginal/Projection整合、CHAT_02/03/09のProvider Privacy gateway、CHAT_08/11の送信可能性UI/Fixtureを正式承認するまではLOCKED扱い不可。Test契約はACM-T21〜36（Designed only）。PR #68の隔離/通信境界はこの追加仕様によって緩和されない。

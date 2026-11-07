@@ -350,3 +350,9 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 **Regression comparison**: safe full source (小規模fixtureのみ)、safe bounded tail、artifact offload only、ACMの4案を同一Data、同じModel/Tool allowance、同じBudgetで比較。価格だけ改善して根拠精度を下げる変更は拒否。長期Taskは複数の有限Run/Watchで測定し、1 Run無制限にしない。
 
 **Evidence**: Test transcriptをSecret/PII redactedで保存し、試験のFailを隠すretryをしない。Harness本体が未実装のためACM-T01〜T20はNOT RUN、CI上のMarkdown検証をruntime validationと表示しない。
+
+## 2026-11-07 Review P0/P1をRelease blockerへ追加（未実行）
+
+`ACM-T21〜36`を従来T01〜T20へ加え、次のHard gatesを必須化する。**引用が正しいだけで出典不支持の数値をverified化 0、Goal typed value/否定/税・費用修飾の変造0、Policy二重計上での不必要Block 0、Token Window超過0、RequestSnapshot不一致のReplay 0、DELETE先行Commit後旧Memory付きAdmission 0、無承認Provider fallback 0、Expired OriginalをVerified Evidence利用0、Child stale merge 0、Head/Artifact dangling Success 0、CrossTenant Cache leak 0、Coverage不足の誤Success 0**。
+
+速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。

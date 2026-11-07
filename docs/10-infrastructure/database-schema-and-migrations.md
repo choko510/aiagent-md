@@ -1490,3 +1490,54 @@ The **proposed SQL/fixtures**, not the missing Agent Harness runtime, were execu
 
 **Acceptance**: ACM-T08/T09/T10/T13/T18、old lease CAS 0、latest User correction preserved、corrupt restore refuses dispatch。物理列名/Index名は正式Ownerレビュー後に決める。
 
+## 2026-11-07 P0/P1: Context Fact / Request Snapshot / Dispatch Admission SQL契約案（未適用）
+
+依存: `Context 18.18〜22`、Memory Writer 06-01/02、Task Goal 02-04、Checkpoint 02-06、CHAT_09 Privacy。**以下のテーブル名/SQLは初期提案で、現在のMigrationが存在する・DBで実行済みとは意味しない。** 正式DDLのOwner合意前に`0001`〜`0003`など適用済みMigrationを上書きしない。
+
+~~~sql
+-- PSEUDOSQL (proposed PostgreSQL shape, not a migration)
+-- Scope lease/epoch row: single serialization point for memory mutations
+-- and Model Admission; include tenant+owner+scope, never model-chosen.
+memory_scope_epochs(
+ tenant_id uuid, owner_user_id uuid, scope_id uuid,
+ current_epoch bigint not null, record_version bigint not null,
+ primary key(tenant_id,owner_user_id,scope_id)
+);
+context_manifests(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid,
+ task_id uuid, run_id uuid, goal_revision bigint,
+ content_digest text, source_epoch bigint, policy_version text,
+ artifact_refs jsonb, created_at timestamptz
+);
+model_request_snapshots(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid,
+ task_id uuid, run_id uuid, attempt_id uuid unique,
+ manifest_id uuid, request_digest text, sealed_ref text,
+ prompt_template_digest text, serializer_revision text,
+ provider_adapter_revision text, ordered_messages_ref text,
+ tool_schema_manifest_ref text, provider_continuation_ref text,
+ recipient_decision_ref uuid, created_at timestamptz
+);
+model_dispatch_admissions(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid, scope_id uuid,
+ attempt_id uuid, run_id uuid, request_snapshot_id uuid,
+ snapshot_digest text, admitted_source_epoch bigint,
+ recipient_provider_id text, state text, admitted_at timestamptz,
+ unique(tenant_id,attempt_id)
+);
+-- FK scope must be tenant+owner restricted; prevent cross-tenant join.
+-- index model_dispatch_admissions(tenant_id,scope_id,admitted_at,state)
+-- index context_manifests(tenant_id,run_id,goal_revision)
+-- index model_request_snapshots(tenant_id,run_id,attempt_id)
+-- serialized plan/Goal/claim verification receipts are append-only.
+~~~
+
+**TX-A Memory Writer**: lock`memory_scope_epochs(tenant,owner,scope) FOR UPDATE`→auth+CAS→active Memory tombstone/update+epoch increment+invalidation outbox/command receipt atomic commit。Lock order (tenant,owner,scope ascending)固定。新規scopeの行作成はunique insert+lock、欠けた行を「epoch=0」と推測しない。
+
+**TX-B Model Gateway**:同じscope rowを同じ順序でlock→最新Projection recordRevision/consent・GoalRevision・Run lease/control・Provider Recipient Policy・Budgetを確認→idempotent unique Attempt + `model_dispatch_admissions`を保存→commit。Deleteが先にcommitした場合に旧MemoryでAdmission 0。Admissionが先なら潜在送信として追跡し、Delete時にcancel/outbox。ネットワークI/OはTX外、STARTING/SENT/MAY_HAVE_SENTのdurable transitionとusage receiptで確認。**物理送信とDB commitの完全原子性を主張しない**。
+
+**FK/GC契約**: Manifest/SnapshotはTask/Run/Artifact ownerへの複合FKまたは等価な認可検証でリンク。Checkpoint HEADまたは未確定Admitted Attemptが参照するObjectを年齢だけで物理GCしない。非参照Manifestは耐久保存後の孤立候補だが未確定Head CAS/リトライ猶予を確認してから消去。法的/ユーザー保持期限で原本削除が必須ならSource tombstone/EXPIREDとHeadのdegraded stateを同時に可視化し、Verified Evidenceの根拠に継続利用不可。Sealed Original/Redacted Projectionは別の参照・Hash・鍵/TTL/座標mappingで管理。
+
+**Schema evolution**: versioned expand→backfill（古いSnapshotはNON_REPLAYABLE）→dual-read/gated write→switch→contract。old Worker/fence/unsupported schemaはfail closed。Rollback時にtombstone watermark以前へMemoryを復活させない。DDL変更はCHAT_01/06/09/10/11の合意・Migration checksum・Fake/PG integrationを条件にする。
+
+**Test suite**: ACM-T22〜25,27,30〜32,36。二つのModel GatewayとMemory Writer100並列、Snapshot commit→HEAD CAS Killpoint、GCとretention race、MAY_HAVE_SENT、CrossTenant ownership、Provider change Consent。物理実行0。

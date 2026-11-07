@@ -197,3 +197,11 @@ Task/Run/親子の予約済み予算へCell ProcessのCPU/Wall/RAM/PID/FD/ディ
 - 予算を超える場合は追加入力・追加検索・圧縮LLMを起動せず、保存済みEvidenceでpartial結果を返す。無期限監視は新finite Runを起動する。
 
 **QA**: ACM-T01/T06/T07/T19/T20。Provider overflowの1回限り縮小、unknown pricing、out-of-budget rerank、parallel Child reservations、very-small modelでA0/A1/A2が収まらない場合のfail closedを検証。初期割合は実測前の提案であり費用削減実績ではない。
+
+## 2026-11-07 P0: Policy二重計上を排除するToken会計
+
+`Context 18.5/18.19`を参照。Wを確認済みModel Window、Rを実Providerの最大必要Output、Sを保守Marginとし、最終serialized inputのTinputはSystem+Policy Projection (A0)、Tool Schemas、typed Goal (A1)、Control Projection (A2)、P1、optional Evidence/Memory、Role/provider wrapperの**互いに重ならない場所**を一度だけ計上。以前の`H=policy+schema`かつ`A=A0+A1+A2`でPolicyが二重計上され得る方式は不採用。
+
+独立した各区分のtokenize結果の合計はBPE/Provider role wrapperでずれる可能性があるため、最終入力をProviderのTokenizer/serializerで再計数した`Tinput+R+S<=W`が最終関門。Body cache hitでWは増えず、Summary/Rerank/再トークン化の費用もTask Budgetへ原子予約。WがOutputとShared WindowでないモデルはCapabilityの別上限で検査し、誤って同一式を適用しない。
+
+**Tests**: ACM-T22、Tool Schema順序変更、Policy二重挿入、Provider変更、8kから4kへ縮小、SnapshotのTokenとProviderの実Token receiptの差異、Budget超過で新送信0。未実装。

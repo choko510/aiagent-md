@@ -229,3 +229,15 @@ ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/proces
 - Workspace snapshot参照はExecutionId/WorkspaceGeneration/Cell image digest/Provenanceに紐付く。旧Cell grantやCredential、Shell Side-effectをCheckPointから復活させない。
 
 **Killpoints**: ACM-T08/13/15/16/18/19、CPR-R3-T01〜T05を同一Fake Model/DB/Artifact fixtureで実施。旧Version・新Lease、Memory deleteとresume競合、Artifact commit直前kill、Page locatorへの権限失効、Child resultの到着遅延を追加する。いずれも未実行。
+
+## 2026-11-07 P0: ModelRequestSnapshot / AdmissionとRecovery
+
+`Context 18.19/18.20`の`ContextManifest`（候補選択）と`ModelRequestSnapshot`（sealed actual Model payload）は別immutable資産。Checkpointは両参照とdigest、Prompt/Serializer/Provider/Tool Schema revision、Goal/Memory epoch、ModelAttempt/DispatchAdmission IDを保持する。旧の「Manifestが保存されれば送信再現可能」という解釈は禁止。
+
+**Commit順序**: Raw Artifact durable→source fact verified→ContextManifest durable→最終serialized payload作成→Sealed ModelRequestSnapshot durable→Run HEAD CAS→Protected Gateway scope-epoch DB Admission→socket dispatch→full response/usage receipt commit。HEAD CASに失敗した古いworkerはAdmission不可。Provider callをDB tx内で行わない。
+
+**Crash**: Snapshotがあっても送信済みAttemptの再発行を正当化しない。`ADMITTED_NOT_SENT`でもsend-state lostなら`MAY_HAVE_SENT`へ。Gatewayのdedup/receipt/reconciliationが確定しない限りsame Attemptを外部再送せず、復元用の元Message partsがpurged/unavailableなら`NON_REPLAYABLE`と明示。Provider stateがOpaque pinnedならAdapter変更時に継続を拒否する。
+
+**Cache/diff**: Goal/Policy/Source/Memory/Recipient/Template/Tokenizerの各revisionとACLを比べ、同一immutable Source Evidenceだけ再利用。old prompt・Tool approvals・Memory projection・Cost receipt・Child lineageは無条件にコピーしない。古いManifestは監査上残せてもcurrent HEADやcurrent successと混同しない。
+
+**Fault tests**: ACM-T23/24/25/32/34/36。Protected service再起動、snapshot write後HEAD CAS fail、Memory DELETE commit後worker retry、Provider ACK lost、retentionによるOriginal消去を含む。すべて未実装・未実行。
