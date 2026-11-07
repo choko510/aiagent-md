@@ -5,11 +5,11 @@
 
 ## 0. 結論と採用案
 
-採用は**23シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
+採用は**31シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
 
 ## 1. 目的・責務・非責務
 
-QA所有：SC-01〜23のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
+QA所有：SC-01〜31のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
 
 **前提**：QA Fixture V1（PR #7のRound2追補を含む）、fake clock、isolated DB/queue/browser、Mock HTTP/LLM、strict outbound denial。UIから起動したものとWatch/Eventから生成されたTaskを同じcanonical storeへ収束させる。
 
@@ -38,7 +38,7 @@ QA所有：SC-01〜23のtest matrix・ground truth・semantic assertion・UI/API
 
 | REQ-ID | Priority | 観測可能な条件 | SC |
 |---|---|---|---|
-| QA-E2E-001 | MUST | 全SC-01〜23にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜23 |
+| QA-E2E-001 | MUST | 全SC-01〜31にpositive/negative/fault/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜23 |
 | QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜23 |
 | QA-E2E-003 | MUST | 重要事実を人手の自由文評点でなく型付きsemantic oracleで照合 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | MUST | 正確な制約、freshness、source/link、uncertaintyをground truthと比較 | SC-01/03/04/05/10/14/15 |
@@ -433,3 +433,7 @@ Every row is three **distinct cases** and each case must run positive, negative,
 **Additional contract tests:** DEV-DB-T01..12, AUTH-DEV-T01..06, EVT-DEV-T01..05, DEV-DOM-T01..05, DEV-UI-T07..10, CAM-T12..19, DEV-BLD-T09..14, DEV-FF-T07..12, DEV-REV-T07..08, DEV-DES-T07..11. All are **DESIGNED_NOT_RUN**. Fixture owner MUST map these to concrete runner cases before public release.
 
 **QA-E2E-T31F** must additionally simulate Project HEAD drift *after* TARGET_REACHED, require latest-current-head evaluation with count dropping from 10 to 8 and no unauthorized automatic resume/spend; restoring PASS on current HEAD restores 10 without duplicate counted work-item rows. **QA-E2E-T30F** checks STOP controlVersion and stale 429 wake jointly.
+
+### SC-23 / SC-24..31 integration reconciliation (2026-11-08)
+
+SC-23 remains the merged Browser Live Observation companion and QA-E2E-T23P/N/F/OFF remains required under its specific feature gate. Development/Campaign additions SC-24..31 have distinct QA-E2E-T24P/N/F..T31P/N/F (8 × 3 cases) and are conditional on feature enablement. Baseline shared security/Owner isolation gates still apply to all 31 scenarios. These 31 are **designed acceptance scenarios**, not a claim that the Agent Harness runtime already passes 31 tests.

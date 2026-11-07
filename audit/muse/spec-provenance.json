@@ -80,7 +80,7 @@
     "docs/10-infrastructure/job-queue-and-outbox.md": "8d4a9328ce2b31fac492d28c0373350a7845eed0",
     "docs/10-infrastructure/observability-and-cost-tracing.md": "263771dd6c935e78899569b3b36fc447c2a7e010",
     "docs/11-qa/benchmark-and-release-gates.md": "15a42d697b66d7b481bb747e49cfe3395cb733ec",
-    "docs/11-qa/end-to-end-acceptance.md": "4686c7c1f9ed3117757c16b72990f26ff5d29680",
+    "docs/11-qa/end-to-end-acceptance.md": "eca5f718ec4a8ec549b63be9e29a6d40fb9b1780",
     "docs/11-qa/fault-injection-and-concurrency.md": "f5c460f5061387b9eda6ed96cb5dcfab8082d0ca",
     "docs/11-qa/test-harness-and-fixtures.md": "257ce16398bb3bb49749c2f07533bc27464ce589",
     "docs/12-intelligence/decision-risk-engine.md": "7ad5cdb3651970ee80b8c3e6585e6c6010832dbc",
