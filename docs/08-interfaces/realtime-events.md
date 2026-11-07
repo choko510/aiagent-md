@@ -280,3 +280,7 @@ SSE replay must consult `agent.event_retention_floors` and actual `domain_events
 ## 2026-11-07: Terminal/Process進捗ストリーム
 
 Sandbox Execの起動/終了/中断/ブロック、process resource使用率、stdout/stderrを受入可能なstream eventsとして表示する。ただしログdeltaは**暫定UI**であり、確定情報はServerにcommit済みのbounded/redacted Artifact/Execution projection。Snapshot/SSEの再接続で重複コマンド/外部送信を発生させず、旧Run/leaseのストリームは無視。Sentinel ASK/DENYは理由コード/要求先/承認期限を最小開示し、VM障害やegr fail-closedは隠さない。Raw token/Shell envの露出禁止。SC-17/19/21/22。
+
+## 2026-11-07: Browser画面をTask SSEへ含めない
+
+[Browser Live Observation](browser-live-observation.md) の映像は認証済みone-way WebRTCかbinary WebSocketの専用relayを使う。`/tasks/{id}/events`は従来どおりdurable Task/Run/Approvalの安全なEvent metadata正本。生frame、ブラウザ画素、Credential/CDP URL/全画面DOMをSSE/Event/Evidenceへ混入させない。観測状態のmetadata通知を追加する場合でも既存ACL/cursor/revoke/rate制約を保つ。BLO-T03/05/08/11、SC-23（未実装）。

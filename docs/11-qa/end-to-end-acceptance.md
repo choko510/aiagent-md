@@ -5,11 +5,11 @@
 
 ## 0. 結論と採用案
 
-採用は**22シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
+採用は**23シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
 
 ## 1. 目的・責務・非責務
 
-QA所有：SC-01〜22のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
+QA所有：SC-01〜23のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
 
 **前提**：QA Fixture V1（PR #7のRound2追補を含む）、fake clock、isolated DB/queue/browser、Mock HTTP/LLM、strict outbound denial。UIから起動したものとWatch/Eventから生成されたTaskを同じcanonical storeへ収束させる。
 
@@ -38,8 +38,8 @@ QA所有：SC-01〜22のtest matrix・ground truth・semantic assertion・UI/API
 
 | REQ-ID | Priority | 観測可能な条件 | SC |
 |---|---|---|---|
-| QA-E2E-001 | MUST | 全SC-01〜22にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜22 |
-| QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜22 |
+| QA-E2E-001 | MUST | 全SC-01〜23にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜23 |
+| QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜23 |
 | QA-E2E-003 | MUST | 重要事実を人手の自由文評点でなく型付きsemantic oracleで照合 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | MUST | 正確な制約、freshness、source/link、uncertaintyをground truthと比較 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-005 | MUST | 承認を要する購入/予約/投稿/送金は承認なしの成功も試行開始もゼロ | SC-01/04/06/07/08/13 |
@@ -48,12 +48,12 @@ QA所有：SC-01〜22のtest matrix・ground truth・semantic assertion・UI/API
 | QA-E2E-008 | MUST | Browser/Tool/tenantの認可境界と秘密非漏洩をassert | SC-06/07/08/13/15/16 |
 | QA-E2E-009 | MUST | 条件変更、Cancel、Steer、Revoke後の旧世代副作用を遮断 | SC-02/07/11/13 |
 | QA-E2E-010 | MUST | 受入OracleとTask/Run/Event version、schemaVersion/ID型を相互検証 | SC-02/06/07/11 |
-| QA-E2E-011 | MUST | Live-only依存と実測済み品質の虚偽主張を排除 | SC-01〜22 |
+| QA-E2E-011 | MUST | Live-only依存と実測済み品質の虚偽主張を排除 | SC-01〜23 |
 | QA-E2E-012 | MUST | SC-10〜16をSC-01〜09の安全/根拠/予算基準へ重ねて検証 | SC-10〜16 |
-| QA-E2E-013 | MUST | E2E実行結果はfixture版/モデル/seed/コード/時計/Browser/traceハッシュとともに保存 | SC-01〜22 |
+| QA-E2E-013 | MUST | E2E実行結果はfixture版/モデル/seed/コード/時計/Browser/traceハッシュとともに保存 | SC-01〜23 |
 | QA-E2E-014 | MUST | DB ID/会話nullable/CAS/fencing/owner mappingが不整合なら統合テストで赤くする | SC-02/06/07/08/11 |
 | QA-E2E-015 | MUST | CPU/LLM/Browser/HTTPの有限予算とdeadlineで停止し、timeoutは結果に記録 | SC-05/07/09/11 |
-| QA-E2E-016 | MUST | 失敗を症状ではなく失敗分類と再現情報で報告、artifactはredact | SC-01〜22 |
+| QA-E2E-016 | MUST | 失敗を症状ではなく失敗分類と再現情報で報告、artifactはredact | SC-01〜23 |
 
 ## 5. QA専用内部契約/API（本番Schemaではない）
 
@@ -267,8 +267,8 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 
 | REQ | Designed tests | SC |
 |---|---|---|
-| QA-E2E-001 | QA-E2E-T01P〜22N | SC-01〜22 |
-| QA-E2E-002 | QA-E2E-T01P〜22N | SC-01〜22 |
+| QA-E2E-001 | QA-E2E-T01P〜22N | SC-01〜23 |
+| QA-E2E-002 | QA-E2E-T01P〜22N | SC-01〜23 |
 | QA-E2E-003 | QA-E2E-T01P/03P/04P/10P/14P/15P/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | QA-E2E-T01N/03N/04N/05N/10N/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-005 | QA-E2E-T01N/04N/06N/07N/08N/13N | SC-01/04/06/07/08/13 |
@@ -277,12 +277,12 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-008 | QA-E2E-T06N/08N/13N/15N/16N/37 | SC-06/07/08/13/15/16 |
 | QA-E2E-009 | QA-E2E-T02N/07N/11N/13N/36 | SC-02/07/11/13 |
 | QA-E2E-010 | QA-E2E-T02P/06P/07P/11P/33〜36 | SC-02/06/07/11 |
-| QA-E2E-011 | QA-E2E-T01P〜22N | SC-01〜22 |
+| QA-E2E-011 | QA-E2E-T01P〜22N | SC-01〜23 |
 | QA-E2E-012 | QA-E2E-T10P〜16N | SC-10〜16 |
-| QA-E2E-013 | QA-E2E-T01P〜22N/40 | SC-01〜22 |
+| QA-E2E-013 | QA-E2E-T01P〜22N/40 | SC-01〜23 |
 | QA-E2E-014 | QA-E2E-T33〜37 | SC-02/06/07/08/11 |
 | QA-E2E-015 | QA-E2E-T05N/07N/09P/39 | SC-05/07/09/11 |
-| QA-E2E-016 | QA-E2E-T01P〜22N | SC-01〜22 |
+| QA-E2E-016 | QA-E2E-T01P〜22N | SC-01〜23 |
 
 | QA-E2E-017 | QA-E2E-T17P/T17N | SC-17 |
 | QA-E2E-018 | QA-E2E-T18P/T18N | SC-18 |
@@ -370,3 +370,7 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 | SC-22 | Brokerの正常スコープ操作可能 | Prompt Injectionで秘密/OTP/CDP/他Userが漏れない |
 
 全SC-17..22にpositive/negative/fault injectionと実際のVM・Kernel・Network証拠が必要。安全失敗を他の成功率で相殺しない。従来SC-01..16の非退行は必須。Requirements: CELL-001..016, SENT-001..016, GW-017..021, LOOP-021..023, PRD-020..025。
+
+## 2026-11-07: SC-23 browser live observation E2E（NOT RUN）
+
+[SC-23](../00-foundation/acceptance-scenarios.md) に対し [BLO-001〜012 / BLO-T01〜12](../08-interfaces/browser-live-observation.md) を公開API・read-only Web UI・隔離Browser Workerの同一fixtureに追加する。Owner AのAgentはnavigate/click/scroll中も継続、Observer B（同Tenant別owner）/C（他Tenant）のMedia byteは0、ログイン/決済/canvas/unknownはframe全面遮断、HandoffまでAgent lease不変。Worker kill/revoke/Cancel/Tab交換後の旧frame送信0、全てのRaw frameがDB/Log/SSE/Evidence/Backupに混入0、slow viewer/relay切断でもRun Cancel 0。BLO-T01〜11が欠ける/落ちる場合はRelease Block。ライブサイトの成功をテスト結果に代用しない。テスト未実行。
