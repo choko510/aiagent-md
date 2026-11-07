@@ -6,7 +6,7 @@
 
 ## 0. 採用する設計
 
-モデルが記述する任意JavaScript/Python/シェルを実行する「Code Mode」ではなく、**厳密な型付き宣言的DAG（有向非巡回グラフ）と、固定された純粋変換ライブラリ**を初期実装とする。検索、HTTP取得、Connector API、確定的なフィルタ・集約・数値計算を一回の計画から複数実行できる。ただし**すべての外部Tool呼出は既存Tool Gatewayへ送る**。Pipeline独自のネットワーク、Cookie、任意filesystem、ホストShell、LLM生成コード評価、Docker socketを持たない。
+本Pipeline内ではモデルが記述する任意JavaScript/Python/シェルを実行せず、**厳密な型付き宣言的DAG（有向非巡回グラフ）と、固定された純粋変換ライブラリ**を初期実装とする。検索、HTTP取得、Connector API、確定的なフィルタ・集約・数値計算を一回の計画から複数実行できる。ただし**すべての外部Tool呼出は既存Tool Gatewayへ送る**。Pipeline独自のネットワーク、Cookie、任意filesystem、ホストShell、LLM生成コード評価、Docker socketを持たない。
 
 初期フェーズではread-onlyで副作用がないと**Gatewayが判断した**Toolノードと、監査済み純粋変換のみ許可する。購入・予約確定・投稿・送信・送金・破壊的変更など、書込みを含むDAGは拒否し、通常の個別Gateway＋承認経路に戻す。学習済みBrowser recipeやXイベント起動Taskでもこの制約は同じ。将来write pipelineを許すなら追加ADR、承認と副作用台帳の整合テストが必須。
 
@@ -27,7 +27,7 @@ DAGの成功は各ノードが**実際にコミット済みのEvidence**を持�
 | 上流問題報告 | [LangGraph #9397](https://github.com/langchain-ai/langgraph/issues/9397) は並列ノードが完了してもcheckpointに残らず復帰で再実行した問題。 | **Issue report**。こちらで未再現。Harnessの実行保証とみなさない。 |
 
 ### 2.1 代替案
-A: LLM生成JS/PythonをVMで実行 → 高い表現力に対しsandbox escape/権限の間接昇格/無制限loop/egressが難しいため**初期不採用**。B: 専用固定Workflowのみ → 商品やホテル用途に偏り、汎用Agentの目標に反するため**却下**。C: **型付きDAG + function allowlist + Gateway** → 汎用的な多段データ処理と安全境界の両立で**採用**。D: 大量ページすべてを巨大LLM promptへ → Context/Cost/証拠欠落が増えやすく、性能実測までは採らない。
+A: LLM生成JS/PythonをVMで実行 → 高い表現力に対しsandbox escape/権限の間接昇格/無制限loop/egressが難しいため**Pipelineとして不採用**（別機能Sandbox Execでは隔離コード実行を許可）。B: 専用固定Workflowのみ → 商品やホテル用途に偏り、汎用Agentの目標に反するため**却下**。C: **型付きDAG + function allowlist + Gateway** → 汎用的な多段データ処理と安全境界の両立で**採用**。D: 大量ページすべてを巨大LLM promptへ → Context/Cost/証拠欠落が増えやすく、性能実測までは採らない。
 
 コードのライセンスを無視した転載は行わず抽象的なパターンのみ採用する。性能比較を別環境のベンチ数字で断定しない。
 
@@ -57,7 +57,7 @@ AgentLoop Verifier (CHAT_02): goal success is separate
 ## 4. Requirements
 | REQ | Level | Measurable result | SC |
 |---|---|---|---|
-| PIP-001 | MUST | Versioned declarative DSL only; reject arbitrary eval/import/script/host command | 08 |
+| PIP-001 | MUST | このPipelineは宣言的DSLのみ。任意コードは独立sandbox.execのCell経由 | 08,17 |
 | PIP-002 | MUST | Compile checks typed edges, missing refs, duplicate node IDs, cycles, max depth/fanout before dispatch | 07,09 |
 | PIP-003 | MUST | All external Tool nodes use Tool Gateway registry/policy/approval/ledger, no shortcut | 07,08,11 |
 | PIP-004 | MUST | Phase-1 external write nodes denied, including mislabeled read remote tool | 01,04,08 |
@@ -379,3 +379,7 @@ Cannot be Locked until P0 contracts and cross-PR acceptance checked. All ownersh
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: 型付きDAGとSandbox Execの併存
+
+本ドキュメントは型付きDAG機能の正本であり、**Agent全体が任意コードを実行できないという旧解釈を廃止**する。Pipeline内の純粋処理は今まで通りno shell/network。Agentがコード生成・依存導入・CLIを必要とするときは別の登録済みsandbox.exec Tool/ExecutionとしてRuntime Cellを起動する。DAGの「write禁止」を生成curlやプロセス経由で回避してはいけない。全egr/ConnectorはSentinel、外部Intent/Approval/Side-effectはGateway正本。SC-17/19/21。Canonical [02-13](../02-runtime/sandbox-execution.md), [09-08](../09-security/sentinel-authority.md).

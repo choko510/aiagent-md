@@ -346,3 +346,7 @@ M1 MCP SDK adapter transport/auth handshake/egress under feature flag, integrati
 - [S4] PydanticAI [FilteredToolset](https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/pydantic_ai_slim/pydantic_ai/toolsets/filtered.py), `3809c1b`, MIT, **Code verified**.
 - [S5] [SDK issue #2232](https://github.com/modelcontextprotocol/typescript-sdk/issues/2232), [#3056](https://github.com/modelcontextprotocol/typescript-sdk/issues/3056), [SDK PR #2668](https://github.com/modelcontextprotocol/typescript-sdk/pull/2668), **Issue/PR reports**, 2026-10-30, limitations not independently reproduced.
 - [S6] [MCP Tools normative docs](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), [Project brief](../00-foundation/project-brief.md), [SC-01..16](../00-foundation/acceptance-scenarios.md). Our transport/TTL/security caps are **design hypothesis**, no runtime tests performed.
+
+## 2026-11-07 Muse移行: MCPサーバーの実行境界
+
+Untrusted MCP server or generated MCP Tool runs within restricted Runtime Cell / independent sandbox, not protected Privsep. Shell/process/network activity remains forced through Sentinel and Tool Gateway; MCP descriptions/annotations cannot grant Host Docker/SSH, Vault secret, Browser CDP, policy mutation or uncontrolled outbound effects. Trusted Connector promotion requires independent review, explicit capability and a protected Worker with scoped credential allowlist. Subagent/MCP calls cannot bypass the parent Run budget and effect ledger. SC-18/19/22。

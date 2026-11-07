@@ -313,3 +313,7 @@ Use existing [REST PR #8](https://github.com/choko510/aiagent-md/pull/8) `POST /
 
 ### Round 3 — lossless canonical version boundary (2026-10-30)
 All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
+
+## 2026-11-07 Muse移行: ローカル計算と実際の外部効果
+
+**sandbox.execの起動許可はシェルによる外部リクエストやConnector操作の承認ではない。** Local process admission / concrete network egress Sentinel authorization / sensitive or irreversible Human Approval are distinct. Arbitrary shell HTTPS POST with unverifiable method/body/effect must not be classified read: deny or require a mediated trusted Connector with scoped exact approval. Tool Gateway retains Approval Record and Side-effect Ledger; Sentinel is final egress/Connector permission authority, never a second approval DB. All permissions bound to owner/Run/lease/goal/intent/destination/budget/policyEpoch and checked immediately before dispatch. Browser fill/click and CLI HTTP also count. SC-17/19/21/22。
