@@ -12,7 +12,7 @@ Runtime/Task/Run checkpoint and lease ownership remain with CHAT_02 task-run-man
 
 ## 1. Strict model proposal vs server-owned admission — P0-4 resolution
 
-The LLM / Agent may provide only `SandboxExecProposalV1`. Server-generated ID, owner, tenant, Task/Run, GoalRevision/LeaseEpoch, ToolIntentId, Cell/VM identity, runtime profile, image, policy, actual budget and network mode **must never be accepted from a model response**. A strict schema rejects unknown keys, rather than ignoring them and accidentally trusting them downstream. These are logical candidate types pending CHAT_01/02/03/09 contract ratification.
+The LLM / Agent may provide only `SandboxExecProposalV1`. Server-generated ID, owner, tenant, Task/Run, GoalRevision/LeaseEpoch, ToolIntentId, Cell/VM identity, runtime profile, image, policy, actual budget and network mode **must never be accepted from a model response**. A strict schema rejects unknown keys, rather than ignoring them and accidentally trusting them downstream. These are logical candidate types pending CHAT_01/02/03/09 contract ratification. Machine-readable **strict schemas** and schema tests (also Draft) are at [Proposal](../../contracts/muse/sandbox-exec-proposal.schema.json), [Admission](../../contracts/muse/sandbox-exec-admission.schema.json), [ExternalAction](../../contracts/muse/external-action-proposal.schema.json) and [negative/positive tests](../../audit/muse/validate_contract_schemas.py). They are part of the cross-owner contract review, not optional implementation examples.
 
 ~~~typescript
 type Int64DecimalString = string; // validated signed 64-bit decimal, parsed via BigInt

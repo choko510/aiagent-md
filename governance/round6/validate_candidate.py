@@ -19,7 +19,7 @@ def get(path):
    time.sleep(2**attempt)
 prs=get("/pulls?state=all&per_page=100")
 by={p["number"]:p for p in prs}
-tree=get("/git/trees/main?recursive=1")
+tree=get("/git/trees/"+os.getenv("LEGACY_85_BASE_SHA","8b153c238c8a4cc18b6e9d258e55d3265e5249d5")+"?recursive=1")
 main_blobs={x["path"]:x["sha"] for x in tree["tree"] if x["type"]=="blob"}
 rows=manifest["prs"]
 errors=[]
@@ -48,7 +48,7 @@ expected={"00":5,"01":6,"02":12,"03":6,"04":9,"05":5,"06":5,"07":5,"08":6,"09":6
 counts=dict(collections.Counter(owners.values()))
 if len(source_paths)!=85 or counts!=expected:
  errors.append(f"85 spec owner counts: {len(source_paths)}, {counts}")
-print("MERGED_SPEC_PROVENANCE",json.dumps({"mergedSourcePRs":len(rows),"moduleBlobs":len(source_paths),"mainSha":tree["sha"],"ownerCounts":counts,
+print("MERGED_SPEC_PROVENANCE",json.dumps({"mergedSourcePRs":len(rows),"moduleBlobs":len(source_paths),"historicalTreeSha":tree["sha"],"ownerCounts":counts,
  "governance":"UNRATIFIED","runtime":"NOT_IMPLEMENTED","errors":errors[:25]}))
 if errors:sys.exit(1)
-print("PASS merged original PRs and all 85 identical module content blobs on main.")
+print("PASS historic 85 module-source blobs at pinned original baseline, NOT current 88-module spec.")
