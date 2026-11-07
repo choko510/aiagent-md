@@ -6,6 +6,18 @@ on:
       - 'AGENTS.md'
       - 'README.md'
       - 'audit/muse/**'
+      - 'audit/cross-contract/**'
+      - 'contracts/muse/**'
+      - 'governance/round6/**'
+      - '.github/workflows/muse-secure-runtime-spec-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'AGENTS.md'
+      - 'README.md'
+      - 'audit/muse/**'
+      - 'audit/cross-contract/**'
       - 'contracts/muse/**'
       - 'governance/round6/**'
       - '.github/workflows/muse-secure-runtime-spec-audit.yml'
@@ -24,3 +36,5 @@ jobs:
         run: python3 -m pip install jsonschema==4.23.0
       - name: Validate proposal/admission/ExternalAction JSON Schema + adversarial cases
         run: python3 audit/muse/validate_contract_schemas.py
+      - name: Cross-module contract drift and regression audit
+        run: python3 audit/cross-contract/check_contract_consistency.py
