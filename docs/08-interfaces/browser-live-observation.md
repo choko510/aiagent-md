@@ -1,6 +1,6 @@
 # Browser Live Observation — サーバーブラウザのリアルタイム閲覧
 
-> Companion specification to `04-03 Browser Session Manager`, `08-01 REST API`, `08-05 Approval & Browser Takeover UI`. Status: **Draft / PROVISIONAL** (2026-11-07). 本リポジトリは仕様書のみで、実装・テスト・性能測定は未実施。既存88モジュールの外に正本を増やさず、共同設計の補足とする。Scenario: SC-06/07/08/09/18/23。
+> Companion specification to `04-03 Browser Session Manager`, `08-01 REST API`, `08-05 Approval & Browser Takeover UI`. Status: **Draft / PROVISIONAL** (2026-11-07). 本リポジトリは仕様書のみで、実装・テスト・性能測定は未実施。既存88モジュールの外に正本を増やさず、共同設計の補足とする。Scenario: SC-06/SC-07/SC-08/SC-09/SC-18/**SC-23**。
 
 ## 1. 利用者ができること
 
