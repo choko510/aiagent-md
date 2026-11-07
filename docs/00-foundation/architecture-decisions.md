@@ -6,7 +6,7 @@
 | ADR | State | Decision and rationale | Alternative rejected/held | Owner / verification |
 |---|---|---|---|---|
 | ADR-001 | PRODUCT_FIXED | general research/monitoring Agent, no host server administration; extensible adapters | Hermes fork, code/OS admin Agent, scraping-only | CHAT_00/09; SC-05,08 |
-| ADR-002 | PRODUCT_FIXED | Tool Gateway enforces schema, budget, authorization, approval, side effects | LLM direct system/Browser or arbitrary shell access | CHAT_03/09; SC-07,08 |
+| ADR-002 | PRODUCT_FIXED | Gateway enforces schema/budget/approval/effect ledger. **Host and Trusted Control VM shell forbidden; bounded offline sandbox.exec in isolated Execution VM permitted.** Each real external action requires its own Gateway Intent and Sentinel permit | LLM direct Host/Trusted Shell, Browser CDP, uncontrolled Internet | CHAT_03/09; SC-07,08,17,19 |
 | ADR-003 | PROPOSED | durable Task/Run, immutable checkpoint, fence and outbox; atomic domain state/event append | stateless chat loops, blind side-effect retry | CHAT_01/02/10; PG/killpoint tests |
 | ADR-004 | PROPOSED | one centrally owned Browser Worker; Playwright Chromium compatibility baseline, HTTP/API first | independent direct Page attachment from Agent, Lightpanda by default without compatibility | CHAT_04/09; SC-06,09,13 |
 | ADR-005 | EXPERIMENT | Jev, Scrapling, Lightpanda as strictly scoped optional adapters based on feature/compat/license | mandatory untested third-party browser | CHAT_04/05; pinned source+benchmark |
@@ -22,7 +22,7 @@
 | ADR-015 | PROPOSED | untrusted file parser isolated no-network, raw→derived artifact + coordinates | model alone executing embedded PDF/Office content | CHAT_01/09/10/15; SC-15 |
 | ADR-016 | PROPOSED | migration expand→backfill→switch→contract, pinned CI PostgreSQL+Browser+Docker+SSRF evidence | altering an already-applied migration or declaring smoke test production-safe | CHAT_10/11; SC-07,08 |
 | ADR-017 | PRODUCT_FIXED | Allow bounded Shell/Python/Node/CLI and generated code inside isolated Runtime Cell, deny host/protected service code; maintain General Agent goal | permanent deny of any code; unprivileged host shell | CHAT_00/02/09; SC-17,18,21 |
-| ADR-018 | PROPOSED | Production KVM/QEMU dedicated VM with userns restricted Runtime Cell and independent Protected Services; no unsafe fallback, dev-only container distinct | Docker-only asserted equivalent to VM; one privileged process | CHAT_09/10/11; SC-18,21 |
+| ADR-018 | PROPOSED | Production two KVM/QEMU guests with **different kernels** (Trusted Control VM vs Untrusted Execution VM) and userns-restricted Runtime Cell; no guest-kernel sharing with Vault/DB, no unsafe fallback, dev-only container distinct | Docker-only asserted equivalent to VM; one privileged process | CHAT_09/10/11; SC-18,21 |
 | ADR-019 | PRODUCT_FIXED | Independent Sentinel is final authority for all connector operations and network egress, regardless of generated subprocess; Gateway retains intent/effect ledger | tool-only routing, environment-variable proxy without kernel route block | CHAT_03/09/10; SC-19,22 |
 | ADR-020 | PROPOSED | Credential Broker/Privsep and Browser Broker external to Cell; agent never sees raw tokens or direct CDP | token env injection or unowned browser socket | CHAT_04/05/09; SC-18,22 |
 | ADR-021 | PROPOSED | SandboxExecution and Workspace child contracts, lifecycle/kill tree/UNCERTAIN reconciliation and temp Skills | uncontrolled daemon, automatic self-upgrade of protected runtime | CHAT_01/02/03/06/10/11; SC-17,20,21 |

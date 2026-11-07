@@ -85,7 +85,7 @@ Scope of permissions is immutable `principal.ownerUserId + tenantId + taskId + r
 ## 5. Internal contract and deployment profile (CHAT_09 security policy; CHAT_10 owns actual Compose)
 
 ```ts
-type ExecutorKind = "fetch"|"browser"|"pure_compute"|"outbox_notification";
+type ExecutorKind = "fetch"|"browser"|"pure_compute"|"sandbox_exec"|"outbox_notification";
 type CapabilityBinding = Readonly<{
   tenantId:string; ownerUserId:string; taskId:string; runId:string;
   goalRevision:string; leaseEpochDecimal:string; registryToolId:string;
@@ -120,7 +120,7 @@ PLANNED -> POLICY_VALIDATED -> PROVISIONING -> ATTESTED -> RUNNING -> COMPLETED
 ```
 
 Sequence:
-1. Gateway persists Tool intent (CHAT_03) and validates canonical schema/owner/goalRevision/budget/approval; BrowserWorker or compute requested by registered capability, no arbitrary command.
+1. Gateway persists Tool intent (CHAT_03) and validates canonical schema/owner/goalRevision/budget/approval; Browser/pure_compute/sandbox_exec requested via registered capability; arbitrary command only in untrusted Execution VM, never Host or Trusted Control VM.
 2. SandboxAdmission picks executor by immutable tool kind; verifies process identity, deployment config policy version, owner binding and current Run leaseEpoch.
 3. Browser Worker locks owner+task BrowserSession with CAS and constructs fresh Context (or owner-matching encrypted state), enforces sandboxed Chromium and isolated temp dir. Compute Worker receives only bounded/redacted input and restricted function.
 4. Executor rechecks authorization and allowed egress target before external IO. Outputs written as scoped Artifact; raw data never becomes grant.
@@ -199,7 +199,7 @@ UI shows `BLOCKED_UNSAFE_RUNTIME`, `WAITING_INPUT`, browser takeover status and 
 
 | TEST | Setup/action | Expected |
 |---|---|---|
-| SBOX-T01 | attempt `ssh`, `bash`, docker.sock, `/proc` from Tool catalog/MCP | tool unavailable / denied; host effects 0 |
+| SBOX-T01 | attempt Host SSH/docker.sock/Host /proc plus authorized Cell `bash`/Python | Host/protected effects 0, bounded Cell Shell succeeds with no raw Internet |
 | SBOX-T02 | run container with privileged, cap add, host network/PID, device, bind mount | config reject before start; no privileged process |
 | SBOX-T03 | fake policy allowing seccomp unconfined or AppArmor unconfined | fail preflight, audit reason present |
 | SBOX-T04 | Chromium fails userns/seccomp sandbox startup | no fallback to `--no-sandbox`; blocked status |

@@ -47,19 +47,20 @@ Task.recordVersion初期1案、Run.leaseEpoch number安全整数/DB bigint、Tas
 
 ## 5. 内部Port / TypeScript pseudo contracts
 ~~~ts
+type Int64DecimalString = string; // validated signed int64 decimal wire; BigInt in trusted service
 type ControlKind="CANCEL"|"PAUSE"|"RESUME"|"STEER";
 interface ScopedControl {
  commandId:string;taskId:string;actorUserId:string;
  expectedRecordVersion:string; kind:ControlKind;
- issuedAt:string;payloadRef?:string;goalRevisionBefore:number;
+ issuedAt:string;payloadRef?:string;goalRevisionBefore:Int64DecimalString;
 }
 interface ControlPort {
  enqueue(auth:VerifiedPrincipal,c:ScopedControl):Promise<ControlReceipt>;
- peekBoundary(runId:string,epoch:number):Promise<ControlSnapshot>;
- acknowledge(commandId:string,checkpointVersion:number):Promise<void>;
+ peekBoundary(runId:string,epoch:Int64DecimalString):Promise<ControlSnapshot>;
+ acknowledge(commandId:string,checkpointVersion:Int64DecimalString):Promise<void>;
 }
 ~~~
-Schema major unknownはreject。Run leaseEpochは非負safe integer、DB bigintから丸め無しで変換。expectedVersion/goalRevision/owner bindingの完全一致が必要。APIは上記Portの正式名称ではなく本書内設計案 [PROVISIONAL]。actorやTask権限はLLM inputから取得しない。
+Schema major unknownはreject。Run leaseEpoch / GoalRevision / CheckpointRevision はsigned int64 decimal wire strings、BigIntとDB BIGINTでlossless変換、JS numberは禁止。expectedVersion/goalRevision/owner bindingの完全一致が必要。APIは上記Portの正式名称ではなく本書内設計案 [PROVISIONAL]。actorやTask権限はLLM inputから取得しない。
 
 ## 6. State machineとSequence
 ~~~text

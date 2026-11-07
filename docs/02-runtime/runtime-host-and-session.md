@@ -46,10 +46,11 @@ Runtimeが署名済みのidentity/ownerとcurrent leaseEpochをDBで検証し、
 
 ## 5. I/O契約・型・Validation
 ~~~ts
+type Int64DecimalString = string; // validated signed int64 wire, BigInt in trusted service
 interface RuntimeIdentity {
  tenantId:string;ownerUserId:string;taskId:string;runId:string;
- inputGoalRevision:number;appliedGoalRevision:number;
- leaseEpoch:string;authIdentityVersion:number;
+ inputGoalRevision:Int64DecimalString;appliedGoalRevision:Int64DecimalString;
+ leaseEpoch:Int64DecimalString;authIdentityVersion:Int64DecimalString;
 }
 interface RuntimeScope {
  identity:Readonly<RuntimeIdentity>;abort:AbortSignal;
@@ -64,7 +65,7 @@ interface Host {
  health():{ready:boolean;live:boolean;reason?:string};
 }
 ~~~
-公開IDはCHAT_01 UUIDv7 validator、Run.leaseEpochは安全なJS number (0..Number.MAX_SAFE_INTEGER) とDB bigintのlossless変換。recordVersionはCAS用（初期1提案）、goalRevisionは条件世代、Tool Attempt fenceは別トークンであり**相互代用不可**。すべて[PROVISIONAL: CHAT_01/10]。Owner/tenant/workspaceはサーバー照会で結合する。Task.activeRunIdはそのTaskのRun以外へ向けられない。
+公開IDはCHAT_01 UUIDv7 validator、Run.leaseEpoch/GoalRevision/authIdentityVersion はsigned int64の十進文字列wire型、Trusted BigIntとDB BIGINTでlossless変換し、JS numberは使わない。recordVersionはCAS用（初期1提案）、goalRevisionは条件世代、Tool Attempt fenceは別トークンであり**相互代用不可**。すべて[PROVISIONAL: CHAT_01/10]。Owner/tenant/workspaceはサーバー照会で結合する。Task.activeRunIdはそのTaskのRun以外へ向けられない。
 
 ## 6. 状態遷移と正常Sequence
 ~~~text
