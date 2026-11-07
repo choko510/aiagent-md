@@ -70,7 +70,7 @@ All UI views must come from authoritative GET \`/api/v1/approvals/{id}\` and \`/
 | HITL-011 | SHOULD | short-lived take-over capability minted behind server-side one-time exchange + device/session binding | 06,08 |
 | HITL-012 | SHOULD | audit history of decisions/lease release to authorized user (no secrets) | 07,08 |
 | HITL-013 | LATER | multi-operator peer review / delegated approvals after ADR & tenancy migration | 07 |
-| HITL-014 | MUST | Ownerが手動起動するread-only live Observe。Agent leaseは維持。機密/不明画面の全面遮断とBLO-001〜012の認可/fencing/非保存が必須 | 06,09,23 |
+| HITL-014 | MUST (Viewer enabled profile) | 機能有効時のみOwnerのread-only Observeを許可。HUMAN/HANDOFF_REQUESTED/RECLAIMING中はCreate・再接続・Sendを拒否。機密/不明画面は全面遮断し、BLO安全試験完了を要す | 06,09,23 |
 
 ## 5. Public DTO proposals [PROVISIONAL CHAT_01/03/04/09]
 
@@ -279,3 +279,10 @@ Sandbox Execのローカル起動、SentinelのネットワークALLOWED/ASK/DEN
 ## 2026-11-07: Observe（閲覧）とHuman Takeover（操作）は独立
 
 [Browser Live Observation](browser-live-observation.md) に従い、Task ownerは `browser:observe` 権限でサーバーBrowserを**見るだけ**にする。ObserveでAgent leaseを停止しない。Viewerからのクリック、入力、clipboard、CDP、任意Browser操作は禁止。Observe権限を`browser:takeover`/Approvalへ昇格させない。機密/不明画面は全面ブロックし、旧frameを画面から消す。「操作を引き継ぐ」を明示した時のみ既存の短命ticket・AGENT/HUMAN排他遷移を用い、その時点でObserve subscriptionは失効する。BLO-T01〜12 / SC-23（未実装）。
+
+
+## 2026-11-07 PR #71 P1再監査：Takeover開始・解除の安全な閾値
+
+Observeの権限とHandoff権限は完全に分離する。Handoffを**要求した時点**でBrowserSessionの`observeBlocked=true`と`observeAdmissionEpoch`をCAS更新し、新規Create/Offer/Tab/WS/Reconnectを拒否する。既存MediaはRelay送信BarrierとTrack/Peer破棄を経て失効を確認しなければ人間の操作ticketを有効化できない。`mode=HUMAN`中に別Tabから新規Observeを発行する経路は無い。ReleaseはACKだけでは許可にならず、`HUMAN→RECLAIMING→AGENT`のWorker/DB最新状態一致後にのみ新規Subscriptionを許可（旧mediaGenerationを再利用しない）。安全なMedia停止を確認できなければHandoffは`WAITING_SAFE_HANDOFF`を維持し、Agent再開/閲覧再開をしない。
+
+`HITL-014 MUST`は**Live Viewer enabled releaseにのみ適用**する条件付き要求であり、disabledの通常Agent releaseでは`BLO-OFF-T01〜03`で媒体Socket/権限の非公開を検証する。`SC-23`の`QA-E2E-T23P/N/F/OFF`が上位Oracle。未実装/未実行。
