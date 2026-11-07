@@ -317,3 +317,7 @@ All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `le
 ## 2026-11-07 Muse移行: ローカル計算と実際の外部効果
 
 **sandbox.execの起動許可はシェルによる外部リクエストやConnector操作の承認ではない。** Local process admission / concrete network egress Sentinel authorization / sensitive or irreversible Human Approval are distinct. Arbitrary shell HTTPS POST with unverifiable method/body/effect must not be classified read: deny or require a mediated trusted Connector with scoped exact approval. Tool Gateway retains Approval Record and Side-effect Ledger; Sentinel is final egress/Connector permission authority, never a second approval DB. All permissions bound to owner/Run/lease/goal/intent/destination/budget/policyEpoch and checked immediately before dispatch. Browser fill/click and CLI HTTP also count. SC-17/19/21/22。
+
+## 2026-11-07 DEV: Design ConsentとTool Approvalの明確な分離（Draft）
+
+[Visual Design & Demo](../16-app-development/visual-design-and-demo.md) の「このデザインを採用」「このDemoで本実装」は人間の**要件合意**であり、この文書のApprovalRecord(不可逆外部Tool)に流用不可。ユーザーが`demoChoice=AUTO`を選んでもGit push/PR・release/deployment/本番API変更/購入/メール等を自動承認した意味ではない。Git Provider/Package Broker/Preview session/CI/Signing/Deploymentは各々versioned typed Tool Descriptorとimmutable Intent、effect classification、Sentinel final auth、Budget/Run fenceの検査を要求。事前に明示して許可した限定branch push/PR scopeは厳格なrevocable grantとして表現し、merge/force-push/production deploy権限へ拡大しない。UNKNOWN external effectはblind retry禁止。Chat/Browser/UIから渡すapproval digestをそのまま信じずTrusted serverが再計算。SC-25,29、DEV-UI-T03、DEV-BLD-T06..08。Draft/NOT RUN。

@@ -215,3 +215,7 @@ BSESS-T16はFake Providerの遅延応答と2 worker raceを注入し、solve中�
 ## 2026-11-07 Muse移行: Browser BrokerはCellの外
 
 Browser WorkerがCDP/Context/Page/Sessionの唯一の所有者である方針をさらに強化。Untrusted Runtime CellのShell、Node/Playwright、生成Browser Skillsからの直接CDP/remote-debugging socketアクセスは不可。Cellにはopaque BrowserSessionIdと狭いBrowser Action APIのみを渡す。Browser Broker controllerはTrusted Control VM内、Chromium Browser Workerは**別の隔離実行ドメイン**に配置し、両者は独立したprocess/user/namespace、Secrets/Browser storageStateはCredential Broker管轄で、UI Human Handoffは別Owner lease。Chromium sandboxが本番で有効化できなければfail-closed; BrowserのWebSocket/iframe/download含む全外部通信はSentinelの許可を検証する**Enforced Egress Transport**で強制制御。SC-18/19/21/22。
+
+## 2026-11-07 DEV-06: 開発用Browser Debug Sessionの追加提案（Draft）
+
+[Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。未マージのBrowser Live Observation PR #71への直接依存は置かず、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。

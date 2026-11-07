@@ -671,3 +671,7 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 ## 2026-11-07: SandboxExecutionのRead Projectionとコマンド
 
 POST /tasksが従来通りTaskを作成し、AgentLoop→Gatewayがsandbox.exec Intentを発行する。クライアントから無制限なshell実行可能なREST POST /execを**公開しない**。GET /runs/{id}/executions（提案）とGET /executions/{id}（提案）はowner/tenant認可済みのstatus、imageDigest、elapsed/resources、bounded stdout/stderr Artifact references、effect uncertainty、Cell attestation summaryのみ返す。出力/Artifactのプライベート内容やraw command/env/surrogate keysは原則閲覧権限を別途検証。Cancel/SteerはTask commandの正本を利用し、ExecutionをAPI bodyから直接RUNNINGとセットできない。正式PathとDTOはCHAT_01/08合同レビューまでProvisional。SC-17/18/21/22。
+
+## 2026-11-07 Development/Campaign API Extension proposals（Draft）
+
+[DEV-09](../16-app-development/development-api-and-ui.md) の `/api/v1/development/projects`, `/cycles`, `/design-candidates`, `/design-decision`, `/demo-decision`, `/reviews`, `/debug-evidence` と `/api/v1/campaigns`, `/commands`, `/events`を追加REST候補とする。正式なOpenAPI/DTO/stateはCHAT_01/08/10協議後にLocked。全書込でIdempotency-Key・If-Match/recordVersion・CSRF/Origin/AuthenticatedPrincipalを保持。UserDesign/DemoDecisionは外部Tool Approvalと独立。HTTP202で完了表示しない。GET/SSEから署名cursorとserver stateへ再整合し、pending/waiting/quota/rate/partial/unknown を区別。raw code/secret/CDP/download tokenや任意Tool実行APIを公開しない。DEV-UI-T01..06、CAM-T05、SC-24..31 未実行。

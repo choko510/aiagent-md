@@ -356,3 +356,9 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 `ACM-T21〜36`を従来T01〜T20へ加え、次のHard gatesを必須化する。**引用が正しいだけで出典不支持の数値をverified化 0、Goal typed value/否定/税・費用修飾の変造0、Policy二重計上での不必要Block 0、Token Window超過0、RequestSnapshot不一致のReplay 0、DELETE先行Commit後旧Memory付きAdmission 0、無承認Provider fallback 0、Expired OriginalをVerified Evidence利用0、Child stale merge 0、Head/Artifact dangling Success 0、CrossTenant Cache leak 0、Coverage不足の誤Success 0**。
 
 速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。
+
+## 2026-11-07 Autonomous Development/Endless Run quality gates（Designed / NOT RUN）
+
+[DEV-10](../16-app-development/acceptance-and-rollout.md) のDEV-REQ-01..13、[CAM-01](../07-automation/endless-run-campaign.md)のCAM-T01..11を受入集合へ追加。P0/P1 gate: 最新commit SHAに対し3独立Reviewerの実際のReceiptがある、合格したテストが同一SHA+ImageDigest+FixtureDigest+DesignRevisionにbind、P0/P1 OPEN/UNVERIFIED=0、Demo承認未失効、Browser Debugで主要フローを実際に操作・再検証、隔離/秘密の負例成功0。Skipped/unsupported/unknown/Tool effect uncertainは合格でなくPartial/Blocked。Endless Campaignは各Cycleの結果・費用・件数を再起動後も持続、Stopの前後に新dispatch0、unknown usageを0計上0、Provider429 busy loop0、重複10件カウント0。Provider quotaの実日時・機能検証はOperator環境で記録し、未実測SLOを宣伝しない。
+
+QA fixtureは2 VM+Cell/Preview Broker/Browser Worker/Mock Git・CI・Model・Provider、故障注入を含む。テストカバレッジ表示は「定義済み/実施済み/合格/失敗/未対応」を別計数する。本体コードが存在しない現時点では**すべて未実行**。Static Markdown/Linkチェックは安全・E2E・実機確認を代替しない。

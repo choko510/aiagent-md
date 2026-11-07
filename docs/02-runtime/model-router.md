@@ -205,3 +205,6 @@ Fallback前にはContext全体を新Provider Adapterで再構築し、`PromptTem
 **Budget gate**: 最終Provider serialized inputのToken数（Role wrappers/Policy projection/Tool schema含む）を一度だけ計数し、`W/R/S`と照合してAdmission。Prompt cacheや一時的推定Tokenが容量を増やさない。古いProvider payload digestで「同じPromptを再現」と断言しない。
 
 Continuationが特定Provider固有ならPinまたはNon-replayableとしてPartial。送信AdmissionはMemory削除・Goal SteerとAtomic Epoch検査が通ったものだけ。Tests ACM-T22/23/24/29/36、未実行。
+
+## 2026-11-07 DEV-04: 高性能Advisorの限定Model routing（Draft）
+[Expert Advisor](../16-app-development/expert-advisor.md) の `expert` role profileは、必要推論・Code能力・コンテキスト・料金capをRouterで照合したModelのみ選ぶ。通常A5モデルと明示区別し、専門相談を再帰無制限にしない。role/profileはPermissionではない。AdviceRequestには再現エラー・固定SHA・最小コード差分/証拠だけを渡し、Cookie/secret/無関係な個人情報は渡さない。Advisorはread-onlyでCode/Git/Tool Policyを変更せず、実修正と採否はA5と独立QAが検査。モデル変更時もGoalRevision/ModelAttempt Receipt/Usage/Budget reservationを維持。DEV-EXP-T01..05/SC-26未実施。
