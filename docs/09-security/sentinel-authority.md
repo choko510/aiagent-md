@@ -107,3 +107,7 @@ No implementation or test was run while preparing this spec. Deployment/CI gates
 
 DBのPITRでRun `leaseEpoch` が過去値へ巻き戻っても旧Workerの権限が復活してはならない。SentinelとEnforced Egress Transportは、**復元DBとは独立したOperator管理の現在`restoreIncarnation`** とcluster identity、tenant/owner/Run、currentGoalRevision/currentLeaseEpoch、policyEpoch、使い捨てGrantを結合して最後の送信境界で照合する。古いsocket/VM/Workerからの物理送信が遮断されない限り本番readyは禁止する。
 独立世代Storeに到達できない場合はfail closed。失効したSecret/ConsentやUNKNOWN副作用を復旧DBの古い値から再承認しない。実KVM/Firewall/Transport環境でREC-T23〜T27相当の負試験を実施するまで、これはDraftの設計案であり実装済み安全保証ではない。
+
+## 2026-11-07 DEV-05/06: Project Preview/Git/Toolchainの追加攻撃面（Draft）
+
+[DEV-05](../16-app-development/build-preview-release.md) / [DEV-06](../16-app-development/autonomous-browser-debugger.md) のPreview Brokerはprivate IP/TCP/HTTP CONNECTの一般的な例外ではない。Operatorが実測検証した独立VM間の限定IPCと、tenant+project+execution+workspace revision+boundPort+TTL+policy epochへbindした一時routeのみ許す。Browser Workerは専有CDPのまま、host/other tenant/metadata/Trusted Services直通、redirect/IPv6/WS/ServiceWorker bypass、URLでの認可偽装を拒否する。npm/pip/GradleやGit/CI/Deploy/SigningをAgentのraw networkから起動せず、各brokerが独立Gateway Intent/Sentinel/Enforced Transport receiptで操作する。Toolchain postinstall scriptはCell隔離を維持。デモ/デザインのユーザー選択は外部作用のApprovalに変換されない。SC-29とDEV-BLD-T01..08にはVM実測/SSRF/secret exfil負例を必須化。未検証ならproduction readiness=false。

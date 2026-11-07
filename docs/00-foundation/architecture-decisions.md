@@ -78,3 +78,15 @@ ADR-023〜028の実装条件を次のとおり補強する。`P0-1` Source ref�
 P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Current、Capacity-aware marginal utility、Provider別Recipient Consent、ChildResult再検証、Context GC/HEAD参照、失敗Journal、Context差分復旧、Tenant scoped Cache、Evidence Coverage Checkerを採用提案とする。
 
 **新たなOwner review blockers**: CHAT_01/02/06/10のGoal/MemoryAdmission/ContextSnapshot Schema、CHAT_01/09/10/15のOriginal/Projection整合、CHAT_02/03/09のProvider Privacy gateway、CHAT_08/11の送信可能性UI/Fixtureを正式承認するまではLOCKED扱い不可。Test契約はACM-T21〜36（Designed only）。PR #68の隔離/通信境界はこの追加仕様によって緩和されない。
+
+## ADR-030〜034: Autonomous Development & Endless Campaign（2026-11-07、Proposed, NOT LOCKED）
+
+| ADR | 採用提案 | 代替/却下 | Owner合意/実測 |
+|---|---|---|---|
+| **ADR-030** | 新規DEV-01〜10は既存88仕様の上に載るProject/DevelopmentCycle/Feature projection。Task/Run/Approvalは01/02/03の正本を使う | Code agent特化への基盤置換、別Runnerによる認可権限複製 | CHAT_00/01/02/03/10 pending |
+| **ADR-031** | 3 blind proposal→1 synthesis→任意Human design→builder demo→任意demo consent→builder implementation→3 independent same-SHA review。Expert相談はread-only予算限定Child Task | 全AIに同一相互コンテキスト、単なる多数決、自分で承認、Reviewerが直接本番branch変更 | CHAT_01/02/03/08/11 pending |
+| **ADR-032** | Design visual side-by-sideと動くDemoでUserが判断、Demo manifest digestにbind。実Deployment Approvalは独立 | 名称だけのデザイン選択、モックを実APIと偽る、Demo consentをTool Approvalへ流用 | CHAT_03/04/08/09 pending |
+| **ADR-033** | 分離Preview Broker→独立Browser WorkerでConsole/Network/Trace/Visual regressionと安全なE2E。PR #71はoptional observe layer | localhost/任意TCP raw proxy、Cell直接CDP、private IP allowlistを一律緩和 | CHAT_03/04/09/10/11 pending。Bridge SSRF/secret試験必須 |
+| **ADR-034** | 永続Campaignはbounded Cycleを成果物で連鎖。10件等のprogressはVerified distinct receipt。停止/Quota/費用上限はハードゲート | 無制限1 Run、空tickごとにModel呼出し、Unknown課金をゼロ、承認待ちで全タスクを停止 | CHAT_01/02/07/08/09/10/11 pending |
+
+`ADR-029` はマージ済みPR #71のBrowser Live Observation仕様。ADR-030〜034はそのObserver/Takeover権限分離を継承する。Shared schema・外部Provider API・実際のKVM/Preview/Browserテストが揃うまで各ADRは採用候補でありLOCKEDと呼ばない。

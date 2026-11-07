@@ -131,3 +131,26 @@ Unit schema/codecs, real PostgreSQL FK/concurrent CAS/migration upgrade, Browser
 - For sandbox.exec: Agent proposal -> trusted Gateway persistent Intent -> execution Admission (server-owned identity/policy) -> offline Execution VM process -> scoped Tool RPC for each external action -> Gateway concrete Intent/Ledger -> Sentinel -> enforced Egress Transport -> recorded effect receipt. No shared guest kernel with Vault/DB and no direct Internet.
 - Any current direct Gateway→External arrows represent a **logical invocation**, not a direct unfiltered socket route. Actual network/connector authority is Sentinel. All legacy no-arbitrary-code statements must be understood as host/protected-service prohibition, not Runtime Cell limitation.
 - The shared transaction/approval contracts are Draft; no explicit implicit lock or VM implementation is implied by this revision. Full implementation requires OWNER reconciliation + TEST SC-17..22.
+
+### 13.1 Autonomous Development & Campaign Extension (2026-11-07, Draft)
+
+既存Orchestrator/Trusted VM、Tool Gateway/Approval/Sentinel、Untrusted VM、Browser Worker/DB/Artifact Storeを**再利用**し、次の論理サービスを追加する（API/DDL/EventsはOwner協議前の提案）：
+
+```text
+Authenticated UI (Design Picker, Demo Approval, Dev Studio, Endless Run)
+   → REST Commands + durable Task/Run/Campaign/Project DB
+      → Development Workflow Coordinator (3 idea children → synthesize → builder)
+         → Workspace/Artifact/Git CAS  ←→  Git/CI Provider Broker → Sentinel/Egress
+         → Sandbox Exec in Untrusted Execution VM (build/runner, offline packages)
+         → Preview Broker (scoped project+execution+port, NO generic CONNECT)
+              → independent Browser Worker (UI demo, visual/E2E/debug tracing)
+         → 3 independent Review children (same immutable commit SHA)
+         → Repair loop / Expert Advisor → GoalVerifier
+      → Campaign Controller (finite Cycles; atomic next-work-item dispatch)
+```
+
+- Development CoordinatorとCampaign Controllerは**Trusted Orchestrator内の論理機能**。LLM生成コードはUntrusted VMのCellのみ、BrowserContext/CDPはBrowser Workerだけ。
+- Preview Brokerは**明示許可されたExecution+port+owner+revisionの専用転送**であり、通常のBrowser/HTTP private IP拒否を緩和するものではない。直接ネットワーク、ホスト/LAN、Secret、CDPへのショートカットを禁止。Browser Live Observation PR #71はoptional observe UI dependency。
+- Tool side effects（Git push/PR、署名、release、deployment）には各Tool Intent、Approval(必要時)、Sentinel transport receiptを要求。Design/Demoのユーザー選択はTool Approvalと別。
+- CampaignはTask/Runではなくその上位。Cycleはfinite budget & checkpointのTask DAG。Campaign Goal/Cycle receiptsをDB正本に保存し、Restart/duplicate outbox/cancel/429時の意味論を [CAM-01](../07-automation/endless-run-campaign.md) に委譲。
+- API/Events/UI: [DEV-09](../16-app-development/development-api-and-ui.md); Runtime/QA: [DEV-10](../16-app-development/acceptance-and-rollout.md)。

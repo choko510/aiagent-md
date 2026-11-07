@@ -541,3 +541,32 @@ AuthZは`(principal.tenantId, principal.userId, sessionId, taskId, task.currentO
 Owner変化/ユーザー無効化/Logout/Session revoke/Auth権限改定/PITR後は`authEpoch`と`restoreIncarnation`を変更し、既存Grantを失効。Auth cacheやTLS/ICE接続維持を理由に生かさない。Media relayはAuth Providerへ到達不能時fail-closed。HTTPは401/404（非owner存在を秘匿）/409（本人のmode競合）を区別し、誰のBrowserかをエラーメッセージに書かない。`AUTH-BLO-T01`は同Tenant別owner/他TenantからどのMediaにも0byte、`AUTH-BLO-T02`は同owner TaskReadだけではObserve不可、`AUTH-BLO-T03`はOwner変更/Logout/Takeover/restoreの送信Barrier以降0新規frame、`AUTH-BLO-T04`はDelegate/Admin roleによる暗黙閲覧不可を検証（すべてNOT RUN）。
 
 文書上の既存`AuthorizationService.requireAccess`はここで新規Actionを明示的に型として扱う。実装では`browser:observe`の許可は再使用できる一般`AuthorizedResource`ではなく、各MediaSession世代/Viewerに紐づく一回限りのserver-only delivery grantであり、Grant自身からtakeover/approvalを発行できない。詳細: [Browser Live Observation `10](../08-interfaces/browser-live-observation.md#10-pr-71-再監査修正閲覧権限送信境界感度判定の正本案)。
+
+## 2026-11-08 P1-07 — Development/Auth action registry extension (Provisional / NOT RUN)
+
+Existing broad `Action` values `read/create/modify` do not silently cover the higher-risk Development/Campaign API. Add an exact action discriminant (owner-approved contract revision required) and deny unknown actions:
+
+```ts
+type DevelopmentActionV1 =
+ | "project:create" | "project:read" | "project:edit"
+ | "dev:run" | "dev:read" | "dev:decide" | "dev:integrate" | "dev:release"
+ | "preview:observe" | "demo:interact" | "browser:handoff"
+ | "debug:read" | "campaign:create" | "campaign:read" | "campaign:control";
+type DevelopmentResourceV1 = {
+  kind:"project"|"cycle"|"preview"|"demo"|"debug"|"campaign"|"integration";
+  tenantId:string; id:string; ownerUserId:string; projectId?:string;
+  cycleId?:string; campaignId?:string; currentGoalRevision?:string;
+  controlVersion?:string; previewGeneration?:string;
+};
+```
+The **server** resolves tenant, owner, membership, capability, immutable target resource and mutable versions; no user body/LLM Tool args can set privilege or actor. For shared GitHub repositories, repo membership alone does not establish permission to another user's private Project/Campaign; use explicit project ACL and revalidate for each resource kind. `campaign:control` and Demo approve/reject require owner or a named, revocable per-project grant with action+scope+expiry, never generic `read`. `preview:observe` is view only; `demo:interact` requires an authenticated project-scoped **synthetic fixture** session plus exclusive active input lease and no side effects; `browser:handoff` requires existing strict Human Takeover. Debug raw Trace/PII is not automatically readable by a project viewer; `debug:read` returns classified/redacted artifacts. `dev:integrate` and `dev:release` require extra project branch protection and Gateway deployment approval.
+
+**Worker identity:** a service actor fetches active project/Cycle/Campaign owner and identityVersion/policyEpoch from canonical DB; a queue's user ID, JWT claims at job creation or a contributor's Git credentials cannot create authority. For Campaign STOP, check exact `controlVersion` at each model/Tool/Browser admission; revocation concurrently invalidates active grants. For demo approvals, check digest/goal/design/owner and grant version at decision transaction. The read side must prevent other same-tenant users from reading Project file/preview/debug/evidence. Treat any missing shared-schema mapping as DENY.
+
+**AUTH-DEV-T01**: same-tenant user B sees A's Project URL and Demo ID; no read/write/session leakage.
+**AUTH-DEV-T02**: shared repo contributor but not Project owner cannot create Cycle or control Campaign.
+**AUTH-DEV-T03**: owner transfers Project while Demo approval pending; old principal and grant invalidated.
+**AUTH-DEV-T04**: preview observe cannot control Browser; demo:interact controls mock only, takeover requires separate lease.
+**AUTH-DEV-T05**: old Campaign controlVersion is rejected by all child/model/tool/Browser admission.
+**AUTH-DEV-T06**: debug reader cannot access raw tokens/HAR or other Project's screenshots.
+These are proposed auth contract tests (not executed).

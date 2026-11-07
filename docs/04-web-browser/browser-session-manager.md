@@ -224,3 +224,7 @@ Browser WorkerがCDP/Context/Page/Sessionの唯一の所有者である方針を
 ## PR #71 P1再監査: BrowserSession Observe Admissionと復旧世代
 
 BrowserSessionのObserver新規許可条件は`mode=AGENT`・`takeoverPhase=NONE`・`observeBlocked=false`に限定し、Handoff要求を保存した瞬間に`observeAdmissionEpoch`を増分して新規`Create/Reconnect/Offer/WS/Tab/Send`を拒否する。Handoffの人間操作Ticketを有効化する前に旧Mediaの`REVOKED_BARRIER_COMMITTED`とTrack/Peer/Queue停止を待つ。Releaseは`HUMAN→RECLAIMING→AGENT`のCAS確定とWorkerのSession/Page再観測までObserve不可。`restoreIncarnation`をPR #72と同じDB独立世代から取得し、Media grant/Producer/Browser sessionと紐づけ、PITR旧Worker拒否。`BLO-013〜017`/`BLO-T13〜16`、`QA-E2E-T23F`に準拠（NOT RUN）。
+
+## 2026-11-07 DEV-06: 開発用Browser Debug Sessionの追加提案（Draft）
+
+[Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。マージ済みBrowser Live Observation PR #71のObserve-only権限を継承しつつ、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。

@@ -97,3 +97,35 @@ When: AがWebダッシュボードTask詳細で「ブラウザをライブ表示
 Expected: Aが安全なBrowser画面のリアルタイム変化を観察できる。Observe中のAIは停止せず、閲覧経路にマウス/キーボード制御なし。B/Cへframe 0byte。機密/未知ページは全面ブロック、旧frameも消去。ObserveだけでHuman Takeoverや外部Approvalは許可されず、明示Takeover時のみ排他leaseでAIを止める。失効/再起動/旧Tab由来frameを拒否。録画/永続保存は行われない。映像の切断・停止はRunのCancelではない。
 
 Negative: public CDP/VNC公開、許可なき録画、別Task/別Tenantのframe、古い映像の貼り付き、Mask不十分なSecret映像、SSEへのraw frame、Observe→Takeover権限昇格。BLO-001〜017 → BLO-T01〜16 / BLO-OFF-T01〜03 → SC-23。詳細: [Browser Live Observation](../08-interfaces/browser-live-observation.md)。
+
+## 2026-11-07 Autonomous App Development / Endless Run (SC-24〜31, Designed / NOT RUN)
+
+SC-23はマージ済みPR #71のBrowser Live Observationとして登録済み。DEVとCAM仕様の正式番号は当該PRの統合時に追跡性を再確認。
+
+### SC-24 8AIによる開発
+Input: 「Webアプリを考えて作り、検証してPRにして」。Expected: 3独立提案と1統合・1Builder・3同SHAの独立Reviewer、テスト/差分/実Commit、P0/P1未解決0。Negative: 2提案を3提案と表示、他SHA reviewerによる合格、未実行テストを成功扱い。
+
+### SC-25 Visual Design / Demo
+Input: 「UIを見た目で選びたい。選んだDemoを作って、OKしたら実装」。Expected: 同一data/viewportの3候補画像・操作可能なmock明示Demo、指定ユーザー承認の版固定、修正依頼では新版再提示。Negative: デザイン名だけ、古いApproval再使用、Demo Consentをデプロイ許可に転用。
+
+### SC-26 Expert consultation
+Input: 実装が同じtestで3回失敗。Expected: bounded Expert Model相談をroot-causeの証拠に基づき許可しA5が修正。Negative: AdvisorがCode/Policy/Gitを勝手に書込、無限tokens。
+
+### SC-27 Browser E2E Debug
+Input: 設定画面mobileレイアウト見切れ、API 500、入力エラー。Expected: 独立Browser Workerの操作/Console/Network/Trace/screenshot→再現・コード相関→修正/回帰。Negative: click API成功のみでPASS、実サービス破壊操作、HAR生CookieをLLMへ送る。
+
+### SC-28 P0/P1 review loop
+Input: 修正したコードにP0とP1。Expected: 新しいSHAに対する3独立レビュー/必須テスト/再デバッグ、未解決0でのみ完了。Negative: old SHA pass、未実施Browser test、証拠なし誤検知dismiss。
+
+### SC-29 Preview/build/Git隔離
+Input: Sandbox Build→Project Preview→Browser debug→限定認可GitHub PR。Expected: Cellの直Internet/Host/metadata/CDP不可、Previewはowner/project/portに限定、Git external actionはGateway/Sentinel台帳。Negative: raw CONNECT/任意LAN転送、未承認本番デプロイ、外部push結果UNKNOWNの二重送信。
+
+### SC-30 Endless Campaign
+Input: 「全体最適化を停止/利用上限まで継続」。Expected: bounded Cycleを継続dispatch、保存された進捗/予算、停止ボタンや429、再起動で正しく停止/待機/再開。Negative: 1Run無限、空tick自問自答、二重カウント、上限リセット。
+
+### SC-31 Feature Factory
+Input: 「本実装に近いDemoを確認して、10機能完成させて」。Expected: featureごとに提案→Demo決定→実装→test→3review→Count。確認待ち中も独立Task継続。Negative: 10案だけ、同じ機能の二重完了、未承認実装。
+
+REQ→TESTの参照は [DEV-10](../16-app-development/acceptance-and-rollout.md) を正本案とする。各SCはmock data/invalid credentials/SSRF/VM killpoint/tenant concurrency/Browser faultを含む positive & negative E2Eが必要。**未実施でありVerifiedではない**。
+
+**SC-31 revalidation fault addendum (2026-11-08):** After a feature factory reaches 10 INTEGRATED, a later merged change to current Project HEAD invalidates two feature regressions. Expected current eligibility/progress falls to 8 and a `REVALIDATION_REQUIRED` state is reported; no automatic new charge or blind resume. After a fresh current-head 3AI review and tests pass, progress returns to 10 without second count receipts for the same logical work items. Designed / NOT RUN.

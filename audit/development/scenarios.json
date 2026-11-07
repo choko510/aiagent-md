@@ -1,0 +1,367 @@
+{
+  "schemaVersion": 1,
+  "status": "DESIGNED_NOT_RUN",
+  "note": "Synthetic fixture design; no runtime evidence and no network operations executed",
+  "scenarios": [
+    {
+      "scenarioId": "SC-24",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 24,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T24P",
+          "setup": "3 independently isolated plans available",
+          "action": "A4 selects tradeoffs; A5 builds; A6/A7/A8 review same SHA",
+          "oracle": "3 plan refs and 3 latest SHA review refs recorded",
+          "forbidden": "2 plans cannot be reported as 3",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T24N",
+          "setup": "one proposal/Reviewer missing",
+          "action": "attempt join and report result",
+          "oracle": "PARTIAL/blocked, no counted success",
+          "forbidden": "fabricated third reviewer",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T24F",
+          "setup": "Kill one of A1-A3 after storing only a partial proposal",
+          "action": "Restart coordinator and attempt A4 join",
+          "oracle": "Missing child is retried or marked partial, never counted as a third valid proposal",
+          "forbidden": "A4 silently fabricates a third completed proposal",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-25",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 25,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T25P",
+          "setup": "3 UI candidates same fixture and synthetic data",
+          "action": "interact with mock Demo then approve known digest",
+          "oracle": "demo:interact permits mock buttons only; acceptance binds version",
+          "forbidden": "preview:observe never allows mutating controls",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T25N",
+          "setup": "AUTO_RECOMMEND supplied without owner decision",
+          "action": "attempt to start implementation",
+          "oracle": "no implementation until explicit/bounded mandate",
+          "forbidden": "implicit demo acceptance",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T25F",
+          "setup": "Restart Browser Worker after interactive mock session issued a scoped capability",
+          "action": "Attempt stale-generation form entry then resume with new capability",
+          "oracle": "Stale action denied and new synthetic session cannot access external application data",
+          "forbidden": "Old demo capability revives on Browser Worker restart",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-26",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 26,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T26P",
+          "setup": "Builder fails repeatedly on same case",
+          "action": "invoke scoped read-only Expert then retry",
+          "oracle": "advisor advice trace and bounded usage recorded",
+          "forbidden": "advisor cannot commit or change policy",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T26N",
+          "setup": "provider returns 429 or budget exhausted",
+          "action": "route/fallback attempt",
+          "oracle": "bounded quota wait or BLOCKED, no unauthorized fallback",
+          "forbidden": "infinite token retry",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T26F",
+          "setup": "Expert provider returns 429 just after reserved token budget was committed",
+          "action": "Retry routing with current quota wait and held usage receipt",
+          "oracle": "Provider request is bounded, uncertain usage retained, no blind fallback to forbidden provider",
+          "forbidden": "Same prompt resubmitted repeatedly without quota/budget check",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-27",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 27,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T27P",
+          "setup": "browser fixture with overflow and API500",
+          "action": "Explore routes, capture Trace and server correlation",
+          "oracle": "deterministic finding + source/evidence + actual reproduction",
+          "forbidden": "click success not regarded as goal success",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T27N",
+          "setup": "Playwright locator click succeeds but UI state unchanged",
+          "action": "Ask verifier to report success from click status",
+          "oracle": "Verifier returns FAIL with missing expected state transition",
+          "forbidden": "Click returned success is treated as user-goal success",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T27F",
+          "setup": "Browser Worker crashes during evidence recording for an API500 flow",
+          "action": "Recover fixture state, restart scenario and correlate source traces",
+          "oracle": "Incomplete trace remains unknown until re-executed, old logs not treated as passed",
+          "forbidden": "Partially collected HAR with credential is sent to model",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-28",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 28,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T28P",
+          "setup": "fixed SHA reviewed by A6 A7 A8",
+          "action": "repair P0/P1 then rerun on next SHA",
+          "oracle": "all latest SHA tests and triple review pass",
+          "forbidden": "missing or stale reviewer must fail",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T28N",
+          "setup": "Three reviewer receipts exist on an outdated feature SHA",
+          "action": "Attempt release on a changed integration HEAD",
+          "oracle": "Release blocked until new combined-head test and review evidence",
+          "forbidden": "Old-SHA review reused as current verification",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T28F",
+          "setup": "Another feature changes the integration HEAD after A6/A7/A8 reviewed feature SHA",
+          "action": "Attempt to count feature against new combined HEAD",
+          "oracle": "All combined-head required regression and independent review receipts are refreshed",
+          "forbidden": "Feature counted only on old branch review SHA",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-29",
+      "featureGate": "development",
+      "fixtureVersion": "design-1",
+      "seed": 29,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T29P",
+          "setup": "scoped preview on untrusted runtime with fake Git",
+          "action": "connect authorized port and run E2E",
+          "oracle": "virtual origin and source process match authorization",
+          "forbidden": "cross-port and raw CONNECT must fail",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T29N",
+          "setup": "Adversarial preview content issues Host rebind, IPv6 literal and arbitrary WS upgrade",
+          "action": "Try reaching another Project / metadata / CDP under an old origin",
+          "oracle": "Every attempt denied before egress, no privileged credential exposed",
+          "forbidden": "Raw TCP CONNECT succeeds to protected service",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T29F",
+          "setup": "Authenticated preview WS/HMR stream is active when preview session and policy are revoked",
+          "action": "Commit revoke, close stream, attempt cross-port and old-origin reconnect",
+          "oracle": "Established socket is terminated, no bytes after lease rejection, all reconnects denied",
+          "forbidden": "Old streaming socket bypasses revocation policy",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-30",
+      "featureGate": "campaign",
+      "fixtureVersion": "design-1",
+      "seed": 30,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T30P",
+          "setup": "campaign with bounded cycles and source quota",
+          "action": "dispatch verified next work and user Stop",
+          "oracle": "current controlVersion gates new Tool/Child admission",
+          "forbidden": "old queued child cannot restart stopped campaign",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T30N",
+          "setup": "Duplicate logical feature outcome emitted from two different Cycle SHAs",
+          "action": "Commit two count receipts for one logicalWorkItemId",
+          "oracle": "Database unique key rejects second count, total remains one",
+          "forbidden": "Duplicate work item counted by commit SHA",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T30F",
+          "setup": "A campaign STOP and a child-dispatch transaction race at the same controlVersion",
+          "action": "Linearize STOP and attempt stale quota wake / child model admission",
+          "oracle": "One control transition, after STOP no new admission and already sent effect classified UNKNOWN",
+          "forbidden": "New child started after STOP commit with stale controlVersion",
+          "evidenceRefs": []
+        }
+      }
+    },
+    {
+      "scenarioId": "SC-31",
+      "featureGate": "campaign",
+      "fixtureVersion": "design-1",
+      "seed": 31,
+      "repoTreeSha": "UNSET_NOT_RUN",
+      "environmentDigest": "UNSET_NOT_RUN",
+      "browserImageDigest": null,
+      "mockProviderDigest": "UNSET_NOT_RUN",
+      "tenantTopology": "two tenants, two users each",
+      "requiredAuthRoles": [
+        "owner",
+        "same_tenant_other_user",
+        "other_tenant_user",
+        "worker"
+      ],
+      "initialProjectHeadSha": null,
+      "status": "DESIGNED_NOT_RUN",
+      "cases": {
+        "positive": {
+          "id": "QA-E2E-T31P",
+          "setup": "ten candidate features with mock approvals and integrated repo",
+          "action": "approve Demo and integrate 10 distinct features",
+          "oracle": "count equals ten current integration HEAD receipts",
+          "forbidden": "ten verified but unmerged branches do not count",
+          "evidenceRefs": []
+        },
+        "negative": {
+          "id": "QA-E2E-T31N",
+          "setup": "Ten Demo-approved features independently reviewed on ten branches but no integration",
+          "action": "Attempt to mark campaign TARGET_REACHED on verified branch receipts",
+          "oracle": "Default integrated feature progress is zero, not ten",
+          "forbidden": "Unmerged isolated branches counted as deployed app features",
+          "evidenceRefs": []
+        },
+        "fault": {
+          "id": "QA-E2E-T31F",
+          "setup": "Concurrent merges of two individually verified feature branches modify same API and Project HEAD",
+          "action": "Rebase and re-test integration HEAD with faults injected",
+          "oracle": "Unmerged branch and stale integration receipts are not counted; new combined-head tests required",
+          "forbidden": "Two branch-level tests reported as two integrated features",
+          "evidenceRefs": []
+        }
+      }
+    }
+  ]
+}

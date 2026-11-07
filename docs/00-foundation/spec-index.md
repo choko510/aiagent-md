@@ -140,3 +140,23 @@
 | COMP-01 | `docs/08-interfaces/browser-live-observation.md` | CHAT_04/08/09/10/11 | Draft / PROVISIONAL |
 
 `COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。PR #71/#72統合時のManifest再生成は `python3 audit/muse/refresh_spec_provenance.py` を実行し、続けて `python3 audit/muse/validate_spec_migration.py` を実行する。
+
+## 2026-11-07 Development & Endless Campaign extension（Provisional）
+
+従来の**88件は歴史的な基礎仕様の件数**であり、この節の11件は新たなDraft設計案として追加される。現行PRベースで **88 + 11 = 99 件の提案モジュール**（Browser Live ObservationはPR #71で別途統合済み。既存88件とは別の補足仕様として扱う）。既存の歴史的Countを削除・上書きするのではなく、採用時にindexを移行する。どれもLocked/Implemented/Verifiedではない。
+
+| ID | New draft | Integration owner |
+|---|---|---|
+| DEV-01 | [Project/Workspace/Git](../16-app-development/project-workspace-and-git.md) | CHAT_01/02/03/05/09/10 |
+| DEV-02 | [Multi Agent Development](../16-app-development/multi-agent-development.md) | CHAT_01/02/03/08/09/10 |
+| DEV-03 | [Visual Design and Demo](../16-app-development/visual-design-and-demo.md) | CHAT_01/02/04/08/09/10 |
+| DEV-04 | [Expert Advisor](../16-app-development/expert-advisor.md) | CHAT_02/03/08/09/10 |
+| DEV-05 | [Build Preview Release](../16-app-development/build-preview-release.md) | CHAT_02/03/04/05/08/09/10 |
+| DEV-06 | [Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) | CHAT_02/03/04/08/09/10/11 |
+| DEV-07 | [Review Repair Gates](../16-app-development/review-and-repair-gates.md) | CHAT_01/02/03/08/10/11 |
+| DEV-08 | [Feature Factory](../16-app-development/feature-factory.md) | CHAT_01/02/07/08/09/10/11 |
+| DEV-09 | [Development API/UI](../16-app-development/development-api-and-ui.md) | CHAT_01/03/04/07/08/09/10 |
+| DEV-10 | [Acceptance & rollout](../16-app-development/acceptance-and-rollout.md) | CHAT_00/01/02/03/04/07/08/09/10/11 |
+| CAM-01 | [Endless Run Campaign](../07-automation/endless-run-campaign.md) | CHAT_01/02/03/07/08/09/10/11 |
+
+Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-development/acceptance-and-rollout.md) → referenced 01/02/03/04/07/08/09/10/11 canonical specs。将来の実装で定義重複があればこちらの型を勝手に正本化しない。差分で変更した基礎ファイルは本PRのOwner合意待ち。

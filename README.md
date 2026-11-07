@@ -66,3 +66,13 @@ Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Co
 ## サーバーブラウザのライブ閲覧（追加設計、未実装）
 
 [Browser Live Observation](docs/08-interfaces/browser-live-observation.md) は、Agentがサーバー上で操作するBrowser画面をWeb管理画面から閲覧するための補足仕様です。見るだけのObserveはAgentを停止せず、入力操作は従来のHuman Takeoverへ明示的に切り替えます。認証/セッション隔離、機密画面の全面遮断、映像非保存、WebRTCまたは認証済みWebSocket、SC-23/テスト案を含みます。既存88件の正本モジュール数は変えません。現在はDraftで本体コード・映像配信はありません。
+
+## 自律アプリ開発・Endless Run（2026-11-07 新規仕様案）
+
+本Harnessは汎用機能を維持したまま、**自然言語からのソフトウェア設計・実装・デバッグ・レビュー・GitHub PR**を扱う追加開発ワークスペースを提案します。[仕様索引](docs/16-app-development/README.md)。
+- **8AI開発チーム**：3独立提案→1統合→1Builder（操作可能なDemo・本実装）→3独立レビュー→P0/P1修正ループ。相談先として限定予算の高性能 **Expert Advisor** を追加。
+- **Visual Design Picker**：デザイン名だけでなく同一内容のサムネイル/実Demoを比較。任意の設計判断・Demo採用を経て本実装。未承認のFeatureは実装しない。
+- **Autonomous Browser Debugger**：実ブラウザ操作・UI見切れ・Console/Network/Trace/視覚回帰・source相関・修正後再検証。開発Previewはprivate-network禁止を緩めず専用認証Brokerを使用。
+- **Endless Run**：[Campaign正本案](docs/07-automation/endless-run-campaign.md)を通じ、改善/全体最適化/UIUX/Feature Factory/任意研究を有限Cycleで繰り返し、停止・目標件数・Quota/費用/安全制約まで継続。新機能の例は承認済み10件の実装。ユーザー判断待ちがあっても独立作業は進む。
+
+[受入試験一覧 SC-24〜31](docs/16-app-development/acceptance-and-rollout.md)と[追加ADR-030〜034](docs/00-foundation/architecture-decisions.md)を参照。**初期88個の既存Draft正本とは別の新規11仕様（DEV-01〜10、CAM-01）**であり、計99件の設計案（別PR #71のBrowser Live Observationは未統合）。本体は未実装、仕様・テスト・脅威モデル・APIはDraft/PROVISIONAL、実行済みのテストはありません。

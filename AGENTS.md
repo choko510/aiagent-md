@@ -35,3 +35,9 @@
 ## Adaptive Context implementation handoff (2026-11-07; draft)
 
 Context実装は [docs/02-runtime/context-manager-and-compaction.md](docs/02-runtime/context-manager-and-compaction.md) の18節を先に読む。ADR-023〜028、Memory 06-01/02、Subagent 02-12、Checkpoint 02-06、Budget 02-10、ModelRouter 02-09、Evidence 01-05、CHAT_09 Sentinel/Cell、QA 11-01/04を同時に確認する。Task Goal / Tool Approval / Memory Writer / EvidenceをContext Summaryに統合して正本を書換えてはいけない。Raw Artifactとgrounded Summary、typed anchors、ContextManifest、Run HEADを別境界として実装。ACM-T01〜T20は未実施であり、コード/試験なしにVerifiedと報告しない。PR #68のMuse型隔離が先行依存。
+
+## Autonomous Development / Endless Campaign 実装引継ぎ（2026-11-07、追加Draft）
+
+ユーザー依頼がWeb/Android/desktop/iOSアプリ開発、継続的UI改善、8AIレビュー、Endless Runを含む場合、[DEV仕様索引](docs/16-app-development/README.md) と [CAM-01](docs/07-automation/endless-run-campaign.md) を読む。[DEV-10](docs/16-app-development/acceptance-and-rollout.md)のDEV-REQ→DEV-T/SC-24..31を守る。現存88個の基礎正本のState/Events/DB/APIをコピーして二重定義しない。型の提案は各OwnerのLocked合意前に確定しない。
+
+初期実装はProject+Git CAS→8 Task DAG→Design/Demo Approval→安全なPreview→Browser Debug→3 Reviewer/P0P1 repair→Campaignの順で縦切り。Reviewerは**最新同一SHA**に対して独立に実行、test/approvalが未実施のCycleはPASSや件数達成にしない。Developer Tool/Expert/Browser/Preview/Package/Git providerの追加は、Sentinel/Gateway/VM隔離・秘密保持・quota・効果UNKNOWNの不変条件を絶対に緩めない。Endlessは無制限Token/無期限Runではない。PR #71 Browser Live Observationの仕様はmainへマージ済みだが実装済みとは見なさず、snapshot E2EとObserve-only権限を維持する。

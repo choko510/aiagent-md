@@ -758,3 +758,7 @@ type BrowserObservationCloseAckV1 = {
 **ICE制限:** Signalingは`same-origin`認可済みViewerだけが利用可能で、許可された候補種別/宛先/ポート/プロトコルを検査する。MVPは**TURN relay-only**（Client側`iceTransportPolicy=relay`とServer ICE候補フィルタの両方を強制）でPrivate/Loopback/LinkLocal/Trusted VM interfaceのhost/srflx candidateをViewerへ公開しない。TURNによる経路もGateway/Egress Policyで許可し、TURNが無ければ映像`DISCONNECTED`、直結host候補へ落とさない。Viewer側Candidateを攻撃者入力とみなしSSRF/LAN peer接続を拒否。候補文字列のsanitizeだけではサーバーからの直接通信を防げないため実ネットワークdenyも必須。RFC 8826 `4.2.4 のICE IP位置情報露出を脅威モデルに含む。
 
 **配信有効化:** `observe_enabled=false`ではREST新規観測・Offer・WSS/Media listenerが一切有効にならず、任意ScopeでもMedia frameを得られない。通常Agentのreleaseを阻害しない。Viewerを有効にするReleaseにのみBLO-T01〜11/T13〜16がhard gate。無効版はBLO-OFF-T01〜03のpositive/negativeを必須化。未知field/認可/SDP不正/ICE漏えい/ETagの契約テストを準備する（**NOT RUN**）。
+
+## 2026-11-07 Development/Campaign API Extension proposals（Draft）
+
+[DEV-09](../16-app-development/development-api-and-ui.md) の `/api/v1/development/projects`, `/cycles`, `/design-candidates`, `/design-decision`, `/demo-decision`, `/reviews`, `/debug-evidence` と `/api/v1/campaigns`, `/commands`, `/events`を追加REST候補とする。正式なOpenAPI/DTO/stateはCHAT_01/08/10協議後にLocked。全書込でIdempotency-Key・If-Match/recordVersion・CSRF/Origin/AuthenticatedPrincipalを保持。UserDesign/DemoDecisionは外部Tool Approvalと独立。HTTP202で完了表示しない。GET/SSEから署名cursorとserver stateへ再整合し、pending/waiting/quota/rate/partial/unknown を区別。raw code/secret/CDP/download tokenや任意Tool実行APIを公開しない。DEV-UI-T01..06、CAM-T05、SC-24..31 未実行。

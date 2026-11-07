@@ -1592,3 +1592,229 @@ Approval Decisionのauthenticated principal / fresh IdentityVersion / CAS / sing
 ContextManifest/ModelRequestSnapshot/Execution/Workspace、MemoryScopeEpochの物理DDLは別の提案中であり、本提案だけでそれらが移行済みにはならない。
 
 **Designed / NOT RUN:** DB-APV-R01〜R08＝cross-owner、金額/target/goal revision変更、同時consume、expired policy、旧restore generation、legacy incomplete approval隔離、外部ACK lost、旧migration checksum不変。DB複合FK + Auth principal + 実Gateway/Transportを連動検証する。
+
+## 2026-11-08 DEV/CAM P1-06 — Physical persistence and migration proposal (NOT APPLIED)
+
+This section is an **additive forward migration candidate** for the new logical resources DEV-01..10/CAM-01. It is not a claim that migration files, a production database, or those services already exist. CHAT_01/07/09/10 must agree on states/IDs and tenant-owned behavior before locking. Never edit checksums of applied 0001..0003; if the deployment already used a number, allocate the next unused version with a checksum-bound migration runner.
+
+### Proposed PostgreSQL physical tables and keys
+The following `agent` schema SQL is an explicit **candidate DDL** (comments describe required admission checks not enforced by SQL). Fields like SHA/algorithm and artifact URI are references, not source code or secrets.
+
+```sql
+-- migration 0004 candidate; apply only after previous migration versions are checked.
+CREATE TABLE agent.development_projects (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,
+ name text NOT NULL, current_head_sha text, integration_version bigint NOT NULL DEFAULT 1,
+ goal_revision bigint NOT NULL DEFAULT 1, record_version bigint NOT NULL DEFAULT 1,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,owner_user_id,id),
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ CHECK(record_version>0 AND integration_version>0),
+ CHECK(current_head_sha IS NULL OR current_head_sha ~ '^[0-9a-f]{40}$')
+);
+CREATE TABLE agent.development_cycles (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, project_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, campaign_id uuid,
+ phase text NOT NULL, goal_revision bigint NOT NULL,
+ design_revision bigint, demo_digest text, current_feature_sha text,
+ record_version bigint NOT NULL DEFAULT 1,
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,id),
+ UNIQUE(tenant_id,owner_user_id,id),
+ FOREIGN KEY(tenant_id,owner_user_id,project_id)
+  REFERENCES agent.development_projects(tenant_id,owner_user_id,id),
+ CHECK(goal_revision>0 AND record_version>0)
+);
+CREATE TABLE agent.development_demo_decisions (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, project_id uuid NOT NULL,
+ cycle_id uuid NOT NULL, owner_user_id uuid NOT NULL,
+ goal_revision bigint NOT NULL, design_revision bigint NOT NULL,
+ demo_digest text NOT NULL, decision text NOT NULL,
+ decision_authorization_ref text NOT NULL, grant_version bigint,
+ record_version bigint NOT NULL DEFAULT 1,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,cycle_id,design_revision,demo_digest),
+ FOREIGN KEY(tenant_id,project_id,cycle_id)
+  REFERENCES agent.development_cycles(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,owner_user_id,project_id)
+  REFERENCES agent.development_projects(tenant_id,owner_user_id,id),
+ CHECK(decision IN ('APPROVE','REJECT','REVISE'))
+);
+CREATE TABLE agent.development_work_items (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, project_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, logical_key text NOT NULL,
+ semantic_equivalence_key text NOT NULL, base_commit_sha text,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,logical_key),
+ UNIQUE(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,owner_user_id,project_id)
+  REFERENCES agent.development_projects(tenant_id,owner_user_id,id)
+);
+CREATE TABLE agent.development_integration_receipts (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, project_id uuid NOT NULL,
+ work_item_id uuid NOT NULL, integration_head_sha text NOT NULL,
+ expected_parent_sha text NOT NULL, design_revision bigint NOT NULL,
+ fixture_digest text NOT NULL, test_manifest_digest text NOT NULL,
+ triple_review_receipts_ref text NOT NULL, verdict text NOT NULL,
+ verified_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,id),
+ UNIQUE(tenant_id,project_id,work_item_id,id),
+ UNIQUE(tenant_id,project_id,work_item_id,integration_head_sha),
+ FOREIGN KEY(tenant_id,project_id) REFERENCES agent.development_projects(tenant_id,id),
+ FOREIGN KEY(tenant_id,project_id,work_item_id)
+  REFERENCES agent.development_work_items(tenant_id,project_id,id),
+ CHECK(verdict IN ('PASS','FAIL','INCOMPLETE'))
+);
+CREATE TABLE agent.campaigns (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, owner_user_id uuid NOT NULL,
+ project_id uuid, state text NOT NULL, goal_revision bigint NOT NULL DEFAULT 1,
+ record_version bigint NOT NULL DEFAULT 1,
+ control_version bigint NOT NULL DEFAULT 1,
+ target_count integer, criterion text NOT NULL DEFAULT 'INTEGRATED',
+ budget_envelope_ref text NOT NULL, stop_committed_at timestamptz,
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,owner_user_id,id),
+ UNIQUE(tenant_id,id,project_id),
+ FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
+ FOREIGN KEY(tenant_id,owner_user_id,project_id)
+  REFERENCES agent.development_projects(tenant_id,owner_user_id,id),
+ CHECK(goal_revision>0 AND record_version>0 AND control_version>0),
+ CHECK(target_count IS NULL OR target_count>0),
+ CHECK(criterion IN ('VERIFIED','INTEGRATED','RELEASED'))
+);
+CREATE TABLE agent.campaign_work_items (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
+ project_id uuid, dev_work_item_id uuid, logical_key text NOT NULL,
+ semantic_equivalence_key text NOT NULL,
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,campaign_id,id),
+ UNIQUE(tenant_id,campaign_id,logical_key),
+ UNIQUE(tenant_id,campaign_id,id,project_id,dev_work_item_id),
+ FOREIGN KEY(tenant_id,campaign_id) REFERENCES agent.campaigns(tenant_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,project_id) REFERENCES agent.campaigns(tenant_id,id,project_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id)
+  REFERENCES agent.development_work_items(tenant_id,project_id,id),
+ CHECK((project_id IS NULL AND dev_work_item_id IS NULL) OR
+       (project_id IS NOT NULL AND dev_work_item_id IS NOT NULL))
+);
+CREATE TABLE agent.campaign_cycles (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, work_item_id uuid,
+ control_version_at_start bigint NOT NULL, goal_revision bigint NOT NULL,
+ run_id uuid, state text NOT NULL, record_version bigint NOT NULL DEFAULT 1,
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,campaign_id,id),
+ FOREIGN KEY(tenant_id,owner_user_id,campaign_id)
+  REFERENCES agent.campaigns(tenant_id,owner_user_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id),
+ CHECK(record_version>0)
+);
+ALTER TABLE agent.development_cycles ADD CONSTRAINT dev_cycles_campaign_owner_fk
+ FOREIGN KEY(tenant_id,owner_user_id,campaign_id)
+ REFERENCES agent.campaigns(tenant_id,owner_user_id,id);
+CREATE TABLE agent.campaign_count_receipts (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
+ work_item_id uuid NOT NULL, project_id uuid, dev_work_item_id uuid,
+ criterion_version text NOT NULL,
+ cycle_id uuid NOT NULL, result_sha text NOT NULL,
+ integration_head_sha text, integration_receipt_id uuid,
+ counted_stage text NOT NULL, committed_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,campaign_id,work_item_id),
+ FOREIGN KEY(tenant_id,campaign_id,cycle_id)
+  REFERENCES agent.campaign_cycles(tenant_id,campaign_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id,project_id,dev_work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id,project_id,dev_work_item_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id)
+  REFERENCES agent.development_work_items(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id,integration_receipt_id)
+  REFERENCES agent.development_integration_receipts(tenant_id,project_id,work_item_id,id),
+ CHECK(counted_stage IN ('VERIFIED','INTEGRATED','RELEASED')),
+ CHECK((counted_stage <> 'INTEGRATED') OR
+       (integration_receipt_id IS NOT NULL AND project_id IS NOT NULL AND dev_work_item_id IS NOT NULL))
+);
+-- This is the per-head *eligibility* history; count receipt is once-per-work-item identity.
+CREATE TABLE agent.campaign_count_evaluations (
+ tenant_id uuid NOT NULL, id uuid NOT NULL,
+ campaign_id uuid NOT NULL, work_item_id uuid NOT NULL,
+ project_id uuid NOT NULL, dev_work_item_id uuid NOT NULL,
+ integration_head_sha text NOT NULL,
+ integration_receipt_id uuid NOT NULL, criterion_version text NOT NULL,
+ attempt integer NOT NULL, verdict text NOT NULL,
+ verified_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,campaign_id,work_item_id,integration_head_sha,attempt),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_count_receipts(tenant_id,campaign_id,work_item_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id,integration_receipt_id)
+  REFERENCES agent.development_integration_receipts(tenant_id,project_id,work_item_id,id),
+ CHECK(attempt>0 AND verdict IN ('PASS','FAIL','INCOMPLETE'))
+);
+CREATE TABLE agent.campaign_quota_wait_receipts (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
+ provider_id text NOT NULL, limit_kind text NOT NULL,
+ evidence_ref text NOT NULL, observed_at timestamptz NOT NULL,
+ retry_after_at timestamptz, authoritative_reset_at timestamptz,
+ control_version bigint NOT NULL, resume_generation bigint NOT NULL,
+ outstanding_usage_ref text NOT NULL, status text NOT NULL,
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,campaign_id,provider_id,resume_generation),
+ FOREIGN KEY(tenant_id,campaign_id) REFERENCES agent.campaigns(tenant_id,id),
+ CHECK(limit_kind IN ('TEMPORARY_RATE','DAILY_QUOTA','HARD_QUOTA','UNKNOWN'))
+);
+CREATE TABLE agent.preview_sessions (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, project_id uuid NOT NULL,
+ owner_user_id uuid NOT NULL, cycle_id uuid, task_id uuid NOT NULL, run_id uuid NOT NULL,
+ execution_id uuid NOT NULL, bound_port integer NOT NULL,
+ execution_generation bigint NOT NULL, origin_id text NOT NULL,
+ origin_generation bigint NOT NULL, browser_session_id uuid NOT NULL,
+ run_lease_epoch bigint NOT NULL, browser_lease_epoch bigint NOT NULL,
+ identity_version bigint NOT NULL, policy_epoch bigint NOT NULL,
+ workspace_revision text NOT NULL, capability_digest text NOT NULL,
+ expires_at timestamptz NOT NULL, revoked_at timestamptz,
+ record_version bigint NOT NULL DEFAULT 1,
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,origin_id,origin_generation),
+ FOREIGN KEY(tenant_id,owner_user_id,project_id)
+  REFERENCES agent.development_projects(tenant_id,owner_user_id,id),
+ FOREIGN KEY(tenant_id,project_id,cycle_id)
+  REFERENCES agent.development_cycles(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,task_id,run_id) REFERENCES agent.runs(tenant_id,task_id,id),
+ CHECK(bound_port BETWEEN 1 AND 65535 AND record_version>0)
+);
+CREATE INDEX dev_cycles_project_idx ON agent.development_cycles(tenant_id,project_id,phase);
+CREATE INDEX campaigns_wake_idx ON agent.campaigns(tenant_id,state,control_version);
+CREATE INDEX quota_recovery_idx ON agent.campaign_quota_wait_receipts(tenant_id,status,authoritative_reset_at);
+CREATE INDEX preview_expiry_idx ON agent.preview_sessions(tenant_id,expires_at) WHERE revoked_at IS NULL;
+```
+
+**Required reconciliation before apply:** DB has no canonical physical `Execution`/credential capability table yet; `execution_id` is a scoped immutable reference requiring trusted attestation at runtime. Its source FK and project-scoped BrowserSession FK must be added when CHAT_01/02/04 agree on physical keys; until then Preview admissions MUST be disabled (not treated as successfully bound by the string). Candidate `development_cycles.campaign_id` is optional and FK-enforced if present. Project control ACL and sharing remain owner-only unless CHAT_09 defines explicit grants. `development_demo_decisions.decision_authorization_ref` identifies a real user decision or a separately checked bounded mandate; it does not substitute for Tool Approval. Model-generated IDs never authorize writes. Additional Account/Workspace material belongs to scoped Artifact Store, not database plaintext.
+
+### Transaction and lock order
+`tenant → campaign row (control) → project integration row → cycle/work-item → count/receipt/outbox` on writes spanning these aggregates, using deterministic key ordering. STOP CAS increments controlVersion and appends control receipt/outbox in one DB commit; child/model/Browser/tool admission holds equivalent serialization to prevent later admissions with old versions. No network I/O inside transaction. Project `integration_version` and `current_head_sha` form CAS before publishing new integrated receipt; only verified receipt matching current head qualifies for current progress. Concurrent feature integration requires whole-head revalidation; unknown external Git effects are NOT a committed integrated head.
+
+DB-level `UNIQUE(tenant,campaign,work_item)` is count idempotency, not semantic-equivalence oracle: trusted application maps new candidate to existing stable logical work item, and duplicate attempts cannot earn a second count. Stop/cancel path revokes admission grants but externally already sent HTTP may be UNKNOWN; no exactly-once external side effect guarantee.
+
+### Migration, old worker compatibility, retention
+- Versioned expand→backfill (unknown owner/campaign records are quarantined, no auto-ownership)→dual-read + gated write→recalculate HEAD-bound counts→cutover→contract. DDL in an approved `0004` file must be replayed under schema lock with SHA256 checksum; if that version already exists use next. First launch without all inter-domain FKs and verified Preview Broker = **feature flag disabled**.
+- Old workers unaware of Campaign controlVersion/Preview origin generation are **read-only or rejected** for new domains, never fallback-write. Mixed-version dispatcher refuses mutations from old schema/unsupported app. Rebuild indices concurrently in separate non-transactional step when necessary.
+- Retention: durable project/review/count/approval provenance retained per owner policy; sensitive preview Cookie/Storage, raw HAR and short-lived capability never stored in these rows. Deleting Project with dependent Campaign requires explicit authorized retention workflow; no cascade that silently erases effect/receipt audit. Backups restore identity/policy generation and revoke old ephemeral preview grants.
+
+### Proposed DB acceptance
+**DEV-DB-T01**: two users same tenant/project share attempt → composite FK/ACL prevents other owner's insert and read.
+**DEV-DB-T02**: same logical work item in new SHA/cycle/criterion version → UNIQUE count, one row.
+**DEV-DB-T03**: parallel Stop+child enqueue+Model/Tool dispatch → Stop-committed version fences new admissions.
+**DEV-DB-T04**: project integration expected HEAD CAS loses race → no integrated receipt/target increment.
+**DEV-DB-T05**: PREVIEW session old browser/execution/origin version → refused in broker, DB does not imply active capability.
+**DEV-DB-T06**: migration interrupted/replayed/checksum changed/old worker → fails closed with durable receipts.
+**DEV-DB-T07**: backup/restore and GC retain Review/Approval/Count immutable evidence, revoke transient grants.
+**DEV-DB-T08**: count receipt from other campaign/project cross-owner → rejected by composite keys and authorization.
+SQL above is **designed only** and has not been executed against PostgreSQL in this PR.
+
+**DEV-DB-T09**: A Campaign with Project A cannot count an integration receipt for Project B even under same Tenant; cross-project composite FKs reject it.
+**DEV-DB-T10**: A generic research Campaign without a Project uses a campaign-scoped logical work item and cannot smuggle a development integration receipt into its count.
+
+### Current-head count revalidation (P1-03 / P1-10)
+The immutable `campaign_count_receipts` row represents **the first successful qualification of a logical work item** and is inserted exactly once. It cannot itself prove that the feature is still valid on a later Project integration HEAD. Each subsequent integration HEAD requires a fresh append-only `campaign_count_evaluations` row against the current HEAD and a correspondingly matching `development_integration_receipts` PASS. The current `effectiveCompletedCount` is a query over eligible unique work item IDs with the latest evaluation for the **current Project integration SHA** passing required tests and reviewer receipts (or over fixed result receipts for non-project Campaign modes). Updating the HEAD never overwrites the historical counted receipt, but may **reduce current eligible progress** and transition a previously TARGET_REACHED campaign into `REVALIDATION_REQUIRED` until the combined-head gate passes. This is not automatic permission to resume billed work or deploy; the campaign owner policy and budget must be rechecked. Transactionally commit the new head, integration evaluation/receipt, current count projection and outbox under project+campaign CAS. A competitor merge invalidates older eligibility evidence.
+
+**DEV-DB-T11**: after ten integrated feature receipts, another merge changes head and invalidates two integration evaluations → current progress falls to eight, no stale target assertion.
+**DEV-DB-T12**: new evaluation PASS for the same logical work item on new head restores eligibility but does not create a second count receipt.

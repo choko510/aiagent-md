@@ -308,3 +308,7 @@ Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string*
 ## 2026-11-07: 自律Agentの無期限Shell実行は禁止
 
 Background Agentは次の目的を提案できても、無期限にVM/Cellのプロセスを残して活動しない。Heartbeatからの自律Runごとに予算/時間/owner/Goal/Leaseを再確認し、Sandbox Exec・Sentinel EgressのAdmissionを再実行する。停止/ユーザー失効/セキュリティ事故後に新規Spawn/外部操作しない。生成Skillの永続昇格や保護Harnessの自己改変はHuman Review対象。既存の有限Watch/Task模型を維持。SC-17/20/21/22。
+
+## 2026-11-07 CAM-01: 成果物駆動のEndless Run（Draft）
+
+従来の「状態変化がなければ空tickでLLM呼出し0」は維持する。[Campaign](endless-run-campaign.md)は**Cycleのverified/partial結果、次WorkItemの存在、ユーザーの新承認、quota回復**を意味のあるwake reasonとして登録し、各短命Cycleのcommit/outboxから次のCycleをCAS・冪等に起動する。モデルに毎分「もう続ける？」と尋ねない。1件のDemo承認待ちがあっても、他の独立した候補作成/実装は継続。全部が承認待ち/依存待ちならParkし、空回ししない。User Stop/quotas/cost/Operator安全上限を優先し、UNKNOWN効果のblind retryや権限拡張を行わない。CAM-T01..11/SC-30,31は未実行。

@@ -5,11 +5,11 @@
 
 ## 0. 結論と採用案
 
-採用は**23シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
+採用は**31シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
 
 ## 1. 目的・責務・非責務
 
-QA所有：SC-01〜23のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
+QA所有：SC-01〜31のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
 
 **前提**：QA Fixture V1（PR #7のRound2追補を含む）、fake clock、isolated DB/queue/browser、Mock HTTP/LLM、strict outbound denial。UIから起動したものとWatch/Eventから生成されたTaskを同じcanonical storeへ収束させる。
 
@@ -38,7 +38,7 @@ QA所有：SC-01〜23のtest matrix・ground truth・semantic assertion・UI/API
 
 | REQ-ID | Priority | 観測可能な条件 | SC |
 |---|---|---|---|
-| QA-E2E-001 | MUST | 全SC-01〜23にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜23 |
+| QA-E2E-001 | MUST | 全SC-01〜31にpositive/negative/fault/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜23 |
 | QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜23 |
 | QA-E2E-003 | MUST | 重要事実を人手の自由文評点でなく型付きsemantic oracleで照合 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | MUST | 正確な制約、freshness、source/link、uncertaintyをground truthと比較 | SC-01/03/04/05/10/14/15 |
@@ -395,3 +395,45 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 合否は`test fixture ID, run profile(enabled/disabled), Browser/Relay image digest, DB schema revision, restoreIncarnation, policyEpoch, source commit, packet boundary event log hash`を記録して検証する。スクリプトのMarkdown marker checkは実行済みE2Eではない。
 
 **Release Gateの条件分岐:** Live Viewer `enabled`の時だけBLO-T01〜11・13〜16と`T23P/N/F`がhard blocking。Live Viewer `disabled`時はBLO-OFF-T01..03・T23OFFがblocking（実装が無ければ構成とソケット非公開を証明）、その他の既存Agent E2Eを通常どおり実施する。`HITL-014 MUST`はLive Viewer機能有効プロファイルに条件付きで適用。未実装の本仕様リポジトリは全項目`NOT RUN`。
+
+## 2026-11-08 SC-24〜31 Development / Campaign E2E formal fixture integration (Designed / NOT RUN)
+
+The existing QA-E2E-001..023/SC-01..23 remain intact, including merged Live Observation PR #71. The fixture manifest for the new coverage is [audit/development/scenarios.json](../../audit/development/scenarios.json). Fixtures are synthetic: no real purchase, production API mutation, GitHub push or external deployment. The backend must use actual controlled execution, real PostgreSQL/queue + fake providers for integration, and separate KVM/Browser isolation checks before claiming Verified.
+
+### Fixture schema proposal / required evidence
+```ts
+type DevelopmentQaFixtureV1 = {
+ schemaVersion:1; scenarioId:string; featureGate:"development"|"campaign";
+ fixtureVersion:string; seed:number; repoTreeSha:string; environmentDigest:string;
+ browserImageDigest:string|null; mockProviderDigest:string; tenantTopology:string;
+ requiredAuthRoles:string[]; initialProjectHeadSha:string|null;
+ cases: { positive:QADevCaseV1; negative:QADevCaseV1; fault:QADevCaseV1 };
+ status:"DESIGNED_NOT_RUN"|"RUNNING"|"PASS"|"FAIL"|"BLOCKED";
+};
+type QADevCaseV1 = { id:string; setup:string; action:string; oracle:string;
+ forbidden:string; evidenceRefs:string[] };
+```
+The actual fixture JSON is a **static design inventory**, with no fabricated runtime evidence. The test runner must reject unknown schema versions, missing evidence, skipped required lanes, ambiguous baseline SHA, stale test review receipts or mismatched owner. A release manifest binds the exact scenario ID, case ID, repo/Integration HEAD SHA, user-approved Demo digest, fixture version, browser engine, VM image, provider mock version, admission policy hash, auth scope, date and tested result. LLM scoring is supplementary; independent DB/Browser/security Oracles decide PASS.
+
+| SC | Positive | Negative | Fault | Oracle owner / requirement |
+|---|---|---|---|---|
+| SC-24 | QA-E2E-T24P: 3 independent ideas→A4→A5→3 reviews | QA-E2E-T24N: only 2 plans / mismatched SHA | QA-E2E-T24F: kill a child during join/retry | CHAT_02+11 / DEV-REQ-02 |
+| SC-25 | QA-E2E-T25P: compare visuals, mock Demo interact and explicit acceptance | QA-E2E-T25N: `AUTO_RECOMMEND` cannot approve; real API/cross-origin denied | QA-E2E-T25F: revoke/rotate Preview or ownership during interaction | CHAT_03/04/08/09 / DEV-REQ-03/04/12 |
+| SC-26 | QA-E2E-T26P: Expert escalation for repeated error | QA-E2E-T26N: Advisor cannot write code/Policy | QA-E2E-T26F: 429+budget exhaustion | CHAT_02 / DEV-REQ-05 |
+| SC-27 | QA-E2E-T27P: Browser finds mobile overflow/API500 and correlates evidence | QA-E2E-T27N: click success != functional success, secret HAR denied | QA-E2E-T27F: Browser crash/Trace interrupted | CHAT_04/09/11 / DEV-REQ-06 |
+| SC-28 | QA-E2E-T28P: three latest-SHA reviews, repair P0/P1 | QA-E2E-T28N: stale SHA or skipped test cannot PASS | QA-E2E-T28F: merge another feature after review; integrated HEAD changes | CHAT_02/11 / DEV-REQ-07/11 |
+| SC-29 | QA-E2E-T29P: attested Preview, sandboxed build, scoped Git intent | QA-E2E-T29N: bad origin/host/WS/private/IP/CDP/other project rejects | QA-E2E-T29F: stop/revoke while established WS stream active | CHAT_03/04/09/10 / DEV-REQ-08/09/12/14 |
+| SC-30 | QA-E2E-T30P: bounded cycles continue until stop/target | QA-E2E-T30N: duplicate logical work, over-budget, stale ControlVersion denied | QA-E2E-T30F: simultaneous STOP/child dispatch/429/quota resume | CHAT_02/07/10 / DEV-REQ-10/13/15 |
+| SC-31 | QA-E2E-T31P: 10 distinct approved **INTEGRATED** features | QA-E2E-T31N: 10 isolated verified branches, 0 integrated | QA-E2E-T31F: merge conflict/restore/old HEAD review invalid | CHAT_07/10/11 / DEV-REQ-11/16 |
+
+Every row is three **distinct cases** and each case must run positive, negative, fault. `NO_EVIDENCE` is not PASS. Positive/negative/fault test names and fixture ids are validated in a **new independent static lane**, not by the historical 88-module static audit. CI compliance with fixture metadata is not runtime verification.
+
+**Test suite applicability:** common AUTH/VM/Sentinel/Tool Gateway privacy gates remain mandatory for every deployment regardless of app feature flags. Development/Preview E2E gates are **conditional on the Development/Preview features being enabled or claimed supported**. Campaign/Feature Factory gates are conditional on those modes being enabled or claimed supported. Disabled endpoints MUST deny unauthorized requests even in a normal Agent build. A normal Agent Harness release with Development off is not blocked solely because optional 8AI and Browser tests are NOT RUN. Enabling or advertising the feature without its actual E2E gates is prohibited.
+
+**Additional contract tests:** DEV-DB-T01..12, AUTH-DEV-T01..06, EVT-DEV-T01..05, DEV-DOM-T01..05, DEV-UI-T07..10, CAM-T12..19, DEV-BLD-T09..14, DEV-FF-T07..12, DEV-REV-T07..08, DEV-DES-T07..11. All are **DESIGNED_NOT_RUN**. Fixture owner MUST map these to concrete runner cases before public release.
+
+**QA-E2E-T31F** must additionally simulate Project HEAD drift *after* TARGET_REACHED, require latest-current-head evaluation with count dropping from 10 to 8 and no unauthorized automatic resume/spend; restoring PASS on current HEAD restores 10 without duplicate counted work-item rows. **QA-E2E-T30F** checks STOP controlVersion and stale 429 wake jointly.
+
+### SC-23 / SC-24..31 integration reconciliation (2026-11-08)
+
+SC-23 remains the merged Browser Live Observation companion and QA-E2E-T23P/N/F/OFF remains required under its specific feature gate. Development/Campaign additions SC-24..31 have distinct QA-E2E-T24P/N/F..T31P/N/F (8 × 3 cases) and are conditional on feature enablement. Baseline shared security/Owner isolation gates still apply to all 31 scenarios. These 31 are **designed acceptance scenarios**, not a claim that the Agent Harness runtime already passes 31 tests.

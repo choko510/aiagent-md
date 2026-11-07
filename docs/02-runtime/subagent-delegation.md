@@ -323,3 +323,7 @@ Subagent always creates its own canonical **child Task/Run**, and `SandboxExecut
 - Failures`CHILD_UNAUTHORIZED`/`CHILD_STALE`/`SOURCE_EXPIRED`/`CONFLICTED`/`PARTIAL`は子を黙ってDONEとして扱わずPlannerへ渡す。
 
 ACM-T31とACM-T11/12の同時Steer/期限切れ/重複Source/未知外部副作用を検証（未実装）。
+
+## 2026-11-07 DEV-02: 8AI開発チームの委任契約追加（Draft/PROVISIONAL）
+[DEV-02](../16-app-development/multi-agent-development.md) は既存SUBの `parent-child Task`、Budget reservation、GoalRevision/Run lease/cancel、責務分離を再利用。最初の3子(A1/A2/A3)は同じ要求・制約の固定入力を使用し互いの提案を隠したread-only independent childとする。統合A4は3proposal Artifactを検証し、欠損時Partial。Builder A5は書込権を持つ唯一の開発担当、Reviewer A6/A7/A8は最新のimmutable SHAに固定した独立read-only子Task。初回reviewer間の回答共有は禁止し、join時のみ結果統合、旧SHAや別DesignRevisionのReceiptは合格としない。
+高性能Expert [DEV-04](../16-app-development/expert-advisor.md) も追加の予算予約・権限縮小された子Task。Role名をTool capabilityと解釈しない。Cycle DAGは既存Task/Runを再利用、Session/Workspace共用の権限漏洩は不可。parallelismと深度は有限、Owner cancel/Steerは全子の新dispatchを止める。追加入場試験 DEV-TEAM-T01..06、DEV-REV-T01..06 (SC-24,26,28) は未実行。

@@ -328,3 +328,7 @@ All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `le
 5. 既存レコードはexpand→authorized backfill→quarantine unknown→read-switch→contractで移す。古いApprovalを自動Approveに変換しない。DBの複合FKは必要条件に過ぎず、外部のauthenticated principal照合はアプリの必須検査。
 
 **受入（設計のみ/NOT RUN）**: 同Tenant別User承認、2件の同時決定、Goal/金額/対象/Policy変更、旧lease・旧restoreIncarnation、lost ACK、復旧後の不確定副作用、旧承認Backfillをすべて実DBとEnforced Transportで確認。静的SQL/FK検証だけで安全性を宣言しない。
+
+## 2026-11-07 DEV: Design ConsentとTool Approvalの明確な分離（Draft）
+
+[Visual Design & Demo](../16-app-development/visual-design-and-demo.md) の「このデザインを採用」「このDemoで本実装」は人間の**要件合意**であり、この文書のApprovalRecord(不可逆外部Tool)に流用不可。ユーザーが`designPolicy=AUTO_RECOMMEND`を選んでもGit push/PR・release/deployment/本番API変更/購入/メール等を自動承認した意味ではない。Git Provider/Package Broker/Preview session/CI/Signing/Deploymentは各々versioned typed Tool Descriptorとimmutable Intent、effect classification、Sentinel final auth、Budget/Run fenceの検査を要求。事前に明示して許可した限定branch push/PR scopeは厳格なrevocable grantとして表現し、merge/force-push/production deploy権限へ拡大しない。UNKNOWN external effectはblind retry禁止。Chat/Browser/UIから渡すapproval digestをそのまま信じずTrusted serverが再計算。SC-25,29、DEV-UI-T03、DEV-BLD-T06..08。Draft/NOT RUN。

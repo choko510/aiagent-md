@@ -205,3 +205,6 @@ Task/Run/親子の予約済み予算へCell ProcessのCPU/Wall/RAM/PID/FD/ディ
 独立した各区分のtokenize結果の合計はBPE/Provider role wrapperでずれる可能性があるため、最終入力をProviderのTokenizer/serializerで再計数した`Tinput+R+S<=W`が最終関門。Body cache hitでWは増えず、Summary/Rerank/再トークン化の費用もTask Budgetへ原子予約。WがOutputとShared WindowでないモデルはCapabilityの別上限で検査し、誤って同一式を適用しない。
 
 **Tests**: ACM-T22、Tool Schema順序変更、Policy二重挿入、Provider変更、8kから4kへ縮小、SnapshotのTokenとProviderの実Token receiptの差異、Budget超過で新送信0。未実装。
+
+## 2026-11-07 CAM-01: Endless Runの階層予算（Draft）
+[Endless Campaign](../07-automation/endless-run-campaign.md) は**無制限の1 Run/無制限Budgetではない**。Campaign全体のhard envelope（USD/tokens/Model Attempts/API calls/Browser/time/parallelism）からCycleごとに上限を原子的予約し、各子Taskも既存BDGの予約/精算を再利用。Unknown usageを0扱いせず保守的にhold、次Cycleの予算流用禁止。Process crash/Model fallback/429/Provider usage欠損時にも `spent+held+uncertain` がhard capを越えない。利用枠回復予定が検証可能な場合だけquota wait→再検査後にresumeし、unknown hard quotaは待機/通知。Clientが`continuousUntilStopped=true`を指定してもOperator上限は廃止しない。CAM-T02/T06/T07、SC-30。Designed/NOT RUN。

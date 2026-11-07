@@ -65,3 +65,24 @@ For every row PRD-Txx produce: setup/fixture→action→DB/HTTP/event/browser as
 - Quantitative SLOs remain `NOT_SET` until benchmark baseline. Reviewer CHAT_11.
 ## Sources
 Project Brief, Architecture Rules, SC-01..16 and extension file at main; representative OSS prior art to independently verify at implementation stage: [LangGraph durable execution](https://docs.langchain.com/oss/javascript/langgraph/durable-execution), [OpenAI Agents SDK](https://github.com/openai/openai-agents-python), [Playwright](https://playwright.dev/). These are architecture references, not evidence of our code running.
+
+## 9. Application Development / Endless Run requirements（2026-11-07 / Draft）
+
+以下は既存PRD-001〜027の基盤要件を**継承**する追加要件。Canonical ID/DB/APIは担当Ownerに委譲し、設計の追加だけでLocked/Verifiedにはしない。
+
+| ID | Level | Observable outcome | Tests / scenario |
+|---|---|---|---|
+| PRD-028 | MUST | Project/Workspace/branch/code commitをTask横断で復元可能、CAS衝突安全 | DEV-WS-T01..07 / SC-24 |
+| PRD-029 | MUST | 3独立提案+1統合+1Builder+3独立Reviewer（同一SHA）のDAG | DEV-TEAM-T01..06 / SC-24 |
+| PRD-030 | MUST | 同内容を見た目で比較、任意ユーザー設計選択をversion固定 | DEV-DES-T01..06 / SC-25 |
+| PRD-031 | MUST | 本実装に近い動くDEMO、選択時の承認/修正依頼、旧版承認拒否 | DEV-DES-T03..06 / SC-25 |
+| PRD-032 | SHOULD | 高性能Expert Modelを証拠・予算・権限限定で呼ぶ | DEV-EXP-T01..05 / SC-26 |
+| PRD-033 | MUST | Playwright/Browser Workerを用いた操作/visual/Console/Network/Trace/E2Eの自動デバッグ | DEV-DBG-T01..10 / SC-27 |
+| PRD-034 | MUST | 同一現行SHAで3レビュー、未解決P0/P1=0、必須テスト実測PASSでのみ完了 | DEV-REV-T01..06 / SC-28 |
+| PRD-035 | MUST | Toolchain/Package/Preview/Git/CI/Deployを既存Sentinel/VM/Approval内に閉じる | DEV-BLD-T01..08 / SC-29 |
+| PRD-036 | MUST | Campaignは有限Cycleを停止/件数/費用/上限まで継続、復旧で二重count/dispatchなし | CAM-T01..11 / SC-30 |
+| PRD-037 | MUST | Feature Factoryの既定達成条件はcurrent統合HEADで検証済みのdistinct 10件（再検証で減算可能） | DEV-FF-T01..12 / SC-31 |
+| PRD-038 | MUST | User decision待ちの一機能で、独立した別機能の作業を停止させない | DEV-FF-T03 / SC-31 |
+| PRD-039 | MUST | Demo Consentと外部Tool Approval/Browser Human Takeoverを区別 | DEV-UI-T02..05 / SC-25,29 |
+
+`continuousUntilStopped` は無期限Run/無制限予算を許す意味ではなく、Provider Quota/費用/セキュリティ制約・人間判断待ちで安全にParkできるCampaignを意味する。モデルの自己採点・クリック成功・パスしていないテストを合格として扱わない。UIはstop受付と確定停止、デモ仮処理と本処理、PR作成とリリース完了を区別。詳細 [DEV-01〜10](../16-app-development/README.md)、[CAM-01](../07-automation/endless-run-campaign.md)。
