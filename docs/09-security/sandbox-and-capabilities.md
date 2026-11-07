@@ -10,10 +10,10 @@
 
 **Process boundaries (proposal)**:
 - API/Web UI: 認証終端、Tool GatewayへのCommand登録のみ。Docker Engine API credentialsなし。
-- Agent/queue Worker: ToolのintentをGatewayへ作成できる。Runtime CellはCell内execを行えるが、Vault key/host mount/保護サービスは不可。外向き通信はSentinel強制経路のみ。
+- Agent/queue Worker: Trusted Control VMのOrchestratorがTool intentをGatewayへ作成できる。**生成コードは別のExecution VMだけで起動**。Runtime CellはCell内execを行えるが、Vault key/host mount/保護サービスは不可。外向き通信はSentinel強制経路のみ。
 - Browser Worker: browserを一元所有、`BrowserContext` tenant/owner隔離、Chromium sandbox = trueで強制。Browser driverが承認済みのUser Takeover leaseを検証。CDPは外部/Agentへ公開しない。
 - Pure Compute Worker: 従来通り定義済み変換のみでShell禁止。**別のSandbox Exec Runtime Cell**はShell、npm/pipによる一時依存導入、ファイル操作を許すが、VM/Cell外への実行、ネットワーク迂回、保護サービスAPI/Keyアクセスは禁止。
-- Credential broker: 接続先を限定した認証injectだけ。AgentとCompute processから到達不能。
+- Credential broker: Trusted Control VM内の接続先限定の認証injectだけ。Execution VMとCompute processから到達不能。
 
 Docker Composeはoperator（人間）が構成・更新する。Agentのtoolsで起動/停止/privileged化することは**禁止**。rootless modeや`userns-remap`は推奨される追加対策でありホスト攻撃完全防御の保証ではない。
 
@@ -75,7 +75,7 @@ Scope of permissions is immutable `principal.ownerUserId + tenantId + taskId + r
 
 | ID | Priority | Requirement | SC |
 |---|---|---|---|
-| SBOX-017 | MUST | secure VM内のUntrusted Runtime Cellだけが自由なcode/shellを実行でき、ホストと保護サービスに到達できない | 17,18 |
+| SBOX-017 | MUST | **Trusted Control VMとは別カーネルのUntrusted Execution VM**のRuntime Cellだけが自由なcode/shellを実行でき、Host/Vault/DB/Protected Gatewayに到達できない | 17,18 |
 | SBOX-018 | MUST | Cell子プロセスの外部通信全てをSentinelで強制許可し、直接ソケットの抜け道を塞ぐ | 19,22 |
 | SBOX-019 | MUST | VM/Cellが不成立ならBlock、developer-onlyのDockerコンテナは本番安全保証に含めない | 18 |
 | SBOX-020 | MUST | Execと純粋ComputeとBrowser Brokerを別能力/プロセスとして識別 | 17,18 |

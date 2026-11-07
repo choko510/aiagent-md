@@ -51,7 +51,7 @@ flowchart LR
   Proxy --> API["UI + Fastify API (Auth)"]
   API -->|"scoped DB"| PG[(Postgres)]
   API -->|"outbox"| PG
-  Worker["Runtime Worker"] --> PG
+  Worker["Trusted Agent Orchestrator (not generated code)"] --> PG
   Scheduler["Scheduler / Relay"] --> PG
   Worker --> Broker["Approved Tool Broker"]
   Broker --> Browser["Browser Worker sandbox"]
@@ -93,7 +93,7 @@ flowchart LR
 | DEP-016 | SHOULD | Graceful drain stops new claims but lets committed jobs survive and fence | 07 |
 | DEP-017 | LATER | Horizontal worker deployment after fencing / owner load tests | 07 |
 | DEP-018 | EXPERIMENT | Lightweight Browser runtime (Lightpanda) isolated as Adapter, not a shortcut around Browser ACL | 06,09,13 |
-| DEP-019 | MUST | Production Secure VM KVM+Cell and Protected Services trust separation; no Cell→host admin sockets | 17,18 |
+| DEP-019 | MUST | Production uses **two distinct guest kernels** for Trusted Control VM and Untrusted Execution VM; no protected service in execution guest | 17,18 |
 | DEP-020 | MUST | Sentinel/credential/Connector Privsep/Browser Broker outside Cell; all egress routes kernel-enforced | 18,19,22 |
 | DEP-021 | MUST | VM absent, non-enforcing proxy or no Chromium sandbox => production blocked, never insecure fallback | 18,19 |
 | DEP-022 | MUST | start/stop/handoff and kill process tree within finite bounds and workspace revision fencing | 21 |
@@ -101,7 +101,7 @@ flowchart LR
 
 ## 5. Compose contract & illustrative config
 
-**This is NOT production-ready deployment YAML: **legacy illustration intentionally lacks the required two-VM boundary**.** Runtime image digests, secrets locations, ingress TLS implementation, egress and network policy implementation require CHAT_09 acceptance and integrative tests. Sample explicitly lacks direct browser internet connectivity (enforced proxy wiring outside snippet); an incomplete egress adapter must prevent browser launch.
+**This is NOT production-ready deployment YAML.** The following legacy illustration intentionally lacks the required two-VM boundary. Runtime image digests, secrets locations, ingress TLS implementation, egress and network policy implementation require CHAT_09 acceptance and integrative tests. Sample explicitly lacks direct browser internet connectivity (enforced proxy wiring outside snippet); an incomplete egress adapter must prevent browser launch.
 
 ```yaml
 name: personal-agent
@@ -138,7 +138,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
     restart: unless-stopped
-  runtime-worker:
+  agent-orchestrator: # Trusted Control VM ONLY; no generated code runs here
     image: registry.local/personal-agent/worker@sha256:REPLACE
     user: "10002:10002"
     init: true

@@ -21,9 +21,9 @@
 
 ## Non-negotiable security boundaries
 
-- Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
-- 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はRuntime Cell外のSentinelで強制評価し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
-- 本番はVM境界とCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
+- Agent OrchestratorはTrusted Control VMでRunを制御するが、**生成されたShell/Scriptは絶対にOrchestrator内で実行しない**。Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
+- 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はTrusted Control VMのSentinelで評価し、同じEgress Transportを通じて実送信を強制し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
+- 本番はTrusted Control VMと別ゲストカーネルのUntrusted Execution VM、Browser Workerの分離、Egress TransportとCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
 - 任意のTool Callはschema検証、policy、budget、approval、side-effect ledgerを通す。LLMが自分の操作を自己承認しない。
 - 購入・予約確定・送金・投稿・対外メッセージ送信は個別承認。UNKNOWN効果を盲目的に再試行しない。
 - APIキー・Cookie・認証トークンをLLMコンテキスト、Evidence、ログに漏らさない。

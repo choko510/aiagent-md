@@ -20,9 +20,9 @@
 
 ## B. 前提となる技術構造
 - 単一の中心AgentLoop＋必要時の並列化/専門Worker。Providerやモデルは変更可能。
-- **Muse migration 2026-11-07:** Agentの任意Shell/生成コードは専用VM内のUntrusted Runtime Cellでのみ許可。ホストShell、管理API、Vault、保護DB、Browser CDP、ポリシー変更は禁止。
-- Runtime Cellの全子プロセス・CLI・生成Skills・ブラウザ・Connectorの外向き通信は、独立Sentinelが具体的宛先・方法・権限を認可し、kernel/network強制で直接通信を阻止する。Tool GatewayはIntent/Approval/Ledgerの正本、Sentinelは全egr/Connectorの最終許可。二重承認正本は作らない。
-- 本番KVM/QEMU Secure VM＋Runtime Cell/Protected Servicesを第一候補とし、VMなしコンテナ開発モードを本番と同等に扱わない。実装時に実測と攻撃テストを要求。
+- **Muse migration 2026-11-07:** Agentの任意Shell/生成コードは**Trusted Control VMとは別ゲストカーネルのUntrusted Execution VM**のRuntime Cellでのみ許可。Agent LoopはTrusted Control VMに置くが、生成コードをその中で実行しない。ホストShell、管理API、Vault、保護DB、Browser CDP、ポリシー変更は禁止。
+- Runtime Cellの全子プロセス・CLI・生成Skillsには直接外向き通信を一切与えず、限定Broker RPCごとに新しいGateway Intentを記録する。ブラウザ・Connectorなどの外向き通信も独立Sentinelが具体的宛先・方法・権限を認可し、kernel/network強制で直接通信を阻止する。Tool GatewayはIntent/Approval/Ledgerの正本、Sentinelは全egress/Connectorの最終許可、Enforced Egress Transportが送信の唯一の経路。二重承認正本は作らない。
+- 本番KVM/QEMUの**Trusted Control VMとUntrusted Execution VMの2ゲスト分離**（保護DB/Vaultは別ゲストカーネル）を第一候補とし、VMなしコンテナ開発モードを本番と同等に扱わない。実装時に実測と攻撃テストを要求。
 - 新正本案: 02-runtime/sandbox-execution.md、09-security/runtime-cell-isolation.md、09-security/sentinel-authority.md。すべてDraft/Provisional。
 - UI/APIはタスク永続化と同じ境界を共有するが、長時間タスクをHTTPリクエスト内に閉じない。
 - LLM Tool Callは必ずTool Gateway→Schema→Policy→Budget→Approved Executorを通す。ツールアダプタが自己承認しない。

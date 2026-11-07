@@ -40,14 +40,14 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 
 ## Muse型 Secure Runtime（2026-11-07 設計改訂）
 
-従来の「登録済みToolだけ」から、**保護されたVM内のRuntime CellでShell・Python・Node.js・CLI・自己生成コードを実行できる汎用Agent**へ拡張する設計です。ホストUbuntu、VM管理プレーン、Vault、Sentinel、Browser CDP、保護サービスへのアクセスは引き続き禁止します。Agentには自由なローカル計算を与え、**全ネットワーク出口とConnector外部行為は独立Sentinelが最終認可**します。Credential Brokerが秘密を代理使用し、Agentは実トークンを閲覧しません。実装/実証済みではなく、共有契約は Draft / Provisional のままです。
+従来の「登録済みToolだけ」から、****Trusted Control VMとは別カーネルのUntrusted Execution VM**内のRuntime CellでShell・Python・Node.js・CLI・自己生成コードを実行できる汎用Agent**へ拡張する設計です。ホストUbuntu、VM管理プレーン、Vault、Sentinel、Browser CDP、保護サービスへのアクセスは引き続き禁止します。Agentには自由なローカル計算を与え、**あらゆる外部操作は独立Sentinelが最終認可し、Trusted Egress Transportだけが実送信**（生成コードの直接ネットワーク接続は禁止）します。Credential Brokerが秘密を代理使用し、Agentは実トークンを閲覧しません。実装/実証済みではなく、共有契約は Draft / Provisional のままです。
 
 - [Runtime Cell Isolation](docs/09-security/runtime-cell-isolation.md) — VM/Cell分離、リソース制限、寿命、起動可否
 - [Sentinel Authority](docs/09-security/sentinel-authority.md) — すべての具体的外部操作と通信出口の最終許可
 - [Sandbox Execution](docs/02-runtime/sandbox-execution.md) — sandbox.exec、Execution/Workspace、停止、復旧
 - [受入シナリオ SC-17〜22](docs/00-foundation/acceptance-scenarios.md) — 生成コード実行からVM/通信隔離まで
 
-本番候補はKVM/QEMU専用VM＋分離されたCell/Protected Services、Dockerはサービス管理と補助隔離に使用します。ハードウェア仮想化なしの開発用プロファイルは本番と同等ではありません。Sentinel障害・隔離不成立時に安全性を下げるフォールバックはありません。
+本番候補はKVM/QEMUによる**Trusted Control VMとUntrusted Execution VMの2ゲスト構成**（Agent LoopはTrusted側、生成コードはUntrusted側、Browser Workerは独立隔離）、Dockerはサービス管理と補助隔離に使用します。ハードウェア仮想化なしの開発用プロファイルは本番と同等ではありません。Sentinel障害・隔離不成立時に安全性を下げるフォールバックはありません。
 
 ## 安全性の基本原則
 

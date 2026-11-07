@@ -1,7 +1,7 @@
 # Product Requirements — Universal Personal Agent Harness
 > Status: **Draft / owner CHAT_00 / 2026-10-30**. Canonical user intent: [Project Brief](project-brief.md), verification: [Acceptance Scenarios](acceptance-scenarios.md). These are design requirements, NOT evidence of implementation.
 ## 1. Mission and boundaries
-A self-hosted Ubuntu / Secure VM **general-purpose personal Agent Harness** which accepts a natural-language goal, plans, discovers tools, reads authorized sources, reasons, calculates, verifies evidence, and reports results. Supports unattended bounded background execution, condition monitoring and notifications. Not an agent for server administration, code execution on host, scraping as sole purpose, or autonomous buying, posting, reservation or transfers.
+A self-hosted Ubuntu / **separated Trusted Control VM and Untrusted Execution VM** general-purpose personal Agent Harness which accepts a natural-language goal, plans, discovers tools, reads authorized sources, reasons, calculates, verifies evidence, and reports results. Supports unattended bounded background execution, condition monitoring and notifications. Not an agent for server administration, code execution on host, scraping as sole purpose, or autonomous buying, posting, reservation or transfers.
 ### Personas and scope
 Owner is authenticated human; additional users are strictly isolated by tenant, workspace, resource ownership and capability. Operators have separate explicit auditable capabilities. All external/provider content, websites, emails, social posts, PDFs, images and Excel rows are **untrusted data**, never system instruction or capability.
 ### Non-goals
@@ -33,7 +33,9 @@ No arbitrary SSH/host shell or Docker socket/host package install; sandboxed Cel
 | PRD-022 | MUST | Credential Broker/Privsep/Browser Broker separate from Cell; no plaintext credentials/CDP to Agent | PRD-T22 / SC-18,19,22 |
 | PRD-023 | MUST | Temporary Skills may be built/tested in Cell but durable activation/policy edits require approval | PRD-T23 / SC-20 |
 | PRD-024 | MUST | Cell exec lifecycle and child processes obey Task/Run fences, cancellation, budgets, workspace CAS and UNCERTAIN side-effect reconciliation | PRD-T24 / SC-21 |
-| PRD-025 | MUST | Production starts only after VM + kernel sandbox + egress attestation; container-only development mode never claims production isolation | PRD-T25 / SC-18,22 |
+| PRD-025 | MUST | Production starts only after two different guest kernels, Cell sandbox and actual transport egress attestation; container-only development mode never claims production isolation | PRD-T25 / SC-18,22 |
+| PRD-026 | MUST | Generated code has no direct Internet, and each brokered external action is separately persisted in Gateway Ledger and Sentinel-authorized before enforced transport dispatch | PRD-T26 / SC-19,21 |
+| PRD-027 | MUST | Personal data must carry owner/provenance/sensitivity labels and cannot be sent to unauthorized recipients even without API secrets; unknown payload disclosure fails closed | PRD-T27 / SC-22 |
 ## 3. User-visible results and definitions
 - **Succeeded**: Goal Verifier evaluates all mandatory user success criteria against current evidence and recorded side-effect outcomes. A successful LLM response alone does not meet it.
 - **Partial**: Some criteria met, other constraints explicitly failed or unverified; include blockers and known gaps.
