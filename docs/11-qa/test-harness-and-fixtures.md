@@ -503,3 +503,25 @@ Evidence grade はコード/テスト実見を **Code verified**、公式文書�
 - F22: Hostile HTML/PDF/email/X/MCP/tool stdout命令、DNS/HTTPによる秘密流出、他Tenant参照。
 
 Assert **zero successful forbidden Host/Network/Secret operations** under tested setup. Positive normal compute/authorized read must work. Host kernel, guest kernel, VM image/Cell profile/policy hashes/egress setupを固定しテスト証跡を保存する。Test runnerの特権はAgentへ与えない。
+
+## 2026-11-07 Adaptive Context fixtureセット案
+
+参照: [Context 18.15 ACM-T01〜20](../02-runtime/context-manager-and-compaction.md#1815-実装優先度release-gate)。既存HarnessのOSS fixture/Mock機能を使用し、別の「コンテキスト専用ランタイム」は作らない。
+
+Fixture manifest v1（QA-owned proposal）に次を含める: fixture ID、fixed clock/locale/TZ、run/step/goalRevision、Model caps & tokenizer revision、tenant/owner principal、current policy/Memory epoch、raw event log、typed hard anchors、Artifact bytes/digests/locators、source timestamps & validity、private/secret redaction markers、expected selected refs/offload/reason codes、expected summary grounded claims、expected ContextManifest & errors、expected effect ledger/approval、expected Token Budget and costs、Child handoff/result source IDs。
+
+QA OracleはLLM出力テキストの単純一致だけでなく、(a)機械的anchor equality、(b)出典claim locator coverage、(c)Event/Checkpoint/Artifact durability/lease fencing、(d)cross-tenant non-interference、(e)Memory revocation read barrier、(f)Provider overflow retry ceiling、(g)UNKNOWN effect no replay、(h)Parent-child stale/dedupを独立判定する。
+
+Required fault injection: Long HTML/PDF+table locator; missing source; malformed embedded instruction; expired data; concurrent memory-delete vs dispatch; old Goal vs Steer; Model 128k→4k; provider overflow; unknown tokenizer; Child×4 conflicting results; Artifact offload killpoint; unsupported snapshot schema; Sandbox stdout attack; Executor process killed; no Network in offline lane; unpriced token usage。各fixtureは予算/時間上限と固有のTest IDを持ち、学習用Promptを使ってoracleを上書きしない。
+
+レポートはtimestamp、git SHA、model/tokenizer/fixture version、pass/fail/degraded、引用source count、delta tokens/cost/p95と匿名化根拠を含める。必要なSource locatorを意図的に省略した場合はunknown/partial扱い。すべて未実行、FakeModel/MockGateway/実PostgreSQLで実装後に回す計画。
+
+## 2026-11-07 P0/P1: ACM-T21〜ACM-T36 Fixture・Oracle具体化
+
+Source of truth: `Context 18.22`。Fixtureは`testId, fixedClock, tenant, principal, GoalRevision/typed values, Model/Tokenizer/Provider, ordered Tool Schemas, Source original digest/span/locator, redacted projection/map, Memory sourceEpoch/revisions, Adapter/template revisions, expected ContextManifest/ModelRequestSnapshot/dispatchAdmission rows, Parent/Child versions, expected sendAttempts, killpoint, errorCode`を備える。
+
+**独立Oracle**: (1)Source-backed Fact entailment、(2)TypedGoal値/否定とRevision整合、(3)Providerの最終serialized Token量/各区分一意性、(4)Sealed Snapshot/Role/Parts/Tool順序/Template digest、(5)Memory deleteとDispatch AdmissionのDB順序、(6)send STARTING/MAY_HAVE_SENT state、(7)Provider別Consent、(8)Artifact原本/派生hashとGC、(9)ParentのGoal/ACL/Source merge検証、(10)JournalのretryEligibility、(11)Cache invalidation、(12)Evidence Coverage Checker。主張が出典に支持されない場合はContextがフィットしていてもSuccess 0。
+
+**Race fixtures**: DELETE-TX commit前後の2 Gateway dispatch、Model send ACK lost、Template changed during restart、ToolSchema order changed、Artifact GCとactive HEAD/Retention期限が競合、Parent Steerとchild DONE、Source doc "駐車料金別途"をLLMが「込み」と誤要約。SourceRefだけ正しい場合にもFact supportがREFUTEDでなければ失敗。結果期待値はDB行/attempt状態とProviderへの送信記録で照合。
+
+**Static vs Runtime**: Markdown/JSON構造検証は仕様の整合しか保証せず、Semantic Validator/Memory concurrency/Provider/DB/GC/Sentinelの動作成功を意味しない。Harness本体実装後、FakeModel + Real PG + test-only Gateway + denial egressで実行するまではすべてNOT RUN。

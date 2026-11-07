@@ -282,3 +282,30 @@ Tests EVD-R4-T01 OCR rotated table maps to original page bbox; T02 XLSX sheet/ce
 ## 2026-11-07: Generated Code / Console / Workspace Provenance
 
 EvidenceはTask Goalの検証可能な事実。Execution stdout/stderr、生成コード、インストールしたpackage、Workspace snapshot、compiled outputは**raw or derived Artifact**であり、既にVerified Evidenceではない。Artifact refsにはhash、出所、source line/offset、owner/tenant/task/run/execution、image digest、workspace revision、capture time、trust class、redaction/retention metadataを保持。Host pathやcredential/surrogateは記録しない。Console logsはfinite byte limits and redaction required; Generated SkillsはcandidateでありSkill publish承認の代替にならない。SC-17/20/21/22。
+
+## 2026-11-07 Context Provenance連携提案（未Locked）
+
+参照: [Adaptive Context 18.3/18.6/18.14](../02-runtime/context-manager-and-compaction.md)。原本のEvidence/Artifact契約を変更せず、ContextManager側に必要なSource Locator viewをCHAT_01へ依頼する。
+
+**MUST proposal**: ArtifactRefとContent digest/hash algorithm version、chunk/page/table-row/byte-offset等の型付きlocator、capturedAt/observedAt/source validity、tenant/owner/task/goal scope、redaction classification、source version、immutable HEAD/checkpoint lookupを整合。ContextManifestは選択されたEvidenceRefと省略理由のみを保持し、Evidenceの新しい正本にはしない。Source/Artifactが存在しない、revoked、digest mismatch、ACL不一致の場合はread-by-locatorを失敗させ、Summary内の引用をverified Evidenceとして採用しない。
+
+**Raw→Derived**: Browser fetch、HTML/PDF parser、Sandbox Execのstdoutはraw/source provenance付きData。要約したDerivedClaimは必ずinputSourceRefs/locators/claimState/timeを持ち、原本の権限・鮮度・真偽を引き継がない。Secret/PII/Credentialはredaction before persistence、Host path/Cell Socketへの直接参照を禁止。被引用SourceがrevokeされたらContextから次dispatch時に除外するが、Retention/Backup削除はCHAT_09/10の別手順。
+
+**Tests**: ACM-T03/T04/T05/T15/T17/T18。重要なPrice/date/approval/successをEvidenceなしに生成0、Corrupt locatorが有効として表示される件数0。Shared schema と migrationはCHAT_01/10のcross-owner reviewまでPROVISIONAL。
+
+## 2026-11-07 P0/P1: Sealed Original・Redacted Projection・Evidence entailment
+
+### Source semantics and TypedFact
+
+ArtifactRef/Digest/Locatorの検証は**その範囲が実在する**ことの証明であり、Claimが根拠と一致する保証ではない。`Context Manager 18.18`にある`SourceBackedFact` /`SemanticVerificationReceipt`をEvidenceV1/ObservationV1の派生読取モデルとして提案する。`supports` relationや`verification=verified`を、単なる出典存在で自動設定してはいけない。
+
+- 原文Locator Spanを読み直し、versioned parserで数値・金額・税/手数料・日時・人数・数量・否定・条件を型付き抽出。ClaimFactを比較して`SUPPORTED_BY_SPAN`、決定的計算の`DERIVED_BY_RULE`、`REFUTED_BY_SPAN`、`UNDETERMINED`、`SOURCE_MISSING`のReceiptを保存。出典が価格48,000円+駐車別2,000円なのに「駐車込み48,000円」はREFUTED。ReceiptなしのSummaryはUNVERIFIED。
+- Currency ISO 4217、decimal string、単位、IANA TZ、Fee include/exclude、Operator、modalityを保持。支持が不明な文章は「出典による裏付け未検証」と明示し、Result SUCCESS/予約判断の根拠から除外。外部Source内容の真実性・鮮度は別評価。
+
+### Two-layer storage
+
+1. `SealedOriginalArtifact`: 合法かつ必要性があるSource original bytesを、独立暗号鍵/owner+tenant ACL/retention/classificationで保存。元bytesのdigest、ページ位置・byte offsetを不変に維持。Malware/Secrets/privileged filesは検疫・保存禁止を優先。
+2. `RedactedProjectionArtifact`: モデル/検索用に必要な部分だけderivationする別Artifact。独立digestと`originalRef, originalLocator, derivedLocator, redactionVersion, irreversibleMaskMap`を記録する。Secret/PIIがUI/LLM/Sandboxへ流れないようにする。
+3. 原本消去後に派生Projectionを元原本として扱わない。原文照合が不可能になったClaimは`SOURCE_MISSING/UNDETERMINED`とし、保持期間/法的消去/GCを上書きしない。Sourceが歴史的に古くても、許可済み履歴回答では観測日時付きで使用可能だが現在値にはしない。
+
+**Cross-owner acceptance**: 01/09/10/15（Artifact retention/locator/parser）、02（Context Verifier）、11（ACM-T21/27/28/32）。データ分類ごとに保存可能性を決めるので、全てのCredentialを暗号化して残すという設計ではない。

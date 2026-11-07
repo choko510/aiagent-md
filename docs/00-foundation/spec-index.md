@@ -124,3 +124,8 @@
 - CHAT_15: `docs/15-multimodal/` (1 MD)
 
 **Historical: 74 + 11 = 85 original drafts; 2026-11-07 Muse migration adds 3 = 88 module documents across 16 owner domains.**
+
+## 2026-11-07 Adaptive Context integration addendum
+
+既存の仕様数は**88件のまま**で、新しい独立MDは増やさない。実装可能な詳細契約は **02-08 [Context Manager and Compaction](../02-runtime/context-manager-and-compaction.md) の18節** に追記。これを中心に02-03/06/09/10/12、06-01/02、08-04、09-05、11-01/04、01/10の各正本・横断提案を整合させる。ADR-023〜028とDEC-P0-08〜10、DEC-P1-06は [Architecture Decisions](architecture-decisions.md) を確認。**PR #68 Muse secure architectureに依存するDraft proposal** であり、承認・実装・QA実行済みではない。
+

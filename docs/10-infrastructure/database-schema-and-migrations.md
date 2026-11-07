@@ -1477,3 +1477,67 @@ The **proposed SQL/fixtures**, not the missing Agent Harness runtime, were execu
 - RecordVersion/GoalRevision/DefinitionRevision/LeaseEpoch and Event counters are **different dimensions**. Database signed BIGINT, internal BigInt, API/Event wire canonical decimal string; no JSON number, no implicit float. For CAS use `record_version` (not old `revision` symbol), initial `1`; `lease_epoch` may be `0` before claim. UUIDv7 is trusted server-issued and validated before DB insert; historical v4 test-generated IDs do not authorize production IDs.
 - Initial migration 0001 and proposed forward 0002/0003 have SHA256 ledger. They have been exercised against fresh PostgreSQL 16 **independent audit tests** only. `LOCKED` still depends on Domain/Event/Runtime/Authorization owner acceptance; `VERIFIED` depends on real migration driver upgrade/backfill/rollback/driver tests. Never mutate SQL already applied in production to change a checksum; instead issue a new forward migration.
 - **DB-R6-T01** tests trusted UUIDv7 roundtrip, v4 validator reject; **DB-R6-T02** 2^53+1 wire codec and optimistic CAS; **DB-R6-T03** synthetic Test SQL ensures old `revision=0` cannot silently bind a current `record_version=1` resource; **DB-R6-T04** cross-owner same Tenant read and digest enrollment denied. Newly authored R6 tests remain pending Runtime verification.
+
+## 2026-11-07 Adaptive Context永続化・移行要求（CHAT_10への提案）
+
+正本: [Context 18節](../02-runtime/context-manager-and-compaction.md) とADR-023〜028。**設計提案のみ。新しいDDLが既に存在すると主張しない。** 既存のTask/Run/checkpoint/Memory/Artifact正本を維持し、追加が必要ならexpand/backfill/read-switch/contractのversioned migrationで扱う。
+
+- Immutable ContextManifest/summary metadataはtenant/owner/run/step/goalRevision/leaseEpoch、selectedRefs/locators/digests、sourceEpoch、policyVersion、model/tokenizer revision、usage reservation、hardAnchorDigest、raw event cursorを持つ。本文Secret/PIIを投影ログやIndexへ平文複製しない。
+- Persistence order: Artifact bytes durable → digest/ACL checked → immutable Manifest persist → Run checkpoint HEAD CAS (recordVersion/leaseEpoch/currentGoalRevision) → dispatch。DB外のStorage writeが失敗していたらHEAD参照を作らない。外部Model/HTTP実行中にDBトランザクションロックを保持しない。
+- Memory writer CAS/tombstone/sourceEpoch/invalidation intentは単一TX。Read sideはIndexの古いhitがあっても正本のscope/epoch/status/expiryで必ず拒否。Backup restore時もrevocation watermark以前の値をACTIVEへ復活させない。
+- Journalはappend-only state transitions/claims refsと検証状態を保存し、Raw Tool全文やSystem Promptをduplicated Source of Truthにしない。
+- Scope/RLSとunique idempotency、source digest version・unknown schema rejection、retention/restoreを含むSchema Testを作る。既存Checkpointを無断にUPDATEせずHead CASへ接続。Migrationを適用済みとして手修正しない。
+
+**Acceptance**: ACM-T08/T09/T10/T13/T18、old lease CAS 0、latest User correction preserved、corrupt restore refuses dispatch。物理列名/Index名は正式Ownerレビュー後に決める。
+
+## 2026-11-07 P0/P1: Context Fact / Request Snapshot / Dispatch Admission SQL契約案（未適用）
+
+依存: `Context 18.18〜22`、Memory Writer 06-01/02、Task Goal 02-04、Checkpoint 02-06、CHAT_09 Privacy。**以下のテーブル名/SQLは初期提案で、現在のMigrationが存在する・DBで実行済みとは意味しない。** 正式DDLのOwner合意前に`0001`〜`0003`など適用済みMigrationを上書きしない。
+
+~~~sql
+-- PSEUDOSQL (proposed PostgreSQL shape, not a migration)
+-- Scope lease/epoch row: single serialization point for memory mutations
+-- and Model Admission; include tenant+owner+scope, never model-chosen.
+memory_scope_epochs(
+ tenant_id uuid, owner_user_id uuid, scope_id uuid,
+ current_epoch bigint not null, record_version bigint not null,
+ primary key(tenant_id,owner_user_id,scope_id)
+);
+context_manifests(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid,
+ task_id uuid, run_id uuid, goal_revision bigint,
+ content_digest text, source_epoch bigint, policy_version text,
+ artifact_refs jsonb, created_at timestamptz
+);
+model_request_snapshots(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid,
+ task_id uuid, run_id uuid, attempt_id uuid unique,
+ manifest_id uuid, request_digest text, sealed_ref text,
+ prompt_template_digest text, serializer_revision text,
+ provider_adapter_revision text, ordered_messages_ref text,
+ tool_schema_manifest_ref text, provider_continuation_ref text,
+ recipient_decision_ref uuid, created_at timestamptz
+);
+model_dispatch_admissions(
+ id uuid primary key, tenant_id uuid, owner_user_id uuid, scope_id uuid,
+ attempt_id uuid, run_id uuid, request_snapshot_id uuid,
+ snapshot_digest text, admitted_source_epoch bigint,
+ recipient_provider_id text, state text, admitted_at timestamptz,
+ unique(tenant_id,attempt_id)
+);
+-- FK scope must be tenant+owner restricted; prevent cross-tenant join.
+-- index model_dispatch_admissions(tenant_id,scope_id,admitted_at,state)
+-- index context_manifests(tenant_id,run_id,goal_revision)
+-- index model_request_snapshots(tenant_id,run_id,attempt_id)
+-- serialized plan/Goal/claim verification receipts are append-only.
+~~~
+
+**TX-A Memory Writer**: lock`memory_scope_epochs(tenant,owner,scope) FOR UPDATE`→auth+CAS→active Memory tombstone/update+epoch increment+invalidation outbox/command receipt atomic commit。Lock order (tenant,owner,scope ascending)固定。新規scopeの行作成はunique insert+lock、欠けた行を「epoch=0」と推測しない。
+
+**TX-B Model Gateway**:同じscope rowを同じ順序でlock→最新Projection recordRevision/consent・GoalRevision・Run lease/control・Provider Recipient Policy・Budgetを確認→idempotent unique Attempt + `model_dispatch_admissions`を保存→commit。Deleteが先にcommitした場合に旧MemoryでAdmission 0。Admissionが先なら潜在送信として追跡し、Delete時にcancel/outbox。ネットワークI/OはTX外、STARTING/SENT/MAY_HAVE_SENTのdurable transitionとusage receiptで確認。**物理送信とDB commitの完全原子性を主張しない**。
+
+**FK/GC契約**: Manifest/SnapshotはTask/Run/Artifact ownerへの複合FKまたは等価な認可検証でリンク。Checkpoint HEADまたは未確定Admitted Attemptが参照するObjectを年齢だけで物理GCしない。非参照Manifestは耐久保存後の孤立候補だが未確定Head CAS/リトライ猶予を確認してから消去。法的/ユーザー保持期限で原本削除が必須ならSource tombstone/EXPIREDとHeadのdegraded stateを同時に可視化し、Verified Evidenceの根拠に継続利用不可。Sealed Original/Redacted Projectionは別の参照・Hash・鍵/TTL/座標mappingで管理。
+
+**Schema evolution**: versioned expand→backfill（古いSnapshotはNON_REPLAYABLE）→dual-read/gated write→switch→contract。old Worker/fence/unsupported schemaはfail closed。Rollback時にtombstone watermark以前へMemoryを復活させない。DDL変更はCHAT_01/06/09/10/11の合意・Migration checksum・Fake/PG integrationを条件にする。
+
+**Test suite**: ACM-T22〜25,27,30〜32,36。二つのModel GatewayとMemory Writer100並列、Snapshot commit→HEAD CAS Killpoint、GCとretention race、MAY_HAVE_SENT、CrossTenant ownership、Provider change Consent。物理実行0。

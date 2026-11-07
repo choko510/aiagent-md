@@ -56,3 +56,9 @@ Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格�
 ## 調査資料の整理について
 
 並列仕様執筆時に使った担当別プロンプトや作成テンプレートは整理済みです。旧プロンプトの一部は既存仕様からの相対参照を維持するため、`prompts/ROUND2_AUTHOR_CONTINUE.md` のみ**履歴用資料として残置**しています。実装手順ではありません。削除したファイルもGit履歴から確認できます。元の61件の仕様PRとのSHA対応や未承認事項を確認する `audit/`、`governance/`、`.premerge/pinned-prs.json` は保持しています。
+
+## コンテキスト管理の実装判断（2026-11-07追記）
+
+LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き固定領域とし、Evidence原本のArtifact offload、関連度・鮮度で選択したWorking/Memory投影、根拠付きSummary、Checkpoint復旧/Model変更時の再構築を組み合わせる。[詳細: Context Manager 18節](docs/02-runtime/context-manager-and-compaction.md) / [ADR-023〜028](docs/00-foundation/architecture-decisions.md) / [QA ACM-T01〜20](docs/11-qa/benchmark-and-release-gates.md)。
+
+Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。

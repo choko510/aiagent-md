@@ -508,3 +508,13 @@ CreateTask APIはcommandIdを受け取れること、更新APIはexpectedVersion
 ## 2026-11-07: Muse型SandboxExecution/Workspaceドメイン契約案
 
 Task/Run/Conversation/Watchの正本は維持し、**SandboxExecution (一つのRunに属する実行)**、**RuntimeCell (隔離実体/attestation)**、**WorkspaceRevision (owner/tenant/taskスコープ付き)**を新規子ドメインとして扱う。ExecutionIDはRunIDの別名ではなく、同一Run内の複数実行を識別する。ExecutionにはownerUserId、tenantId、taskId、runId、goalRevision、leaseEpoch、toolIntentId、cellId、runtimeProfile、imageDigest、policyEpoch、workspaceRevision、limits、start/end、exit/signal、effectState、artifact refsを関連づける。Workspaceは可変なポインタを持っても内容のcommitはimmutable revision + owner CAS。既存のEvidence/Artifactは実行ログ/生成ファイルのProvenanceを保持する。外部ActionのApproval/GrantはExecutionと独立したGateway/Sentinel契約としてbindする。共有型は[Sandbox Exec](../02-runtime/sandbox-execution.md)のProposed ShapeをOwner review後にcanonical化。採用前に全ownerが状態/ID/索引/イベントを合意し、勝手にLockedとしない。SC-17/18/21。
+
+## 2026-11-07 Context / Goal / Model Admissionの共有契約要求（Draft）
+
+CHAT_01が最終承認すべき独立の資産/IDは`TaskGoalRevisionRef`（値付きtyped Goal Snapshot）、`ContextManifestRef`（候補選択）、`ModelRequestSnapshotRef`（実送信入力のsealed構造）、`DispatchAdmissionId`（送信線形化）、`SemanticVerificationReceiptRef`（出典支持検証）の五つ。これらの`Revision`/`GoalRevision`/`LeaseEpoch`は既存int64十進文字列とし、Modelの呼出IDを承認/Task権限へ流用しない。
+
+- GoalRevisionにはUser明示のHard/Soft/Negative/Unknown条件値・演算子・単位/TZ/税・sourceMessageRefを保持。Contextが同じRevisionを使っていても古いvalueを再導入しない。
+- ContextManifestは`selected SourceRef/Locator`、Summary/Offload/Digests、GoalRevision/MemoryEpoch/PolicyVersionを示すが、**LLM requestの完全な複製ではない**。Message/Role/Content Part/Tool schemas/Template/Provider conversion/Continuationは別sealed ModelRequestSnapshotが正本。
+- DispatchAdmissionは`tenant/owner/task/run/attempt/scopeEpoch/modelRecipient/payloadDigest/status`を保持し、MemoryWriterの削除/訂正commitとスコープ単位で直列化。削除が先なら旧Memory付きAdmissionは0。先行Admissionの既送信可能性は記録。
+- Evidenceの支持判定をSummaryやContextManifestのdigestだけで満たした扱いにしない。非数値の判断やProvider独自の曖昧さは`UNVERIFIED`を尊重する。
+- 共有Schema/enum/error/event名はCHAT_01 Ownerの明示承認とCHAT_10物理Migration前にPROVISIONAL。各別Ownerが同名型を独断で正式化しない。ACM-T21〜26に追跡。

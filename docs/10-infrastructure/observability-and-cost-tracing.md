@@ -286,3 +286,12 @@ Unknown: OTel version installed in future implementation, SDK exporter compatibi
 ### 16.1 Issue / PR evidence
 [S11] https://github.com/open-telemetry/opentelemetry-js/issues/4184 — **Issue report**, 2023-10, closed: user reported `maxQueueSize` overflow/dropped spans despite changing setup options; issue is not measured in this Harness and does not prove a currently unfixed defect. Ensure instrumentation config is passed to the actual processor, with overflow counters and no effect on usage ledger (OBS-T07/T15).
 [S12] https://github.com/open-telemetry/opentelemetry-js/pull/3458 — **PR evidence**, closed **unmerged**: proposed eager export to address dropped batch spans. Do not claim this fix is present in released SDK; current pinned `BatchSpanProcessorBase.ts` source is the behavior to inspect. OBS-T07 must induce exporter backpressure under the chosen installed version.
+
+## 2026-11-07 Context Fidelity / Cost trace（未実装）
+
+参照: [Adaptive Context 18.15](../02-runtime/context-manager-and-compaction.md)。既存のTask/Run/Tool/Model traceに追加する非機密フィールド案: contextManifestId、manifestDigest、sourceEpoch、modelCapabilityRevision、tokenizerId、estimatedInputTokens、actualInputTokens (provider supplied)、reservedOutputTokens、summaryCost、rerankCost、offloadedBytes、sourceCoverageCount、sourceAgeBucket、blockedReason、degradedReason、compactionKind、providerOverflowAttempt、rebuildTrigger、childResultMergeCount。
+
+**集計**: hard-anchor loss、unsupported claim、Source locator mismatch、stale memory re-injection、cross-tenant leakageは安全系count (fixture hard gate=0)、quality系はEvidence recall@budget、source precision、grounded claim coverage、tokens/step、USD/task、retrieval/compaction/recovery p50/p95、Parent-child duplicate claim率。Token/Cost provider receiptと見積・cache hitは区別する。User ID/URL query/secret本文をmetrics tagにしない。ObservedAtの日時粒度もPrivacy policyで最小化。
+
+Telemetryが落ちてもPolicy/Goal/Sourceの安全判定をLLM推測へ切り替えず、必要なUsage receiptが取得できなければunknown Costとして保守的Budgetを維持。SLO/価格節約率はFixtureと現物測定前に保証しない。ACM-T01..T20との対応をQAに提出する。
+

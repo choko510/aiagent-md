@@ -579,3 +579,19 @@ Cross-team source of truth: #23 Event, #27 Checkpoint, #10 DDL, #21 Task/Run, #8
 ## P0-4/5/6 binding correction (2026-11-07)
 
 Agent Loop / Orchestrator is a **Trusted Control VM** service and cannot execute generated shell/code locally or co-reside inside the untrusted guest kernel. The LLM outputs only strict `SandboxExecProposalV1`, never a preauthenticated ExecutionAdmission. Gateway freezes proposal and creates server-owned `SandboxExecutionAdmissionV1` from live Task/Run/lease/owner/policy. Execution VM runs the command with no public network. Any child operation requiring external I/O must call per-Execution **scoped broker RPC**, creating **independent Tool Intent/Side-effect Ledger** and fresh Sentinel authorization prior to trusted HTTP Fetch / Typed Connector / Notification / Browser Egress Transport dispatch. A model-produced command is not external approval. Unauthorized curl/raw TLS from guest is always blocked. Cancel/Steer/revoke aborts execution channel and subprocess tree, and UNKNOWN external effect is reconciled rather than reissued. SC-17/18/19/21/22.
+
+## 2026-11-07 Context admission at model boundary
+
+Agent Loopのstepモデル呼出前に[Adaptive Context 18節](context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)の順序を組込む: canonical Goal/Policy/Run lease再取得→Context候補のACL/有効期限filter→ModelRouter capability/token budget→Artifact offload/grounded compaction→ContextManifest耐久化とHEAD CAS→Memory epoch/Goal revision/PolicyVersion再検証→LLM dispatch。OLD snapshotなら再構築。
+
+Model full reply確定→Tool proposal正規化→Gateway intent/approval ledger commitまではToolを実行しない。Steer/Delete/Cancel/Model fallback/Provider overflowで古いContextPlanを流用しない。Context再構築はUser操作や外部副作用の承認ではない。System/Goal/Policyが容量超過ならTool/Modelを止めPartial/blockerを表示する。
+
+Stepごとに ManifestRef、anchorDigest、sourceEpoch、tokenizer revision、source coverage、offload count、failure/degraded reasonをTrace（秘密抜き）へ記録。ACM-T01/T04/T06/T08/T09/T14/T16の受入を追加する。現在は設計のみ。
+
+## 2026-11-07 P0: Model dispatch境界の実行順
+
+旧`Context admission at model boundary`を以下で強化する（既存Tool approvalは維持）。Typed GoalとSourceBackedFactを検証→disjoint Token Accounting→Coverage Checker→ContextManifest→Final Provider serialization→Sealed ModelRequestSnapshot durability→Run HEAD CAS→**Protected Model Gateway DB dispatch admission**（Memory delete/Recipient Policy/Goal/leaseを同一線形化点で確認）→send STARTING/SENT/MAY_HAVE_SENT→full response/usage commit。
+
+Source locatorだけでは意味的検証が不足ならUNVERIFIED、必要Evidenceが足りなければ`COVERAGE_INCOMPLETE`でbounded rehydrateかPartial。古いMemory/Goal/RecipientではAdmissionを拒否する。ACK lossを「確実に未送信」とみなさず、同一Attemptのblind retryを禁止。Provider変更時はPrompt/Role/Schema/Token/Consentを新たに評価する。
+
+Working Context reuse時も実Tool/Modelの権限が増えるわけではない。Tool ResponseとSandbox outputはDataのみ。TaskJournalに`failureCode, effectState, retryEligibility, rejectedApproach, nextPlannerEligibility`を保存し、同じ失敗をPlannerが繰り返さない。ACM-T21〜26/T29/T33/T35が実装後の受入条件。

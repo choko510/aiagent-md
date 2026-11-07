@@ -27,6 +27,12 @@
 | ADR-020 | PROPOSED | Credential Broker/Privsep and Browser Broker external to Cell; agent never sees raw tokens or direct CDP | token env injection or unowned browser socket | CHAT_04/05/09; SC-18,22 |
 | ADR-021 | PROPOSED | SandboxExecution and Workspace child contracts, lifecycle/kill tree/UNCERTAIN reconciliation and temp Skills | uncontrolled daemon, automatic self-upgrade of protected runtime | CHAT_01/02/03/06/10/11; SC-17,20,21 |
 | ADR-022 | EXPERIMENT | Compare eBPF taint provenance and MicroVM-per-task after production mandatory path established | assume Meta's kernel data flow tracking implemented | CHAT_09/10/11; SC-19,22 |
+| ADR-023 | PROPOSED | Adaptive ContextはPolicy/Goal/Controlをimmutable typed anchorsとして固定し、Evidence/Memory/Tool/Journalを別権限のData層として扱う。LLM summaryは正本/権限/成功判定を代替しない | last-N-only truncation、全History/MemoryをSystemへ常時注入 | CHAT_01/02/03/06/09/10; ACM-T01/T02/T04/T09 |
+| ADR-024 | PROPOSED | Context priority P0〜P3とACL/freshness hard filterを先に適用し、Model版別Tokenizer+Output reserve+Margin内でprovenance/dedup付き選択を行う | Embeddingスコアだけで配置・権限を決定、Prompt cache hitをWindow拡大扱い | CHAT_02/06/09/11; ACM-T03/T06/T07/T10 |
+| ADR-025 | PROPOSED | Raw Artifactとlocators、grounded summary claims、immutable ContextManifest/HEAD CAS、run journalを独立保存し、Worker Crash/Steer/Memory revoke/Model swapでrehydrate | summaryを原本化、旧Goal/旧Memory/旧leaseを無条件復元 | CHAT_01/02/06/10/11; ACM-T08/T09/T13/T15/T18 |
+| ADR-026 | PROPOSED | 長時間Taskは複数有限Run/Watchを原本に接続し、鮮度とsource identityで必要情報のみ再取得。子Taskにはtyped Handoffと出典付きChildResultだけを共有 | 無期限Single Run、全History+Secretsを子Taskへコピー、子Agentの自称完了で成功 | CHAT_01/02/03/07/09/10; ACM-T11/T12/T17/T20 |
+| ADR-027 | PROPOSED | Sandbox/Browser/MCP/Generated Script/Memory由来のコンテキストはTrustTierを引き上げず、Sentinel/Gateway/Protected Serviceが権限を再検証する | 要約/Embedding済み文字列にPolicy/Approval権限を与える | CHAT_02/03/06/09/11; ACM-T04/T10/T14/T15 |
+| ADR-028 | PROPOSED | Context監査UIとsource確認/訂正/再構築のCommandsを版付きで定義し、Hard gatesをQuality gatesより優先してRelease判定する | 「精度99%」など無実測指標、Summary編集でGoal/Receiptを書換 | CHAT_08/11/02; ACM-T01〜T20 |
 
 ## Cross-team conflict register
 | ID | Blocker | Required owner handshake | Closure evidence |
@@ -44,6 +50,11 @@
 | DEC-P0-07 | Secure VM + nspawn + Chrome sandbox production readiness and dev-only mode | CHAT_09/10/11 | actual kernel attestation, QA isolated profiles and fault test |
 | DEC-P1-05 | Temporary generated Skill activation vs durable Skill publication/secret access | CHAT_02/03/06/09/11 | bounded temp use, reviewed promotion, revocation tests |
 
+| DEC-P0-08 | Adaptive ContextManifest/typed anchor/Journal/Artifact locatorの正本とHEAD CAS境界未Locked | CHAT_01/02/03/10/11 | schema-version、hash、owner/epoch、expand-contract migration、ACM-T01/13/18 |
+| DEC-P0-09 | Memory revoke/read epochとModel-dispatch race、Source ACLとContext selectionの責務未Locked | CHAT_02/06/09/10/11 | deletion barrier、cross-tenant no-leak、ACM-T02/09/10 |
+| DEC-P0-10 | Model Window/Tokenizer/Tool schema/Output reserve/Cost settlementの統一規定未Locked | CHAT_02/10/11 | model switch/overflow/partial/budget tests、ACM-T06/07/19 |
+| DEC-P1-06 | Child context handoff/Artifact provenance/UX quality thresholds pending | CHAT_01/02/03/08/09/11 | Child source validation、Context dashboard、ACM-T11/12/14/17 |
+
 ## Locking and decision escalation
 1. Core Owner publishes canonical proposed contract with schema version, precise examples, invariants, migration and negative tests.
 2. Affected Owners review the HEAD and explicitly accept/reject or propose a compatible alternative; don't silently assume agreement.
@@ -58,3 +69,11 @@ Authoritative local: Project Brief, Architecture Rules, SC-01..16, full Round 5 
 A green static Markdown gate or synthetic PostgreSQL test is **not** Owner acceptance. Technical readiness has two independent axes: **(A) contract convergence** (exact type/schema/API equivalence and no same-name divergent enums) and **(B) authority** (explicit responsible Owner review on the current HEAD). A third axis, Runtime Verified, is separate and cannot be inferred from specification work.
 
 The coordinator may prepare a proposed reconciliation table but cannot impersonate 16 Owner signatures. Candidate states: `NEEDS_RECONCILIATION`, `OWNER_REVIEW_REQUIRED`, `SPEC_LOCK_CANDIDATE`, `LOCKED` (all gate approvals recorded), `IMPLEMENTED`, `VERIFIED`. For a Lock, require accepted canonical revision and corresponding dependent PR HEADs, owner approvals, a signed freeze manifest, conflict resolution disposition, and code/test gate boundaries identified. After any HEAD change, reopen affected acceptance. Never auto-merge merely for statuses. Source: [Round 5 integration review](https://github.com/choko510/aiagent-md/blob/audit/round4-runtime-validation/audit/round5/integration-gate-report_2026-10-30.md).
+
+## 2026-11-07 PR #69 P0/P1レビュー反映（採用提案、NOT LOCKED）
+
+ADR-023〜028の実装条件を次のとおり補強する。`P0-1` Source refだけでは意味照合にならず型付きSourceBackedFactと独立SemanticVerificationReceiptを要求。`P0-2` 最終Serialized Provider Requestの一意Token区分で二重計上を防止。`P0-3` ContextManifestとSealed ModelRequestSnapshotは別資産。`P0-4` MemoryWriter DeleteとModel Gateway DispatchAdmissionはscope row lock + epoch CASで線形化、物理送信は厳密に原子的でない。`P0-5` Goalの条件は演算子・値・単位・否定・強弱・未解決を含むtyped snapshot。
+
+P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Current、Capacity-aware marginal utility、Provider別Recipient Consent、ChildResult再検証、Context GC/HEAD参照、失敗Journal、Context差分復旧、Tenant scoped Cache、Evidence Coverage Checkerを採用提案とする。
+
+**新たなOwner review blockers**: CHAT_01/02/06/10のGoal/MemoryAdmission/ContextSnapshot Schema、CHAT_01/09/10/15のOriginal/Projection整合、CHAT_02/03/09のProvider Privacy gateway、CHAT_08/11の送信可能性UI/Fixtureを正式承認するまではLOCKED扱い不可。Test契約はACM-T21〜36（Designed only）。PR #68の隔離/通信境界はこの追加仕様によって緩和されない。
