@@ -235,3 +235,7 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
 
 **CHAT_07 PR #16 harmonization:** Dashboard WatchDetail shows recordVersion (CAS) and definitionRevision (semantically changed definition), nextCheckAt mapped from nextDueUtc, lastCheckedAt for an attempted run, and lastValidObservedAt for a verified observation. Watch terminal control is `retire`; `cancel` belongs to Task only. DASH-T03/T08 now also distinguish failure checking from verified last price, and concurrent definition change from a simple status update.
+
+## 2026-11-07: Secure VM / Execution Dashboard
+
+Task detailにExecution count/current command summary/Cell profile/attestation status、stdout/stderr Artifact refs、generated file list、サブプロセス/CPU/RAM/期限、Sentinel ALLOW/ASK/DENY/Unknown、Budget usageを追加候補として表示。Watch一覧に最後のSandboxExecutionの安全失敗/通信拒否を価格取得失敗や0円と区別して表示。Production KVM/Cell required、Development-onlyの安全レベルを区別。Userが承認した実行でもホストShellは使えない。Execution actionsは従来Task/Run API+Gateway commandを通し、direct process control/host terminal API禁止。SC-17..22。

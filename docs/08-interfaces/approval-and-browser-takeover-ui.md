@@ -271,3 +271,7 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
 
 **CHAT_03 PR #20 approval lease reconciliation:** Approval binding is to immutable intentId, goalRevision, toolRevision, argsHash, target and policy epoch. A Run leaseEpoch increment at a safe reclaim **does not by itself change that approved immutable intent or require a new user approval**. However the old Worker is fenced; the new Worker must re-validate current lease, authorization, goal, budget and side-effect ledger at the actual Tool-dispatch boundary. HITL-T03/T06 separately test valid approved intent across safe Run reclaim versus rejected stale worker/effect. The approval UI does not display leaseEpoch as permission, and the owner determines whether changed intent/policy requires fresh consent.
+
+## 2026-11-07: Sentinel承認とSandbox Execの分離
+
+Sandbox Execのローカル起動、SentinelのネットワークALLOWED/ASK/DENY、外部副作用のHuman Approval、Browser Human Takeoverは別の意味を持つ。ASK画面は実操作(対象/HTTP method/data scope/Account/金額/期限/Action digest)、現在Run/owner/lease/policy versionを表示し、実行/ネットワークGrantをユーザーのチャット一言で無期限化しない。ユーザーのApprovalはTool Gatewayに永続化され、Sentinelが具体的効果を最終認可する。Browser HandoffはBroker-owned Context内に限定し、shellへCookie/CDPを公開しない。Sentinelに要求対象を正確に把握できないHTTPS送信は自動Allowせず、Trusted Connectorへ切替/deny/明示承認待ち。SC-18/19/21/22。

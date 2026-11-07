@@ -294,3 +294,7 @@ Issue報告は本Harnessの再現実績ではなく、設計時のadversarial te
 | TG-011 | TG-T11 | SC-06, SC-07 |
 
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
+
+## 2026-11-07: MessengerからのSandbox Exec依頼は権限制限付き
+
+Telegramの会話からTask/RunやSandbox Execを要求できるとしても、Telegram chatIdはHost shell、VM admin、Vault、CDPの管理者権限ではない。APIが認証済ownerを確認しGateway/Cell Admission/Sentinelが隔離された実行と外部書込みを制御。承認UIで具体的な外部Actionの対象/額/期限/内容を確認し、Chat本文の「許可する」は認可記録の代替にならない。Terminalログは機微情報をredact/サイズ制限、詳細はWebの認証済みViewerから表示。SC-17/19/22。

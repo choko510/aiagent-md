@@ -276,3 +276,7 @@ All MUST REQs map: SSE-001→T01; 002→T02,T08; 003→T03; 004→T04,T09; 005�
 
 ### Round 4 signed SSE cursor / persisted retention floor (2026-10-30 / design)
 SSE replay must consult `agent.event_retention_floors` and actual `domain_events` ordering, not compute retention from owner-filtered visible Events. If `cursor.lastDeliveryOffset < earliest_replayable_offset - 1`, return **410 STREAM_CURSOR_EXPIRED** and force a fresh authorized GET Snapshot; otherwise hidden offsets are legitimate and replay may return zero items without a gap. For an empty tenant, firstOffset=1 is normal. Signed cursors remain bound to viewer/tenant/filter and are checked against fresh auth. GC/outbox integrity is physical CHAT_10 ownership. Tests SSE-R4-T01 owner filter hides some offsets (no false410), T02 expired floor (410), T03 delete+replay/subscribe race (complete or reset). Not executable until server implementation.
+
+## 2026-11-07: Terminal/Process進捗ストリーム
+
+Sandbox Execの起動/終了/中断/ブロック、process resource使用率、stdout/stderrを受入可能なstream eventsとして表示する。ただしログdeltaは**暫定UI**であり、確定情報はServerにcommit済みのbounded/redacted Artifact/Execution projection。Snapshot/SSEの再接続で重複コマンド/外部送信を発生させず、旧Run/leaseのストリームは無視。Sentinel ASK/DENYは理由コード/要求先/承認期限を最小開示し、VM障害やegr fail-closedは隠さない。Raw token/Shell envの露出禁止。SC-17/19/21/22。
