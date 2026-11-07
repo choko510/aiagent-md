@@ -37,3 +37,12 @@ Modelが「成功」と発言しただけで成功にしない。Goalに結び�
 5. Campaign/Feature Factoryを複数有限サイクルで継続、Watch/Monitor/通知と連携。
 
 本章は仕様の原案であり、既存88モジュールの本文がLocked化されたという意味ではない。
+
+## PR #73 P0/P1 audit disposition (2026-11-08, Draft)
+Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resolved as **specification proposals** only; they are NOT production verified. Implementation Owner sign-off remains pending. This chapter's ambiguity resolutions:
+- P0-01: [Preview Capability](build-preview-release.md) binds trusted process, tenant/project/execution/port/origin/browser lease and revokes active sockets.
+- P1-01/02: [Demo mode and approvals](visual-design-and-demo.md) distinguish observe, synthetic interact, human takeover, and explicit/bounded user acceptance.
+- P1-03/04/10: [Feature Factory](feature-factory.md) and [Review Gates](review-and-repair-gates.md) require current integration HEAD and stable logicalWorkItem identity.
+- P1-05: [Campaign](../07-automation/endless-run-campaign.md) specifies Stop/Quota/CAS fences and receipts.
+- P1-06/07/08/09: DB/Auth/Event/QA and separate release gates are extended in their respective owner specifications and CI. The full app requirements are not implied by the initial 88-module static audit.
+- PR #71 and #72 are concurrent independent branches, not merged into this PR. Their impact is tracked at the end of [DEV-10](acceptance-and-rollout.md), and must be reconciled if either becomes main.

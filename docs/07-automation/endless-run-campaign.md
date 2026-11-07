@@ -30,7 +30,7 @@ type CycleReceiptV1 = { campaignId:string; cycleId:string; goalRevision:string;
  resultArtifactRefs:string[]; qualityGateRef:string; countContribution:0|1;
  committedAt:string };
 ```
-このschemaは01/10のowner lock前であり、UUIDv7/Int64DecimalString/recordVersion/tenant関係を新たに正本化しない。CycleReceiptの`countContribution`は実行時検証された成果が1件の場合のみ原子的に付与、distinct key `(campaign,workItemFingerprint,completedCriterionVersion)` とし、重複配信/replay/remote PR重複でカウント増加禁止。Optimizationは同じ小手先のノイズ改善を繰り返さず、安定したベンチと改善効果を根拠として記録。
+このschemaは01/10のowner lock前であり、UUIDv7/Int64DecimalString/recordVersion/tenant関係を新たに正本化しない。CycleReceiptの`countContribution`は実行時検証された成果が1件の場合のみ原子的に付与、legacy distinct key `(campaign,workItemFingerprint,completedCriterionVersion)` (superseded by §2026-11-08) とし、重複配信/replay/remote PR重複でカウント増加禁止。Optimizationは同じ小手先のノイズ改善を繰り返さず、安定したベンチと改善効果を根拠として記録。
 
 ## 3. FSM / scheduling
 `CREATE → ACTIVE → [Cycle claimed] → Cycle verification → (target met ? TARGET_REACHED : enqueue next distinct Cycle) → ACTIVE`。
@@ -53,8 +53,8 @@ Progress: goal、mode、phase、current/target count、queue（running/waiting-d
 ## 7. Acceptance / negative fixtures
 CAM-T01: Cycle #1完了→検証済み次WorkItemを自動dispatch、LLMに空の「続ける？」を呼ばない。
 T02: 途中VM/Worker crash→同一Campaign/cycle復旧、countと予算のリセット/二重起動なし。
-T03: feature 4完了+2 waiting approvals→Count=4、独立Taskは進行。
-T04: 10件目のverified receiptがTARGET_REACHED、重複outboxで11件目起動0。
+T03: feature 4 current-integrated完了+2 waiting approvals→Count=4、独立Taskは進行。
+T04: 10件目のcurrent-integrated receiptがTARGET_REACHED、重複outboxで11件目起動0。
 T05: ユーザーStopとenqueue競合→Stop先行なら新Task0。
 T06: daily quota reset confirmed→QUOTA_WAITから新validation後に再開; hard quota未知→no blind retry。
 T07: cost/step/time ceilingでLIMIT_REACHED、未確定使用量を無料とみなさない。
@@ -62,3 +62,57 @@ T08: Modelの「完了」だけで成果件数増加0。
 T09: 同一最適化が数Cycle連続し改善実測なし→重複候補抑制/他案/park。
 T10: P0/P1存在のFeatureをDONE扱いしない。
 T11: 外部イベント/危険なTool/秘密へ権限拡張0。
+
+## 2026-11-08 P1-04/P1-05 — Canonical Work Identity, Stop Fence, Quota Receipt
+
+The earlier `(campaign,workItemFingerprint,completedCriterionVersion)` key is **superseded**: fingerprint may change when baseline code changes. Server-assigned immutable `logicalWorkItemId` identifies the user-visible outcome independently of commit SHA/cycle. A semantic equivalence group links attempts and new candidates which implement identical behavior. The baseline/result SHA are evidence, not identity. A criterion revision alone cannot recount a previously counted logical feature.
+
+```ts
+type CycleReceiptV2 = {
+  campaignId:string; cycleId:string; logicalWorkItemId:string;
+  workItemFingerprint:string; criterionVersion:string; goalRevision:string;
+  baselineSha:string|null; resultSha:string|null; integrationHeadSha:string|null;
+  completionStage:"VERIFIED"|"INTEGRATED"|"RELEASED";
+  resultState:"VERIFIED"|"PARTIAL"|"FAILED"|"BLOCKED";
+  qualityGateRef:string; integrationReceiptRef?:string;
+  completedByControlVersion:string; counted:boolean; committedAt:string;
+};
+type QuotaWaitReceiptV1 = {
+  campaignId:string; providerId:string; credentialScopeRef:string; modelRouteRef:string;
+  limitKind:"TEMPORARY_RATE"|"DAILY_QUOTA"|"HARD_QUOTA"|"UNKNOWN";
+  providerRequestId?:string; observedAt:string; retryAfterAt?:string;
+  authoritativeResetAt?:string; evidenceRef:string; controlVersion:string;
+  nextResumeGeneration:string; outstandingUsageRef:string; admissionPolicyHash:string;
+};
+type CampaignControlReceiptV1 = {
+  campaignId:string; commandId:string; actorRef:string; command:"STOP"|"PAUSE"|"RESUME"|"STEER";
+  previousControlVersion:string; newControlVersion:string;
+  committedAt:string; inFlightExternalIntentRefs:string[]; stateAfter:string;
+};
+type CampaignChildAdmissionV1 = {
+  campaignId:string; cycleId:string; childTaskId:string;
+  expectedControlVersion:string; expectedGoalRevision:string;
+  expectedRunLeaseEpoch:string; expectedPolicyEpoch:string;
+  dispatchIntentId:string; expiresAt:string;
+};
+```
+IDs, versions and wire values must be reconciled by 01/02/07/10 owners. All counters exposed in UI are **derived from committed and still-eligible receipts**, not an independent unprotected cached integer. Unique DB constraint is `(tenantId,campaignId,logicalWorkItemId)` for a counted receipt per campaign. `criterionVersion` is stored for audit and determines whether a new result qualifies but is **not** a new counting key. For default Feature Factory the result must have an integration receipt for the **current integrated head** (DEV-08). If another feature changes that head, reevaluate eligibility; never count an old branch SHA as integrated.
+
+### Stop linearization and in-flight work
+- Every worker admission for a new child task, model call, Browser action, package request, or tool/external write **must** compare `expectedControlVersion`, Task/Run lease and policy epoch under a trusted admission gate. These tokens must be minted by Trusted Control, short-lived and revocable; the model cannot update them.
+- STOP commits `STOP_REQUESTED` and increments controlVersion in the same transaction as stop receipt+outbox; new Cycle enqueue and child admission use the **same campaign row lock / equivalent serializable CAS**. Whichever commits first defines ordering. After STOP is committed no new admissions; already-dispatched jobs cannot use their old controlVersion.
+- **Physical effect caveat:** an external request admitted and sent before STOP commit cannot always be rolled back. The stop handler revokes preview/broker grants, terminates child processes and attempts transport cancellation; already-sent/ack-lost effects are `UNKNOWN` until reconciled. UI distinguishes STOP_REQUESTED from STOPPED, records in-flight intents, and never promises zero post-stop bytes already sent before linearization.
+- RESUME requires authenticated command + fresh identity/policy/goal/budget/quota checks, new generation and controlVersion. A stale queue delivery, timed wake, old advisor/Browser tool or old lease cannot restart a stopped campaign. Idempotent duplicate Stop returns existing receipt, not a new generation.
+- When all eligible work is awaiting human decision, the Campaign remains parked; it **does not** generate meaningless model calls to satisfy “endless”.
+
+### Quota recovery
+On 429/quota result, record `QuotaWaitReceiptV1` with provider, category, observed response/request correlation, retry-after (if available), confidence source, remaining uncertain usage reservation, and monotonic resume generation. The provider may supply a hint but not a guaranteed reset. Exact reset validation is required before a timed wake; unknown or hard quota must pause for human/configured review. A single persisted wake key `(campaignId,providerId,resumeGeneration)` prevents concurrent reactivation. On wake, recheck authenticated owner grant, current Campaign controlVersion, operator budget, provider route availability, quota estimate, and any external intent uncertainty, then attempt one bounded admission. 429 recurrence reschedules with exponential/capped backoff and no spin/alternate-key bypass.
+
+### Fault matrix
+**CAM-T12** STOP commit wins race against a claimed old queue job → old child/tool/model admissions zero.
+**CAM-T13** child was admitted and external request already sent just before STOP → cancel attempt, ledger UNKNOWN, no blind retry.
+**CAM-T14** duplicate Stop/Resume from two UIs and stale ControlVersion → one authoritative transition and no resurrection.
+**CAM-T15** 429 with Retry-After vs uncertain hard quota vs multiple providers → one evidence-bound wait/resume; no premature retry.
+**CAM-T16** stale wake on old resumeGeneration after owner revoke → no new cycle.
+**CAM-T17** same logical work item in 3 distinct SHAs / criterion revisions → one eligible count.
+**CAM-T18** integrated HEAD changed after count → current count recalculated from integration receipts, no stale TARGET_REACHED.

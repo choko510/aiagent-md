@@ -32,7 +32,8 @@ Write endpointsには `Idempotency-Key`、`If-Match`/expected version、CSRF/Ori
 ```ts
 type DevelopmentPreferencesProposal = {
  designChoice:"AUTO"|"USER_CHOICE";
- demoChoice:"AUTO"|"REQUIRE_APPROVAL";
+ designPolicy?:"AUTO_RECOMMEND"|"REQUIRE_USER_SELECTION";
+ demoAcceptancePolicy?:"REQUIRE_USER_APPROVAL"|"PREAUTHORIZED_BOUNDED_AUTO";
  styleCandidates:number; // bounded; same content / fixtures for all
  expertAdvisorEnabled:boolean; expertProfileRef?:string;
  reviewRoles:["functional","security","ui_e2e"];
@@ -54,3 +55,31 @@ T03: Demo承認が購入/デプロイ承認にならない。
 T04: Viewerとdebug操作者の権限分離、CDP URL配布0。
 T05: browser/terminal raw sensitive contentがWeb client/Traceへ漏洩0。
 T06: Stop UI受付と実停止完了を区別、SSE断線復元で重複count0。
+
+## 2026-11-08 P1-01/P1-02/P1-07 — Action-specific permissions and API preference compatibility
+
+The former `demoChoice:"AUTO"` is **deprecated as ambiguous**. New clients send `designPolicy:"AUTO_RECOMMEND"|"REQUIRE_USER_SELECTION"` separately from `demoAcceptancePolicy:"REQUIRE_USER_APPROVAL"|"PREAUTHORIZED_BOUNDED_AUTO"`. Feature Factory defaults to REQUIRE_USER_APPROVAL. Old requests with `demoChoice=AUTO` **must not** silently accept a Demo: reject with an actionable migration error or conservatively map only to automatic recommendation while preserving human approval; never auto-implement.
+
+A usable Demo uses `demo:interact` only in a synthetic/mock BrowserContext and short-lived exclusive input lease; `preview:observe` remains read-only; `browser:handoff` is a separate sensitive takeover. Token/sensitive credential never reaches front-end. Route handlers look up server principal and Project/Cycle/Preview binding again on every command. Any stale manifest, controlVersion, identityVersion, policyEpoch, project ownership or browser generation => 409/412 (or authorization 403/404). UI must show which permission is being requested and clearly mark mock actions.
+
+| Resource | Action | Authorized actor | Scope |
+|---|---|---|---|
+| project | `project:create/read/edit` | authenticated owner or explicit project-scoped ACL | tenant + owner + project |
+| dev cycle | `dev:run/read/decide` | project owner, separately scoped delegate on read-only operations | project + cycle + goal revision |
+| preview | `preview:observe` | authorized viewer | project + preview + TTL; no input |
+| demo | `demo:interact` | authenticated authorized demo viewer | synthetic fixture only + exclusive lease |
+| browser | `browser:handoff` | separate sensitive approval subject | existing Browser Worker handoff rules |
+| debug | `debug:read` | project owner or narrow debug-reader ACL | redacted artifacts only |
+| campaign | `campaign:create/read/control` | owner for start/stop/steer, scoped view for sharing | campaign + controlVersion + budget |
+| integration | `dev:integrate` | project owner, branch policy plus Integration Gate | expected HEAD + receipt |
+| release | `dev:release` | owner + separate Gateway deployment approval | release target, digest, approved limits |
+
+Additional proposed routes: `POST /api/v1/development/previews/{id}/commands` accepts only enumerated synthetic action kinds and a scoped exclusive lease; `POST /api/v1/development/projects/{id}/integrations` is expectedHeadSha-bound; `GET /api/v1/development/projects/{id}/integration-receipts` exposes current HEAD quality state; `GET /api/v1/campaigns/{id}/quota-wait` exposes redacted receipts and confirmed vs estimated reset. The generic REST framework's Idempotency-Key/If-Match/CSRF/fresh authorization apply to all mutations. No `GET` has side effects, and an ACK is not a completed operation.
+
+### Compatibility / Event proposals
+Map the new actions in [Auth owner](../09-security/authentication-and-user-isolation.md), domain events in [Event envelope](../01-contracts/event-envelope-and-stream.md) and SQL in [DB owner](../10-infrastructure/database-schema-and-migrations.md); they are not automatically locked by this draft. Event additions: `preview.session.revoked`, `demo.interaction.admitted`, `feature.integration.verified`, `campaign.control.changed`, `campaign.quota_wait.recorded`, `campaign.count.reconciled`. Event payload must contain safe ID/receipt references, no raw preview capability token, no raw HTML/JS, no secret.
+
+**DEV-UI-T07** Old `demoChoice=AUTO` cannot cause unapproved implementation.
+**DEV-UI-T08** Same-tenant different-user caller with project-only read role cannot decide demo/stop campaign.
+**DEV-UI-T09** Preview observe allows viewing but not typing; `demo:interact` synthetic action works without sensitive browser takeover.
+**DEV-UI-T10** stale actor/preview/session/control lease or unauthorized shared-repo owner → deny, no effect/event.
