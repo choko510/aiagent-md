@@ -40,8 +40,8 @@ Worker死、Tool timeout、429、誤認可、Design選択待ち、Git push UNKNO
 
 ## 5. Tests
 DEV-TEAM-T01: 3A並行→A4は3異なるproposal artifactを照合し設計。
-T02: 相互に独立したReviewerの結果3件同一SHAでjoin。
-T03: 子Task失敗/429/再起動/重複queueで提案二重計上0。
-T04: design変更で旧demo/commit/review acceptanceを無効化。
-T05: Owner revoke/cancel時に未実行子Tool0、費用予約を会計精算。
-T06: 未提出案を存在したと虚偽表示せずPartial。
+DEV-TEAM-T02: 相互に独立したReviewerの結果3件同一SHAでjoin。
+DEV-TEAM-T03: 子Task失敗/429/再起動/重複queueで提案二重計上0。
+DEV-TEAM-T04: design変更で旧demo/commit/review acceptanceを無効化。
+DEV-TEAM-T05: Owner revoke/cancel時に未実行子Tool0、費用予約を会計精算。
+DEV-TEAM-T06: 未提出案を存在したと虚偽表示せずPartial。

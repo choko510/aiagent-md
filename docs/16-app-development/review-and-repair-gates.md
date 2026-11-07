@@ -34,11 +34,11 @@ shared IDs/events/stateはCHAT_01のcanonical契約レビューを要する。
 
 ## Tests
 DEV-REV-T01: independent3件同SHAでPASS、2件なら拒否。
-T02: P0を修正してP1新規→再Round必須。
-T03: oldSHAレビュー、missing E2E、partialログ、未検証dismissでPASS不可。
-T04: reviewer間矛盾→追加証拠/Expert、自己評価で決めない。
-T05: 反復失敗→bounded Escalation、無制限ループなし。
-T06: cancel/revoke後に新PR・external tool起動0。
+DEV-REV-T02: P0を修正してP1新規→再Round必須。
+DEV-REV-T03: oldSHAレビュー、missing E2E、partialログ、未検証dismissでPASS不可。
+DEV-REV-T04: reviewer間矛盾→追加証拠/Expert、自己評価で決めない。
+DEV-REV-T05: 反復失敗→bounded Escalation、無制限ループなし。
+DEV-REV-T06: cancel/revoke後に新PR・external tool起動0。
 
 ## 2026-11-08 P1-10 — Feature Review is not Integration Review
 

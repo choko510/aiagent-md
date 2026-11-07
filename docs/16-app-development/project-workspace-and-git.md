@@ -36,9 +36,9 @@ type GitWriteIntent = { projectId:string; branchRef:string; expectedHeadSha:stri
 
 ## 6. 必須受入
 DEV-WS-T01: Task完了・Worker/VM再起動後も認可済みスナップショットから同じtree hashを復元。
-T02: 2AI同じbaseに変更→CAS衝突、静かな上書きゼロ。
-T03: symlink/traversal、別tenant path、.git object攻撃、悪性install script→host/secret到達ゼロ。
-T04: old Run/cancel後patch commit→拒否。
-T05: push ACK欠落→remote照会・UNKNOWN分類、重複release/force pushゼロ。
-T06: code commitにはtest manifest/imageDigest/approval revisionとparent SHAが結び付く。
-T07: 既存repo importと空repo作成をfixtureで再現; pushはmock providerで検査。
+DEV-WS-T02: 2AI同じbaseに変更→CAS衝突、静かな上書きゼロ。
+DEV-WS-T03: symlink/traversal、別tenant path、.git object攻撃、悪性install script→host/secret到達ゼロ。
+DEV-WS-T04: old Run/cancel後patch commit→拒否。
+DEV-WS-T05: push ACK欠落→remote照会・UNKNOWN分類、重複release/force pushゼロ。
+DEV-WS-T06: code commitにはtest manifest/imageDigest/approval revisionとparent SHAが結び付く。
+DEV-WS-T07: 既存repo importと空repo作成をfixtureで再現; pushはmock providerで検査。

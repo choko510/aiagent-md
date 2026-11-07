@@ -50,11 +50,11 @@ type DevelopmentPreferencesProposal = {
 
 ## 5. Tests
 DEV-UI-T01: 3 candidate thumbnail同一fixtureで選択、キーボード/モバイル対応。
-T02: 旧Design/Demo版をApproveすると409/412で拒否。
-T03: Demo承認が購入/デプロイ承認にならない。
-T04: Viewerとdebug操作者の権限分離、CDP URL配布0。
-T05: browser/terminal raw sensitive contentがWeb client/Traceへ漏洩0。
-T06: Stop UI受付と実停止完了を区別、SSE断線復元で重複count0。
+DEV-UI-T02: 旧Design/Demo版をApproveすると409/412で拒否。
+DEV-UI-T03: Demo承認が購入/デプロイ承認にならない。
+DEV-UI-T04: Viewerとdebug操作者の権限分離、CDP URL配布0。
+DEV-UI-T05: browser/terminal raw sensitive contentがWeb client/Traceへ漏洩0。
+DEV-UI-T06: Stop UI受付と実停止完了を区別、SSE断線復元で重複count0。
 
 ## 2026-11-08 P1-01/P1-02/P1-07 — Action-specific permissions and API preference compatibility
 

@@ -27,7 +27,7 @@ Advisorが解決できなくても「解決済み」と判定しない。Advice�
 
 ## 6. Tests
 DEV-EXP-T01: 同一failure連続で一度だけ相談、修正結果の検証はBuilder/QA。
-T02: advisorはrepo書込/外部送信/Policy変更できない。
-T03: 429/timeout/cost ceilingでbounded fallback・quota待機を実行。
-T04: secretを含むlog/raw codeからredaction、他tenantへの流出0。
-T05: 証拠変化なしの再帰相談が回数上限で打ち切られる。
+DEV-EXP-T02: advisorはrepo書込/外部送信/Policy変更できない。
+DEV-EXP-T03: 429/timeout/cost ceilingでbounded fallback・quota待機を実行。
+DEV-EXP-T04: secretを含むlog/raw codeからredaction、他tenantへの流出0。
+DEV-EXP-T05: 証拠変化なしの再帰相談が回数上限で打ち切られる。

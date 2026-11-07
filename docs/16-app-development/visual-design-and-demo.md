@@ -31,11 +31,11 @@ Demoは本実装に近いコンポーネント構成、ルート・操作・主�
 
 ## 6. Tests
 DEV-DES-T01: 3案が同一fixture/content/viewport、画像クリックで正しい候補を選択。
-T02: mobile/light/darkとkeyboard選択・読み上げラベルを検証。
-T03: stale manifest/old Goal/別tenant/二重承認/同時選択を拒否。
-T04: mock API動作をproduction接続と虚偽表示せず実側効果ゼロ。
-T05: user修正→新Demo生成→旧承認で本実装再開不可。
-T06: 本実装との差分とfunctional regressionをBrowser検査で判定。
+DEV-DES-T02: mobile/light/darkとkeyboard選択・読み上げラベルを検証。
+DEV-DES-T03: stale manifest/old Goal/別tenant/二重承認/同時選択を拒否。
+DEV-DES-T04: mock API動作をproduction接続と虚偽表示せず実側効果ゼロ。
+DEV-DES-T05: user修正→新Demo生成→旧承認で本実装再開不可。
+DEV-DES-T06: 本実装との差分とfunctional regressionをBrowser検査で判定。
 
 ## 2026-11-08 P1-01/P1-02 — Interactive Demo versus Human Takeover
 

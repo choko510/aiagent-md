@@ -26,11 +26,11 @@ type FeatureCandidateV1 = { featureId:string; projectId:string; campaignId?:stri
 
 ## Tests
 DEV-FF-T01: DONE4件+pending2+implementing2→progress=4。
-T02: denied/only demo/duplicated/oldSHA/missing reviewで件数増分0。
-T03: pending featureが他独立Featureの実装を妨害しない。
-T04: 共同schema更新はCAS競合時にfail/serial。
-T05: 最終10件目は原子countで一度だけ達成。
-T06: Demo revision変更は旧承認無効、実装開始0。
+DEV-FF-T02: denied/only demo/duplicated/oldSHA/missing reviewで件数増分0。
+DEV-FF-T03: pending featureが他独立Featureの実装を妨害しない。
+DEV-FF-T04: 共同schema更新はCAS競合時にfail/serial。
+DEV-FF-T05: 最終10件目は原子countで一度だけ達成。
+DEV-FF-T06: Demo revision変更は旧承認無効、実装開始0。
 
 ## 2026-11-08 P1-02/P1-03/P1-04/P1-10 — Integration-based completion
 

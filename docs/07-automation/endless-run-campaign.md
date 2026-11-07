@@ -52,16 +52,16 @@ Progress: goal、mode、phase、current/target count、queue（running/waiting-d
 
 ## 7. Acceptance / negative fixtures
 CAM-T01: Cycle #1完了→検証済み次WorkItemを自動dispatch、LLMに空の「続ける？」を呼ばない。
-T02: 途中VM/Worker crash→同一Campaign/cycle復旧、countと予算のリセット/二重起動なし。
-T03: feature 4 current-integrated完了+2 waiting approvals→Count=4、独立Taskは進行。
-T04: 10件目のcurrent-integrated receiptがTARGET_REACHED、重複outboxで11件目起動0。
-T05: ユーザーStopとenqueue競合→Stop先行なら新Task0。
-T06: daily quota reset confirmed→QUOTA_WAITから新validation後に再開; hard quota未知→no blind retry。
-T07: cost/step/time ceilingでLIMIT_REACHED、未確定使用量を無料とみなさない。
-T08: Modelの「完了」だけで成果件数増加0。
-T09: 同一最適化が数Cycle連続し改善実測なし→重複候補抑制/他案/park。
-T10: P0/P1存在のFeatureをDONE扱いしない。
-T11: 外部イベント/危険なTool/秘密へ権限拡張0。
+CAM-T02: 途中VM/Worker crash→同一Campaign/cycle復旧、countと予算のリセット/二重起動なし。
+CAM-T03: feature 4 current-integrated完了+2 waiting approvals→Count=4、独立Taskは進行。
+CAM-T04: 10件目のcurrent-integrated receiptがTARGET_REACHED、重複outboxで11件目起動0。
+CAM-T05: ユーザーStopとenqueue競合→Stop先行なら新Task0。
+CAM-T06: daily quota reset confirmed→QUOTA_WAITから新validation後に再開; hard quota未知→no blind retry。
+CAM-T07: cost/step/time ceilingでLIMIT_REACHED、未確定使用量を無料とみなさない。
+CAM-T08: Modelの「完了」だけで成果件数増加0。
+CAM-T09: 同一最適化が数Cycle連続し改善実測なし→重複候補抑制/他案/park。
+CAM-T10: P0/P1存在のFeatureをDONE扱いしない。
+CAM-T11: 外部イベント/危険なTool/秘密へ権限拡張0。
 
 ## 2026-11-08 P1-04/P1-05 — Canonical Work Identity, Stop Fence, Quota Receipt
 
