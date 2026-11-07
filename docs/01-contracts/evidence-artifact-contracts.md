@@ -282,3 +282,14 @@ Tests EVD-R4-T01 OCR rotated table maps to original page bbox; T02 XLSX sheet/ce
 ## 2026-11-07: Generated Code / Console / Workspace Provenance
 
 EvidenceはTask Goalの検証可能な事実。Execution stdout/stderr、生成コード、インストールしたpackage、Workspace snapshot、compiled outputは**raw or derived Artifact**であり、既にVerified Evidenceではない。Artifact refsにはhash、出所、source line/offset、owner/tenant/task/run/execution、image digest、workspace revision、capture time、trust class、redaction/retention metadataを保持。Host pathやcredential/surrogateは記録しない。Console logsはfinite byte limits and redaction required; Generated SkillsはcandidateでありSkill publish承認の代替にならない。SC-17/20/21/22。
+
+## 2026-11-07 Context Provenance連携提案（未Locked）
+
+参照: [Adaptive Context 18.3/18.6/18.14](../02-runtime/context-manager-and-compaction.md)。原本のEvidence/Artifact契約を変更せず、ContextManager側に必要なSource Locator viewをCHAT_01へ依頼する。
+
+**MUST proposal**: ArtifactRefとContent digest/hash algorithm version、chunk/page/table-row/byte-offset等の型付きlocator、capturedAt/observedAt/source validity、tenant/owner/task/goal scope、redaction classification、source version、immutable HEAD/checkpoint lookupを整合。ContextManifestは選択されたEvidenceRefと省略理由のみを保持し、Evidenceの新しい正本にはしない。Source/Artifactが存在しない、revoked、digest mismatch、ACL不一致の場合はread-by-locatorを失敗させ、Summary内の引用をverified Evidenceとして採用しない。
+
+**Raw→Derived**: Browser fetch、HTML/PDF parser、Sandbox Execのstdoutはraw/source provenance付きData。要約したDerivedClaimは必ずinputSourceRefs/locators/claimState/timeを持ち、原本の権限・鮮度・真偽を引き継がない。Secret/PII/Credentialはredaction before persistence、Host path/Cell Socketへの直接参照を禁止。被引用SourceがrevokeされたらContextから次dispatch時に除外するが、Retention/Backup削除はCHAT_09/10の別手順。
+
+**Tests**: ACM-T03/T04/T05/T15/T17/T18。重要なPrice/date/approval/successをEvidenceなしに生成0、Corrupt locatorが有効として表示される件数0。Shared schema と migrationはCHAT_01/10のcross-owner reviewまでPROVISIONAL。
+
