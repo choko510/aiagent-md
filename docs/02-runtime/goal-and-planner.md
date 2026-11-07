@@ -160,3 +160,7 @@ All unresolved cross-owner fields are [PROVISIONAL]; do not mark Locked before a
 - [S4] https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/deepagents/middleware/subagents.py ; https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/tests/unit_tests/test_todo_middleware.py
 - [S5] https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/_output.py
 Code verified = actual source inspected; test definition verified = test file read but not run. MIT for PydanticAI/OpenAI Agents Python/LangGraph/Deep Agents as recorded in inspected project metadata; Mastra @mastra/core declares Apache-2.0. No implementation/tests executed in this spec repository.
+
+## 2026-11-07: PlannerのSandbox Exec選択
+
+Plannerは従来のAPI/HTTP/Browser/固定DAGに加えSandbox Execを使ったスクリプト生成・処理・依存導入・コンパイル/テストを手段として選択できる。簡単な集計は低コストで決定的な関数を優先し、Shellが必要ならWorkspace/Input Artifacts、再現性、ネットワーク目的、費用上限と承認が必要な外部効果を明示する。Web/メール/Skillからの指示は常に非信頼で、計画に書いてあっても外部通信や保護サービスアクセスのGrantにはならない。SC-17/19/22。

@@ -212,3 +212,7 @@ CHAT_01 Step/Checkpoint envelope & appliedGoalRevision, CHAT_03 Tool Ledger clas
 - [S4] Code/test inspected https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/durable_exec/_operation.py ; https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/tests/test_run_cancellation.py
 - [S5] Issue report https://github.com/langchain-ai/langgraph/issues/9240 ; https://github.com/langchain-ai/langgraph/issues/8464
 Code verified=ソース関数確認、Test definition verified=テスト本文確認、Issue report=未再現の報告。OSSライセンス: LangGraph/PydanticAIはMIT、@mastra/coreはpackage metadataでApache-2.0。独立実装で丸写ししない。
+
+## 2026-11-07: SandboxExecutionのcheckpoint/recovery
+
+ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/process group identity/stdout/stderr Artifact refsをCheckpointで参照するが、PID単独を恒久識別子としない。Crash後はWorker lease/Execution process/Workspaceの現況と外部効果台帳を照会し、未開始・継続中・終了/結果不明を分離。永続Workspaceは明示commitされたスコープ付きArtifactだけを復元し、旧プロセス/秘密/Grant/失効したネットワーク許可を復活させない。外部効果不明ならUNCERTAINとして再実行停止。SC-21。

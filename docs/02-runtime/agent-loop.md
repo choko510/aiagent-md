@@ -4,7 +4,7 @@
 
 ## 0. 結論と採用案
 
-**採用: DB-firstの決定的なStep Orchestrator + 交換可能なLLM Adapter + Tool Gatewayでの唯一の外部実行。** LLMは「次の行動を提案するだけ」。Agent Loopはステップ・制約・予算・承認状態を追跡し、外部効果を発生させるかはCHAT_03のGateway/Policy/Side-effect Ledgerが決める。非同期Workerの寿命とTask/Runの寿命は一致しない。Stepは必ず再構築可能な永続境界で停止し、UIのストリーミングは永続的な事実の表示を先取りしない。
+**採用: DB-firstの決定的なStep Orchestrator + 交換可能なLLM Adapter + Tool Gatewayでの唯一の永続実行意図とSentinelの外部通信最終許可。** LLMは次の行動を提案し、Sandbox Execを通して隔離Runtime Cell内で生成したコードも実行できる。Agent Loopはステップ・制約・予算・承認状態を追跡し、外部効果を発生させるかはCHAT_03のGateway/Policy/Side-effect Ledgerが決める。非同期Workerの寿命とTask/Runの寿命は一致しない。Stepは必ず再構築可能な永続境界で停止し、UIのストリーミングは永続的な事実の表示を先取りしない。
 
 **重要な非保証:** DB checkpoint、LLM outputの保存、idempotency keyだけでは、外部APIが受け付けた直後にWorkerが死ぬケースの「厳密なexactly-once外部操作」を保証できない。結果照会できない副作用は `UNCERTAIN_EFFECT` の暫定扱いで停止し、同じ操作の自動再発行は禁止する。これは公式OSSの一般的能力に対する追加安全要求である。根拠は[S1][S3][S5][S7][S10]。
 
@@ -571,3 +571,7 @@ The earlier AgentLoop pseudocode is a *domain-level port contract*: `commitModel
 - **Tests designed, NOT executed**: `LOOP-R3-T01` model committed→crash→same reply ref reused; `LOOP-R3-T02` five checkpoints at one step + recovery no duplicate effects; `LOOP-R3-T03` old worker lease settles late→0 writes; `LOOP-R3-T04` two simultaneous Retry controls terminal vs nonterminal→correct Task/Run immutable mapping; `LOOP-R3-T05` interleaved Watch+Run events→SSE no lost Task events.
 
 Cross-team source of truth: #23 Event, #27 Checkpoint, #10 DDL, #21 Task/Run, #8 REST. These remain Draft pending actual implementation and fault tests.
+
+## 2026-11-07 Muse移行: 隔離コードを選べるAgent Loop
+
+従来のModel→Tool Gateway→Approved Executorは維持し、Registered Tool sandbox.execの利用を許可する。LLMはShell/CLI/Python/Nodeのコマンドや生成コードを提案できるが、その提案は実行権限ではない。Gatewayがargv/cwd/workspaceRevision/imageDigest/GoalRevision/LeaseEpoch/予算をfreezeしIntent永続化→Runtime Cell入場のVM/namespace/seccomp/cgroup attestation→Supervisorが子プロセスを実行する。**ローカルコード実行と外部APIへの許可は別**であり、Sentinelが全socketとConnectorの最終認可。Host・Protected ServicesへのShellは禁止。Shell exit 0はTask成功を意味せず、VerifierはEvidenceと外部効果を確認。Crash/Cancel/Steerに伴う子processと旧grantを失効し、外部UNKNOWNは盲目的再試行禁止。LOOP-021..023 MUST。SC-17/18/19/21/22。正本[Sandbox Exec](sandbox-execution.md)、[Cell](../09-security/runtime-cell-isolation.md)、[Sentinel](../09-security/sentinel-authority.md)。
