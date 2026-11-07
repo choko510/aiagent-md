@@ -293,3 +293,19 @@ EvidenceはTask Goalの検証可能な事実。Execution stdout/stderr、生成�
 
 **Tests**: ACM-T03/T04/T05/T15/T17/T18。重要なPrice/date/approval/successをEvidenceなしに生成0、Corrupt locatorが有効として表示される件数0。Shared schema と migrationはCHAT_01/10のcross-owner reviewまでPROVISIONAL。
 
+## 2026-11-07 P0/P1: Sealed Original・Redacted Projection・Evidence entailment
+
+### Source semantics and TypedFact
+
+ArtifactRef/Digest/Locatorの検証は**その範囲が実在する**ことの証明であり、Claimが根拠と一致する保証ではない。`Context Manager 18.18`にある`SourceBackedFact` /`SemanticVerificationReceipt`をEvidenceV1/ObservationV1の派生読取モデルとして提案する。`supports` relationや`verification=verified`を、単なる出典存在で自動設定してはいけない。
+
+- 原文Locator Spanを読み直し、versioned parserで数値・金額・税/手数料・日時・人数・数量・否定・条件を型付き抽出。ClaimFactを比較して`SUPPORTED_BY_SPAN`、決定的計算の`DERIVED_BY_RULE`、`REFUTED_BY_SPAN`、`UNDETERMINED`、`SOURCE_MISSING`のReceiptを保存。出典が価格48,000円+駐車別2,000円なのに「駐車込み48,000円」はREFUTED。ReceiptなしのSummaryはUNVERIFIED。
+- Currency ISO 4217、decimal string、単位、IANA TZ、Fee include/exclude、Operator、modalityを保持。支持が不明な文章は「出典による裏付け未検証」と明示し、Result SUCCESS/予約判断の根拠から除外。外部Source内容の真実性・鮮度は別評価。
+
+### Two-layer storage
+
+1. `SealedOriginalArtifact`: 合法かつ必要性があるSource original bytesを、独立暗号鍵/owner+tenant ACL/retention/classificationで保存。元bytesのdigest、ページ位置・byte offsetを不変に維持。Malware/Secrets/privileged filesは検疫・保存禁止を優先。
+2. `RedactedProjectionArtifact`: モデル/検索用に必要な部分だけderivationする別Artifact。独立digestと`originalRef, originalLocator, derivedLocator, redactionVersion, irreversibleMaskMap`を記録する。Secret/PIIがUI/LLM/Sandboxへ流れないようにする。
+3. 原本消去後に派生Projectionを元原本として扱わない。原文照合が不可能になったClaimは`SOURCE_MISSING/UNDETERMINED`とし、保持期間/法的消去/GCを上書きしない。Sourceが歴史的に古くても、許可済み履歴回答では観測日時付きで使用可能だが現在値にはしない。
+
+**Cross-owner acceptance**: 01/09/10/15（Artifact retention/locator/parser）、02（Context Verifier）、11（ACM-T21/27/28/32）。データ分類ごとに保存可能性を決めるので、全てのCredentialを暗号化して残すという設計ではない。

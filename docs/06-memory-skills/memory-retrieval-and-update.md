@@ -286,3 +286,22 @@ Agentは過去WorkspaceやMemoryのコード/コマンドを参照して新し�
 **Failure gates**: semantic unavailable→keyword-onlyとdegraded、DB unavailable→Memoryなしで限定回答または停止、Memory delete race→次dispatchに旧投影0、budget exhausted→Memory省略と可視化、conflicting memory→Current Goal優先、stale source→historical/uncertainの明示。
 
 **QA**: ACM-T02/T09/T10/T17に加え、Source Epochが同じでもrecordRevisionが変わる場合、Auto candidateがapproveされていない場合、同じTaskを2 Workerが同時に再投影する場合、UserがUndo中のRunをCancelする場合を境界テスト。MemoryからTool approval/authorityへの昇格0件をRelease gateにする。
+
+## 2026-11-07 P0: Retrieval projectionのDispatch Admission連携
+
+旧節7の「モデル呼出直前のepoch再照合」を**十分条件として扱わない**。`Context 18.20`とMemory Writer単一正本を参照。ModelRequestSnapshotのMemoryProjectionには`memoryId, recordRevision, sourceEpoch, scope, sourceRefs, applicableRecipientPolicyRef`を紐付け、送り出す前にProtected Model Gatewayでscope epoch row lockと認可/Consentの最終チェックを行い`dispatch_admission`をcommitする。
+
+~~~text
+Memory lookup/Model context assembled (no network send)
+ -> save sealed ModelRequestSnapshot
+ -> short atomic admission with Memory scope epoch + Task Goal + Policy + Provider
+ -> if stale -> discard snapshot/rebuild, no provider send
+ -> if admitted -> protected sender checks invalidation and begins send
+ -> on delete after admission -> cancel if feasible; MAY_HAVE_SENT if uncertain
+~~~
+
+- stale sourceEpoch/recordRevision/DELETE/Undoを検出したら新しいModel Attemptは0。Vector/keyword cacheの古い結果はDBの現在Statusを越えない。
+- Crash/lost ACK時のAdmitted/MayHaveSent/ConfirmedSentはModel attempt ledgerの状態。再生成の新Requestは異なるAttemptであり、既送信済みReply/費用の二重計上を避ける。
+- Recipient Policy/個人情報のModel Provider転送同意は対象Providerごとに評価。過去の他Provider承認を流用しない。
+
+QA: ACM-T24/25/29/30。これらのDB sender integrationは未実装・未試験。

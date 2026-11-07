@@ -575,3 +575,14 @@ SandboxExecutionのScript、stdout、temporary package、Workspace snapshotを�
 - AuditはsourceEpoch/recordRevision、operation id、scope、decision codeだけを記録し、本文・Secret・PIIをメトリクスラベルへ流さない。
 
 **Cross-owner acceptance**: CHAT_02はモデル呼出前のMemory epoch recheckを実装、CHAT_10はcommit+projection invalidation/Restore tombstoneの一貫性、CHAT_09は認可と消去政策、CHAT_11はACM-T02/T09/T10/T14を検証。正式Schema/DDLは未Locked。
+
+## 2026-11-07 P0: Memory WriterとModel Gatewayの送信境界
+
+既存の`sourceEpoch`再確認は必要だが**それだけでDELETEとの競合を排除できない**。`Context 18.20`に従い、MemoryWriterの`tombstone/epoch CAS`とProtected Model Gatewayの`dispatch_admission`を同一scopeのDB row lockで直列化する。Memoryの所有者/ScopeをMemory record本文・LLM生成値から取得しない。
+
+- DELETE/CORRECT/UNDOはactive record失効+epoch増分+outboxを短いTXでcommit。先にcommitされたDeleteより古いMemory参照を含む後続のModel Admissionは0。Index delete完了を待たなくてもRead barrierで拒否。
+- Admissionが先にcommitしたAttemptは送信済みの可能性がある。Writerは未送信Ticketを取消し、in-flight Gatewayへcancelを要求。既送信/不明は`MAY_HAVE_SENT`として監査し、ユーザーに外部Providerからの撤回不能性を説明。
+- Memory delete後に動作中TaskのSnapshot/Cache/Child projectionが旧EpochならRebuild。Cross-tenant Cache reuse禁止。Provider別のデータ送信ConsentとRecordのMemory登録Consentは**別判定**。
+- すでにProviderへ送信したデータは消去を約束できない。ユーザーの削除操作自体は引き続き即時のread/dispatch exclusionと後続purgeを約束し、外部到達に関する不確実性を隠さない。
+
+**Tests**: ACM-T24/25/30、古いin-flight sourceEpoch、Deleteと二つのGatewayが同時Admission、cancel/ACK lost、backup後tombstone回復。**ランタイム未実装**。
