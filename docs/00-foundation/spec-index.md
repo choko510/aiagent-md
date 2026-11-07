@@ -131,7 +131,7 @@
 
 ## 2026-11-07 Browser Live Observation companion design
 
-[Browser Live Observation](../08-interfaces/browser-live-observation.md) は04-03 BrowserSessionと08-05 Browser Takeoverの**共同補足仕様**。サーバー側Browserのライブ閲覧を`browser:observe`で追加し、見るだけではAgentを停止せず、操作は別のHuman Takeoverに限定する。BLO-001〜12 → BLO-T01〜12 → SC-23。既存88件の正本モジュール数は維持し、ADR-029と関連文書を横断更新する（Draft / 実装無し）。
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) は04-03 BrowserSessionと08-05 Browser Takeoverの**共同補足仕様**。サーバー側Browserのライブ閲覧を`browser:observe`で追加し、見るだけではAgentを停止せず、操作は別のHuman Takeoverに限定する。BLO-001〜17 → BLO-T01〜16 / BLO-OFF-T01〜03 → SC-23。既存88件の正本モジュール数は維持し、ADR-029と関連文書を横断更新する（Draft / 実装無し）。
 
 ### Audited companion specifications (outside 88 canonical module count)
 
@@ -139,4 +139,4 @@
 |---|---|---|---|
 | COMP-01 | `docs/08-interfaces/browser-live-observation.md` | CHAT_04/08/09/10/11 | Draft / PROVISIONAL |
 
-`COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。
+`COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。PR #71/#72統合時のManifest再生成は `python3 audit/muse/refresh_spec_provenance.py` を実行し、続けて `python3 audit/muse/validate_spec_migration.py` を実行する。
