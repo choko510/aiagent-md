@@ -290,3 +290,36 @@ Task詳細には親子TaskのGoal、状態（Queued/Running/Waiting/Partial/Unce
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: サブエージェントへのCell権限の縮小委任
+
+子Taskは独立ExecutionId/WorkspaceGeneration/Process groupを持つRuntime Cellまたは同等の厳格namespace内で稼働する。親と同じSecure VMでもBrowser Context/秘密/Mutable Workspace/Grantを自動共有しない。権限は親×子×現行Sentinel Policyの積集合、Budgetは原子分配、親Cancel/Steer/Revokeが子Process/通信Grantまで伝播。子が生成したコードやSkillは親の権限へ自己昇格できず、出力は非信頼データ。SC-17/18/20/21/22。
+
+## P1 parent-child isolation matrix (2026-11-07)
+
+Subagent always creates its own canonical **child Task/Run**, and `SandboxExecution` is a subresource of **that child Run**, never a duplicate parent Run or privileged subagent process. Parent budget reservation is split transactionally; child granted capabilities = parent effective set ∩ child requested ∩ current Sentinel policy. Execution guest VM reuse only within same owner/tenant after verified cleanup; siblings have independent PID/cgroup mount/network namespace, read-write Workspace revisions, IPC grants, source/provenance. A parent may share immutable **explicitly selected Artifact references** with a child; raw parent memory/Cookies/all Workspace filesystem/credentials and actor authority are never implicitly inherited. Child expiration/revoke/Cancel inherits tighter parent limit; parent exit revokes all child grants and terminates child execution process trees before reporting completion. Allow different users in same Trust Control VM only with tenant ACL/DB isolation; Execution VM is not simultaneously shared across users. SC-18/20/21/22.
+
+## 2026-11-07 Adaptive Context Handoff仕様
+
+参照: [Context仕様18.9](context-manager-and-compaction.md#189-親子エージェントの情報伝達とconflict統合)。本追加はSUB-008/SUB-013を具体化する案で、既存のTask/Run・budget・approval境界を維持。実装テストは未実施。
+
+- ChildAdmissionの前に親Run/GoalRevision/Policy/leaseEpoch、権限、Budgetをfresh DBで検査。ChildContextHandoffは親の全文Historyでなく、目的・hard constraint refs・必須Evidence locators・未解決疑義・期限・子のTool cap・予約済Budgetだけを持つ。
+- Parent Handoff digestはcanonical serializationで保存し、Child開始時にcurrent parent controlVersionと照合。Blob/Artifact ACLを子へ自動拡張しない。参照不許可なら子Taskの開始を拒否するか明示的部分実行にする。
+- 子のWorkspace、stdout/stderr、exec Cell、Browser Cookie、private journalは親/兄弟へ直接共有せず、明示的に公開可能になったEvidence Manifestのみを検証して受け取る。
+- ChildResultはDONE/PARTIAL/UNCERTAIN/FAILED、source refs、observedAt、hash、conflicting claims、uncompleted work、UNKNOWN effectsを必須構造化出力とする。親のResultVerifierでGoalの要件とSource coverageを再確認し、子の自然言語の「完了」を信用しない。
+- 同一Source digestとcanonical identityで重複候補を統合し、独立ソース数を水増ししない。相反する価格・事実・日付は両方保持する。親Steer後の旧Goalの子結果はSTALE、親の現Goalを変更しない。
+- 親Cancel/Revocationは子のModel/Tool/Cell/Sentinel grantへ伝播させる。外部操作のUNKNOWNは再実行せず照会/承認へ。親子全階層のBudget reservationは原子的に有限。
+
+**追加検証**: ACM-T05/T11/T12/T14を必須。Handoff時の子数超・親budget不足・private Artifact参照・時点不一致・Child result偽成功・親steerと子commit競合に対するfail closedを確認。親子コンテキストを全文複製する方式は採用しない。
+
+## 2026-11-07 P1: Child Result受入Admission契約
+
+子から返った自然文・STATUS・SourceRefを受け取っただけで、親TaskのGoal達成を決定しない。親Runは現行親GoalRevision/leaseEpoch/PolicyVersion/owner/child lineageをDBで取り、子`ChildResultBundle`のGoalRevision・Budget lineage・artifact digest/locator/source date・current ACL/Source expiry・UNKNOWN effectを順に検証する。各SourceBackedFactは`SemanticVerificationReceipt`を持ち、複数子が同じSourceを引用しても独立根拠件数は増えない。
+
+- Parent SteerとChild DONEが競合: 古いGoalで生まれた結果を`CHILD_STALE`で隔離し、未変更Evidenceだけ現在のACL/validityを通して再利用可。Reused Evidenceから新Goalへ自動Successは禁止。
+- 子のRuntime Cell/Tool Context/Sealed Snapshot/Credentialsは親や兄弟へ直接複製しない。子のsource refsと結果は新たな権限を生まない。
+- Parent Merge Admissionの判定ログには`parentRevision,childRevision,sourceDigest,sourceValidity,dispositionCode,mergeManifestRef`を残し、個人情報は出さない。
+- Admission後からParent HEAD CASまでGoalが変更されたらCommit不可。旧Workerの遅延結果/削除されたSourceの引用は親のfinal resultに入れない。
+- Failures`CHILD_UNAUTHORIZED`/`CHILD_STALE`/`SOURCE_EXPIRED`/`CONFLICTED`/`PARTIAL`は子を黙ってDONEとして扱わずPlannerへ渡す。
+
+ACM-T31とACM-T11/12の同時Steer/期限切れ/重複Source/未知外部副作用を検証（未実装）。

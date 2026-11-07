@@ -150,3 +150,7 @@ Jevの判断候補と理由は提案として表示。ステップ実行/サイ�
 ## 17. CapSolver integration boundary (user-requested policy, 2026-10-30)
 
 この文書の「bot wall → handoff」は無条件ではない。判定の正本は `docs/04-web-browser/login-challenges-human-handoff.md §18`。CAPTCHA/Turnstileと認証/2FA、WAFによるアクセス拒否を別分類する。確定した許可済みCAPTCHAだけをTool Gatewayで保護されたBrowser Workerの単一solveフローへ送り、Jevのモデル判断・ページ内コンテンツがAPIキー、Solver task type、送信対象、追加費用を自由に指定できないようにする。Provider `ready`後もブラウザ側の再観測で検証する。未許可・不明・予算超過・失敗ならHuman Handoffまたは安全停止。E2Eテスト未実施、CHAT_00/03/09の契約調停が完了するまではPROVISIONAL。
+
+## 2026-11-07 Muse移行: Jevはブラウザ所有者にならない
+
+Jev/AI Browser判断器はRuntime Cell内の補助ロジックまたは限定されたAdapterとなり得るが、Browser BrokerのCDP/セッション資格/OS権限を取得しない。動作提案を現在のOwner/lease/GoalRevision/Tool Gatewayに紐づけ、具体的Browser ActionとネットワークはBroker/Sentinel経路のみ。Agentの自由なPython/NodeがJev代わりになっても直接CDPは許可しない。SC-18/19/22。

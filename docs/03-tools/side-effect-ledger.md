@@ -367,3 +367,11 @@ L1 immutable identity/fingerprint/intent, unit/uniqueness and owner check. L2 at
 
 ### Round 3 — lossless canonical version boundary (2026-10-30)
 All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `leaseEpoch` values MUST use CHAT_01's canonical signed-int64 decimal **string** codec (PostgreSQL BIGINT / internal BigInt), not JSON number. Each version comparison converts validated strings to BigInt and rejects leading zeros/exponents/unsafe numbers, preserving full 64-bit range. This module does not redefine the canonical type. **Contract test (designed, not executed):** roundtrip `9007199254740992` and `9223372036854775806`, reject an unsafe JS number, and reject stale version/goal approval without dispatching external effects.
+
+## 2026-11-07 Muse移行: 子プロセスの副作用
+
+sandbox.exec is local compute, but generated code and package lifecycle scripts can attempt HTTP/Connector/Browser effects. Concrete external writes require an authorized Gateway Intent + the same durable Side-effect Ledger and Sentinel final permission; unmediated raw writes are blocked at egress. A successful exitCode, HTTP status, or process kill never proves no external effect. External response received but DB commit lost -> UNCERTAIN, never blind retry. Correlate records by Owner/Tenant/Task/Run/Execution/Intent/PolicyEpoch and revoke old lease/child network grants on Cancel/Steer. SC-19/21。
+
+## P0-5 mandatory child-request ledger relation (2026-11-07)
+
+The `sandbox.exec` local-process Intent does NOT imply or substitute for a concrete external Tool Intent. Each brokered child request has its own immutable ExternalIntentId, ExecutionId, TaskId, RunId, owner/tenant/GoalRevision/LeaseEpoch, request digest, destination/method/data sensitivity, Approval/PolicyEpoch, SentAt/ACK/Outcome and reconciler. Write intent must commit transactionally **before** Sentinel final permit and Enforced Egress Transport sends packets. Retry of an `ExternalActionProposalV1` with same requestId only replays the stored receipt/UNCERTAIN, not duplicate write. If no durable Intent/ledger exists, no send. Exec exit 0 or Cancel does not prove external effect absence; UNKNOWN/UNCERTAIN is preserved until provider inquiry or explicit manual resolution. SC-19/21.

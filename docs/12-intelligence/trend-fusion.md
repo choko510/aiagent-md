@@ -198,3 +198,6 @@ CHAT_10 proposes `trend_receipts` with (tenant, canonicalEntityId, mappingRevisi
 Sampling completeness is explicit complete/partial/unknown; a change in query/provider entitlement invalidates comparable baseline. Entity split/merge creates new mappingRevision; old trend cannot be attached as current without verification. Derived trend can recommend research but never authorize Provider access or notify as guaranteed future rise.
 Tests TRND-R4-T01 100 reposts same root→independent origin count 1; T02 two timestamps out of order→correct bucket and revision; T03 query coverage partial→confidence unknown; T04 entity split rev→old result stale; T05 fake X volume increase without price corroboration→no causal claim. SC-14/03/10. DRAFT.
 
+## 2026-11-07: Trend計算コードの出所と外部通信
+
+Generated CLI/Notebook/Scriptによるトレンド融合はSandbox Exec内で実行し、利用したWeb/X/価格Observationの正本時刻/出典/重複/信頼度を保持する。Raw stdoutは推計の根拠ではなく、検証/再現可能なArtifactをEvidenceに紐づける。外部Script/依存からの通信は全て独立Sentinelが制御し、対象の個人データや通知を無承認で外送しない。SC-17/19/22。

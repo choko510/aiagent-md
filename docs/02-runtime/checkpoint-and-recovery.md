@@ -212,3 +212,32 @@ CHAT_01 Step/Checkpoint envelope & appliedGoalRevision, CHAT_03 Tool Ledger clas
 - [S4] Code/test inspected https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/durable_exec/_operation.py ; https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/tests/test_run_cancellation.py
 - [S5] Issue report https://github.com/langchain-ai/langgraph/issues/9240 ; https://github.com/langchain-ai/langgraph/issues/8464
 Code verified=ソース関数確認、Test definition verified=テスト本文確認、Issue report=未再現の報告。OSSライセンス: LangGraph/PydanticAIはMIT、@mastra/coreはpackage metadataでApache-2.0。独立実装で丸写ししない。
+
+## 2026-11-07: SandboxExecutionのcheckpoint/recovery
+
+ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/process group identity/stdout/stderr Artifact refsをCheckpointで参照するが、PID単独を恒久識別子としない。Crash後はWorker lease/Execution process/Workspaceの現況と外部効果台帳を照会し、未開始・継続中・終了/結果不明を分離。永続Workspaceは明示commitされたスコープ付きArtifactだけを復元し、旧プロセス/秘密/Grant/失効したネットワーク許可を復活させない。外部効果不明ならUNCERTAINとして再実行停止。SC-21。
+
+## 2026-11-07 Context Manifest / Journal復旧契約
+
+参照: [Adaptive Context 18.3/18.8](context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。追加の永続化対象は、ContextManifestRef、summaryRef/digest、raw event cursor、mandatory anchors digest、Artifact locator refs、Memory sourceEpoch、model/tokenizer revision、PolicyVersionとSource coverage。SchemaはCHAT_01/10未Locked。
+
+- Tool結果やModel full replyが耐久記録されたこと、Raw Artifactが保存されたこと、Summaryが安全に生成されたこと、Manifestが保存されたこと、HEAD CASが成功したことは**別段階**。Manifestが外部効果やTask成功の正本にならない。
+- Artifact書込み→Digest/ACL検証→Manifest immutable persist→Head CAS→次Model dispatch。Artifact durabilityに失敗したらHEADを進めず、「見つからない原本」の参照を保存しない。
+- Restart: 現行principalとTask/Goal/Run/current lease・policy/Memory epochを読み直し、過去HEADのwriter leaseと新Claimを区別。Source削除/Goal Steer/Model切替があればContextを再構築。再実行はLedgerでNOT_STARTEDだけを許す。
+- Crash後のSummaryはモデルの作業メモとして再利用しても、新Goalのcanonical constraintsやUser訂正の根拠へ昇格しない。Old workerが遅れてManifestをcommitしてもRUN HEAD CASで拒否。
+- Digest mismatch/unsupported schema/Source ACL revokedはcorrupt/degradedとして停止し、モデルにEvidenceがあったと見せかけない。互換migrationがない場合は復旧を拒否する。
+- Workspace snapshot参照はExecutionId/WorkspaceGeneration/Cell image digest/Provenanceに紐付く。旧Cell grantやCredential、Shell Side-effectをCheckPointから復活させない。
+
+**Killpoints**: ACM-T08/13/15/16/18/19、CPR-R3-T01〜T05を同一Fake Model/DB/Artifact fixtureで実施。旧Version・新Lease、Memory deleteとresume競合、Artifact commit直前kill、Page locatorへの権限失効、Child resultの到着遅延を追加する。いずれも未実行。
+
+## 2026-11-07 P0: ModelRequestSnapshot / AdmissionとRecovery
+
+`Context 18.19/18.20`の`ContextManifest`（候補選択）と`ModelRequestSnapshot`（sealed actual Model payload）は別immutable資産。Checkpointは両参照とdigest、Prompt/Serializer/Provider/Tool Schema revision、Goal/Memory epoch、ModelAttempt/DispatchAdmission IDを保持する。旧の「Manifestが保存されれば送信再現可能」という解釈は禁止。
+
+**Commit順序**: Raw Artifact durable→source fact verified→ContextManifest durable→最終serialized payload作成→Sealed ModelRequestSnapshot durable→Run HEAD CAS→Protected Gateway scope-epoch DB Admission→socket dispatch→full response/usage receipt commit。HEAD CASに失敗した古いworkerはAdmission不可。Provider callをDB tx内で行わない。
+
+**Crash**: Snapshotがあっても送信済みAttemptの再発行を正当化しない。`ADMITTED_NOT_SENT`でもsend-state lostなら`MAY_HAVE_SENT`へ。Gatewayのdedup/receipt/reconciliationが確定しない限りsame Attemptを外部再送せず、復元用の元Message partsがpurged/unavailableなら`NON_REPLAYABLE`と明示。Provider stateがOpaque pinnedならAdapter変更時に継続を拒否する。
+
+**Cache/diff**: Goal/Policy/Source/Memory/Recipient/Template/Tokenizerの各revisionとACLを比べ、同一immutable Source Evidenceだけ再利用。old prompt・Tool approvals・Memory projection・Cost receipt・Child lineageは無条件にコピーしない。古いManifestは監査上残せてもcurrent HEADやcurrent successと混同しない。
+
+**Fault tests**: ACM-T23/24/25/32/34/36。Protected service再起動、snapshot write後HEAD CAS fail、Memory DELETE commit後worker retry、Provider ACK lost、retentionによるOriginal消去を含む。すべて未実装・未実行。

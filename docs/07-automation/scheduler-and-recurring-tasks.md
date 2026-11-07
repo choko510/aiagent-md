@@ -475,3 +475,7 @@ Evidence grade:
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+## 2026-11-07: 無人ジョブのSecure Runtime制約
+
+従来のWatchの価格比較/差分検出は可能な限り決定的Workerで実行し、AgentやSandbox Execが不要なら起動しない。自律コード・生成Skillsを使う定期ジョブは都度独立した有限Run/ExecutionとしてVM/Cell Admission・Sentinel強制Egress・TaskBudgetを再評価する。過去のApproval/ネットワークGrantを無期限に使いまわさず、Watchの削除/停止/permission revokeが新プロセス生成を阻止。夜間の自律発掘でもホストShellやPrivate LANにアクセスさせない。SC-17/19/21。

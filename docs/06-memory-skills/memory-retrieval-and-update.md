@@ -267,3 +267,41 @@ DB proposal CHAT_10 PR #10 `memory_feedback_mutations` extension remains owner-r
 CHAT_10 PR #10's `memory_feedback_mutations` proposal stores idempotency_key, target `canonicalEntityId` + mapping revision, consentRef, reversible action, scope and prior mutation reference. **It is an immutable input ledger**, not itself the entire Memory index/active preference projection: CHAT_06 Memory Writer must compare-and-set currently active preference, sourceEpoch and tombstone before making it readable, and rollback ledger+active projection atomically on conflict. Reading old memory after revoke requires a new sourceEpoch/ACL check; absence of active mapping fails closed.
 One entity chain vs branch ambiguity never expands the target, and tenant/user scope is enforced by authenticated principal, not user-supplied ID. Tests MEM-R4-T07 Undo writes new tombstone while preserving Evidence; T08 same idempotency key no duplicate preference; T09 record active preference rev invalidated by storefront split; T10 two user scopes isolated. SC-16/08. Draft.
 
+## 2026-11-07: Generated code from Memory is not trusted
+
+Agentは過去WorkspaceやMemoryのコード/コマンドを参照して新しいTemporary Toolを生成可能。ただしMemoryから取得した文字列は権限のソースではなく、直接実行する場合も現在RunのGateway sandbox.exec + Cell Admission + Sentinel強制Networkを経由する。過去の承認やCredential/Tool scopeを再利用せず、owner/version/expiryをチェック。Embedding検索/Auto-summary経由で外部の不正命令をsystem roleへ昇格させない。SC-20/22。
+
+## 2026-11-07 Context admission・選択・回復の確定案
+
+参照: [Adaptive Context仕様](../02-runtime/context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。既存のkeyword-first + optional vectorという検索順序を採用したまま、注入決定を次の通り厳格化する。未実装。
+
+1. Search: 現Task intentとGoalRevisionからMemoryQueryを構築。User/Project/Task scope・tenant ACLをserver principalから導出し、metadata/keywordで上限80件、optional semantic候補40件を取得。候補IDのみを非信頼Indexerから受け取る。
+2. Filter: DB正本でactive、sourceEpoch、status、consent、expiry、source availability、記憶のscopeを再照合。現在Goalと矛盾する候補を抑制。否定・訂正・tombstoneは最優先。エラーは無言でMemory採用せずdegradedを返す。
+3. Rank: 採用できる記憶のみをContext仕様のP3/P2へ分類。好みの明示性、関連性、時点、source completenessで安定順位。Relevanceは信頼権限でなく選択順位。
+4. Project: instructionAuthority=none、sourceRefs/recordRevision/assertedAt/validUntil付きのread-only Projectionへ。一般Tool結果や外部Web命令をRole instructionへ変換しない。
+5. Admit: 残存Token budgetに従い既存の8件/1,500 tokens（最大20件/2,000）を上限として切り詰め、selected refsとsourceEpochをContextManifestへ記録。Agentが記憶を省略した場合は記憶0件を「好みなし」という事実に変換しない。
+6. Dispatch: Modelへ送る直前にSourceEpoch/PolicyVersion/GoalRevision/Run fenceを再検証。更新済みならRequestを破棄し、必要情報だけ再検索・再投影。旧版の上に新しいsummaryを上書きしない。
+7. Feedback: Preference変更はUser explicit/consented record CASでのみ確定し、Task Noteから自動永続Profileを作らない。APIを利用する子Taskも同じWriterと認可を通る。
+
+**Failure gates**: semantic unavailable→keyword-onlyとdegraded、DB unavailable→Memoryなしで限定回答または停止、Memory delete race→次dispatchに旧投影0、budget exhausted→Memory省略と可視化、conflicting memory→Current Goal優先、stale source→historical/uncertainの明示。
+
+**QA**: ACM-T02/T09/T10/T17に加え、Source Epochが同じでもrecordRevisionが変わる場合、Auto candidateがapproveされていない場合、同じTaskを2 Workerが同時に再投影する場合、UserがUndo中のRunをCancelする場合を境界テスト。MemoryからTool approval/authorityへの昇格0件をRelease gateにする。
+
+## 2026-11-07 P0: Retrieval projectionのDispatch Admission連携
+
+旧節7の「モデル呼出直前のepoch再照合」を**十分条件として扱わない**。`Context 18.20`とMemory Writer単一正本を参照。ModelRequestSnapshotのMemoryProjectionには`memoryId, recordRevision, sourceEpoch, scope, sourceRefs, applicableRecipientPolicyRef`を紐付け、送り出す前にProtected Model Gatewayでscope epoch row lockと認可/Consentの最終チェックを行い`dispatch_admission`をcommitする。
+
+~~~text
+Memory lookup/Model context assembled (no network send)
+ -> save sealed ModelRequestSnapshot
+ -> short atomic admission with Memory scope epoch + Task Goal + Policy + Provider
+ -> if stale -> discard snapshot/rebuild, no provider send
+ -> if admitted -> protected sender checks invalidation and begins send
+ -> on delete after admission -> cancel if feasible; MAY_HAVE_SENT if uncertain
+~~~
+
+- stale sourceEpoch/recordRevision/DELETE/Undoを検出したら新しいModel Attemptは0。Vector/keyword cacheの古い結果はDBの現在Statusを越えない。
+- Crash/lost ACK時のAdmitted/MayHaveSent/ConfirmedSentはModel attempt ledgerの状態。再生成の新Requestは異なるAttemptであり、既送信済みReply/費用の二重計上を避ける。
+- Recipient Policy/個人情報のModel Provider転送同意は対象Providerごとに評価。過去の他Provider承認を流用しない。
+
+QA: ACM-T24/25/29/30。これらのDB sender integrationは未実装・未試験。

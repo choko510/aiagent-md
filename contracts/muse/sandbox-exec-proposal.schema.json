@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/muse/sandbox-exec-proposal.schema.json",
+  "title": "SandboxExecProposalV1 (untrusted Agent fields only)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tool": {
+      "const": "sandbox.exec"
+    },
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      }
+    },
+    "cwdRelative": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000]+$"
+    },
+    "stdinArtifactRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "requestedPackageRefs": {
+      "type": "array",
+      "maxItems": 40,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^pkg:[a-z0-9-]+@sha256:[0-9a-f]{64}$"
+      }
+    },
+    "requestedLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wallMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 68719476736
+        }
+      }
+    }
+  },
+  "required": [
+    "tool",
+    "argv",
+    "cwdRelative"
+  ]
+}

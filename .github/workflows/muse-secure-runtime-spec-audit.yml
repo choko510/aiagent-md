@@ -1,0 +1,26 @@
+name: muse-secure-runtime-spec-audit
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'AGENTS.md'
+      - 'README.md'
+      - 'audit/muse/**'
+      - 'contracts/muse/**'
+      - 'governance/round6/**'
+      - '.github/workflows/muse-secure-runtime-spec-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docs-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate 88-module inventory, provenance and semantic incompatibilities
+        run: python3 audit/muse/validate_spec_migration.py
+      - name: Install exact JSON Schema test dependency
+        run: python3 -m pip install jsonschema==4.23.0
+      - name: Validate proposal/admission/ExternalAction JSON Schema + adversarial cases
+        run: python3 audit/muse/validate_contract_schemas.py

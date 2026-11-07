@@ -343,3 +343,7 @@ PH-6 Review UI rollout, rollback, restore, benchmark and operator incident contr
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: Hook/Recipe実行をRuntime Cellへ限定
+
+User作成Hook/Plugin/Recipe内にShellや生成コードが含まれる場合、必ずUntrusted Runtime Cell内sandbox.execで実行し、Host/Privsep/Browser Broker/Policy Adminで実行しない。Web/外部MCP由来のRecipeはuntrustedであり、Current Run/owner/approval/budget/Network/Sentinelの権限を超えない。Persistent Hookとして登録・自動実行するには既存Skill Lifecycleの明示的有効化が必要。Watch/ExternalEvent起点の無人Hookにも同じ隔離/recall/kill/timeout制約。SC-19/20/21/22。

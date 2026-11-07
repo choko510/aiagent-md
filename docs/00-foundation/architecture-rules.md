@@ -20,6 +20,10 @@
 
 ## B. 前提となる技術構造
 - 単一の中心AgentLoop＋必要時の並列化/専門Worker。Providerやモデルは変更可能。
+- **Muse migration 2026-11-07:** Agentの任意Shell/生成コードは**Trusted Control VMとは別ゲストカーネルのUntrusted Execution VM**のRuntime Cellでのみ許可。Agent LoopはTrusted Control VMに置くが、生成コードをその中で実行しない。ホストShell、管理API、Vault、保護DB、Browser CDP、ポリシー変更は禁止。
+- Runtime Cellの全子プロセス・CLI・生成Skillsには直接外向き通信を一切与えず、限定Broker RPCごとに新しいGateway Intentを記録する。ブラウザ・Connectorなどの外向き通信も独立Sentinelが具体的宛先・方法・権限を認可し、kernel/network強制で直接通信を阻止する。Tool GatewayはIntent/Approval/Ledgerの正本、Sentinelは全egress/Connectorの最終許可、Enforced Egress Transportが送信の唯一の経路。二重承認正本は作らない。
+- 本番KVM/QEMUの**Trusted Control VMとUntrusted Execution VMの2ゲスト分離**（保護DB/Vaultは別ゲストカーネル）を第一候補とし、VMなしコンテナ開発モードを本番と同等に扱わない。実装時に実測と攻撃テストを要求。
+- 新正本案: 02-runtime/sandbox-execution.md、09-security/runtime-cell-isolation.md、09-security/sentinel-authority.md。すべてDraft/Provisional。
 - UI/APIはタスク永続化と同じ境界を共有するが、長時間タスクをHTTPリクエスト内に閉じない。
 - LLM Tool Callは必ずTool Gateway→Schema→Policy→Budget→Approved Executorを通す。ツールアダプタが自己承認しない。
 - PostgresへTool意図を記録→実行→結果のObservation/Evidence保存。再実行が外部副作用を起こす場合、状態確認や明示的承認がない限り盲目的再試行禁止。
@@ -38,3 +42,9 @@
 
 ## D. 再現可能な評価
 常に「SDK公式が提供する」→「指定版のコードで確認した」→「我々の統合で実測した」を別評価。複数ライブラリのベンチマーク条件が違う場合、数字を直接比較しない。
+
+## 2026-11-07 Adaptive Context設計原則
+
+[Context Manager 18節](../02-runtime/context-manager-and-compaction.md) とADR-023〜028を追加参照。A0:Policy/Approval、A1:Task Goal、A2:Control/Effect Ledgerは原本参照を維持する非圧縮領域。Evidence/Raw Artifact、Working Journal、Long-term Memory、Skill/Workspaceは独立正本であり、LLMへのProjectionはどれも権限を生成しない。
+
+各Model callの入力は (1)現在のGoal・ACL/Source Epoch/Lease検査、(2)Model固有Tokenizer/Output reserve/Limit検査、(3)権限済み候補だけを関連性/出典/時刻で選択、(4)大きな原本をArtifactに退避しGrounded Summary、(5)ManifestをDurable checkpoint、(6)dispatch前に最新版再検証という順序を原則とする。失敗時はPartial/Blockedで停止し、条件削除・架空のEvidence・権限の推定補完を禁止。Sandboxの生成Script、stdout、外部HTML、Memoryは非信頼DataとしてSentinel/Gateway境界を越えない。選択Scoreは権限でない。実装未着手・未検証。

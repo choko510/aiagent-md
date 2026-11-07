@@ -376,3 +376,6 @@ Compatibility: optional digest feature gate default OFF until CHAT_07/10 agree a
 The CHAT_10 `notification_intent_ownership` contract is now required for every member: `NotificationIntent` and digest envelope must have exactly matching `tenantId`, `ownerUserId` and `destinationRef`; the member row must satisfy **both composite foreign keys**, not merely `tenantId`. Ranking makes recommendations and cannot establish owner binding from document content. Missing verified binding excludes the intent from digest until trusted backfill; never infer binding from a hashed message or unauthenticated X post. The CHAT_07 Outbox sender still owns admission/revoke and UNKNOWN reconciliation.
 Tests NIR-R5-T01 cross-user inside same Tenant denied; T02 same user wrong destination denied; T03 unverified legacy intent excluded; T04 canceled-before-send can release/re-group; T05 provider acceptance vs UNKNOWN never shown as individual delivery. SC-16/08. Provisional until actual sender and auth integration.
 
+## 2026-11-07: NotificationのSentinel権限
+
+Agent生成Report/Scriptから通知内容をまとめることはできるが、外部通知をCLIのcurl/SMTP POSTで直接送信してOutboxとApprovalを迂回することはできない。Notificationは既存のOutbox/Connector intentで送出し、Sentinelが宛先・送信Data scope・Rate・Policy/Leaseを最終評価する。機密情報とcredentialを本文/ログへ混ぜない。SC-19/21/22。

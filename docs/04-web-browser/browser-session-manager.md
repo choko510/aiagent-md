@@ -211,3 +211,7 @@ Browser actionの間に `SELECT ... FOR UPDATE` 行ロックを保持すると�
 `SOLVING`はCHAT_04の**内部サブ状態提案**（CHAT_01/02の正本Stateには未採用）であり、同一PageのAgent操作、Human takeover、別Solver実行を同時許可しない。DB checkpoint/Tool Ledger intent→専有lease取得→Provider送信→Provider結果→当該epoch/goalRevision/Tab/origin/challenge再検証→Browser Workerによる結果適用とサイト状態再観測→専有lease解放という順で処理する。長時間のAPI polling中にDB行ロックを保持しない。期限切れ・Cancel・Steer・Owner変更では古い結果の適用を禁止し、外部請求の成否が不明ならUNKNOWNを維持する。
 
 BSESS-T16はFake Providerの遅延応答と2 worker raceを注入し、solve中のAgent click/Human takeoverが発生せず、古いsolve結果の注入が0件であることを証明する。**テスト未実行・跨CHAT契約調停待ち。**
+
+## 2026-11-07 Muse移行: Browser BrokerはCellの外
+
+Browser WorkerがCDP/Context/Page/Sessionの唯一の所有者である方針をさらに強化。Untrusted Runtime CellのShell、Node/Playwright、生成Browser Skillsからの直接CDP/remote-debugging socketアクセスは不可。Cellにはopaque BrowserSessionIdと狭いBrowser Action APIのみを渡す。Browser Broker controllerはTrusted Control VM内、Chromium Browser Workerは**別の隔離実行ドメイン**に配置し、両者は独立したprocess/user/namespace、Secrets/Browser storageStateはCredential Broker管轄で、UI Human Handoffは別Owner lease。Chromium sandboxが本番で有効化できなければfail-closed; BrowserのWebSocket/iframe/download含む全外部通信はSentinelの許可を検証する**Enforced Egress Transport**で強制制御。SC-18/19/21/22。

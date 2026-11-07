@@ -295,3 +295,7 @@ All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `le
 
 ### Round 6 — Canonical public Watch JSON serialization
 Watch GET/PATCH/SSEの`recordVersion`と`definitionRevision`は正規int64 decimal **string**（例: `"4"`, `"2"`）。既存§5 JSON例はこの表現へ修正済み。Client側でJSON numberへ変換して比較しない。If-Match/ETagとDB BIGINTの変換はlosslessで、User/Watch/Task IDはtrusted UUIDv7。**Tests:** WAT-R6-T01 parse projected JSON without numeric revisions, T02 2^53+1 roundtrip, T03 stale If-Match→412, T04 other owner within same Tenant→read/write deny. These are designed, not executed against Harness.
+
+## 2026-11-07: Watchと生成CLIの境界
+
+Watchの永続Definition/Observation/Trigger/Notificationは既存の正本のまま。実行に生成Python/CLIが必要なWatchは毎回新しいSandboxExecutionとCell owner/Run leaseを取得し、Sentinelの現行通信ポリシーに従う。Watch登録の承認を無期限の外部POST・購入・投稿承認として扱わない。価格取得不能とSandbox/egress拒否は0円/価格低下として保存しない。停止Watchの子プロセス/残留grantゼロを監査。SC-19/21。

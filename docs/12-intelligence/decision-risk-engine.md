@@ -178,3 +178,6 @@ CHAT_10 proposes immutable `risk_decision_receipts(tenant,candidate,engineVersio
 Fenced candidate identity `canonicalEntityId + mappingRevision` must be current at both calculate and publish. A later source correction revokes a previous profit verification without rewriting its historical receipt. Discount campaign tweets do not imply source authority; only a matching, time-current provider price and eligibility Evidence can be used.
 Tests RISK-R4-T01 unknown resale fee→expectedProfit null; T02 currency mismatch without FX Evidence→reject; T03 JPY exact coupon minor units→BigInt deterministic; T04 same inputHash/version replay→same receipt; T05 stale SKU mapping→no publish; T06 hidden tax/condition→conditional label. SC-01/10/14.
 
+## 2026-11-07: Code-generated Profitと外部購入は別
+
+Generated Pythonによる利益計算や风险分析はCell内で許可されるが、価格・在庫・クーポン条件/手数料の実測を検証する責務は既存Risk Engineが維持する。Shellが送金/購入/予約/投稿を行う権限は与えない。具体的不可逆行為はGatewayのScope-bound Approval/Side-effect Ledgerと独立Sentinelを必要とする。未確認結果は0円や確定利益に変換しない。SC-17/19/22。

@@ -385,3 +385,6 @@ CHAT_12 `entity-resolution.md` now proposes `retailer_storefront` distinct from 
 Memory canonical mutation belongs to CHAT_06, not this module: `Feedback.apply` submits validated scoped preference to idempotent Memory Writer, which records actor, consent, source original evidence ID, mapping revision, status, version and Undo tombstone in one DB TX. Undo never deletes the original historical evidence; stale Memory retrieval/active Task observes tombstone and stops applying the prior preference. No source text or old Skill can turn a preference into policy permission.
 Tests: FBL-R4-T01 chain two branches exclude one only; T02 ambiguity→review/no exclusion; T03 mapping split invalidates old association; T04 concurrent Undo vs recommendation read→versioned result; T05 cross-user feedback mutation refused; T06 repeated idempotency same feedback ID, no additional writes. SC-16/08. **Old Round-1 UUID/revision/nullable conflicts in §3 are historical, superseded by current PR #10 SQL; they are not newly open P0.**
 
+## 2026-11-07: フィードバックは権限昇格ではない
+
+ユーザーの「この方法を覚えて」は生成ToolやScript/Skill候補の記憶/評価を促すが、Credential Broker/Protected Harness/Sentinel Policy/Network allowlistの変更権限は付与しない。Permanent activationは明示的Review/Approval/rollback。過去の好みから勝手に商品購入/投稿/他サービス送信しない。Agent-generated ShellとProcessが成功しても実際のEvidence/Outcomeを検証してから候補へ反映。SC-20/22。

@@ -531,3 +531,7 @@ SHOULDの追跡：TRD-018→T15/T26、TRD-019→T24/T26、TRD-020→T10/T18/T24�
 - **TRD-XR4 / P1 / CHAT_08+10**：Conversation-less scheduled/external-event Taskのoptional Conversation linkをAPI/DBへ提案。Tool RegistryはTaskIdのみをRoot scopeとして扱う。受入：TRD-T28。
 
 詳細な承認・side-effect関連は03-02〜03-04の個別仕様で確定する。外部のOSSテスト実行・実装試験は未実施。
+
+## 2026-11-07 Muse移行: Exec登録と生成ツール
+
+Tool Registryにsandbox.execを登録済みの一能力として追加する。AIが書いたPython/CLI、MCP/SkillコードはTrusted Tool Descriptorではなく、Untrusted Runtime Cell内のバイナリ/スクリプト。コードや外部Tool manifestは自分自身へNetwork/Policy/Vault/Host権限を付与できない。Tool discoveryから許可への昇格はUser/Owner承認が必須。Execのargv、image digest、workspace revision、profileと版を固定し、package/toolchain dependencyをEvidence/Artifactに残す。SC-17/18/20/22。

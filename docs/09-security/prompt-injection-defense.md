@@ -11,10 +11,14 @@
 採用する多層防御：
 1. **Provenance**：各入力にServer検証済みのsourceRef、取得時刻、owner/tenant、hash、抽出位置、trust classを付与。本文中の「system」「admin」「approved」は単なる文字列。
 2. **Context separation**：モデルへ渡す外部文字列を有限長のdata regionに限定。role/special tokenに見せかけた境界をsanitizeし、偽markerを無効化。これは補助策でありLLMが常に守る保証ではない。
-3. **Deterministic gate**：LLMのTool ProposalをCHAT_03 Gatewayが静的Registry・厳密Schema・owner・Tenant/Workspace・GoalRevision・Run leaseEpoch・Approval・副作用台帳・費用・egressで検証。任意Tool/ホストshell/Docker/秘密の読み出し不可。
+3. **Deterministic gate**：LLMのTool ProposalをCHAT_03 Gatewayが静的Registry・厳密Schema・owner・Tenant/Workspace・GoalRevision・Run leaseEpoch・Approval・副作用台帳・費用・egressで検証。任意Tool/ホストshell/Docker/秘密の読み出し不可。隔離Runtime Cell内のsandbox.execはGatewayで承認されるが、そのshellはSentinelの外部通信ポリシーを変更できない。
 4. **Evidence validation**：観測時刻・出典・内容hashをserver receiptに紐づけ、Webの自己申告「公式検証済み」を無視する。未知はUNKNOWN。
 5. **Persistence quarantine**：抽出文から直接 trusted Memory/Skill/Browser Action Recipeを有効化しない。別途所有者の明示的Review/Undoが必要。旧revisionのモデルproposalをSteer後に実行しない。
 6. **Adversarial regression**：多言語・Unicode・埋込HTML・base64・ツール説明・OCR・長文・再利用時の攻撃を評価し、zero unauthorized effect/exfiltrationを合否基準とする。
+
+## 0.1 2026-11-07: arbitrary code increases injection risk
+
+Generated Python/Node/Shell, package install scripts, temporary Skills and agent-created subagents are untrusted code, even when produced by model from hostile websites. Their **local execution** is permitted inside attested Runtime Cell but grants no authority to read protected secrets, bypass Browser Broker, change policy or send unauthorized network traffic. Prohibit copy/paste of external instructions into privileged context and ensure all file downloads/packages are provenance-tagged. Test malicious code and command-injection in README/CLI output/PDF/HTML causing direct network exfiltration: Sentinel must deny even if LLM follows the malicious instruction. "Prompt guard" alone cannot guarantee this. See [Cell](runtime-cell-isolation.md), [Sentinel](sentinel-authority.md), [Exec](../02-runtime/sandbox-execution.md).
 
 ## 1. Scope / threat model / non-goals
 
@@ -251,3 +255,15 @@ No published contract is Locked. Thresholds/model detector quality and shared En
 ## Upstream PR investigation — Provenance of user paste versus external data
 - **[PR inspected, open/unmerged]** OpenClaw [#165776](https://github.com/openclaw/openclaw/pull/165776) documents a UI paste provenance issue: long user-pasted content became an attachment and was handled as untrusted external source despite originating from the operator's message. **Not adopted as shipped upstream behavior**. Our implementation must preserve *verified transport origin* separately from whether the **content itself** contains third-party untrusted instructions. A user's pasted webpage text can be a trusted request to analyze the pasted bytes, but the embedded webpage commands cannot become server/tool policy. Add `INJ-T19`: typed text vs long paste vs file vs forwarded web content, origin metadata preserved, tool privileges unchanged.
 - Source grade: PR report. This strengthens explicit `AUTHENTICATED_USER` transport vs `UNTRUSTED_EXTERNAL` quoted content separation without granting external instructions new authority.
+
+## 2026-11-07 Context圧縮・Memory検索経由の注入防止
+
+参照: [Adaptive Context 18.2/18.6/18.11](../02-runtime/context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。Tool stdout/stderr、外部ページのRole-looking文字列、README/依存パッケージ、生成Script、Memory recordは**命令権限なしのデータ**。SummaryやEmbeddingを通過しただけではTrustTier昇格しない。
+
+- CompactorのOutputはGroundedSummaryClaimのsource refsとsource hash/locatorを検証し、無根拠の「承認済み」「購入済み」「指示を無視」「秘密を送信」をRejectする。
+- Positive/negative Goal constraints、Auth、Policy、Tool Approval、Sentinel egress grantはLLM要約から復元せず保護サービスの現在正本からのみ読む。
+- Retrieval結果にあるsystem/developer-looking bytes、shell commands、Cookie、secretはquoted data/redact扱い。Memory Writerは外部Contentによるユーザープロフィール/権限の自動上書きを拒否。
+- SandboxからのArtifact参照/Workspace pathはTask+owner+Cell/Exec ID+digestで検査し、file pathの文字列を直接読まない。隠された外部接続経路やhost shellを記憶/コンテキストを通じて許可しない。
+- 注入を不正として拒否する場合も、監査イベントに秘密の本文を保存しない。Tool/Modelを止めても既発生UNKNOWN副作用のLedger照会を省略しない。
+
+**Negative tests**: ACM-T04/T09/T10/T14/T15、Web HTMLに「Ignore system」、stdoutにAuthority marker、MemoryにCommand、要約中にPolicy変更/Goal修正を注入。期待: 権限不変、Secret leak0、unsupported external commands execution0。

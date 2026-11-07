@@ -14,6 +14,10 @@
 2. **Artifacts:** HTML/PDF/スクリーンショット、Evidence raw、Checkpoint外部object、モデル結果に関連するobject metadata。DBの`artifact_id→object_key→sha256`を検証できること。バックアップ先は本番コンテナの普通の読み書きパスと分離。
 3. **Secrets:** DBパスワード、Provider Key、Cookie/ブラウザ保存状態、暗号化鍵、リカバリ用復号キー。Raw secretsはManifestにもログにも載せない。復旧主体はoperator-only、Agent/LLMへ提供しない。
 
+## 0.1 2026-11-07 Secure VM / Workspace recovery
+
+Operator-only backup/restore of Secure VM image, protected DB, Vault-encrypted values, policy/signing material and scoped workspaces must use separate access domains: Runtime Cell never gains backup credentials. Only owner-approved Workspace artifacts persist; volatile code, temporary package layers, active grants and untrusted process state must not silently be restored. Rebuilt Cell receives new identity/lease and reruns admission/egress attestation; pending external writes remain UNCERTAIN pending reconciliation, not blind retry. Version upgrades must validate kernel+KVM+nspawn/Chromium sandbox compatibility, Sentinel forced egress, migrations and rollbacks; a failed security gate blocks production instead of downgrading. See [Cell](../09-security/runtime-cell-isolation.md).
+
 ## 1. Scope / Non-scope / 関連SC
 
 **Scope:** backup sets、WAL archive、artifact・DBのlogical point-in-time一致、Secret復元、checksum/manifest、独立試験環境でのrestore drill、Schema/runtime upgradeのexpand/contractとdrain、PITR後のreconciliation gate、RPO/RTO検証方法、operator操作・監査。
@@ -404,3 +408,9 @@ Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string*
 
 ### Round 4 Event retention floor and restore consistency
 Backups must include `agent.event_retention_floors`, tenant counters, domain_events and outbox in one recovery-point-consistent snapshot. Restoring a database to an older snapshot while newer signed cursors still exist MUST NOT silently promise replay of deleted/never-committed offsets; sign cursors with a DB recovery generation or invalidate outstanding cursor tokens after restore. Restored data cannot advance retention floor past the oldest event required by a pending Outbox/Evidence/Checkpoint reference. Test BUR-R4-T01: backup/restore with live replay window and queued outbox, expect safe cursor invalidation/410+snapshot and zero phantom success. Design only; restore drill not executed.
+
+## P2 Workspace snapshot validity and VM pool reuse (2026-11-07)
+
+A durable Workspace commit contains owner/tenant/task, immutable content manifest, SHA-256 of each referenced Artifact and root manifest digest, source/lineage, package archive/checksum, image/policy generation, encryption scope and expiration/retention. Restore validates every item (scope ACL, hash, revocation, retention, quarantine/malware decision) before exposing any byte. Missing/expired/corrupted Artifact => **RESTORE_BLOCKED**, not partially synthesized workspace or silent deletion. Updates use expectedWorkspaceRevision CAS to prevent concurrent lost updates. Temp credentials, IPC grants, ephemeral package scripts and process memory are never part of a snapshot.
+
+VM pool may reuse only within same owner/tenant, after actual cleanup of cgroups/PIDs/IPC/egress grants/overlay/session/caches; cross-tenant reuse requires destroying guest and provisioning a fresh image. Finite configured idle TTL and max concurrent Execution VM/Cells are mandatory; capacity/performance claims wait for measured startup/RSS/CPU data. If cleanup/attestation fails, destroy VM and deny new work. Recovery never blurs external UNKNOWN effects into success. SC-18/21.

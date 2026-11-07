@@ -278,3 +278,7 @@ Proposed state names require codegen/migration once approved. Keep Draft until a
 [S5] Hypothesis: domain Task/Run state enums, authority tie priority, terminal retry Task lineage, limits. No runtime execution, source tests not run.
 
 **Review gate:** P0 unresolved; Draft only.
+
+## 2026-11-07: SandboxExecutionはRunと別の有限状態機械
+
+Task/Run state machineは既存正本を維持。追加Execution state案は REQUESTED -> VALIDATING -> PROVISIONING -> RUNNING -> TERMINATING -> (SUCCEEDED|FAILED|CANCELLED|TIMED_OUT|BLOCKED_UNSAFE|UNCERTAIN)。実際の現行Run leaseがないExecutionを開始禁止、終端後に旧Processが新ToolやWorkspace commitを発火禁止。ExitCode 0はExecution成功だけを意味し、Goal successとは別。External effect unknownはRunをUNCERTAINへ誘導するが状態/文言はOwner共通契約で確定。CancelはProcess tree停止/Network grant失効が完了するまでACKと完了を区別、resumeは新lease/Cell attestationへbind。SC-17/21。

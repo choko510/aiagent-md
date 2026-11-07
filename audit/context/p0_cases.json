@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "kind": "design-oracles-not-runtime-results",
+  "testCount": 16,
+  "source": "docs/02-runtime/context-manager-and-compaction.md#1822-追加の受入テスト-acm-t21t36全て設計のみ",
+  "examples": {
+    "parkingSource": {
+      "lodgingTotalYen": "48000",
+      "parkingFeeYen": "2000",
+      "parkingIncluded": false,
+      "claimAllInYen": "48000",
+      "expectedReceipt": "REFUTED_BY_SPAN",
+      "derivedKnownComponentTotalYen": "50000",
+      "derivedAllInTotalVerified": false
+    },
+    "tokenBuckets": {
+      "W": 8192,
+      "R": 1024,
+      "S": 1024,
+      "paths": [
+        "sys",
+        "tool",
+        "goal",
+        "ctrl",
+        "must",
+        "opt",
+        "frame"
+      ],
+      "tokens": [
+        500,
+        600,
+        400,
+        200,
+        1000,
+        700,
+        100
+      ],
+      "expectedUniqueTotal": 3500,
+      "expectedWindowPass": true
+    },
+    "memoryOrdering": {
+      "deleteCommitSeq": 10,
+      "admissionAttemptSeq": 11,
+      "expectedAdmitted": false
+    },
+    "snapshotRequiredFields": [
+      "promptTemplateRevision",
+      "promptTemplateDigest",
+      "serializerRevision",
+      "providerAdapterRevision",
+      "messages",
+      "toolSchemas",
+      "providerPayloadDigest",
+      "continuation",
+      "dispatchAdmissionRef"
+    ]
+  },
+  "cases": [
+    {
+      "id": "ACM-T21",
+      "category": "semantic_fact_entailment",
+      "setup": "別途2,000円を込み48,000円と要約",
+      "expectedOracle": "REFUTED_BY_SPAN; verified=0",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T22",
+      "category": "disjoint_token_accounting",
+      "setup": "Policy A0をTsysとTgoalに二重配置",
+      "expectedOracle": "accountingPath unique; total counted once",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T23",
+      "category": "request_snapshot",
+      "setup": "Prompt templateとRole/Tool順序を変更",
+      "expectedOracle": "payloadDigest mismatch; no exact replay",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T24",
+      "category": "delete_before_admission",
+      "setup": "DELETE commit -> stale memory Admission",
+      "expectedOracle": "admission=DENIED; send=0",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T25",
+      "category": "admission_before_delete",
+      "setup": "Admission -> DELETE -> lost ACK",
+      "expectedOracle": "cancel attempted; MAY_HAVE_SENT",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T26",
+      "category": "typed_goal_anchor",
+      "setup": "8人2泊・禁煙・税込/税別・日付未指定",
+      "expectedOracle": "all values/operators/strength/unknown preserved",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T27",
+      "category": "original_projection_retention",
+      "setup": "原本PDFをRedactしてGC",
+      "expectedOracle": "hash + locator map distinct; stale source not verified",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T28",
+      "category": "historical_source",
+      "setup": "有効期限切れの価格を現在/過去で検索",
+      "expectedOracle": "current reject; historical timestamp only",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T29",
+      "category": "provider_recipient_policy",
+      "setup": "A許可・B未同意・Fallback",
+      "expectedOracle": "B dispatched=0; deny or consent",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T30",
+      "category": "scoped_cache_invalidation",
+      "setup": "cross-tenant cache hit + memory delete",
+      "expectedOracle": "no cached prompt reuse",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T31",
+      "category": "child_merge_steer",
+      "setup": "親Steerと子DONEの競合",
+      "expectedOracle": "stale Child output not merged",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T32",
+      "category": "gc_cas_integrity",
+      "setup": "artifact GC and active HEAD CAS",
+      "expectedOracle": "no successful dangling reference",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T33",
+      "category": "failed_task_journal",
+      "setup": "同じTool失敗後のPlanner再計画",
+      "expectedOracle": "blind retry=0; reason preserved",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T34",
+      "category": "manifest_diff_recovery",
+      "setup": "Model+Goal変更後にEvidence再利用",
+      "expectedOracle": "only unchanged authorized Evidence",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T35",
+      "category": "coverage_checker",
+      "setup": "Tokenが余っていても必須Evidenceなし",
+      "expectedOracle": "COVERAGE_INCOMPLETE -> bounded re-read / PARTIAL",
+      "runStatus": "NOT_RUN"
+    },
+    {
+      "id": "ACM-T36",
+      "category": "snapshot_unavailable",
+      "setup": "sealing禁止/Continuation消滅",
+      "expectedOracle": "NON_REPLAYABLE; no blind resend",
+      "runStatus": "NOT_RUN"
+    }
+  ]
+}

@@ -27,7 +27,7 @@ Skillの小さな名称/説明は発見用index、本文は要求時のみlow-tr
 
 ### 2.1 比較選択
 
-A. Agentに`SKILL.md`を自動ダウンロードさせ、依存の`npm/pip/apt`をHostへ導入：**却下**。Supply chain/egress/権限を一意に保証不能。
+A. Agentに`SKILL.md`を自動ダウンロードさせ、依存の`npm/pip/apt`を**Hostへ導入**：**却下**。隔離Cell内の一時依存導入は承認済みsandbox.execに限り可能。Supply chain/egress/権限を一意に保証不能。
 B. SkillをToolと同一視しfrontmatterだけでcapability付与：**却下**。Prompt injectionで実行権限が増える。
 C. **Content-addressed immutable Skill Bundle + Registry + explicit user/owner approval + runtime capability intersection：採用**。代価は運用/審査コスト増だが権限と再現性を維持。
 
@@ -63,7 +63,7 @@ Skill bundle/activationの意味論はCHAT_06、shared ID/EventはCHAT_01、Tool
 | SKL-LIFE-006 | MUST | Tool要求はGatewayの現行許可との積集合に限定 | 07,08 |
 | SKL-LIFE-007 | MUST | 有効Task/RunはSkill version pin、途中更新は次安全境界 | 07 |
 | SKL-LIFE-008 | MUST | 同時install/retryをidempotentにする、CASで反対更新を検出 | 07 |
-| SKL-LIFE-009 | MUST | 内容/script/URLをOS上で自動実行しない、untrusted importを隔離 | 08 |
+| SKL-LIFE-009 | MUST | 内容/script/URLを**Host/Protected Services上で**自動実行しない。Temp Skillは隔離Cellでのみ実行可、importは非信頼 | 08,20 |
 | SKL-LIFE-010 | MUST | disable/revoke後の新規Skill loadと新規Tool intentを禁止 | 07,08 |
 | SKL-LIFE-011 | MUST | digest / publisher / source / version / signature verification resultを保存 | 05,08 |
 | SKL-LIFE-012 | MUST | rollout/rollbackで旧権限やSecretを復活させない | 07,08 |
@@ -300,3 +300,13 @@ SL-1 Immutable manifest parser/schemas（unknown field negative tests）。SL-2 
 ## 17. Sources / confidence
 
 2026-10-30、``## 2`` のHermes/Deep Agents/OpenClaw commit-pinned sourceとテストは **Code verified (static)**。Licenseの原本: [Hermes MIT](https://github.com/NousResearch/hermes-agent/blob/fcc26fbd9f1641755e49793d7ed608f3b7214c3d/LICENSE), [Deep Agents MIT](https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/LICENSE), [OpenClaw MIT](https://github.com/openclaw/openclaw/blob/aa65a0ed16aa4a0ba70a26a3e9cb647eefe985f3/LICENSE)。Release tag/installer/API/benchmarkの採用版は **Unverified**。上記Registry/Policy/limits/DDL/APIはHarness独自の**Hypothesis/Proposal**。OSSテストおよびHarnessテストは**未実行**。
+
+## 2026-11-07: Temporary Skillと永続Skillの別ライフサイクル
+
+**許可される:** AgentがRuntime Cell内でコード、SKILL.md、CLI、Python/Nodeパッケージを生成/修正/試行し、**現在のTask/Runの既存Capabilityの範囲内で一時利用**する。Temp SkillはCell内ArtifactでありTrusted Tool Descriptorでも、RegistryのInstalled/Enabled Skillでもない。Temp実行はGateway sandbox.exec + Sentinel network + finite Task/Run budgetに従い、ホストへpip/npm/aptをインストールしない。
+
+**正式な保存:** 共有/永続Skillのinstall/enable/upgrade/promotionは従来のimmutable manifest/digest/supply-chain-review/human approval/revoke/rollbackを必須。Agentが自分で自動有効化、Credential/Policy/Broker/保護Harnessソース改変、Tool権限の拡大は不可。審査済みSkillもRuntime Cell外で任意コードを実行しない。SC-17/20/22。Source: [Sandbox Execution](../02-runtime/sandbox-execution.md).
+
+## P1 Trusted Package Broker and offline dependency reproducibility (2026-11-07)
+
+Generated code may request packages by **immutable catalog reference** in `SandboxExecProposalV1.requestedPackageRefs`. Agent/Cell may not download from public npm/pip directly. Trusted Package Broker resolves approved registry origins and versions through Sentinel-controlled Transport, checks digest/signature if available, archive path traversal, explicit provenance/licensing and security policy, then stores immutable package Artifact in owner/tenant-scoped cache. Offline installer inside Execution VM may resolve only these staged artifacts and pinned lockfiles. Package lifecycle/preinstall/postinstall scripts run with same sandboxed process/OS/CPU/quotas and **no network**. Unknown or changed dependencies require fresh Broker fetch+validation; cache corruption/hash mismatch => DENY and do not launch. No host package install or execution inside Trusted Control VM. A generated Tool/Temp Skill that uses such packages remains task-local; permanent promotion remains human review. SC-17/20/22.

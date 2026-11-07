@@ -4,9 +4,26 @@
 
 ## 0. 採用構成
 
-Ubuntu単一ホストを前提にDocker Composeを**配置と再起動管理のみ**に使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`runtime-worker`/`scheduler-relay`/`browser-worker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`egress-policy-proxy`/`telemetry-collector`を**別プロセス権限・ネットワーク**へ分ける。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue `pgboss`は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
+本番は**Ubuntu物理ホスト→KVM/QEMUの**Trusted Control VM + 別ゲストカーネルのUntrusted Execution VM****を前提とする。Docker Composeは**Trusted Control VM側のみ**の保護サービスの配置/再起動管理候補として使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`scheduler-relay`/`browser-broker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`sentinel-egress`/`credential-broker`/`privsep-connectors`/`telemetry-collector`を**Cell外のProtected Servicesとして別プロセス権限・ネットワーク**へ分ける。**Agent Loop/OrchestratorはTrusted Control VM**、Shell/CLI/Node/Python/生成コードのみUntrusted Execution VM内で実行する。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue `pgboss`は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
 
 採用候補: rootless Docker (可能なら)、非root UID/GID、`cap_drop: [ALL]`、`security_opt: [no-new-privileges:true]`、`read_only: true`、限定`tmpfs`、`pids_limit`、`mem_limit`、`cpus`、init/restart、immutable digest images、secrets mount、DB volume/Artifact volume。Chromium sandboxは明示有効化し、Playwrightのroot+no-sandbox便法を**採用しない**。Sandboxとの相性はHost kernel/LSM(seccomp/userns/AppArmor)の実機試験で判定。できなければproduction readinessはブロック。`ipc: host`、`network_mode: host`、`privileged`、`cap_add: SYS_ADMIN`を採用しない。
+
+## 0.1 Production topology / deployment profiles (Muse migration 2026-11-07)
+
+**Secure production profile**: Ubuntu operator owns KVM/QEMU and **two separate guest kernels**. Trusted Control VM has API/DB/Agent Orchestrator/Gateway/Sentinel/Vault/Privsep/Browser control and enforced Egress Transport. Untrusted Execution VM has only a bounded shell Cell, no public NIC route, no mounted trusted credentials or control sockets, and an execution-bound broker RPC. An independent Browser worker sandbox is required. Compose for Control VM does **not** configure guest network firewall; guest egress denial must be enforced by host/hypervisor firewall, interface ACLs and network namespace. No protected service may share the untrusted guest kernel. All Egress capable Trusted Workers (Privsep/Browser/Notification/Fetch) also lack direct Internet routes and dispatch through actual enforcing Transport. Verify actual VM/guest/kernels/network in E2E.
+
+**Development-only profile**: single-host rootless Docker Cell may speed tests but is never automatically upgraded to production; default no real credentials, payment/booking/posting, indefinite scheduling or unrestricted public egress. No privileged, host networking, unsafe --no-sandbox, unconfined LSM, bypass proxy or host socket fallback to improve compatibility. KVM absent => readiness is BLOCKED_UNSAFE rather than fall back.
+
+The Compose YAML below is an illustrative **legacy service topology skeleton only**, not a production profile. It omits the VM boundary and enforcing kernel rules, Sentinel Authd and Broker identity setup. A deploy tool must refuse it as production until the missing security components have real definitions and tests. The 'runtime-worker' in that sketch represents only Trusted Agent Orchestrator and **must never run generated code**. The Untrusted Execution VM and Hypervisor egress policy require separate deployment artifacts and attestation. Canonical Cell [09-07](../09-security/runtime-cell-isolation.md), Sentinel [09-08](../09-security/sentinel-authority.md), Exec [02-13](../02-runtime/sandbox-execution.md).
+
+## 0.2 Explicit packet path and production readyness
+
+- Execution VM: no public/default gateway, no direct IPv4/IPv6/UDP/DNS or CONNECT. Operator network firewall protects physical host and Trusted VM; only authenticated scoped broker RPC, with per-Execution budget/lease.
+- Trusted Control VM: HTTP Fetch, Privsep Connector, Browser Worker and Notification Sender each have outbound **deny by default** namespaces/service identities and can route only to enforced Egress Transport. No direct route or dual-homed bypass, regardless of Sentinel ALLOW.
+- Sentinel authoritative policy decisions are consumed by Enforced Transport **at the actual send boundary**. Final host/IP, policyEpoch, grant, method and receipt correlation must match. Transport failure => fail closed.
+- Package Broker resolves vetted versions/checksums/licences in trusted control plane, caches immutable artifacts, delivers them by scoped RPC. No pip/npm raw Internet in Execution VM.
+- Startup must validate two separate live guest kernels, kernel sandbox, bridge firewall, Trusted worker socket table, deny-everything bypass probe, Browser sandbox, and expiry of Execution grants. Failure => BLOCKED_UNSAFE.
+- Residual risks and resource budget for two VMs are reviewed; production is prohibited rather than silently colocating Vault with Untrusted Execution.
 
 ## 1. Scope / Non-scope / Scenarios
 
@@ -34,7 +51,7 @@ flowchart LR
   Proxy --> API["UI + Fastify API (Auth)"]
   API -->|"scoped DB"| PG[(Postgres)]
   API -->|"outbox"| PG
-  Worker["Runtime Worker"] --> PG
+  Worker["Trusted Agent Orchestrator (not generated code)"] --> PG
   Scheduler["Scheduler / Relay"] --> PG
   Worker --> Broker["Approved Tool Broker"]
   Broker --> Browser["Browser Worker sandbox"]
@@ -76,10 +93,15 @@ flowchart LR
 | DEP-016 | SHOULD | Graceful drain stops new claims but lets committed jobs survive and fence | 07 |
 | DEP-017 | LATER | Horizontal worker deployment after fencing / owner load tests | 07 |
 | DEP-018 | EXPERIMENT | Lightweight Browser runtime (Lightpanda) isolated as Adapter, not a shortcut around Browser ACL | 06,09,13 |
+| DEP-019 | MUST | Production uses **two distinct guest kernels** for Trusted Control VM and Untrusted Execution VM; no protected service in execution guest | 17,18 |
+| DEP-020 | MUST | Sentinel/credential/Connector Privsep/Browser Broker outside Cell; all egress routes kernel-enforced | 18,19,22 |
+| DEP-021 | MUST | VM absent, non-enforcing proxy or no Chromium sandbox => production blocked, never insecure fallback | 18,19 |
+| DEP-022 | MUST | start/stop/handoff and kill process tree within finite bounds and workspace revision fencing | 21 |
+| DEP-023 | MUST | hard profile distinction for development_only and secure_production; attest actual kernel, not YAML claims | 18,22 |
 
 ## 5. Compose contract & illustrative config
 
-**This is NOT production-ready deployment YAML.** Runtime image digests, secrets locations, ingress TLS implementation, egress and network policy implementation require CHAT_09 acceptance and integrative tests. Sample explicitly lacks direct browser internet connectivity (enforced proxy wiring outside snippet); an incomplete egress adapter must prevent browser launch.
+**This is NOT production-ready deployment YAML.** The following legacy illustration intentionally lacks the required two-VM boundary. Runtime image digests, secrets locations, ingress TLS implementation, egress and network policy implementation require CHAT_09 acceptance and integrative tests. Sample explicitly lacks direct browser internet connectivity (enforced proxy wiring outside snippet); an incomplete egress adapter must prevent browser launch.
 
 ```yaml
 name: personal-agent
@@ -116,7 +138,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
     restart: unless-stopped
-  runtime-worker:
+  agent-orchestrator: # Trusted Control VM ONLY; no generated code runs here
     image: registry.local/personal-agent/worker@sha256:REPLACE
     user: "10002:10002"
     init: true
@@ -232,7 +254,7 @@ A single unhealthy container cannot cause repeated unbounded expensive model cal
 | open CDP debug port | image/compose policy scan | reject deployment | blocked |
 | egress proxy unreachable | connect fail | no direct fallback to raw internet | blocked |
 | DNS rebinding/redirect to private IP | network filter | deny and audit, not retry unbounded | unsafe target |
-| hostile HTML causes fork bomb | no subprocess ability + PIDs quota | worker killed, DB survives | partial |
+| hostile HTML causes fork bomb | bounded Exec guest cgroups + PID limits | entire guest Process tree stopped, Trusted DB survives | partial |
 | secrets mount missing | startup preflight | fail closed, no value in logs | unavailable |
 | cert expired | proxy TLS monitoring | no downgrade to plain HTTP | maintenance |
 | compose down -v | operator-only destructive action | release gates prohibit automation, restore drill | outage; possible loss |

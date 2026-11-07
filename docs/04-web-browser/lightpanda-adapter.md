@@ -158,3 +158,7 @@ P0契約未LockedのためDraft維持。
 - **[PR metadata inspected]** [Lightpanda PR #3231](https://github.com/lightpanda-io/browser/pull/3231) はScreenshot実装のmerged PR。現行 `Page.captureScreenshot` の**PNGのみ**という実コードを正本の挙動として評価。PR titleだけで他format対応は保証しない。
 - **[Issue report / not reproduced]** [#3076](https://github.com/lightpanda-io/browser/issues/3076) はPlaywright Test over CDPの互換性改善要望。特にContext/Storage/Download/Network routeの同一動作を前提にしない。**LP-T03, LP-T05, LP-T08** ではAPIが成功応答を返しても状態隔離が失われていないか負のfixtureを追加。
 - **[Issue report / not reproduced]** [#3747](https://github.com/lightpanda-io/browser/issues/3747) は日本語がPNG screenshot上で豆腐（四角）になるというv1.0.0報告。**LP-T13** の同条件比較に日本語/かな/漢字/混植fixtureを必須追加し、文字が判読不能なLightpanda visual outputを後続Visionに渡さない。HTML/Markdown抽出が成功していても画像側の品質は別判定。
+
+## 2026-11-07 Muse移行: ブラウザエンジンの差替えも安全境界固定
+
+Lightpanda/Chromiumなどエンジンの選択はBrowser Broker内の互換アダプタとしてのみ許可。Browser sandbox、Tenant/Owner isolation、CDP限定公開、Sentinelのネットワーク強制が満たせなければ実験用のみに制限してproduction fail-closed。起動速度を優先してno-sandbox/privilegedや直接CDP経路へ切替えない。SC-18/19。

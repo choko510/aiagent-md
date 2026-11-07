@@ -9,6 +9,10 @@
 
 **Hard invariants (MUST):** (1) ドメイン変更・Event・Outbox recordを一つのDB commitで保存。(2) Outbox未publishを必ず再列挙可能。(3) Queue job payloadは不透明なPointer+generationでありauthorityではない。(4) Run leaseEpoch、Tool attempt fence、Schedule revisionは**別値**。(5) 既に外部実行したか不明なTool/NotificationはACK喪失だけを理由に盲目再実行しない。(6) pause/cancel/steer後の旧JobをTool Gatewayへ通さない。(7) CAS結果0行は「成功扱い」しない。(8) Queue障害でもTask/Watch正本を削除しない。
 
+## 0.1 2026-11-07 Secure Exec job/fence integration
+
+A sandbox.exec execution is child of canonical Task/Run. Enqueue/dispatch requires a durably committed Gateway Intent and the current Run lease; external requests from shell are forced through Sentinel. Queue delivery is at-least-once, not authority to fork/exec twice. A worker/VM crash must reconcile process identity, workspace revision, network/effect receipts before retry. Stale Cell processes and child jobs cannot create new network effects or commit Artifact/DB state after lease invalidation. The existing Side-effect Ledger's UNKNOWN state still dominates uncertainty. New queue job kinds/execution IDs are PROVISIONAL until CHAT_01/02/03/09/10 agree. See [Exec](../02-runtime/sandbox-execution.md).
+
 ## 1. Scope / Non-scope / Scenario
 
 **Scope:** Postgres queue, transactional Outbox, producer/relay/consumer, at-least-once, stale lease fencing, due job dispatch, retry/cap/DLQ, idempotent checkpoints and delivery reconciliation, schema migration hooks, operations and metrics.

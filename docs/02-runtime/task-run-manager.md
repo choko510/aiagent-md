@@ -199,3 +199,7 @@ P0 CHAT_01 Task/Run State, GoalRevision, leaseEpoch decimal string, nullable con
 - [S3] Code+test inspected: https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/src/plans.ts ; https://github.com/timgit/pg-boss/blob/71ea068b144c75b014a1eb90327aaa4a92da1cf2/test/attemptFenceTest.ts
 - [S4] Code+test inspected: https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_runner.py ; https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/tests/test_pregel.py
 LICENSE: LangGraph / PydanticAI / pg-boss はMIT、@mastra/coreはpackage.jsonのApache-2.0宣言を確認。ソースとテストの読解のみで本Harnessコードを実装/実行したものではない。
+
+## 2026-11-07: Execution/Workspace子資源の権限・寿命
+
+Task/Runの既存正本は維持。SandboxExecutionはRunに従属し、Cell内のProcess GroupとWorkspace versionを持つ。Cancel/Steer/lease失効/認可変更で新execと新外部dispatchを停止、子プロセスを強制終了しGrantを失効させる。既送外部効果は撤回不可なのでSide-effect LedgerがUNCERTAINなら再送禁止。旧Run/子Taskから成果物やプロセスを新Runへ無断移譲できない。Run終了時に孤児子プロセス0とWorkspace owner/version CASを検証。SC-21。

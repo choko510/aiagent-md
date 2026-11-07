@@ -1,6 +1,6 @@
-# Canonical Specification Inventory: 85 Modules / 16 Independent Chats
+# Canonical Specification Inventory: 88 Modules / 16 Independent Chats
 
-> 2026-10-30。**85仕様MDは文書としてDraftで配置されている。契約のLocked、HarnessのImplemented/Verifiedを意味しない。** カテゴリオーナー以外は編集禁止。
+> 2026-10-30。**88仕様MDは文書としてDraftで配置されている。契約のLocked、HarnessのImplemented/Verifiedを意味しない。** カテゴリオーナー以外は編集禁止。
 
 | ID | Required specification path | Owner | Initial state |
 |---|---|---|---|
@@ -27,6 +27,7 @@
 | 02-10 | `docs/02-runtime/budget-and-limits.md` | CHAT_02 | Draft / documented (not Locked) |
 | 02-11 | `docs/02-runtime/middleware-lifecycle.md` | CHAT_02 | Draft / documented (not Locked) |
 | 02-12 | `docs/02-runtime/subagent-delegation.md` | CHAT_02 | Draft / documented (not Locked) |
+| 02-13 | `docs/02-runtime/sandbox-execution.md` | CHAT_02 | Draft / PROVISIONAL (Muse migration) |
 | 03-01 | `docs/03-tools/tool-registry-and-discovery.md` | CHAT_03 | Draft / documented (not Locked) |
 | 03-02 | `docs/03-tools/tool-execution-gateway.md` | CHAT_03 | Draft / documented (not Locked) |
 | 03-03 | `docs/03-tools/tool-approval-and-policy.md` | CHAT_03 | Draft / documented (not Locked) |
@@ -69,6 +70,8 @@
 | 09-04 | `docs/09-security/network-egress-and-ssrf.md` | CHAT_09 | Draft / documented (not Locked) |
 | 09-05 | `docs/09-security/prompt-injection-defense.md` | CHAT_09 | Draft / documented (not Locked) |
 | 09-06 | `docs/09-security/privacy-audit-and-retention.md` | CHAT_09 | Draft / documented (not Locked) |
+| 09-07 | `docs/09-security/runtime-cell-isolation.md` | CHAT_09 | Draft / PROVISIONAL (Muse migration) |
+| 09-08 | `docs/09-security/sentinel-authority.md` | CHAT_09 | Draft / PROVISIONAL (Muse migration) |
 | 10-01 | `docs/10-infrastructure/database-schema-and-migrations.md` | CHAT_10 | Draft / documented (not Locked) |
 | 10-02 | `docs/10-infrastructure/job-queue-and-outbox.md` | CHAT_10 | Draft / documented (not Locked) |
 | 10-03 | `docs/10-infrastructure/docker-deployment.md` | CHAT_10 | Draft / documented (not Locked) |
@@ -82,17 +85,17 @@
 ## Assigned ownership and counts
 - CHAT_00: `docs/00-foundation/` (5 MD)
 - CHAT_01: `docs/01-contracts/` (6 MD)
-- CHAT_02: `docs/02-runtime/` (12 MD)
+- CHAT_02: `docs/02-runtime/` (13 MD)
 - CHAT_03: `docs/03-tools/` (6 MD)
 - CHAT_04: `docs/04-web-browser/` (9 MD)
 - CHAT_05: `docs/05-connectors/` (5 MD)
 - CHAT_06: `docs/06-memory-skills/` (5 MD)
 - CHAT_07: `docs/07-automation/` (5 MD)
 - CHAT_08: `docs/08-interfaces/` (6 MD)
-- CHAT_09: `docs/09-security/` (6 MD)
+- CHAT_09: `docs/09-security/` (8 MD)
 - CHAT_10: `docs/10-infrastructure/` (5 MD)
 - CHAT_11: `docs/11-qa/` (4 MD)
-**Count: 85 module specs.** README、AGENTS、補助設計文書および調査履歴はこの件数に含まない。旧CHAT_XXは執筆当時の所有者ラベルで、実装担当を制約しない。
+**Count: 88 module specs.** README、AGENTS、補助設計文書および調査履歴はこの件数に含まない。旧CHAT_XXは執筆当時の所有者ラベルで、実装担当を制約しない。
 
 ## Change control
 実装で仕様の変更が必要になったら、関連する正本・契約・依存モジュールを洗い出し、ADR、互換性、要件/テスト対応を含めてPRで更新する。元のCHAT担当区分は設計上の責務境界を示す履歴であり、実装作業を16チャットに分ける必要はない。`Locked`化は契約整合と承認後のみ。
@@ -120,4 +123,9 @@
 - CHAT_14: `docs/14-adaptive-experience/` (2 MD)
 - CHAT_15: `docs/15-multimodal/` (1 MD)
 
-**Total 74 + 11 = 85 planned module documents across 16 author chats.**
+**Historical: 74 + 11 = 85 original drafts; 2026-11-07 Muse migration adds 3 = 88 module documents across 16 owner domains.**
+
+## 2026-11-07 Adaptive Context integration addendum
+
+既存の仕様数は**88件のまま**で、新しい独立MDは増やさない。実装可能な詳細契約は **02-08 [Context Manager and Compaction](../02-runtime/context-manager-and-compaction.md) の18節** に追記。これを中心に02-03/06/09/10/12、06-01/02、08-04、09-05、11-01/04、01/10の各正本・横断提案を整合させる。ADR-023〜028とDEC-P0-08〜10、DEC-P1-06は [Architecture Decisions](architecture-decisions.md) を確認。**PR #68 Muse secure architectureに依存するDraft proposal** であり、承認・実装・QA実行済みではない。
+

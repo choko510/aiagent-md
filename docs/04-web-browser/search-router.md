@@ -536,3 +536,7 @@ Scope/所有者/REQ-ID/追跡/State/Error/Cancel/Crash/Secret/費用上限/OSS l
 **新しい拡張への接続:** SC-10の未知候補発掘、SC-11 X投稿イベント起点検索、SC-12サイト変更に対し、Event/Opportunityの本文を新しいTool authorityに昇格させない。SearchPlanをTask/Run/goalRevision/Policyへ紐付け、検索結果に無条件の確定イベントを生成しない。Source reliability (CHAT_12) はrankingヒントとしてのみ参照し、原典Evidenceを変造しない（SC-14）。
 
 **既存PR修正の目的:** 新規機能ではなく、他担当の未マージ仕様と衝突する暗黙仮定を取り除く。下記の共同合意が出るまではDraft維持。契約のレビュー後に正式field namingと型へ置き換える。
+
+## 2026-11-07 Muse移行: Search/Browser/CLI Egress権限
+
+Search Routerは既存のHTTP/API→静的抽出→Browserの低コスト選択方針を保持し、隔離Runtime CellでAgentが生成したCLI/Scriptを使う場合も外部通信はSentinelが**実ソケット単位で**許可する。検索URLや未知の外部内容はPrompt Injectionで権限を追加できない。Shellから直接Private/LAN/API Credentialへ接続できず、認証情報が必要ならTrusted Connector/Browser Brokerに委譲。SC-17/19/22。

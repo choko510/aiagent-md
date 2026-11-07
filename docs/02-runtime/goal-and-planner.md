@@ -46,10 +46,10 @@ Goalの入力をプロンプトから保存する場合もAuth/tenant/ownerを�
 ## 5. 変更できるinternal contracts（共通型ではない）
 ~~~ts
 interface GoalSnapshot {
- taskId:string; revision:number; createdByUserId:string;
+ taskId:string; revision:string; createdByUserId:string; // canonical int64 decimal-string wire
  sourceCommandId:string; goalTextRef:string;
- hardConstraints:ReadonlyArray<{key:string;operator:string;value:unknown;unit?:string}>;
- softPreferences:ReadonlyArray<{key:string;weight:number;value:unknown}>;
+ hardConstraints:ReadonlyArray<GoalCondition>; // See P0 typed contract addendum
+ softPreferences:ReadonlyArray<{condition:GoalCondition;weight:number}>;
  successCriteria:ReadonlyArray<{criterionId:string;verifierId:string}>;
  timeZone:string; locale:string; schemaVersion:1;
 }
@@ -160,3 +160,43 @@ All unresolved cross-owner fields are [PROVISIONAL]; do not mark Locked before a
 - [S4] https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/deepagents/middleware/subagents.py ; https://github.com/langchain-ai/deepagents/blob/3efa098130d6670fe713f841072bc11ff40545da/libs/deepagents/tests/unit_tests/test_todo_middleware.py
 - [S5] https://github.com/pydantic/pydantic-ai/blob/c2ac8cc49cbec6a3c5c7a3351fa92cbf8e19a0d9/pydantic_ai_slim/pydantic_ai/_output.py
 Code verified = actual source inspected; test definition verified = test file read but not run. MIT for PydanticAI/OpenAI Agents Python/LangGraph/Deep Agents as recorded in inspected project metadata; Mastra @mastra/core declares Apache-2.0. No implementation/tests executed in this spec repository.
+
+## 2026-11-07: PlannerのSandbox Exec選択
+
+Plannerは従来のAPI/HTTP/Browser/固定DAGに加えSandbox Execを使ったスクリプト生成・処理・依存導入・コンパイル/テストを手段として選択できる。簡単な集計は低コストで決定的な関数を優先し、Shellが必要ならWorkspace/Input Artifacts、再現性、ネットワーク目的、費用上限と承認が必要な外部効果を明示する。Web/メール/Skillからの指示は常に非信頼で、計画に書いてあっても外部通信や保護サービスアクセスのGrantにはならない。SC-17/19/22。
+
+## 2026-11-07 P0: GoalRevisionが保持する値を含むTypedGoalAnchor（修正提案）
+
+`Context Manager 18.18`のcanonical Goalの唯一のオーナーはCHAT_02/01。本書の旧`hardConstraints:{key,operator,value:unknown}`は初期提案であり、実装では次の**値・条件・否定・由来を検証可能な型**へ置き換える。Modelに値や単位を補わせない。
+
+~~~ts
+type ConditionValue =
+ | {type:"MONEY";amount:string;currency:string;tax:"INCLUDED"|"EXCLUDED"|"UNKNOWN";fees:"INCLUDED"|"SEPARATE"|"UNKNOWN"}
+ | {type:"QUANTITY";decimal:string;unit:string}
+ | {type:"LOCAL_DATE";date:string;zone:string;state:"KNOWN"|"UNSPECIFIED"|"AMBIGUOUS"}
+ | {type:"INSTANT";utc:string;originalZone:string}
+ | {type:"BOOL";value:true|false}
+ | {type:"ENUM";code:string}
+ | {type:"UNKNOWN";reason:"MISSING"|"AMBIGUOUS"|"CONFLICTED"};
+interface GoalCondition {
+ conditionId:string; key:string;
+ operator:"EQ"|"NE"|"LTE"|"GTE"|"IN"|"NOT_IN"|"EXISTS"|"NOT_EXISTS";
+ value:ConditionValue; strength:"REQUIRED"|"FORBIDDEN"|"SOFT";
+ sourceUserMessageRef:string; sourceCommandId:string;
+ conditionScope:string; explicitness:"USER_EXPLICIT"|"USER_CONFIRMED";
+}
+interface TypedGoalAnchor {
+ taskId:string; canonicalGoalRef:string; goalRevision:string;
+ schemaVersion:1; snapshotDigest:string;
+ hard:GoalCondition[]; soft:GoalCondition[]; unresolved:GoalCondition[];
+ sourceMessageRefs:string[]; locale:string; timeZone:string;
+}
+~~~
+
+- Must validate input normalization: ISO4217/decimal string (no float)、IANA TZ、日時未指定/曖昧/矛盾、税込/税別・人数×部屋・駐車料金別などの複合条件、soft/hard/negative/exception。存在だけの`mandatoryFields:string[]`は値の代替にしない。
+- `GoalSnapshot.revision` /`goalRevision`は共通CHAT_01 int64 canonical decimal **string**に合わせる。DraftのTSで`number`と書かれた版値はこの決定に対して旧表現であり、実装では変換せず無効とする。
+- Steerの新Revisionは前版全値から暗黙継承するのではなく、変更操作が指定する条件にのみ差分を適用。新しいcanonical全条件Snapshotを原子保存し、退役した/否定された条件を再活性化しない。
+- 不明な宿泊日を今日で埋めない。金額に含まれない駐車料金は`fees=SEPARATE`としてConstraint/Evidenceと区別し、ResultVerifierは必要なALL-IN比較で証拠不足を明示。
+- Hard anchorの完全性は`conditionId,value,operator,strength,scope,digest`の型付き同値比較。LLMが条件本文を要約してもGoalの実値を置換しない。
+
+**Tests (NOT RUN)**: ACM-T21/26、Goalを8名→10名にSteer、日付未指定、税別料金/駐車別、否定「喫煙不可」、SOFTの重みがHardへ昇格しない、int64>2^53のlossless round-trip。

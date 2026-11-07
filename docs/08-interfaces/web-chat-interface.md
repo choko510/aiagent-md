@@ -274,3 +274,7 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 | CHATUI-011 | CHATUI-T11 | SC-09 |
 
 **Execution:** 0 Harness tests run. These are proposed test cases; an independent reviewer must validate each result before Locked.
+
+## 2026-11-07: Muse型Agentの作業コンソール
+
+Webチャットから実行されるTaskは、Agentの計画、Sandbox Execコマンド、進捗、プロセス終了、Shell/生成コード由来Artifact、外部操作のSentinel承認/拒否を同じ正本Task/Runで表示する。ユーザーが指示しただけでホストShell権限が付くわけではない。表示上、Script生成中・ローカルコード実行中・ネットワーク承認待ち・VM隔離失敗・外部Effect UNKNOWNを区別する。生Credential/CDP/Terminal envは表示しない。Pause/Resume/CancelはProcess Group終了/Run fencingの完了を待つ非同期Command。ユーザーの手入力がモデルに権限を追加するのではなく認証済みApproval UI経由で特定Actionだけ許可。SC-17/18/19/21。

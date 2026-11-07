@@ -1,0 +1,28 @@
+name: Adaptive Context spec contract (static only)
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "audit/context/**"
+      - ".github/workflows/adaptive-context-spec-audit.yml"
+  push:
+    paths:
+      - "docs/**"
+      - "audit/context/**"
+      - ".github/workflows/adaptive-context-spec-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  static-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate design contracts and test examples
+        run: python3 audit/context/validate_spec_contracts.py
+      - name: Clarify test scope
+        run: echo "STATIC PASS is not runtime/DB/LLM/VM verification."

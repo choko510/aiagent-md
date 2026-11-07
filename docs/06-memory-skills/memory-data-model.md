@@ -557,3 +557,32 @@ URLはソースcommitへpin。行番号は調査時点の参考、関数/テス�
 - **[S13] Issue report (not current bug verification)** — Hermes #85858, 2026-10-13 closed, concurrency loss narrative: https://github.com/NousResearch/hermes-agent/issues/85858
 
 **Readiness**: 本文のOSS部分はソース/テスト閲覧に基づく。選定したHarnessの論理契約、上限、transaction/index/outbox構造は **proposed design / Hypothesis**。動作試験、負荷試験、統合試験は未実施。Revision/Schema/Privacyのオーナーが承認するまで **Draftのまま**。
+
+## 2026-11-07: Runtime WorkspaceとMemoryの分離
+
+SandboxExecutionのScript、stdout、temporary package、Workspace snapshotを長期Memoryと混同しない。作業中のプロセス/ファイルはuntrustedで、成功したTaskであってもMemoryにコードや秘密・Shell実行権限を自動追加しない。Workspaceの永続Artifactにはowner/tenant/task/run/execution、digest、retention、review statusが必要。Memoryの書込みでSentinel policy、Credential Brokerの許可、正式Tool/Skill Registryを変更できない。SC-20/22。
+
+## 2026-11-07 横断決定: Adaptive Context Memory 正本境界
+
+参照: [CTX 18節](../02-runtime/context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。本追記は現行Draftを補強し、MemoryServiceの単一Writer・Postgres正本を変更しない。実装/テストは未完了。
+
+- Memoryはprofile/episodic/procedural_hint/task_noteの論理レコードのみ。Task Journal、Exec stdout、Workspace artifact、Tool結果、Watch Observation、Goal、PolicyはMemory正本へ昇格しない。
+- User訂正・Undo・DELETEはACTIVE ProjectionのsourceEpochを更新し、同一transactionでCAS/tombstone/index invalidation intentを確定。後続のモデルdispatchは最新Epoch、recordRevision、ACL、consent、validityを**再読**する。読み込み直後の削除競合も遮断する。すでに外部Modelへ送った文字列は回収不能。
+- MemoryScopeとTenant/OwnerはAuthContext由来であり、LLMが提示したscope、Sandboxからのファイル名、子Taskの文字列を使って権限拡張しない。UIの再構築要求はMemory Writerのcommitを偽装しない。
+- 最終Goalは独立したtyped hard-anchor。Taskに紐付けたMemoが8人/2泊なのにMemoryに2人とあれば、Userの現Goalが必ず勝つ。scope移動は既存recordの上書きでなくrevoke+consented new record。
+- 自動推論のsummaryを自身の出典として二重登録し「verified」へ格上げしない。sourceRefの有効性を検証し、期限切れ情報を現在値にしない。
+- Projection上限は既存の8件/1,500 tokens（最大20件/2,000 tokens）の暫定値を優先し、ContextManagerのさらに厳しい残余Budget内へ縮める。Privacy Policyで禁止のSourceはscoreに関係なく0件。
+- AuditはsourceEpoch/recordRevision、operation id、scope、decision codeだけを記録し、本文・Secret・PIIをメトリクスラベルへ流さない。
+
+**Cross-owner acceptance**: CHAT_02はモデル呼出前のMemory epoch recheckを実装、CHAT_10はcommit+projection invalidation/Restore tombstoneの一貫性、CHAT_09は認可と消去政策、CHAT_11はACM-T02/T09/T10/T14を検証。正式Schema/DDLは未Locked。
+
+## 2026-11-07 P0: Memory WriterとModel Gatewayの送信境界
+
+既存の`sourceEpoch`再確認は必要だが**それだけでDELETEとの競合を排除できない**。`Context 18.20`に従い、MemoryWriterの`tombstone/epoch CAS`とProtected Model Gatewayの`dispatch_admission`を同一scopeのDB row lockで直列化する。Memoryの所有者/ScopeをMemory record本文・LLM生成値から取得しない。
+
+- DELETE/CORRECT/UNDOはactive record失効+epoch増分+outboxを短いTXでcommit。先にcommitされたDeleteより古いMemory参照を含む後続のModel Admissionは0。Index delete完了を待たなくてもRead barrierで拒否。
+- Admissionが先にcommitしたAttemptは送信済みの可能性がある。Writerは未送信Ticketを取消し、in-flight Gatewayへcancelを要求。既送信/不明は`MAY_HAVE_SENT`として監査し、ユーザーに外部Providerからの撤回不能性を説明。
+- Memory delete後に動作中TaskのSnapshot/Cache/Child projectionが旧EpochならRebuild。Cross-tenant Cache reuse禁止。Provider別のデータ送信ConsentとRecordのMemory登録Consentは**別判定**。
+- すでにProviderへ送信したデータは消去を約束できない。ユーザーの削除操作自体は引き続き即時のread/dispatch exclusionと後続purgeを約束し、外部到達に関する不確実性を隠さない。
+
+**Tests**: ACM-T24/25/30、古いin-flight sourceEpoch、Deleteと二つのGatewayが同時Admission、cancel/ACK lost、backup後tombstone回復。**ランタイム未実装**。

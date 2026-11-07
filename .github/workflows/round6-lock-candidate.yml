@@ -1,4 +1,4 @@
-name: round6-lock-candidate-audit
+name: archived-round6-original-85-provenance
 on:
   workflow_dispatch:
 permissions:
@@ -10,7 +10,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Verify all 61 merged source PR HEADs and 85 main module blobs
+      - name: Historical 61 PR / original 85 blob identity audit (pinned 2026-11-07 baseline)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEGACY_85_BASE_SHA: 8b153c238c8a4cc18b6e9d258e55d3265e5249d5
         run: python3 governance/round6/validate_candidate.py

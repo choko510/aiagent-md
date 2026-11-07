@@ -324,3 +324,6 @@ Atomic sequence: authorize and lock Watch, obtain previous accepted Evidence/Art
 CHAT_10's forward migration proposal introduces `source_attempt_receipts` and `change_baselines`. `scope_digest` must commit exact origin/URL, user credential scope, cookie/auth session, locale, extractor version and field conditions. Every baseline update needs a valid Observation Evidence ID and complete source attempt; a failed/partial/unknown fetch cannot be promoted to a verified price baseline solely because an HTTP status was successful. Out-of-order old extraction and stale `entityMappingRevision` fail baseline CAS. No notifications until CHAT_07's actual Watch trigger review.
 Tests CHG-R4-T07 failed source attempt cannot satisfy price threshold; T08 two watchers same page but different session digest remain separate; T09 stale definitionRevision does not overwrite baseline. Draft.
 
+## 2026-11-07: 生成Diffコードと安全なイベント連鎖
+
+AgentがWebページDiff/Observation抽出をPython/CLIで生成した場合、Source/Execution/WorkspaceRevisionに紐づけた非信頼Artifactを取得する。確認済みSource URL/observedAtと未確認Script推定を区別し、イベント本文/Changeが実行権限やSentinel Policy、承認済み宛先を追加できない。再解析用外部取得はSentinel強制出口経由。SC-17/19/22。

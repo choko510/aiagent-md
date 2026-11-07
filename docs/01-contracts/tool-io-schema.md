@@ -256,3 +256,18 @@ Do not mark Locked until Tool Gateway and schema dialect are agreed.
 **Review gates:** Tool Gateway policy, Schema dialect and owner/lease DB contract unresolved. Tests designed but not run, Draft only.
 
 **MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
+
+## 2026-11-07: sandbox.exec Tool I/Oと外部Grantの交差
+
+新登録Tool sandbox.exec は **モデル提案 SchemaとサーバーAdmission Schemaを厳密に分離**。提案はargv/cwdRelative/入力Artifact/有限予算ヒントのみで、runtimeProfile・imageDigest・所有者/RevisionはAdmissionでのみサーバーが設定する。返却はexecutionId, bounded stdout/stderr artifact refs, exitCode/signal, produced Artifact refs, attestationRef, execution state と external effect status (none_verified/known/uncertain)。stdoutを自由なJSON Tool Schemaや権限として扱わない。外部Connector/egrは別のIntent/Approval/Sentinel grant; Scriptから直接任意の認証情報を渡すツール型は許可しない。canonical schemaはCHAT_01とCHAT_02/03/09の同意後採用。SC-17/18/19/21。
+
+## P0-4: canonical sandbox.exec boundary (2026-11-07 review fix)
+
+Previous combined "Tool Input" description is superseded: only `SandboxExecProposalV1={tool:"sandbox.exec",argv,cwdRelative,stdinArtifactRef?,requestedPackageRefs?,requestedLimits?}` may originate from LLM/Skill. It MUST NOT contain executionId, taskId, runId, owner, tenant, goalRevision, leaseEpoch, toolIntentId, cellId, imageDigest, policyEpoch, networkMode, workspaceId or runtimeProfile. Any unexpected field causes strict schema rejection. **Server-only `SandboxExecutionAdmissionV1`** attaches those values after canonical Run state read, budget reservation and durable Gateway Intent. **runtimeProfile is REQUIRED in Admission**, set by server to secure_isolated/restricted_compute; production never honors Agent-selected development_only. Goal/lease/workspace revisions are canonical validated signed int64 decimal wire strings (BigInt internally). Exact logical definitions: [02-13 §1](../02-runtime/sandbox-execution.md).
+
+Each child external action uses a separate strict `ExternalActionProposalV1` (only operation/args/requestId). Trusted Broker RPC derives authenticated identity and creates its own Gateway Intent/Side-effect Ledger record; `sandbox.exec` grant does not authorize HTTP writes. `ExternalActionReceiptV1` correlates intent, execution and Sentinel decision; sent/ACK lost is UNCERTAIN. Tests EXEC-T13..18, SC-17/19/21. The old prose describing executionId/imageDigest as model input is non-normative; do not implement from it.
+
+
+## Machine-readable contract and schema negative-gate status (2026-11-07)
+
+Provisional machine-readable files: [SandboxExecProposalV1](../../contracts/muse/sandbox-exec-proposal.schema.json), [SandboxExecutionAdmissionV1](../../contracts/muse/sandbox-exec-admission.schema.json), [ExternalActionProposalV1](../../contracts/muse/external-action-proposal.schema.json). The schema validator rejects LLM-supplied owner/Run/Lease/VM/profile/image, oversized commands and int64 numeric/overflow at admission. These are Draft source-of-truth **proposals** to lock together with CHAT_01/02/03/09 rather than a second contradictory Tool schema. Runtime port, DB mapping and packet-level enforcement must still be implemented/tested.

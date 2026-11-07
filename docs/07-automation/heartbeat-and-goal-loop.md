@@ -304,3 +304,7 @@ P0が未決のためDraft。目標が継続できるという宣言は実運用�
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+## 2026-11-07: 自律Agentの無期限Shell実行は禁止
+
+Background Agentは次の目的を提案できても、無期限にVM/Cellのプロセスを残して活動しない。Heartbeatからの自律Runごとに予算/時間/owner/Goal/Leaseを再確認し、Sandbox Exec・Sentinel EgressのAdmissionを再実行する。停止/ユーザー失効/セキュリティ事故後に新規Spawn/外部操作しない。生成Skillの永続昇格や保護Harnessの自己改変はHuman Review対象。既存の有限Watch/Task模型を維持。SC-17/20/21/22。

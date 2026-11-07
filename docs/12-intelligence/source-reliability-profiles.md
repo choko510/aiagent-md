@@ -166,3 +166,6 @@ CHAT_10's proposed `source_attempt_receipts` is immutable per (tenant,sourceKey,
 Trend/Radar/Risk decisions must link to a specific profile revision and accepted SourceReceipt; a profile change or revoked provider entitlement invalidates derived confidence, not historical Evidence. Source correlation clusters mirror/retweets to one upstream origin; sample denominators unknown => coverage unknown, not zero.
 Tests SRC-R4-T01 same provider attempt key duplicate→one receipt; T02 partial coverage→no confidence 100%; T03 three mirrors same upstream→one independent source; T04 revoked provider still high historic score→denied Tool; T05 profile version old→consumer rejects stale claim. SC-01/10/14. DRAFT.
 
+## 2026-11-07: Generated Scraperは自動的に信頼ソースとならない
+
+Agent生成Script/Custom Connectorや新しいCLIの取得元は、実行成功だけでProviderの高信頼性を獲得しない。必要なSource identity, observedAt, URL, credential scope, Extraction/Execution digest, error rate, regression testsを独立保存。Runtime Cell内パッケージは非信頼であり、ポリシー・Evidenceの真偽やCredentialの信頼度を変更できない。SC-17/19/22。

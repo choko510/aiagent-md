@@ -20,6 +20,10 @@
 
 **Reject**: logging every LLM prompt/HTTP payload; deletion via one SQL DELETE without object/index/browser cleanup; returning `success` after enqueue alone; unlimited raw traces; backup restores that bypass tombstones; globally shared cache without owner scope; per-user copies of credentials in artifacts; automatic export of tokens as part of user data download.
 
+## 0.1 Runtime execution privacy addendum (2026-11-07)
+
+Generated code, shell histories, command arguments, terminal output, workspace snapshots, package-manager logs and process metadata may contain sensitive user data. Bound output sizes; redact logs/artifacts at controlled ingress; never log raw auth tokens, surrogate tokens, credential references with capability, browser storageState or passwords. Workspace deletion and tenant-specific retention must include command transcripts, temporary package layers and child process stdout/stderr. Control-plane audit of executable hash, image/policy epoch, owner/Run identity, Sentinel decision (not sensitive payload) and external effect receipt should remain reviewable while respecting retention constraints. See [Runtime Cell](runtime-cell-isolation.md) and [Sentinel](sentinel-authority.md).
+
 ## 1. Purpose, scope, non-scope and acceptance scenarios
 
 - Protect privacy of one initial owner and future several users in a self-hosted Ubuntu Docker deployment. Inputs: trusted user deletion/export/retention commands, domain data expiration, owner disable, operator key rotation, job/callback expiry; Outputs: redacted status, evidence of steps completed, tenant-scoped audit, safe export package, optional failure/UNCERTAIN report.
@@ -380,3 +384,14 @@ All fixture stores/emulated providers; **no real user data, credentials or produ
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+## 2026-11-07 P1: 原本とRedacted Projection、Model送信のプライバシー保証
+
+- **保存区分を分ける**: ユーザーが合法的に提出したPDF等で、照合目的に必要なものはSealedOriginalとして暗号化・owner隔離・短期保持し、LLM/検索には原本の派生物であるRedacted Projectionのみ提供する。元digest/ページと投影のdigest/offsetを混同しない。元Artifactの期限/ユーザー消去は正本であり、派生Refから勝手に復元しない。
+- **保存禁止区分**: Cookie/API key/OAuth token/Vault token/password/browser storageState/raw private env等はContext Originalとして無条件保存しない。必要なBearer tokenはCredential Broker所有の別Vault boundaryで保持し、Prompt/Trace/Sandboxに表示しない。Malware/未許可文書のquarantine・deleteを優先。
+- **ModelRequestSnapshot**: 復元に必要なPrompt PartはPolicyで許可された場合にのみsealed+encryption+purpose-specific TTL+KMS key idで保存。通常の監査/メトリクスへ平文を送らない。保存不許可ならnon-replayableと明示し再現したと主張しない。
+- **Model Recipient Policy**: データ分類・利用目的・Provider ID/地域・保存/学習利用設定・本人同意をprotected control-planeが判定。Model切替・Fallback前に再評価。Provider承認はMemoryへの恒久記録同意とは別。拒否の時は別送信経路へ勝手に迂回せずPartialへ。
+- **Deletion vs Dispatch**: Memory/Context削除commitがAdmissionより先なら旧Projectionを送信AdmissionできないことをDBで保証。Admission後に既送信ならcancelを試みても到達済みの可能性を表示。監査に送信対象のSecret/PII本文を残さず、attempt ID/recipient/epoch/decisionのみ保全。
+- **Retention**: Manifest/ContextCache/Sealed Snapshot/Derived Artifact/Backup/Indexの全派生へのpurge・key shred・revocation watermarkを追跡。合法保存中のSourceでも所定の保持期限切れでread-by-locatorをdenyする。
+
+Acceptance: ACM-T24/25/27/29/30/32。未実装、Owner CHAT_09/10/11 review必須。

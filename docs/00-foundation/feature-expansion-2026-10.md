@@ -71,3 +71,7 @@ Every external subscription has a user-approved purpose, a disabling mechanism, 
 
 ## Research and delivery
 当初の調査・執筆プログラムは終了し、対象11モジュールを含む85仕様MDが `docs/` に配置されている。**配置済み = 実装済み/契約Lockedではない。** 実装前に関連仕様の根拠、型と契約、失敗時挙動、承認境界、受入テスト、未解決のCross-team proposalを確認し、必要な決定はADRと実装PRに記録する。
+
+## 2026-11-07: 後続のMuse型Secure Runtime要求との関係
+
+本資料は2026-10の機能拡張履歴として維持する。後続のShell/生成Tool/自律Skills実行は[Sandbox Exec](../02-runtime/sandbox-execution.md)と[Runtime Cell](../09-security/runtime-cell-isolation.md)で隔離。既存のOpportunity/Event/Feedback/MultimodalはSentinel外部通信とCredential Brokerを迂回できない。ここに記載した件数・旧調査基線は履歴であり、最新Spec Indexは[spec-index.md](spec-index.md)の**88件**を参照する。Meta Muse実装済みという主張ではない。

@@ -326,3 +326,33 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 
 **Gate rules:** all GATE-R3-01..06 have runnable fixtures, independent assert against DB/network observations, version-pinned environment, recorded evidence SHA and nonzero process exit on failure; zero P0/P1 unaccepted conflicts before `Locked`; actual executed green tests plus rollout/restore for `Verified`. Any skipped required test is **not pass**. Runtime/DB schema may remain Draft until named owners reconcile; this spec's list is not a substitute for executing tests.
 
+## 2026-11-07: Muse Secure VM production gate
+
+Production BLOCKED unless all verified:
+- KVM guest and Untrusted Runtime Cell separate from Protected Services; shell works only inside Cell.
+- Every child Process, package hook, browser/MCP path and direct socket forced through Sentinel; DNS rebinding/IPv6/UDP/QUIC/opaque TLS fails closed.
+- No Credential Broker secret/CDP in Cell/model/logs; scopes and ownership validated.
+- Gateway Intent, Current Run/Lease/Goal/Budget/Human Approval, Sentinel Policy allow/deny, crash recovery/side-effect UNCERTAIN are coherent.
+- Development-only profile never claims production; missing kernel prerequisites explicit BLOCKED.
+- Original SC-01..16 regression and SC-17..22 positive+adversarial+fault tests pass; security failures are hard blockers.
+- Record actual startup cold/warm latency, RAM/CPU, quotas, network/Browser overhead, concurrent subagents and provider/token costs before claiming SLA.
+
+Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgroup/profile hash, Sentinel rules, Test time and traces. Static Markdown gate verifies only design syntax, not runtime isolation.
+
+## 2026-11-07 Adaptive Context 合格基準の追加（設計、未実行）
+
+正本: [Context 18.15](../02-runtime/context-manager-and-compaction.md#1815-実装優先度release-gate)。既存のSC-01〜22や安全ゲートを緩和しない。ACM試験は**Kernel/Cell実機安全性を保証しない**。Contextに対するoffline contract/fault/benchmark laneを追加する提案。
+
+**Blocking invariants**: hard anchors消失/変造0、旧Goal/Model/Memory projection誤使用0、未承認権限昇格0、scope/secret漏洩0、無出典の料金・在庫・承認・Task success 0、UNKNOWN side-effect retry0、old lease commit0、Provider unchanged-input infinite retry0。fixture全ケースで0を要求。失敗したらQualityの改善率がよくてもRelease不可。
+
+**Quality measures**: Evidence Recall@FixedBudget、precision of cited source locators、claim-to-source coverage、contradiction retention、context tokens/step、model+summarization total USD/task、retrieval and compaction p50/p95 latency、crash recovery success、source freshness compliance、cross-child duplicate claims。モデル・Tokenizer/Tool schema・Provider price snapshot・Locale/TZ・Source ages・seedを固定して再現。どの閾値も実装とBaseline測定前に製品保証値と表記しない。
+
+**Regression comparison**: safe full source (小規模fixtureのみ)、safe bounded tail、artifact offload only、ACMの4案を同一Data、同じModel/Tool allowance、同じBudgetで比較。価格だけ改善して根拠精度を下げる変更は拒否。長期Taskは複数の有限Run/Watchで測定し、1 Run無制限にしない。
+
+**Evidence**: Test transcriptをSecret/PII redactedで保存し、試験のFailを隠すretryをしない。Harness本体が未実装のためACM-T01〜T20はNOT RUN、CI上のMarkdown検証をruntime validationと表示しない。
+
+## 2026-11-07 Review P0/P1をRelease blockerへ追加（未実行）
+
+`ACM-T21〜36`を従来T01〜T20へ加え、次のHard gatesを必須化する。**引用が正しいだけで出典不支持の数値をverified化 0、Goal typed value/否定/税・費用修飾の変造0、Policy二重計上での不必要Block 0、Token Window超過0、RequestSnapshot不一致のReplay 0、DELETE先行Commit後旧Memory付きAdmission 0、無承認Provider fallback 0、Expired OriginalをVerified Evidence利用0、Child stale merge 0、Head/Artifact dangling Success 0、CrossTenant Cache leak 0、Coverage不足の誤Success 0**。
+
+速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。

@@ -2,7 +2,7 @@
 
 Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナルAIエージェント**の設計資料です。自然言語からWeb調査、比較、ブラウザ操作、外部API、定期監視、通知などを安全に実行することを目標とします。特定の商品・SNS・旅行サービス専用でも、コーディングエージェント専用でもありません。
 
-> **現在の状態（2026-11-05）:** 85件の詳細仕様MDはリポジトリに存在しますが、実装コードはまだありません。各仕様は `Draft / Provisional` で、契約の正式承認（Locked）や実機検証（Verified）を受けたことは意味しません。記載の外部API・OSSは実装時点で再検証してください。
+> **現在の状態（2026-11-05）:** 88件の詳細仕様MDはリポジトリに存在しますが、実装コードはまだありません。各仕様は `Draft / Provisional` で、契約の正式承認（Locked）や実機検証（Verified）を受けたことは意味しません。記載の外部API・OSSは実装時点で再検証してください。
 
 ## 実装開始時に読むもの
 
@@ -11,10 +11,10 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 3. [System Architecture](docs/00-foundation/system-architecture.md) と [Architecture Rules](docs/00-foundation/architecture-rules.md) — コンポーネント境界・正本
 4. [Acceptance Scenarios](docs/00-foundation/acceptance-scenarios.md) — ユーザーが求める動作
 5. [Architecture Decisions](docs/00-foundation/architecture-decisions.md) — 採用案・保留案・判断根拠
-6. [85仕様の索引](docs/00-foundation/spec-index.md) — 実装するモジュールの詳細仕様へのリンク
+6. [88仕様の索引](docs/00-foundation/spec-index.md) — 実装するモジュールの詳細仕様へのリンク
 7. [未承認の共有契約 CL-01〜12](governance/round6/contract-lock-candidate.md) — 整合・承認を要する重要事項
 
-各機能を実装するときは、索引からその機能の**正本MDと依存MD**（特に `01-contracts`、`03-tools`、`09-security`、`10-infrastructure`）を読んでください。85件を一括で読み込む必要はありませんが、関連する契約は省略しないでください。
+各機能を実装するときは、索引からその機能の**正本MDと依存MD**（特に `01-contracts`、`03-tools`、`09-security`、`10-infrastructure`）を読んでください。88件を一括で読み込む必要はありませんが、関連する契約は省略しないでください。
 
 ## 仕様のまとまり
 
@@ -38,10 +38,27 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 
 この順序は実装計画案であり、未承認の仕様を無条件にLockedとするものではありません。各PRは、小さく動作確認できる単位に分け、失敗・安全性・互換性まで検証してください。
 
+## Muse型 Secure Runtime（2026-11-07 設計改訂）
+
+従来の「登録済みToolだけ」から、****Trusted Control VMとは別カーネルのUntrusted Execution VM**内のRuntime CellでShell・Python・Node.js・CLI・自己生成コードを実行できる汎用Agent**へ拡張する設計です。ホストUbuntu、VM管理プレーン、Vault、Sentinel、Browser CDP、保護サービスへのアクセスは引き続き禁止します。Agentには自由なローカル計算を与え、**あらゆる外部操作は独立Sentinelが最終認可し、Trusted Egress Transportだけが実送信**（生成コードの直接ネットワーク接続は禁止）します。Credential Brokerが秘密を代理使用し、Agentは実トークンを閲覧しません。実装/実証済みではなく、共有契約は Draft / Provisional のままです。
+
+- [Runtime Cell Isolation](docs/09-security/runtime-cell-isolation.md) — VM/Cell分離、リソース制限、寿命、起動可否
+- [Sentinel Authority](docs/09-security/sentinel-authority.md) — すべての具体的外部操作と通信出口の最終許可
+- [Sandbox Execution](docs/02-runtime/sandbox-execution.md) — sandbox.exec、Execution/Workspace、停止、復旧
+- [受入シナリオ SC-17〜22](docs/00-foundation/acceptance-scenarios.md) — 生成コード実行からVM/通信隔離まで
+
+本番候補はKVM/QEMUによる**Trusted Control VMとUntrusted Execution VMの2ゲスト構成**（Agent LoopはTrusted側、生成コードはUntrusted側、Browser Workerは独立隔離）、Dockerはサービス管理と補助隔離に使用します。ハードウェア仮想化なしの開発用プロファイルは本番と同等ではありません。Sentinel障害・隔離不成立時に安全性を下げるフォールバックはありません。
+
 ## 安全性の基本原則
 
-Agentにホストの任意Shell/SSH/Dockerソケットや権限昇格を与えない。支払い、予約確定、投稿、外部送信などの不可逆な副作用は明示承認を必須にする。CookieやAPIキーをLLM文脈へ露出させず、Web上の文言を高優先度の命令として扱わない。実装がない/試験を実行していない段階で成功を宣言しない。
+Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格を与えない。支払い、予約確定、投稿、外部送信などの不可逆な副作用は明示承認を必須にする。CookieやAPIキーをLLM文脈へ露出させず、Web上の文言を高優先度の命令として扱わない。実装がない/試験を実行していない段階で成功を宣言しない。
 
 ## 調査資料の整理について
 
 並列仕様執筆時に使った担当別プロンプトや作成テンプレートは整理済みです。旧プロンプトの一部は既存仕様からの相対参照を維持するため、`prompts/ROUND2_AUTHOR_CONTINUE.md` のみ**履歴用資料として残置**しています。実装手順ではありません。削除したファイルもGit履歴から確認できます。元の61件の仕様PRとのSHA対応や未承認事項を確認する `audit/`、`governance/`、`.premerge/pinned-prs.json` は保持しています。
+
+## コンテキスト管理の実装判断（2026-11-07追記）
+
+LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き固定領域とし、Evidence原本のArtifact offload、関連度・鮮度で選択したWorking/Memory投影、根拠付きSummary、Checkpoint復旧/Model変更時の再構築を組み合わせる。[詳細: Context Manager 18節](docs/02-runtime/context-manager-and-compaction.md) / [ADR-023〜028](docs/00-foundation/architecture-decisions.md) / [QA ACM-T01〜20](docs/11-qa/benchmark-and-release-gates.md)。
+
+Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。

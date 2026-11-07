@@ -180,3 +180,28 @@ Code verified = GitHub source functions inspected. Test definition verified = re
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: Model Adapterは実行ポリシーを管理しない
+
+Modelはsandbox.exec Tool proposalを生成できるが、実Exec/Workspace/Network/Connector許可はGateway/Cell Admission/Sentinelの権限境界に委ねる。保護されたModel Gatewayへ必要部分だけ送信し、Cell内CLIが生のProvider API鍵を使って推論/課金/権限を迂回できない。モデル切替、プロンプト更新、コンパクションからHost/Protected ServicesのShell・Vault・CDP権限を得られない。SC-18/19/22。
+
+## 2026-11-07 ContextManifest compatibility on model switch
+
+[Adaptive Context 18.5/18.7](context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)により、ModelRouterはcontextWindow、maxOutput、tokenizerId、tool schema ability、capability revision、pricing snapshotをModelAttemptへ固定し、ContextManifestへ反映する。旧ProviderのToken見積を無条件に新Providerへ渡さない。
+
+- fallback時は現在GoalRevision/Memory sourceEpoch/PolicyVersion/Artifact hashesを再検証し、Context計画とoutput reserveを新Modelで作り直す。
+- Provider continuation固有の状態を保持する場合はそのproviderにピン留めし、完全移植不可なら別Run stageの安全な再構築/partialを選ぶ。
+- Inputが収まらなければPolicy/Goalを切らず別ModelかBLOCKED_CONTEXT_CAPACITY。Context overflowの縮小再試行は最大1回、同一Payloadのループ0。
+- Tool calling/vision/citationsの必要能力を欠くModelへの静かなfallbackは禁止。Price/usageとToken traceの比較はversionを揃える。
+
+Model switching/Provider 429、Tool schema増大、Tokenizer missing、Model Window過小をACM-T06/T07で検証。これらの本Harness実測は未実施。
+
+## 2026-11-07 P0/P1: Provider変更時のRequest SnapshotとRecipient Admission
+
+Fallback前にはContext全体を新Provider Adapterで再構築し、`PromptTemplateRevision`、`orderedMessages/roles/parts`、`ToolSchema digest/ordinal`、`Tokenizer revision`、`Provider continuation mode`を含む`ModelRequestSnapshot`を新しいAttemptで生成する。Provider間のToken算定・内部Role/Message serialization/Tool semanticsは同一とは限らない。
+
+**Privacy gate (MUST)**: Protected Model Gatewayが現在のprincipal/policy/consentと各データの機密区分から`recipient(providerId, region, retention, trainingUse, processingTerms)`の送信許可を評価する。Provider Aへの送信同意はProvider Bへ自動継承しない。未許可→`DENIED_RECIPIENT_POLICY`でB送信0、必要ならユーザー承認または削減Projectionで再構築（いずれも再審査）。LLM/Workspace/SkillがProvider Policyを上書きできない。
+
+**Budget gate**: 最終Provider serialized inputのToken数（Role wrappers/Policy projection/Tool schema含む）を一度だけ計数し、`W/R/S`と照合してAdmission。Prompt cacheや一時的推定Tokenが容量を増やさない。古いProvider payload digestで「同じPromptを再現」と断言しない。
+
+Continuationが特定Provider固有ならPinまたはNon-replayableとしてPartial。送信AdmissionはMemory削除・Goal SteerとAtomic Epoch検査が通ったものだけ。Tests ACM-T22/23/24/29/36、未実行。

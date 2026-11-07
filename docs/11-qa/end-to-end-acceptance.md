@@ -5,11 +5,11 @@
 
 ## 0. 結論と採用案
 
-採用は**16シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
+採用は**22シナリオの再現可能なオフラインE2E＋決定的な意味論Oracle**。会話文に似た回答を生成できたかではなく、意図・制約・正本状態・Evidence・外部副作用・不確定性・費用境界をタスクの入口から出口まで検査する。全シナリオに1件以上のpositive、1件以上のadversarial/negativeを要求し、**安全性や正確性の致命的失敗は重み付き平均で相殺しない**。Liveサイト/実LLMは別途許可された非blocking評価lane、受入の正本とはしない。
 
 ## 1. 目的・責務・非責務
 
-QA所有：SC-01〜16のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
+QA所有：SC-01〜22のtest matrix・ground truth・semantic assertion・UI/APIとDB read modelの整合検査・採点規則・再現report。商品照合、価格計算、スケジュール、通知、認証、X API、Multimodal抽出の**本番アルゴリズムは所有しない**。Task/Run/Event/Evidence/Approval/BrowserSession/Watchの型はCHAT_01正本を参照し、未Locked箇所は[PROVISIONAL: CHAT_XX]として要求だけ記載。全てsynthetic source、ユーザー秘密/実決済/実投稿なし。
 
 **前提**：QA Fixture V1（PR #7のRound2追補を含む）、fake clock、isolated DB/queue/browser、Mock HTTP/LLM、strict outbound denial。UIから起動したものとWatch/Eventから生成されたTaskを同じcanonical storeへ収束させる。
 
@@ -38,8 +38,8 @@ QA所有：SC-01〜16のtest matrix・ground truth・semantic assertion・UI/API
 
 | REQ-ID | Priority | 観測可能な条件 | SC |
 |---|---|---|---|
-| QA-E2E-001 | MUST | 全SC-01〜16にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜16 |
-| QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜16 |
+| QA-E2E-001 | MUST | 全SC-01〜22にpositive/negative/setup/action/assertion/traceを定義し、missing fixtureをpass扱いしない | SC-01〜22 |
+| QA-E2E-002 | MUST | 全Scenarioを同一Task API経由で流し、UI/API/DB/Evidenceを照合 | SC-01〜22 |
 | QA-E2E-003 | MUST | 重要事実を人手の自由文評点でなく型付きsemantic oracleで照合 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | MUST | 正確な制約、freshness、source/link、uncertaintyをground truthと比較 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-005 | MUST | 承認を要する購入/予約/投稿/送金は承認なしの成功も試行開始もゼロ | SC-01/04/06/07/08/13 |
@@ -48,12 +48,12 @@ QA所有：SC-01〜16のtest matrix・ground truth・semantic assertion・UI/API
 | QA-E2E-008 | MUST | Browser/Tool/tenantの認可境界と秘密非漏洩をassert | SC-06/07/08/13/15/16 |
 | QA-E2E-009 | MUST | 条件変更、Cancel、Steer、Revoke後の旧世代副作用を遮断 | SC-02/07/11/13 |
 | QA-E2E-010 | MUST | 受入OracleとTask/Run/Event version、schemaVersion/ID型を相互検証 | SC-02/06/07/11 |
-| QA-E2E-011 | MUST | Live-only依存と実測済み品質の虚偽主張を排除 | SC-01〜16 |
+| QA-E2E-011 | MUST | Live-only依存と実測済み品質の虚偽主張を排除 | SC-01〜22 |
 | QA-E2E-012 | MUST | SC-10〜16をSC-01〜09の安全/根拠/予算基準へ重ねて検証 | SC-10〜16 |
-| QA-E2E-013 | MUST | E2E実行結果はfixture版/モデル/seed/コード/時計/Browser/traceハッシュとともに保存 | SC-01〜16 |
+| QA-E2E-013 | MUST | E2E実行結果はfixture版/モデル/seed/コード/時計/Browser/traceハッシュとともに保存 | SC-01〜22 |
 | QA-E2E-014 | MUST | DB ID/会話nullable/CAS/fencing/owner mappingが不整合なら統合テストで赤くする | SC-02/06/07/08/11 |
 | QA-E2E-015 | MUST | CPU/LLM/Browser/HTTPの有限予算とdeadlineで停止し、timeoutは結果に記録 | SC-05/07/09/11 |
-| QA-E2E-016 | MUST | 失敗を症状ではなく失敗分類と再現情報で報告、artifactはredact | SC-01〜16 |
+| QA-E2E-016 | MUST | 失敗を症状ではなく失敗分類と再現情報で報告、artifactはredact | SC-01〜22 |
 
 ## 5. QA専用内部契約/API（本番Schemaではない）
 
@@ -160,6 +160,13 @@ async function evaluateCase(c: E2ECaseV1): Promise<E2ECaseResultV1> {
 | SC-15 Multimodal | 自作チラシPNG、見える表を埋めたPDF、XLSXセル、画像解像度不足・危険formula text | 複数文書から価格と条件を抽出 | page/box/cell由来付き、判別不能はunknown、script/macro/eval動作0 | OCR不明数値を捏造、PDFページ/セル参照の混同、式実行→FAIL | CHAT_15 |
 | SC-16 Feedback & ranking | user Aが低利益否定・店除外、Undo、静音時間、user B同時run、高優先alert | フィードバックを保存して推薦と通知を再評価 | PreferenceとFact分離・Undo可能、Aだけに適用、静音/priority・重複に整合 | 観測事実の上書き、Bへの混入、高優先ユーザーtriggerの暗黙drop→FAIL | CHAT_14/13/06 |
 
+| SC-17 Sandbox Exec | Python/Node/Shell generated test, scoped workspace | proposal/admission and offline run | local code/Artifact succeeds, no protected access | server-field forgery, raw Internet | CHAT_01/02/03/09 |
+| SC-18 Two VM trust boundary | separate guest kernels + protected probes | attempt host/Vault/DB/CDP socket | protected VM unreachable, no unsafe fallback | guest root escapes trusted plane | CHAT_09/10/11 |
+| SC-19 Broker external action | allowed public read + approved typed write | child Tool RPC, separate Gateway Intent/approval/Sentinel/Transport | receipt and correct scope | raw TLS/CONNECT and network bypass | CHAT_03/05/09 |
+| SC-20 Skills and packages | hash-verified offline Package Broker | temp Skill build/review | temporary execution only, staged packages | postinstall egress or auto-enable | CHAT_06/09 |
+| SC-21 Process lifecycle | forked children and VM loss | Pause/Steer/Cancel at send/ACK boundary | no stale process/grant; effect UNCERTAIN if sent | orphan process/replayed write | CHAT_02/03/10 |
+| SC-22 Personal data security | synthetic sensitive CSV/email and hostile content | try unauthorized disclosure | provenance/recipient policy and deny | exfil through stdout/body or alternate socket | CHAT_09/11 |
+
 ## 9. 障害と同時実行マトリクス
 
 | Cause | Detection / classify | Safe recovery / observable outcome |
@@ -243,12 +250,25 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-T39 | resource/time/token/tool budgetsを超過 | 強制停止、partialとbudget reasonを表示 | SC-05/07/09 |
 | QA-E2E-T40 | 異なるseed/locale/browser binaryを混在して同じスコアへ集約 | comparable cohortではないため集計拒否 | SC-09 |
 
+| QA-E2E-T17P | server-only admission fields rejected, isolated generated Python works | explicit positive Oracle and recorded evidence | SC-17 |
+| QA-E2E-T17N | adversarial/fault equivalent for server-only admission fields rejected, isolated generated Python works | zero unauthorized effect; hard release block on failure | SC-17 |
+| QA-E2E-T18P | trusted and untrusted kernel separation, inaccessible DB/Vault/CDP | explicit positive Oracle and recorded evidence | SC-18 |
+| QA-E2E-T18N | adversarial/fault equivalent for trusted and untrusted kernel separation, inaccessible DB/Vault/CDP | zero unauthorized effect; hard release block on failure | SC-18 |
+| QA-E2E-T19P | typed broker action accepted; direct raw network and opaque CONNECT denied | explicit positive Oracle and recorded evidence | SC-19 |
+| QA-E2E-T19N | adversarial/fault equivalent for typed broker action accepted; direct raw network and opaque CONNECT denied | zero unauthorized effect; hard release block on failure | SC-19 |
+| QA-E2E-T20P | offline staged package/temporary Skill works; persistent promotion reviewed | explicit positive Oracle and recorded evidence | SC-20 |
+| QA-E2E-T20N | adversarial/fault equivalent for offline staged package/temporary Skill works; persistent promotion reviewed | zero unauthorized effect; hard release block on failure | SC-20 |
+| QA-E2E-T21P | Cancel/Steer/Pause and VM crash stop descendants; lost ACK stays UNCERTAIN | explicit positive Oracle and recorded evidence | SC-21 |
+| QA-E2E-T21N | adversarial/fault equivalent for Cancel/Steer/Pause and VM crash stop descendants; lost ACK stays UNCERTAIN | zero unauthorized effect; hard release block on failure | SC-21 |
+| QA-E2E-T22P | malicious data cannot exfiltrate personal content or credentials | explicit positive Oracle and recorded evidence | SC-22 |
+| QA-E2E-T22N | adversarial/fault equivalent for malicious data cannot exfiltrate personal content or credentials | zero unauthorized effect; hard release block on failure | SC-22 |
+
 ## 14. 全MUST REQ → TEST → SC追跡
 
 | REQ | Designed tests | SC |
 |---|---|---|
-| QA-E2E-001 | QA-E2E-T01P〜16N | SC-01〜16 |
-| QA-E2E-002 | QA-E2E-T01P〜16N | SC-01〜16 |
+| QA-E2E-001 | QA-E2E-T01P〜22N | SC-01〜22 |
+| QA-E2E-002 | QA-E2E-T01P〜22N | SC-01〜22 |
 | QA-E2E-003 | QA-E2E-T01P/03P/04P/10P/14P/15P/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | QA-E2E-T01N/03N/04N/05N/10N/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-005 | QA-E2E-T01N/04N/06N/07N/08N/13N | SC-01/04/06/07/08/13 |
@@ -257,12 +277,19 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-008 | QA-E2E-T06N/08N/13N/15N/16N/37 | SC-06/07/08/13/15/16 |
 | QA-E2E-009 | QA-E2E-T02N/07N/11N/13N/36 | SC-02/07/11/13 |
 | QA-E2E-010 | QA-E2E-T02P/06P/07P/11P/33〜36 | SC-02/06/07/11 |
-| QA-E2E-011 | QA-E2E-T01P〜16N | SC-01〜16 |
+| QA-E2E-011 | QA-E2E-T01P〜22N | SC-01〜22 |
 | QA-E2E-012 | QA-E2E-T10P〜16N | SC-10〜16 |
-| QA-E2E-013 | QA-E2E-T01P〜16N/40 | SC-01〜16 |
+| QA-E2E-013 | QA-E2E-T01P〜22N/40 | SC-01〜22 |
 | QA-E2E-014 | QA-E2E-T33〜37 | SC-02/06/07/08/11 |
 | QA-E2E-015 | QA-E2E-T05N/07N/09P/39 | SC-05/07/09/11 |
-| QA-E2E-016 | QA-E2E-T01P〜16N | SC-01〜16 |
+| QA-E2E-016 | QA-E2E-T01P〜22N | SC-01〜22 |
+
+| QA-E2E-017 | QA-E2E-T17P/T17N | SC-17 |
+| QA-E2E-018 | QA-E2E-T18P/T18N | SC-18 |
+| QA-E2E-019 | QA-E2E-T19P/T19N | SC-19 |
+| QA-E2E-020 | QA-E2E-T20P/T20N | SC-20 |
+| QA-E2E-021 | QA-E2E-T21P/T21N | SC-21 |
+| QA-E2E-022 | QA-E2E-T22P/T22N | SC-22 |
 
 ## 15. 未決事項とCross-team proposals
 
@@ -331,3 +358,15 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 ### 19.1 Round 5 observed CI status
 [GitHub Actions run 40959094493](https://github.com/choko510/aiagent-md/actions/runs/40959094493) has four green jobs: draft PostgreSQL 16 migrations/FKs/32-writer sequence, 24-worker X ingress SQL Task dedup and transaction rollback/revoke, generic Chromium/SSRF reference tests, restricted Docker ZIP/Office reference parser, and all 61 PR / 85 MD static scan with 11 contract-presence gates. Explicit **not exercised**: actual agent Runtime, provider X entitlement/signed ingress, DomainEvent+Outbox full path, real sender ACK-loss and consent race, Browser EgressGuard, actual multimodal parser and migration runner. Static marker gates only indicate required strings/sections exist; they do not prove semantic consistency. This changes QA testing evidence status only for the synthetic fixtures, not the acceptance outcomes for SC-01..16.
 
+## 2026-11-07: SC-17..22 E2E受入条件
+
+| SC | 正常動作 | 攻撃/異常入力の合格条件 |
+|---|---|---|
+| SC-17 | Python/Node/ShellがCell内で動作しArtifact生成 | Hostパス/Env/Workspace越境不可、stdoutをEvidenceへ自動昇格しない |
+| SC-18 | 本番VM/Cell attestationを実施 | Host/Docker/VM/Vault/CDP/metadata到達0、KVMなし本番はBLOCKED |
+| SC-19 | 承認済みpublic GETはSentinel経由で記録 | 直接ソケット、DNS/IPv6/UDP/QUIC/WS、opaque raw POSTは禁止、proxy fail-closed |
+| SC-20 | Temporary Skillをタスク内で試行 | Policy/Skill Registry/Host自己変更不可、永続化に明示審査 |
+| SC-21 | Cancel/restartで全Processと旧grantを停止 | 外部UNKNOWNは再実行しない、旧lease書込み拒否 |
+| SC-22 | Brokerの正常スコープ操作可能 | Prompt Injectionで秘密/OTP/CDP/他Userが漏れない |
+
+全SC-17..22にpositive/negative/fault injectionと実際のVM・Kernel・Network証拠が必要。安全失敗を他の成功率で相殺しない。従来SC-01..16の非退行は必須。Requirements: CELL-001..016, SENT-001..016, GW-017..021, LOOP-021..023, PRD-020..025。

@@ -160,3 +160,7 @@ All unresolved cross-owner fields are [PROVISIONAL]; do not mark Locked before a
 - [S3] https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/goal/scorer.ts ; https://github.com/mastra-ai/mastra/blob/ec3ba11dad428caeb3b4afae77d1669462e8c129/packages/core/src/agent/goal/scorer.test.ts
 - [S4] https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/langgraph/langgraph/pregel/_loop.py
 Code verified = actual source inspected; test definition verified = test file read but not run. MIT for PydanticAI/OpenAI Agents Python/LangGraph/Deep Agents as recorded in inspected project metadata; Mastra @mastra/core declares Apache-2.0. No implementation/tests executed in this spec repository.
+
+## 2026-11-07: Exec成功とGoal成功の分離
+
+sandbox.execのexitCode 0、stdoutの成功宣言、生成ファイルだけではTaskの成功条件を満たさない。Version付きArtifact digest、入力と観測日時、試行/消費/終了理由、Sentinelの外部効果の結果とSide-effect Ledger照合を要求する。ネットワーク送信や予約・投稿がUNCERTAINのままなら、Agentが「成功」と書いてもGoal Verifierは成功扱いしない。生成Skillの一時実行と正式なSkill有効化も別。SC-17/20/21/22。
