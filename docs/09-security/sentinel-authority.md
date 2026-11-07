@@ -102,3 +102,8 @@ CHAT_09 network-egress-and-ssrf remains the canonical URL/DNS/transport rules; t
 - SENT-T10: raw credentials absent from agent prompt, artifacts, telemetry and task history; non-authorized users cannot view approvals.
 
 No implementation or test was run while preparing this spec. Deployment/CI gates must pin Ubuntu kernel, isolation profile and enforceable ingress/egress configuration. Test failures block production readiness.
+
+## 2026-11-07 再監査: DB復元世代の実送信Fence（Owner提案）
+
+DBのPITRでRun `leaseEpoch` が過去値へ巻き戻っても旧Workerの権限が復活してはならない。SentinelとEnforced Egress Transportは、**復元DBとは独立したOperator管理の現在`restoreIncarnation`** とcluster identity、tenant/owner/Run、currentGoalRevision/currentLeaseEpoch、policyEpoch、使い捨てGrantを結合して最後の送信境界で照合する。古いsocket/VM/Workerからの物理送信が遮断されない限り本番readyは禁止する。
+独立世代Storeに到達できない場合はfail closed。失効したSecret/ConsentやUNKNOWN副作用を復旧DBの古い値から再承認しない。実KVM/Firewall/Transport環境でREC-T23〜T27相当の負試験を実施するまで、これはDraftの設計案であり実装済み安全保証ではない。
