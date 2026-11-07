@@ -378,7 +378,7 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 
 ## 2026-11-07: SC-23 browser live observation E2E（NOT RUN）
 
-[SC-23](../00-foundation/acceptance-scenarios.md) に対し [BLO-001〜012 / BLO-T01〜12](../08-interfaces/browser-live-observation.md) を公開API・read-only Web UI・隔離Browser Workerの同一fixtureに追加する。Owner AのAgentはnavigate/click/scroll中も継続、Observer B（同Tenant別owner）/C（他Tenant）のMedia byteは0、ログイン/決済/canvas/unknownはframe全面遮断、HandoffまでAgent lease不変。Worker kill/revoke/Cancel/Tab交換後の旧frame送信0、全てのRaw frameがDB/Log/SSE/Evidence/Backupに混入0、slow viewer/relay切断でもRun Cancel 0。BLO-T01〜11が欠ける/落ちる場合はRelease Block。ライブサイトの成功をテスト結果に代用しない。テスト未実行。
+[SC-23](../00-foundation/acceptance-scenarios.md) に対し [BLO-001〜017 / BLO-T01〜16 / BLO-OFF-T01〜03](../08-interfaces/browser-live-observation.md) を公開API・read-only Web UI・隔離Browser Workerの同一fixtureに追加する。Owner AのAgentはnavigate/click/scroll中も継続、Observer B（同Tenant別owner）/C（他Tenant）のMedia byteは0、ログイン/決済/canvas/unknownはframe全面遮断、HandoffまでAgent lease不変。Worker kill/revoke/Cancel/Tab交換後の旧frame送信0、全てのRaw frameがDB/Log/SSE/Evidence/Backupに混入0、slow viewer/relay切断でもRun Cancel 0。BLO-T01〜11が欠ける/落ちる場合はRelease Block。ライブサイトの成功をテスト結果に代用しない。テスト未実行。
 
 
 ## 2026-11-07 PR #71再監査：正式SC-23追跡とRelease Profile
