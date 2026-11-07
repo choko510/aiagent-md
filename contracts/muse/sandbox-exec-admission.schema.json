@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/muse/sandbox-exec-admission.schema.json",
+  "title": "SandboxExecutionAdmissionV1 (server-only, never an Agent JSON)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "executionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "toolIntentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "proposalDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ownerUserId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "tenantId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "goalRevision": {
+      "type": "string",
+      "format": "signed-int64-decimal",
+      "pattern": "^-?(0|[1-9][0-9]*)$"
+    },
+    "leaseEpoch": {
+      "type": "string",
+      "format": "nonnegative-int64-decimal",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "workspaceRevision": {
+      "type": "string",
+      "format": "nonnegative-int64-decimal",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "cellId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "vmIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "imageDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "attestationRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "policyEpoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "policyDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "runtimeProfile": {
+      "enum": [
+        "secure_isolated",
+        "restricted_compute"
+      ]
+    },
+    "networkMode": {
+      "enum": [
+        "none",
+        "broker_rpc_only"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wallMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cpuMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stdoutBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stderrBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "diskBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "networkBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wallMs",
+        "cpuMs",
+        "memoryBytes",
+        "pids",
+        "stdoutBytes",
+        "stderrBytes",
+        "diskBytes",
+        "networkBytes"
+      ]
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "oneUseNonce": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "required": [
+    "executionId",
+    "toolIntentId",
+    "proposalDigest",
+    "ownerUserId",
+    "tenantId",
+    "taskId",
+    "runId",
+    "goalRevision",
+    "leaseEpoch",
+    "workspaceId",
+    "workspaceRevision",
+    "cellId",
+    "vmIdentity",
+    "imageDigest",
+    "attestationRef",
+    "policyEpoch",
+    "policyDigest",
+    "runtimeProfile",
+    "networkMode",
+    "limits",
+    "expiresAt",
+    "oneUseNonce"
+  ]
+}

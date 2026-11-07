@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/muse/external-action-proposal.schema.json",
+  "title": "ExternalActionProposalV1 (untrusted child RPC, not a grant)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "operation": {
+      "enum": [
+        "http.read",
+        "connector.invoke",
+        "browser.action",
+        "notify.send",
+        "package.fetch"
+      ]
+    },
+    "args": {
+      "type": "object"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  },
+  "required": [
+    "operation",
+    "args",
+    "requestId"
+  ]
+}
