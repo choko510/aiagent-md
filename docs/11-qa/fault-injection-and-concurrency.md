@@ -305,3 +305,18 @@ FaultをGateway Intent前後、Cell admission前後、fork/child spawn中、Sent
 8. Logs/console/artifactsにraw secret/surrogateなし。
 
 Host/VM/Kernel/Policy exact versions、fault point、side-effect receipts、evidenceを保存。MockだけをRuntime VERIFIEDと表示しない。SC-18/19/21/22。
+
+## 2026-11-07 再監査: Approval/PITRの競合テスト（設計のみ）
+
+| ID | 注入する競合/障害 | 合否となる独立Oracle |
+|---|---|---|
+| FIC-AUD-T01 | 同Tenant別UserがApprovalを受理 | 他Ownerの承認消費0・送信0 |
+| FIC-AUD-T02 | 凍結対象のGoal・金額・Target・Policyがdecision前に変化 | stale binding非実行 / 再承認要求 |
+| FIC-AUD-T03 | 現行Approvalを持つ旧Run leaseのWorkerからdispatch | 旧Worker送信0 |
+| FIC-AUD-T04 | 復元前後でleaseEpoch数値が衝突 | 旧restoreIncarnationの実Socket送信0・DB更新0 |
+| FIC-AUD-T05 | 独立Incarnation Storeが応答しない | RESTORED_QUARANTINED維持 / READY 0 |
+| FIC-AUD-T06 | Provider送信後ACKが喪失してからPITR | UNKNOWN維持、再送0 |
+| FIC-AUD-T07 | goalRevision 0/-1、child http.read POSTを入力 | Schema拒否・Brokerから送信0 |
+| FIC-AUD-T08 | Relay epoch=2^53+1と同Tenant別Owner/Workspace | BigInt無損失、クロスOwnerデータ0 |
+
+すべて **DESIGNED / NOT RUN**。実PostgreSQL/VM/Transportのpacket数・保存状態を別のtest oracleで観察し、Barrier未到達はPASSではなくINFRA_ERROR。

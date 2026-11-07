@@ -110,7 +110,7 @@ Initial provisional finite gates: 24 model turns, max60 Tool proposals, 30-minut
 
 ## 11. DB/transaction/migration [PROVISIONAL: CHAT_10]
 task_goal_revisions immutable keyed (tenant,task,revision), Task.currentGoalRevision CAS and activeRunId, Step goalRevision checkpoint. PLAN hash + Tool intent must reference same revision. Steer/Outbox/Event atomic; no plan mutation after commit.
-Task recordVersion init1 vs current SQL revision default0, public UUIDv7 vs SQL gen_random_uuid(), nullable Task.conversationId vs SQL NOT NULL, Run.leaseEpoch/Task.activeRunId missing from SQL: cross-team blockers, not silently fixed by planner. At every commit use CAS by latest Run leaseEpoch + task recordVersion and store Event/Outbox atomically; retry only transactional writes, never foreign effects.
+**Current contract (supersedes historical Round1 conflict):** CHAT_10現行DB案はtrusted UUIDv7, nullable Conversation, recordVersion initial 1, persisted Run leaseEpoch and Task activeRunId/GoalRevisionを設計上整合させた。なおShared契約は未Locked、実Postgres/Runtimeテスト未実施。全commitで現在のRun leaseEpoch + Task recordVersion + owner/GoalRevisionのCASを確認し、Event/Outboxを同じTXに保存する。送信済みか不明な外部副作用をblind retryしない。
 
 ## 12. API/UI [PROVISIONAL: CHAT_08]
 Show hard/soft constraints separately, appliedGoalRevision vs requestedGoalRevision, progress per criterion with evidence and human review; never show inferred hotel room count as confirmed.

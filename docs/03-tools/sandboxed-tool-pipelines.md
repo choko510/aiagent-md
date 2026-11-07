@@ -283,7 +283,7 @@ Logical stores: `pipeline_plan` (version, immutable hash, run/task owner, goalRe
 
 T1 validated immutable Plan+budget reservation/outbox commit before any Tool. T2 each Tool node invokes Gateway (which persists intent and effect ledger before external request), pure transforms commit local data only. T3 node CAS commit with `leaseEpoch`, goalRevision, expectedRecordVersion; never overwrite newer checkpoint. T4 fan-in consumes only confirmed node receipts with same planHash, propagates Uncertain/Partial and preserves source timestamp. Data artifacts persisted separately with orphan cleanup; missing Artifact does not become a confirmed value.
 
-**Known cross-team P0 inconsistencies (not silently repaired):** CHAT_01 public Entity UUIDv7 vs CHAT_10 default `gen_random_uuid()`; logical `recordVersion=1` vs SQL `revision DEFAULT 0`; nullable `Task.conversationId` vs SQL NOT NULL/CHAT_08 required; CHAT_01 `leaseEpoch:string` vs CHAT_02 bigint and incomplete DB fencing; `tenantId`/`ownerUserId` vs SQL `workspace_id`. Requires owner-approved migration/codec and integration tests before Locked. No SQL tables redefined here.
+**Historical Round1 inconsistencies (NOT current DDL assertions):** 旧UUIDv4 default、revision0、Conversation NOT NULL、Run lease列の不整合はCHAT_10の現行DDL案で設計修正済み。現在のP0はDAG node/Tool/ArtifactのOwner scope、Run/Goal/RestoreIncarnation fence、Outbox/side-effectの実トランザクションとE2E合格であり、旧記録を重複の未解決P0にしない。
 
 ## 12. UI/API proposals [PROVISIONAL: CHAT_08]
 Read-only per Task: pipeline list, node status, provenance/source/time, partial/unavailable reason, estimated vs actual usage, conditional resume/cancel commands. User interface must distinguish Plan accepted from external calls started and Evidence confirmed. Telegram only controls approved Task state and cannot submit arbitrary executable code. Expose Artifacts via authenticated bounded read, not raw signed private URLs in model/chat. The actual REST routes/types belong CHAT_08.
@@ -364,7 +364,7 @@ PIP-017/018 SHOULD tested by T06/T15/T25. PIP-019 LATER needs new ADR. PIP-020 E
 | PIP-X08 | CHAT_08 P1 | Pipeline progress/partial/artifact UX; T17/T28 |
 | PIP-X09 | CHAT_11 P1 | concurrency+fault+benchmark fixture and finite targets; T18/T25 |
 | PIP-X10 | CHAT_12/13/14/15 P1 | entity resolver/event/recipe/multimodal feeds data only, not permissions; T16/T21/T22 |
-| PIP-X11 | CHAT_00 P1 | Code Mode/sandbox alternate deployment ADR; first release disallows arbitrary script |
+| PIP-X11 | CHAT_00 P1 (SUPERSEDED by ADR-017) | Pure DAG worker has no generated code; separate Agent sandbox.exec is allowed only inside protected Runtime Cell |
 
 Cannot be Locked until P0 contracts and cross-PR acceptance checked. All ownership edits are proposals, not modifications to other areas.
 
@@ -383,3 +383,7 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: 型付きDAGとSandbox Execの併存
 
 本ドキュメントは型付きDAG機能の正本であり、**Agent全体が任意コードを実行できないという旧解釈を廃止**する。Pipeline内の純粋処理は今まで通りno shell/network。Agentがコード生成・依存導入・CLIを必要とするときは別の登録済みsandbox.exec Tool/ExecutionとしてRuntime Cellを起動する。DAGの「write禁止」を生成curlやプロセス経由で回避してはいけない。全egr/ConnectorはSentinel、外部Intent/Approval/Side-effectはGateway正本。SC-17/19/21。Canonical [02-13](../02-runtime/sandbox-execution.md), [09-08](../09-security/sentinel-authority.md).
+
+## 2026-11-07 再監査: DAGと生成コードの非競合契約
+
+§9の「No runnable model-generated code」は固定DAG Transform Workerの禁止事項であり、Agent全体のコード実行禁止ではない。ADR-017 / 02-13 `sandbox.exec` により、生成Shell/Python/Nodeは別VMのRuntime Cellで実行できるが、子プロセスも含め外部通信はBroker RPC→Gateway Intent→Sentinel→Enforced Transportのみ。旧Phase1の全体Code Mode禁止は歴史的提案で、現在の製品要件を上書きしない。DAGのread-only/純粋処理制約は維持する。

@@ -128,3 +128,10 @@ Owner handoff: CHAT_01 canonical Execution/Workspace IDs, JSON schema, state/err
 Workspace restore verifies a signed manifest of file hashes, provenance, owner scope, image and package version, retention expiry and malware/quarantine state. A missing/expired/quarantined Artifact blocks restore explicitly (no silent omission). Same-tenant Execution VM reuse requires complete cgroup/overlay/network/credential grant cleanup; different tenants require destroy/recreate VM. Idle TTL and VM/Cell concurrency must be finite operational settings with benchmark evidence.
 
 EXEC-T13: Agent provides server-only keys in Proposal => DENY. EXEC-T14: raw curl/CONNECT to Internet => denied; typed broker http.read succeeds. EXEC-T15: forged Execution/broker token/replay of scoped action => denied. EXEC-T16: offline staged pip/npm works but lifecycle network is denied. EXEC-T17: Pause/Steer/Cancel kills descendants/revokes grants, effect remains UNKNOWN when sent. EXEC-T18: exact typed Connector write has its own persisted Intent/Approval/Sentinel/Transport receipt.
+
+## 2026-11-07 再監査: Admission整数値域とBroker二段階検証
+
+- `SandboxExecutionAdmissionV1.goalRevision` は正整数 `1..INT64_MAX`。旧 `signed-int64-decimal` だと0/負数が通るため、Schemaの `positive-int64-decimal` + `^[1-9][0-9]*$` とFormatCheckerの上下限を併用する。Run `leaseEpoch` / `workspaceRevision` は0許可の別型のまま。別言語実装でも同じ値域を契約試験で検証する。
+- `ExternalActionProposalV1` は信頼しない子RPCの外側Envelope。空argsを禁止し、`http.read` ではHTTPS URLと省略またはGET/HEAD methodのみを最低限検査する。ただしこれは**送信許可ではない**。`connector.invoke`・`browser.action`・`notify.send`・`package.fetch` を含め全操作で、Trusted Brokerは必ずregistry generation/digestでpinした**操作別Tool Schema**、現在のOwner/Run/Scope、予算/Approval、SentinelとEnforced Transportを再検証する。未登録のArgs Schemaは外部送信0・UNSUPPORTED_OPERATION。
+- URLに「https://」があるだけで公開宛先とは断定しない。リダイレクト・DNS・実送信先・本体/ヘッダ・機密データ分類はBroker/Sentinelの専有する独立判定。Envelope検証PASS/Policy ALLOW/Transport送信/外部効果の確定を混同しない。
+- **Designed / NOT RUN:** revision 0/-1/overflowを拒否、max int64を許可、空argsとhttp.read POST/plain HTTPを拒否。未知fieldや未登録Tool別argsのBroker側拒否、実Socketの禁止は別途integration/security試験が必要。

@@ -271,3 +271,7 @@ Each child external action uses a separate strict `ExternalActionProposalV1` (on
 ## Machine-readable contract and schema negative-gate status (2026-11-07)
 
 Provisional machine-readable files: [SandboxExecProposalV1](../../contracts/muse/sandbox-exec-proposal.schema.json), [SandboxExecutionAdmissionV1](../../contracts/muse/sandbox-exec-admission.schema.json), [ExternalActionProposalV1](../../contracts/muse/external-action-proposal.schema.json). The schema validator rejects LLM-supplied owner/Run/Lease/VM/profile/image, oversized commands and int64 numeric/overflow at admission. These are Draft source-of-truth **proposals** to lock together with CHAT_01/02/03/09 rather than a second contradictory Tool schema. Runtime port, DB mapping and packet-level enforcement must still be implemented/tested.
+
+## 2026-11-07 再監査: 外部ActionのContractと権限の分離
+
+`SandboxExecutionAdmissionV1.goalRevision` は正整数（初期1）、`leaseEpoch` / `workspaceRevision` は0許可で値域が異なる。Brokerへ渡す `ExternalActionProposalV1` は非空Argsと、`http.read` のHTTPS・GET/HEADなどの**Envelope最小検証**を行う。正式なoperation-specific Tool Schema / Registry revision / args digest / Target / Credential / Identity / Policy / Budgetを必ず別途確認する。Envelopeのみで受信できても実送信は不可。未知operation/未知Schema major/Registry digest mismatch/未認可の宛先はfail closed。

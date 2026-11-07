@@ -244,7 +244,7 @@ Prompt Injectionはmanifest/recipe/source textにも存在。モデル文脈で�
 
 `plugin_releases` immutable digest/manifests/licenses/security status; `plugin_bindings` per principal/tenant/owner version/CAS (1開始); `plugin_approvals` exact digest + Actor + policyVersion + TTL; `plugin_recipe_versions` with step refs; `plugin_hook_declarations` with priority/phase/constraints hash; `plugin_operations_receipts` with request fingerprint; `plugin_outbox_events`; `plugin_revocation_epoch` for restoring read barrier。物理DDLはCHAT_10所有、別MDで定義しない。
 
-Migration: version N reader+validator→quarantine N+1→validate known fields/migrate settings in sandbox pure function→new release approval→atomic binding cutover→old version retained for rollback but credentials/permissions invalidated。migration失敗は旧configを変えずblocked/degraded。Backup restoreはrevocation epochとissuer signature trustを再検証。UUIDv7/recordVersion=1はCHAT_01 draft、DBのv4/0とmapping不一致あり、別Owner修正が必須。
+Migration: version N reader+validator→quarantine N+1→validate known fields/migrate settings in sandbox pure function→new release approval→atomic binding cutover→old version retained for rollback but credentials/permissions invalidated。migration失敗は旧configを変えずblocked/degraded。Backup restoreはrevocation epochとissuer signature trustを再検証。UUIDv7/recordVersion=1はCHAT_01 draft、旧DBのv4/0問題は現行DB案で設計修正済みだが実際の認可mapping/forward migrationは未検証であり、別Owner修正が必須。
 
 ## 12. HTTP/UI [CHAT_08 proposal]
 
@@ -313,7 +313,7 @@ PH-6 Review UI rollout, rollback, restore, benchmark and operator incident contr
 | CHAT_01 | P0 | PluginId/RecipeId/Event schema UUIDv7、Run leaseEpoch/goalRevision、recordVersion1開始 |
 | CHAT_03 | P0 | Tool Gateway policy-first execution + side-effect ledger, capability intersection and uncertain ACK handling |
 | CHAT_09 | P0 | plugin signer/key trust, execution deny, SSRF policy, Secret handle boundary |
-| CHAT_10 | P0 | physical DDL/outbox/install receipts/epoch/rollback, workspaceId mapping to tenant/owner, v4/0 contradiction |
+| CHAT_10 | P0 | physical DDL/outbox/install receipts/epoch/rollback, owner-workspace mapping and actual integration; old v4/0 divergence already corrected in current DDL draft |
 | CHAT_02 | P1 | Recipe plan and Hook Run fence admission/Cancel/Steer checkpoints |
 | CHAT_05 | P1 | Plugin descriptor vs external API Connector Adapter/credential lifecycle |
 | CHAT_04 | P1 | Browser replay code stays browser-owned, plugin is not browser tab owner |
