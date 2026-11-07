@@ -372,3 +372,11 @@ The YAML is intentionally illustrative; it contains placeholders and is not a co
 
 `DEP-R3-T01..08`のうちT02・T03・T05の失敗は**P0リリースブロッカー**。他も未合格のままproduction`Verified`にしない。既存`DEP-Txx`の試験を置き換えるのではなく追加する。Docker CLIはユーザー/テスト管理者が利用するもので、Agent RuntimeへDockerソケットを渡すことは一切許可しない。SSRF testのOracleはモデル回答ではなく接続先のサーバーアクセスログ/pcap/隔離proxyの証拠とする。テストは未実行。
 
+## 2026-11-07: Browser Live Observation Media relay
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のread-only media relayをTrusted HTTPS入口から認証済みBrowserSession ownerにのみ公開する。Browser Worker内部Capture、CDP、virtual display、renderer socketはLAN/host/publicへpublishしない。WebRTCはDTLS/SRTP＋必要な範囲のICE/TURN、fallback WSSはTLS/厳格Origin/認可。画面配信中もtenant/user/session generation/revokeを照合。resource quotaはconcurrent viewers/frame queue/bandwidth/FPS/timeに有限上限を設ける。relay障害時は映像`DISCONNECTED`でRun継続。本番でinsecure CDP/VNCへdowngrade禁止。BLO-T03/06/07/09/11、SC-23（未実装）。
+
+
+## 2026-11-07 PR #71 P1追加: ICE経路と復旧世代の保証
+
+WebRTC/ICEはRFC 8826 `4.2.4のprivate network disclosureを想定。ViewerとのMVP Mediaは**TURN relay-only**、ServerとClient両方のcandidateは明示allowlistでfilter、host/srflx/private/VM interconnect候補は公開せず、trusted host firewall/Sentinelで候補の偽装宛先への直送を拒否。TURN unavailable時はViewer`DISCONNECTED`としinsecure peer fallback不可。TURN credentialsは期限・対象・byte/FPS上限付き。MediaSession/WorkerのrestoreIncarnationはDB復旧世代とは独立したTrusted store正本に一致させ、PITR旧worker/peerを物理送信Gateで拒否。Media中断はAgent Runの停止を意味しない。録画なし/Crash dumpなし、Reverse proxy・Browser cache・Swapへのraw映像残留0を運用で証明（未実装）。参照: [Browser Live Observation](../08-interfaces/browser-live-observation.md)、[RFC 8826](https://www.rfc-editor.org/rfc/rfc8826.html#section-4.2.4)。

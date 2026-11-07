@@ -136,6 +136,13 @@ Web UI / Telegram Adapter / API client
 | BrowserSession | GET /browser-sessions, GET /browser-sessions/{id} | browser:read | 200 redacted handoff status, own task linkage |
 | BrowserSession | POST /browser-sessions/{id}/handoff | browser:takeover | 202/200 **単回・期限付き**takeover request（Browser Worker delegate） |
 | BrowserSession | POST /browser-sessions/{id}/release | browser:takeover | 202 ownership返却要求。If-Match + Idempotency-Key |
+| BrowserObserve | GET /browser-sessions/{id}/tabs | browser:observe | 200許可済みTabのopaque ref一覧。HUMAN中/disabledは拒否 |
+| BrowserObserve | POST /browser-sessions/{id}/observations | browser:observe | 201短命Subscription（Idempotency-Key/Origin/CSRF、AGENT modeのみ） |
+| BrowserObserve | GET /browser-sessions/{id}/observations/{observationId} | browser:observe | 200 recordVersion/ETag・現行状態（no token） |
+| BrowserObserve | POST /browser-sessions/{id}/observations/{observationId}/offer | browser:observe | 200 完全ICE収集SDP answer、If-Match/Idempotency-Key |
+| BrowserObserve | POST /browser-sessions/{id}/observations/{observationId}/select-tab | browser:observe | 200新mediaGenerationで以前のTrack破棄、If-Match/Idempotency-Key |
+| BrowserObserve | POST /browser-sessions/{id}/observations/{observationId}/close | browser:observe | 200/202停止Receipt、If-Match/Idempotency-Key、停止確定は別状態 |
+| BrowserObserve | WSS /browser-sessions/{id}/observations/{observationId}/frames | browser:observe | Binary frame fallback。Cookie+Origin+権限再評価、URL token不可 |
 | Evidence | GET /evidence/{id} | evidence:read | 200 provenance projection。raw artifact閲覧は別許可 |
 | Usage | GET /runs/{id}/usage | usage:read | 200 billed/estimated/currency/source timestamps |
 | Progress | GET /tasks/{id}/events | task:read | 200 text/event-stream **詳細は realtime-events.md** |
@@ -671,3 +678,83 @@ TXX は本節の REST-TXX を指す。**合格閾値:** functional testはexpect
 ## 2026-11-07: SandboxExecutionのRead Projectionとコマンド
 
 POST /tasksが従来通りTaskを作成し、AgentLoop→Gatewayがsandbox.exec Intentを発行する。クライアントから無制限なshell実行可能なREST POST /execを**公開しない**。GET /runs/{id}/executions（提案）とGET /executions/{id}（提案）はowner/tenant認可済みのstatus、imageDigest、elapsed/resources、bounded stdout/stderr Artifact references、effect uncertainty、Cell attestation summaryのみ返す。出力/Artifactのプライベート内容やraw command/env/surrogate keysは原則閲覧権限を別途検証。Cancel/SteerはTask commandの正本を利用し、ExecutionをAPI bodyから直接RUNNINGとセットできない。正式PathとDTOはCHAT_01/08合同レビューまでProvisional。SC-17/18/21/22。
+
+## 2026-11-07: Browser Live Observation API候補 [PROVISIONAL]
+
+[詳細設計](browser-live-observation.md) に従い、既存の`GET /api/v1/browser-sessions/{id}`は権限あるownerに閲覧可否`observationAvailable`と安全な`observationBlockReason`をread-only表示。`browser:observe`は`browser:read`と`browser:takeover`/Approvalから独立した認可。`POST /api/v1/browser-sessions/{id}/observations`で短命閲覧subscriptionを作り、`GET /api/v1/browser-sessions/{id}/observations/{observationId}`で状態照会、`POST /.../offer`で認証済みWebRTC signaling、`POST /.../close`で終了。fallbackは同一origin `wss /.../frames` のbinary video。POSTにIdempotency-Key、終了にIf-Match、認証/Origin/CSRFとgeneration fenceが必要。Token/CDP URL/cookie/raw frameをURL、JSON、SSEに含めない。Replay/Expired/Owner mismatchで拒否。詳細DTOはOwner合意までDraft。BLO-T01/03/04/06/11、SC-23。
+
+
+## 2026-11-07 PR #71再監査：Browser Observe wire contract v1 [PROVISIONAL]
+
+正本設計は [Browser Live Observation `10](browser-live-observation.md#10-pr-71-再監査修正閲覧権限送信境界感度判定の正本案)。`/api/v1` prefix、個々のBrowserSession/Task owner ACL、`browser:observe` actionが必須で、Handoff/Approval権限に流用不可。以下のWire DTOは**OpenAPI実装前の正式な提案**。未知field拒否、UTF-8、Body/Header/SDP長の有限上限、HTTPS、CSRF、Cookie/Origin strict、MUST No Store、URL tokenなし。
+
+~~~typescript
+type BrowserObservationState =
+  | "REQUESTED" | "CONNECTING" | "LIVE" | "STALE" | "PRIVACY_BLOCKED"
+  | "DISCONNECTED" | "REVOKE_PENDING" | "ENDED" | "BLOCKED_UNSAFE";
+type BrowserObservationCreateV1 = {
+  schemaVersion: 1;
+  pageRef: string;              // GET /tabs発行のowner-bound opaque ref
+  preferredTransport: "webrtc" | "wss"; // allowed transportのみ
+};
+type BrowserObservationViewV1 = {
+  schemaVersion: 1;
+  observationId: Id;            // owner/Task/Session束縛。Bearer Tokenではない
+  browserSessionId: Id;
+  taskId: Id;
+  pageRef: string;             // opaque; URL/pathを公開しない
+  recordVersion: string;       // 正規decimal int64 string; ETag: "<recordVersion>"
+  state: BrowserObservationState;
+  transport: "webrtc" | "wss";
+  mediaGeneration: string;     // decimal int64; changeで旧Track/SDP/framesを失効
+  observationEpoch: string;    // decimal int64; mode/revoke/owner fencing
+  expiresAt: ISOInstant;       // サーバーの短命期限
+  lastFrameAt: ISOInstant | null;
+  lastFrameSequence: string | null;
+  privacyReasonCode: "NONE" | "NOT_ALLOWLISTED" | "UNKNOWN" | "SENSITIVE" | "STALE" | "DISABLED";
+  // No session secret, Credential, video bytes, CDP URLs, raw URL, SDP, private network info
+};
+type BrowserObservationTabV1 = {
+  pageRef: string;             // 現Sessionと世代に限定。時限/1回のopaque ref
+  safeHostLabel: string | null;// path/query/cookiesを含まない
+};
+type BrowserObservationTabListV1 = {
+  schemaVersion: 1; browserSessionId: Id; tabs: BrowserObservationTabV1[];
+  snapshotGeneration: string;  // page set revision (decimal int64)
+};
+type BrowserObservationOfferV1 = {
+  schemaVersion: 1;
+  mediaGeneration: string;
+  type: "offer";
+  sdp: string;                 // browser ICE gathering完了済、初回のみ
+};
+type BrowserObservationAnswerV1 = {
+  schemaVersion: 1; observationId: Id; mediaGeneration: string;
+  type: "answer"; sdp: string; // relay ICE gathering完了; credentials redacted in logs
+  state: "CONNECTING";
+};
+type BrowserObservationSelectTabV1 = {
+  schemaVersion: 1; pageRef: string;
+  expectedPageSetGeneration: string;
+};
+type BrowserObservationCloseV1 = {
+  schemaVersion: 1; reason?: "user_closed" | "tab_hidden";
+};
+type BrowserObservationCloseAckV1 = {
+  schemaVersion: 1; commandId: Id; disposition: "accepted" | "already_recorded";
+  observedVersion: string;
+  closingState: "REVOKE_PENDING" | "ENDED" | "BLOCKED_UNSAFE";
+};
+~~~
+
+**State/HTTP rules:** `POST observations`はTask/owner/AGENT mode/takeoverPhase NONE/restoreIncarnation/Viewer Authを同一Admission transactionで照合した後に201＋`Location`/`ETag`を返す。作成はアクティブ`observe_enabled=true`の場合だけ。GET viewは現在の`recordVersion`を返し、ETagは同値の強い引用文字列。Write（Offer/SelectTab/Close）は`If-Match: "<recordVersion>"`と`Idempotency-Key`必須。同じKey同じBodyは初回と同じackを返し、同key異bodyは409、版ずれ412、If-Match欠如428。`GET tabs`は読み取り専用、SnapshotGenerationを返す。Tabが消えた場合新Refを取得する。
+
+**Tab選択:** `POST .../select-tab`は既存ObservationのTab/MediaRevisionをCASで更新し、旧Track/PeerConnection/Queueを**停止Barrierで失効**させて`mediaGeneration++`、`recordVersion++`。新`pageRef`をサーバーSession内の最新Tab集合・世代に突合し、同一Task/owner/Mode AGENT/Sensitivity Permitを再審査する。成功時は`BrowserObservationViewV1`（state=CONNECTING、new mediaGeneration/ETag）で返し、Viewerは`offer`を作り直す。Handoff/Logout/RestoreIncarnation change中は409または失効エラー。旧Tab画像を再掲しない。
+
+**WebRTC方式:** MVPは**trickle ICEを無効**にし、Clientはcandidate gathering完了後にofferの`sdp`（候補を含む）をPOST。Relayは候補フィルタ後に完了済みanswerを一度返す。独立Candidate endpointを作らない。ICE restart、Renegotiation/Tab変更では新Media generationのOfferが必要。ResponseのSDPは監査例外で秘密ではないが内部IP/関連ポートを含み得るため、アクセスログ/Traceには記録しない。`wss` fallbackは`FrameHeaderV1 = {schemaVersion:1, mediaGeneration:string, pageGeneration:string, frameSequence:string, capturedAt:ISOInstant, contentType:"image/jpeg"|"image/webp", payloadByteLength:number}`とbyte-bound binary imageを同一メッセージで配送。Frame size, rate, expiryはserver capを適用し、古いsequence/generationはクライアントも拒否。
+
+**失効と線形化:** Media送信はサーバー内部の`REVOKED_BARRIER_COMMITTED`以前に必ずGateを通ること。HTTP Closeが202ならREVOKE_PENDING、GETでENDEDを確認する。ACKだけで停止したと言わない。WebRTC track/PeerConnectionは失効時closeし、queueを破棄、UIは黒画面化する。Serverの`restoreIncarnation`は#72が提案するDB外管理の復元世代と統一。Mediaのみ別の復旧管理方式を増やさず、Authへ接続できない時はfail-closed。
+
+**ICE制限:** Signalingは`same-origin`認可済みViewerだけが利用可能で、許可された候補種別/宛先/ポート/プロトコルを検査する。MVPは**TURN relay-only**（Client側`iceTransportPolicy=relay`とServer ICE候補フィルタの両方を強制）でPrivate/Loopback/LinkLocal/Trusted VM interfaceのhost/srflx candidateをViewerへ公開しない。TURNによる経路もGateway/Egress Policyで許可し、TURNが無ければ映像`DISCONNECTED`、直結host候補へ落とさない。Viewer側Candidateを攻撃者入力とみなしSSRF/LAN peer接続を拒否。候補文字列のsanitizeだけではサーバーからの直接通信を防げないため実ネットワークdenyも必須。RFC 8826 `4.2.4 のICE IP位置情報露出を脅威モデルに含む。
+
+**配信有効化:** `observe_enabled=false`ではREST新規観測・Offer・WSS/Media listenerが一切有効にならず、任意ScopeでもMedia frameを得られない。通常Agentのreleaseを阻害しない。Viewerを有効にするReleaseにのみBLO-T01〜11/T13〜16がhard gate。無効版はBLO-OFF-T01〜03のpositive/negativeを必須化。未知field/認可/SDP不正/ICE漏えい/ETagの契約テストを準備する（**NOT RUN**）。
