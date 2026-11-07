@@ -4,9 +4,17 @@
 
 ## 0. 採用構成
 
-Ubuntu単一ホストを前提にDocker Composeを**配置と再起動管理のみ**に使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`runtime-worker`/`scheduler-relay`/`browser-worker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`egress-policy-proxy`/`telemetry-collector`を**別プロセス権限・ネットワーク**へ分ける。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue `pgboss`は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
+本番は**Ubuntu物理ホスト→KVM/QEMU専用Secure VM→独立Runtime CellとProtected Services**を前提とする。Docker ComposeはVM内の保護サービスの配置と再起動管理の候補として使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`scheduler-relay`/`browser-broker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`sentinel-egress`/`credential-broker`/`privsep-connectors`/`telemetry-collector`を**Cell外のProtected Servicesとして別プロセス権限・ネットワーク**へ分ける。AgentLoop・shell/CLI/Node/PythonはUntrusted Runtime Cell内で実行する。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue `pgboss`は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
 
 採用候補: rootless Docker (可能なら)、非root UID/GID、`cap_drop: [ALL]`、`security_opt: [no-new-privileges:true]`、`read_only: true`、限定`tmpfs`、`pids_limit`、`mem_limit`、`cpus`、init/restart、immutable digest images、secrets mount、DB volume/Artifact volume。Chromium sandboxは明示有効化し、Playwrightのroot+no-sandbox便法を**採用しない**。Sandboxとの相性はHost kernel/LSM(seccomp/userns/AppArmor)の実機試験で判定。できなければproduction readinessはブロック。`ipc: host`、`network_mode: host`、`privileged`、`cap_add: SYS_ADMIN`を採用しない。
+
+## 0.1 Production topology / deployment profiles (Muse migration 2026-11-07)
+
+**Secure production profile**: Ubuntu operator owns QEMU/KVM. Guest Secure VM runs restricted Runtime Cell (systemd-nspawn userns/cgroups/seccomp/LSM suggested) and Cell-external Protected Services. VM guest may use Compose for database, API, Sentinel, Connector/Browser Broker and observability; those services must never share the Cell's mutable rootfs, raw mounts or admin socket. Bounded authenticated IPC across this boundary. VM/Cell actual UID map, process capability, kernel sandbox and forced egress must pass preflight and hostile network tests.
+
+**Development-only profile**: single-host rootless Docker Cell may speed tests but is never automatically upgraded to production; default no real credentials, payment/booking/posting, indefinite scheduling or unrestricted public egress. No privileged, host networking, unsafe --no-sandbox, unconfined LSM, bypass proxy or host socket fallback to improve compatibility. KVM absent => readiness is BLOCKED_UNSAFE rather than fall back.
+
+The Compose YAML below is an illustrative **legacy service topology skeleton only**, not a production profile. It omits the VM boundary and enforcing kernel rules, Sentinel Authd and Broker identity setup. A deploy tool must refuse it as production until the missing security components have real definitions and tests. The 'runtime-worker' inside that sketch cannot receive production shell/secret/egress capability. Canonical Cell [09-07](../09-security/runtime-cell-isolation.md), Sentinel [09-08](../09-security/sentinel-authority.md), Exec [02-13](../02-runtime/sandbox-execution.md).
 
 ## 1. Scope / Non-scope / Scenarios
 
@@ -76,6 +84,11 @@ flowchart LR
 | DEP-016 | SHOULD | Graceful drain stops new claims but lets committed jobs survive and fence | 07 |
 | DEP-017 | LATER | Horizontal worker deployment after fencing / owner load tests | 07 |
 | DEP-018 | EXPERIMENT | Lightweight Browser runtime (Lightpanda) isolated as Adapter, not a shortcut around Browser ACL | 06,09,13 |
+| DEP-019 | MUST | Production Secure VM KVM+Cell and Protected Services trust separation; no Cell→host admin sockets | 17,18 |
+| DEP-020 | MUST | Sentinel/credential/Connector Privsep/Browser Broker outside Cell; all egress routes kernel-enforced | 18,19,22 |
+| DEP-021 | MUST | VM absent, non-enforcing proxy or no Chromium sandbox => production blocked, never insecure fallback | 18,19 |
+| DEP-022 | MUST | start/stop/handoff and kill process tree within finite bounds and workspace revision fencing | 21 |
+| DEP-023 | MUST | hard profile distinction for development_only and secure_production; attest actual kernel, not YAML claims | 18,22 |
 
 ## 5. Compose contract & illustrative config
 

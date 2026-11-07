@@ -8,6 +8,10 @@
 
 Model/Tokensの『見積』『Provider報告』『請求確定』、cache reads/writes、usage時刻と価格表の有効区間、通貨と外貨換算時刻を別フィールドとし、価格の混同禁止。Providerがusageを返さない場合は未知のまま。API料金とユーザーに示す予想費用/実費を混ぜない。
 
+## 0.1 2026-11-07 Muse secure runtime observability
+
+Record Execution ID, Cell/VM image digest, attestation profile, workload cgroup, Run/lease/Goal/policy revisions, process exit/signal, CPU/memory/PID/disk/stdout sizes, workspace revision, Sentinel ALLOW/ASK/DENY and cause code, denied direct socket attempts, distinct authorized external receipts. Never write plaintext secrets/surrogates or raw sensitive outputs to traces. Distinguish "isolation configured" from kernel-backed "isolation verified". Alert on egress policy engine fail-open, missing VM attestation, unsafe seccomp/capabilities, browser no-sandbox fallback and unauthorized protected IPC. See [Cell](../09-security/runtime-cell-isolation.md), [Sentinel](../09-security/sentinel-authority.md).
+
 ## 1. Scope / non-scope / scenarios
 
 **Scope:** Trace/correlation propagation; instrumented query/model/tool/browser/watch/relay; budget meters; cost record idempotency; trace export allowlist/filter/sampling; secrets redaction; SLO definition procedure; health and data retention; alerting/fault injection.

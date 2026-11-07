@@ -20,6 +20,10 @@
 
 **Reject**: logging every LLM prompt/HTTP payload; deletion via one SQL DELETE without object/index/browser cleanup; returning `success` after enqueue alone; unlimited raw traces; backup restores that bypass tombstones; globally shared cache without owner scope; per-user copies of credentials in artifacts; automatic export of tokens as part of user data download.
 
+## 0.1 Runtime execution privacy addendum (2026-11-07)
+
+Generated code, shell histories, command arguments, terminal output, workspace snapshots, package-manager logs and process metadata may contain sensitive user data. Bound output sizes; redact logs/artifacts at controlled ingress; never log raw auth tokens, surrogate tokens, credential references with capability, browser storageState or passwords. Workspace deletion and tenant-specific retention must include command transcripts, temporary package layers and child process stdout/stderr. Control-plane audit of executable hash, image/policy epoch, owner/Run identity, Sentinel decision (not sensitive payload) and external effect receipt should remain reviewable while respecting retention constraints. See [Runtime Cell](runtime-cell-isolation.md) and [Sentinel](sentinel-authority.md).
+
 ## 1. Purpose, scope, non-scope and acceptance scenarios
 
 - Protect privacy of one initial owner and future several users in a self-hosted Ubuntu Docker deployment. Inputs: trusted user deletion/export/retention commands, domain data expiration, owner disable, operator key rotation, job/callback expiry; Outputs: redacted status, evidence of steps completed, tenant-scoped audit, safe export package, optional failure/UNCERTAIN report.

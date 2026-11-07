@@ -19,6 +19,10 @@
 
 **この文書で採用しないもの**: OpenClawの共有gateway tokenだけで「ユーザー」認可を完了させる方法、LLM側promptでの隔離、URL/Task IDを持っているだけでのアクセス許可、単一ユーザーだから`userId`列を省く方式。Web調査Agentであり、ホストShell/SSH/Dockerソケット/privileged実行は設計対象外。
 
+## 0.1 Runtime Cell owner and command admission (2026-11-07)
+
+Secure VM may serve a single authenticated user initially, but all execution/Workspace/Skill/subagent/BrowserSession/Connector scope bindings still include trusted owner/tenant/task/run/lease; never derive owner from shell environment or user-supplied arguments. Runtime Cell user namespace root is not platform admin; protected IPC authenticates kernel process identity **and** current canonical Run/Task owner/revision/authorization. No Cell process may mint principal, Sentinel policy, Admin capability or credential grant; owner revocation/fresh auth must block new external effect immediately. See [Runtime Cell](runtime-cell-isolation.md) and [Sentinel](sentinel-authority.md).
+
 ## 1. 目的・責務・非責務・受入シナリオ
 
 ### 1.1 Threat modelと守る資産

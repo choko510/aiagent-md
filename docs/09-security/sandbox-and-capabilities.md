@@ -6,20 +6,20 @@
 
 ## 0. 採用設計
 
-**Capability-first deny-by-default**。Agentが呼べるのはCHAT_03のTool Gatewayで事前定義・登録されたデータ取得/ブラウザ操作/安全な計算/通知/承認申請のみ。Agent自身に任意`exec`、ホストファイル編集、SSH、Docker control API、任意Python/JSコード、任意CDP URL、設定変更・ネットワーク権限変更を渡さない。数値計算や表変換は**仕様に固定されたdeterministic function**、複雑な隔離計算だけを短命のrestrictive compute sidecarに許す。
+**Capability-first deny-by-default**。Agentの外部能力はTool Gatewayの登録済み権限に限定する。**sandbox.execを登録済みToolとして扱い、Runtime Cell内ではShell/Python/JS/Node/CLIと生成コードの実行を許可する。** ただしホストファイル編集、ホストShell/SSH、Docker control API、保護サービス改変、任意CDP URL、Network/Sentinelポリシー変更は禁止。純粋な数値計算は従来のdeterministic functionが優先、自由なコードは09-07 Runtime Cellの強制隔離で実行。03-02 Gatewayが実行Intentを永続化し、09-08 Sentinelが外部行為を最終許可する。
 
 **Process boundaries (proposal)**:
 - API/Web UI: 認証終端、Tool GatewayへのCommand登録のみ。Docker Engine API credentialsなし。
-- Agent/queue Worker: Toolのintent作成はできてもexecutor endpoint直叩き不可。Vault keyなし、host mountsなし、network egressはGateway経由。
+- Agent/queue Worker: ToolのintentをGatewayへ作成できる。Runtime CellはCell内execを行えるが、Vault key/host mount/保護サービスは不可。外向き通信はSentinel強制経路のみ。
 - Browser Worker: browserを一元所有、`BrowserContext` tenant/owner隔離、Chromium sandbox = trueで強制。Browser driverが承認済みのUser Takeover leaseを検証。CDPは外部/Agentへ公開しない。
-- Compute Worker: input artifactをread-only scopedで読み取り、wasm/strict interpreterまたは隔離コンテナで定義済み変換のみ。general shell、docker command、pip install、`import os` / `child_process` / filesystem/networkは禁止。
+- Pure Compute Worker: 従来通り定義済み変換のみでShell禁止。**別のSandbox Exec Runtime Cell**はShell、npm/pipによる一時依存導入、ファイル操作を許すが、VM/Cell外への実行、ネットワーク迂回、保護サービスAPI/Keyアクセスは禁止。
 - Credential broker: 接続先を限定した認証injectだけ。AgentとCompute processから到達不能。
 
 Docker Composeはoperator（人間）が構成・更新する。Agentのtoolsで起動/停止/privileged化することは**禁止**。rootless modeや`userns-remap`は推奨される追加対策でありホスト攻撃完全防御の保証ではない。
 
 ## 1. Scope / assumptions / acceptance
 
-対象: container/OS process isolation、seccomp/AppArmor/user namespace/capabilities、bind mount、filesystem/CPU/RAM/PID/open files、Browser takeover、Tool/MCP privilege、untrusted code/file inputs、recovery/race。対象外: Kubernetes/host fleet運用、任意host adminやremote SSH、Linux kernel exploitを完全に防ぐこと、任意パッケージの実行保証、モデルが作ったコードの自動ビルド。SC-06/07/08必須、SC-09費用、SC-13 learned browser action replay、SC-15 multimodal document safetyも該当。
+対象: container/OS process isolation、seccomp/AppArmor/user namespace/capabilities、bind mount、filesystem/CPU/RAM/PID/open files、Browser takeover、Tool/MCP privilege、untrusted code/file inputs、recovery/race。対象外: Kubernetes/host fleet運用、任意host adminやremote SSH、Linux kernel exploitを完全に防ぐこと、任意パッケージの実行保証、ホスト上でモデルが作ったコードの自動ビルド。Cell内でのコードビルドは対象に含む。SC-06/07/08必須、SC-09費用、SC-13 learned browser action replay、SC-15 multimodal document safetyも該当。
 
 ## 2. Existing OSS source audit
 
@@ -29,7 +29,11 @@ Docker Composeはoperator（人間）が構成・更新する。Agentのtoolsで
 | Playwright `38fb53bf4c181abb91f1ca2a2ab741983c5d177c`, Apache-2.0 | `packages/playwright-core/src/server/chromium/chromium.ts`: `options.chromiumSandbox !== true`なら`--no-sandbox`を付ける; `tests/mcp/config-resolve.spec.ts` Chromium sandbox flagのresolved設定を試験 | **重要:** Playwrightを使うだけでChromium sandbox有効とは限らない。必ず明示`chromiumSandbox: true`で起動し、無効ならBrowser Worker起動を拒否する [S4–S5] |
 | Docker Engine docs / OCI | Linux seccomp/capabilities/user namespace/resource flags、non-root実行を参照 | **Docs verified**。Docker daemonの実ファイルは未調査、configでの安全性はDeploy testに委譲 [S6] |
 
-**Rejected designs**: A) `--privileged` + promptで危険行為を抑止: **拒否**。B) Agentにdocker.sockを渡し一時コンテナで任意コード実行: **拒否**。C) 単一の高権限browserプロセスを全ユーザー共有しSession IDだけで区別: **拒否**。D) wasm/定義済みdeterministic function + 隔離BrowserWorker、必要な計算のみsandbox service: **採用**。E) MicroVM per task: 隔離強度は高いが起動・RAM・運用を実測してから採用する`EXPERIMENT`。
+**Rejected designs**: A) `--privileged` + promptで危険行為を抑止: **拒否**。B) Agentにdocker.sockを渡し一時コンテナで任意コード実行: **拒否**。C) 単一の高権限browserプロセスを全ユーザー共有しSession IDだけで区別: **拒否**。D) pure compute用wasm/定義済みdeterministic functionと、自由コード用Sandbox Exec Cellを**併用して採用**。E) MicroVM per task: 隔離強度は高いが起動・RAM・運用を実測してから採用する`EXPERIMENT`。
+
+## 2.1 2026-11-07 Muse移行による優先ルール
+
+**この日付より前の no arbitrary code / no Shell 記述は、HostまたはProtected Servicesでの実行禁止を意味する。** Runtime Cell内のsandbox.execは[09-07](runtime-cell-isolation.md)・[09-08](sentinel-authority.md)・[02-13](../02-runtime/sandbox-execution.md)の条件で明示的に許可する。純粋計算Workerに対する禁止は従来のまま。Ubuntuホスト直下でのDockerのみの配置を「Muse型Secure VMと同等」とみなさない。VM/Cell・Sentinel・credentials・CDPの信頼境界を実機で検証できなければ本番を起動しない。
 
 ## 3. Dependency and authority map
 
@@ -56,7 +60,7 @@ Scope of permissions is immutable `principal.ownerUserId + tenantId + taskId + r
 | SBOX-004 | MUST | Browser Worker起動時Chromium sandbox=true、失敗したらfail closed、`--no-sandbox`不可 | 06,08,13 |
 | SBOX-005 | MUST | BrowserContext/Page/Takeoverはowner/task/lease generationごとに許可、他ownerのstate/CDPを拒否 | 06,08 |
 | SBOX-006 | MUST | モデル生成Python/JS/SQL/Codeを権限のあるホストプロセスで直接実行しない | 08,15 |
-| SBOX-007 | MUST | 計算実行は明示的登録済みfunctionとtypes/schema、CPU/RAM/time/files/output/network禁止/上限 | 07,09 |
+| SBOX-007 | MUST | Pure Computeは登録済み関数のみ。Sandbox ExecはCell内の任意コードを許可するが、CPU/RAM/PID/時間/ファイル/ネットワークの上限と隔離を必須 | 07,09,17,18 |
 | SBOX-008 | MUST | Tool Gatewayを通さないexecutor呼び出しと権限昇格/side effectを禁止、承認再検証必須 | 07,08 |
 | SBOX-009 | MUST | Worker crash/restart/leaseEpoch変化で旧ownerのgrant/Browser leaseが新実行に転用不可 | 06,07 |
 | SBOX-010 | MUST | MCP server/tool descriptor・外部contentをauthorityとは扱わず、capabilitiesは静的policyに閉じる | 08 |
@@ -66,6 +70,17 @@ Scope of permissions is immutable `principal.ownerUserId + tenantId + taskId + r
 | SBOX-014 | MUST | Browser sandbox不成立やresource limit時は`BLOCKED_UNSAFE_RUNTIME`、権限落とさず続行しない | 06,08 |
 | SBOX-015 | SHOULD | rootless Docker/userns + seccomp/AppArmor read-only rootfs/tmprfs等を硬化基準としCI負テスト | 08 |
 | SBOX-016 | EXPERIMENT | untrusted computeをWASM/Firecracker等に差替え検証し負荷を比較 | 09 |
+
+## 4.1 Sandbox Exec/VMの追加適合要件
+
+| ID | Priority | Requirement | SC |
+|---|---|---|---|
+| SBOX-017 | MUST | secure VM内のUntrusted Runtime Cellだけが自由なcode/shellを実行でき、ホストと保護サービスに到達できない | 17,18 |
+| SBOX-018 | MUST | Cell子プロセスの外部通信全てをSentinelで強制許可し、直接ソケットの抜け道を塞ぐ | 19,22 |
+| SBOX-019 | MUST | VM/Cellが不成立ならBlock、developer-onlyのDockerコンテナは本番安全保証に含めない | 18 |
+| SBOX-020 | MUST | Execと純粋ComputeとBrowser Brokerを別能力/プロセスとして識別 | 17,18 |
+| SBOX-021 | MUST | Generated Skill/PackageはCell外のPolicy/鍵/CDPを変更できない | 20,22 |
+| SBOX-022 | MUST | Cancel/Lease失効後、subprocess/egress/Workspace commitをすべて停止/拒否 | 21 |
 
 ## 5. Internal contract and deployment profile (CHAT_09 security policy; CHAT_10 owns actual Compose)
 

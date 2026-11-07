@@ -16,6 +16,10 @@ PostgreSQLを業務データの**唯一のトランザクション正本**とし
 4. 追加カラム→両版読取→バックフィル→切替→制約強化→旧列削除のexpand/contract方式。非transactionalな`CREATE INDEX CONCURRENTLY`は別migration stepに分離。
 5. Phase-1単一Ubuntuサーバー前提。ただし`tenant_id`でデータ分離の物理土台を置く。実際のidentity/tenant認可はCHAT_09が決めるまで`tenant_id`だけを安全境界と**見なさない**。
 
+## 0.1 2026-11-07 Muse migration: Execution and Workspace persisted records
+
+Proposed canonical **Execution** (subresource of Task/Run, current leaseEpoch and goalRevision), **Workspace** (owner/tenant/task scoped, revision CAS), **Cell admission/attestation**, **Artifact lineage** (stdout/stderr/outputs, digests and retention), **Sentinel grant/decision** (intent/binding/policy epoch/decision) must be represented without creating an alternate Task/Run, Approval or Side-effect Ledger. The existing approved owner contract is still provisional: CHAT_01 owns logical states/errors, CHAT_02 lifecycle, CHAT_03 approval/effect, CHAT_09 policy/credential. DB design must preserve unique intent/exec correlation, foreign keys scoped by tenant, immutable effects, TTL/retention, expected-revision CAS and migration/rollback strategy. No secret plaintext in SQL or logs. See [Exec](../02-runtime/sandbox-execution.md) and [Sentinel](../09-security/sentinel-authority.md). Treat physical names as TBD until owner agreement, not silently add diverging DDL.
+
 ## 1. 目的・責務・非責務・受入シナリオ
 
 **目的:** Webチャットから数時間の調査、価格監視、通知まで、プロセスが死んでも復旧する状態・時点・出典・重複防止の保存基盤を実装可能な形で定義する。SC-01〜09、特にSC-02/06/07/08/09を対象とする。

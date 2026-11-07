@@ -6,12 +6,23 @@
 
 ## 0. Conclusion
 
-All untrusted-origin network activity of the Agent (HTTP/API fetch, redirect, Chromium navigation + subresources/WebSocket, uploaded-content URL ingestion, Python Sidecar, and remote MCP client) must flow through a centrally controlled **Egress Authority**. Its default is **deny**. The authority rejects local/private/special/metadata addresses, forbidden hostname forms, redirects/downgrades and DNS changes, even when the Tool Registry grants a read capability. **A preflight URL check alone is NOT sufficient**. Bind transport to a validated DNS result or an enforced egress proxy that performs resolution+validation, deny direct network escape at container firewall/network namespace, and re-evaluate every redirect/hop.
+All untrusted-origin network activity of the Agent (**Sandbox Exec including generated shell/Python/Node CLI and all spawned descendants**, HTTP/API fetch, redirect, Chromium navigation + subresources/WebSocket, uploaded-content URL ingestion, Python Sidecar, and remote MCP client) must flow through a centrally controlled **independent Sentinel Egress Authority**. Its default is **deny**. Sentinel rejects local/private/special/metadata addresses, forbidden hostname forms, redirects/downgrades and DNS changes, even when the Tool Registry grants a read capability. **A preflight URL check alone is NOT sufficient**. Bind transport to a validated DNS result or an enforced egress proxy that performs resolution+validation, deny direct network escape at container firewall/network namespace, and re-evaluate every redirect/hop.
 
 - LLM/Web/MCP never gains `allowPrivateNetwork`, proxy settings, arbitrary CONNECT destinations or service discovery authority. Operator-certified internal integrations are a different, out-of-band allowlist with separate adapter & trace (future ADR only), **not a general user-accessible bypass**.
 - Browser Worker does not trust URL allowlist watchdog alone: service worker, iframe, preconnect, WebSocket, DNS and redirects can bypass page-navigation checks; network namespace and proxy must guard every socket. Browser User takeover inherits the same network restrictions.
 - Credentials may be attached only after the destination and certificate/SNI have been evaluated by this authority. Redirect to different origin drops all secrets unless explicitly reauthorized by the Credential Broker.
 - Enforce finite hops, bytes, DNS answers, wall time, concurrency, hostname length and per-Task/network quota. Unknown DNS / TLS / proxy configuration means **no request**.
+
+## 0.1 Muse migration: compulsory packet route / opaque TLS (2026-11-07)
+
+[Sentinel Authority](sentinel-authority.md) is the only final external egress permission authority and operates **outside** Runtime Cell ([Cell Isolation](runtime-cell-isolation.md)). Tool Gateway remains persistent intent/approval/ledger owner; neither shell, curl, npm/pip, generated Python, DNS, websocket, IPv6, UDP, QUIC nor browser subresources can bypass enforced kernel/network boundary. Browser and trusted Privsep also require independently enforced egress, not just checking HTTP client headers. A proxy environment variable alone is not enforcement; deny any alternative physical network route.
+
+When actual HTTPS method/path/body or information sensitivity is opaque, Sentinel must NOT infer harmless read from domain, SNI, SDK annotations or Agent description. Fail closed or delegate to an auditable typed Connector/HTTP broker that can enforce exact request, with per-action approval for sensitive/irreversible effects. Optional eBPF taint propagation is experimental and cannot be relied on until verified. Internal/private and metadata ranges always deny unless a separately owner-approved trusted adapter with narrow audited policy exists.
+
+| EGR-016 | MUST | arbitrary sandbox code and subprocess direct sockets cannot bypass Sentinel | 17,19,22 |
+| EGR-017 | MUST | outbound origin attributed to owner/task/run/exec/lease, plus bounded policy and expiry | 19,21 |
+| EGR-018 | MUST | opaque encrypted side-effect or tainted request is not auto read-only, deny or seek specific authorization | 19,22 |
+| EGR-019 | MUST | proxy failure/network ACL failure never falls back to direct public internet | 18,19 |
 
 ## 1. Scope and threat model
 

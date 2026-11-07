@@ -11,10 +11,14 @@
 採用する多層防御：
 1. **Provenance**：各入力にServer検証済みのsourceRef、取得時刻、owner/tenant、hash、抽出位置、trust classを付与。本文中の「system」「admin」「approved」は単なる文字列。
 2. **Context separation**：モデルへ渡す外部文字列を有限長のdata regionに限定。role/special tokenに見せかけた境界をsanitizeし、偽markerを無効化。これは補助策でありLLMが常に守る保証ではない。
-3. **Deterministic gate**：LLMのTool ProposalをCHAT_03 Gatewayが静的Registry・厳密Schema・owner・Tenant/Workspace・GoalRevision・Run leaseEpoch・Approval・副作用台帳・費用・egressで検証。任意Tool/ホストshell/Docker/秘密の読み出し不可。
+3. **Deterministic gate**：LLMのTool ProposalをCHAT_03 Gatewayが静的Registry・厳密Schema・owner・Tenant/Workspace・GoalRevision・Run leaseEpoch・Approval・副作用台帳・費用・egressで検証。任意Tool/ホストshell/Docker/秘密の読み出し不可。隔離Runtime Cell内のsandbox.execはGatewayで承認されるが、そのshellはSentinelの外部通信ポリシーを変更できない。
 4. **Evidence validation**：観測時刻・出典・内容hashをserver receiptに紐づけ、Webの自己申告「公式検証済み」を無視する。未知はUNKNOWN。
 5. **Persistence quarantine**：抽出文から直接 trusted Memory/Skill/Browser Action Recipeを有効化しない。別途所有者の明示的Review/Undoが必要。旧revisionのモデルproposalをSteer後に実行しない。
 6. **Adversarial regression**：多言語・Unicode・埋込HTML・base64・ツール説明・OCR・長文・再利用時の攻撃を評価し、zero unauthorized effect/exfiltrationを合否基準とする。
+
+## 0.1 2026-11-07: arbitrary code increases injection risk
+
+Generated Python/Node/Shell, package install scripts, temporary Skills and agent-created subagents are untrusted code, even when produced by model from hostile websites. Their **local execution** is permitted inside attested Runtime Cell but grants no authority to read protected secrets, bypass Browser Broker, change policy or send unauthorized network traffic. Prohibit copy/paste of external instructions into privileged context and ensure all file downloads/packages are provenance-tagged. Test malicious code and command-injection in README/CLI output/PDF/HTML causing direct network exfiltration: Sentinel must deny even if LLM follows the malicious instruction. "Prompt guard" alone cannot guarantee this. See [Cell](runtime-cell-isolation.md), [Sentinel](sentinel-authority.md), [Exec](../02-runtime/sandbox-execution.md).
 
 ## 1. Scope / threat model / non-goals
 

@@ -14,6 +14,10 @@
 2. **Artifacts:** HTML/PDF/スクリーンショット、Evidence raw、Checkpoint外部object、モデル結果に関連するobject metadata。DBの`artifact_id→object_key→sha256`を検証できること。バックアップ先は本番コンテナの普通の読み書きパスと分離。
 3. **Secrets:** DBパスワード、Provider Key、Cookie/ブラウザ保存状態、暗号化鍵、リカバリ用復号キー。Raw secretsはManifestにもログにも載せない。復旧主体はoperator-only、Agent/LLMへ提供しない。
 
+## 0.1 2026-11-07 Secure VM / Workspace recovery
+
+Operator-only backup/restore of Secure VM image, protected DB, Vault-encrypted values, policy/signing material and scoped workspaces must use separate access domains: Runtime Cell never gains backup credentials. Only owner-approved Workspace artifacts persist; volatile code, temporary package layers, active grants and untrusted process state must not silently be restored. Rebuilt Cell receives new identity/lease and reruns admission/egress attestation; pending external writes remain UNCERTAIN pending reconciliation, not blind retry. Version upgrades must validate kernel+KVM+nspawn/Chromium sandbox compatibility, Sentinel forced egress, migrations and rollbacks; a failed security gate blocks production instead of downgrading. See [Cell](../09-security/runtime-cell-isolation.md).
+
 ## 1. Scope / Non-scope / 関連SC
 
 **Scope:** backup sets、WAL archive、artifact・DBのlogical point-in-time一致、Secret復元、checksum/manifest、独立試験環境でのrestore drill、Schema/runtime upgradeのexpand/contractとdrain、PITR後のreconciliation gate、RPO/RTO検証方法、operator操作・監査。

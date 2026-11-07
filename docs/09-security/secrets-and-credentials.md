@@ -16,6 +16,16 @@
 - **副作用**: 秘密が必要なToolを実行する前にGatewayのpolicy/approval/budget/ownerと、Network egressの実宛先を検証。資格情報が失効・不確定なら`NEEDS_REAUTH`、未知の外部操作は`UNCERTAIN`として実行を止める。
 - **境界**: HTTPSリクエストHeaderに秘密を適用する際も、Browser/HTTP/MCPが任意の別ホストへ転送できないようprovider origin/path/scope/redirect downgradeを制限。実資格情報をLLM入力・モデル返答・Tool output/Traceへ挿入しない。
 
+## 0.1 Muse migration: Privsep and surrogate credentials (2026-11-07)
+
+**No plaintext secret in Runtime Cell, not even for code produced by the Agent.** The protected Credential Broker and encrypted Vault are outside Cell but inside Secure VM; trusted Connector Privsep Workers have distinct identities and explicit per-provider allowlists. The protected Browser Broker owns credentials and CDP; no raw storageState or session cookie is exposed to Cell. Credential surrogation is optional implementation technique: surrogate is itself sensitive, tied to tenant/owner/tool/receiver/action/expiry, and can be redeemed only *after* Sentinel's final exact egress/connector authorization. Redirect/origin drift invalidates recipient binding. An agent-created curl script cannot redeem or exfiltrate a surrogate. Policy, signer, master key and admin control may never be managed by Agent's shell.
+
+Canonical full bounds: [Sentinel Authority](sentinel-authority.md) and [Runtime Cell](runtime-cell-isolation.md). Previous rejection of arbitrary *host* shell-based secret providers remains; isolated shell cannot request raw secrets. A user-authenticated Browser Handoff occurs in Broker-owned session, not as credentials typed into the runtime shell. If no safe credential-free pathway exists, show NEEDS_REAUTH / WAITING_INPUT / UNSUPPORTED, not insecure fallback.
+
+| SEC-CRED-014 | MUST | protected Privsep/Browser identities separated from Cell and from one another; strict credential allowlists | SC-18,22 |
+| SEC-CRED-015 | MUST | surrogate injection only for exact authorized destination/action; no raw token to runtime or LLM | SC-19,22 |
+| SEC-CRED-016 | MUST | script/CLI stdout, env, /proc and artifacts never expose real secrets | SC-17,22 |
+
 ## 1. Scope / non-scope / scenarios
 
 対象は保存時、転送時、プロセス内、Browser storageState、ローテーション、失効、バックアップ復元、export/delete/監査とcross-tenant混入。対象外は他サービスの認証迂回、CAPTCHA突破、自動でのアカウント新規作成、ホスト管理者の秘密ファイル閲覧、Arbitrary shell-based provider。SC-06 browser handoff、SC-07 restart/crash、SC-08 secret exfiltrationを必須、SC-02通知・SC-03 X API・SC-04ホテルログイン・SC-11イベントWebhook・SC-15文書内埋込文字列にも適用。
