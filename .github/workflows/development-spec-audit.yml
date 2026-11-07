@@ -1,0 +1,26 @@
+name: Autonomous Development spec contract (static only)
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "audit/development/**"
+      - ".github/workflows/development-spec-audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "audit/development/**"
+      - ".github/workflows/development-spec-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  development-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate 11 new modules, test IDs, contracts, and SC-24..31 fixtures
+        run: python3 audit/development/validate_spec_contracts.py
