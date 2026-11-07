@@ -195,3 +195,6 @@ Owned pathのみ。Sourceコードとテストを参照したがHarness test未�
 
 - **[Issue report / not reproduced]** Undici [#1462](https://github.com/nodejs/undici/issues/1462) はContent-Encodingが付いたHTTP応答でraw compressed bytesとtransparent decompressionの区別が重要であることを報告。本仕様の `maxCompressedBytes` と `maxDecodedBytes` は別カウンタとして必ず計測し、`Content-Length`（転送表現）をuncompressed sizeとして扱わない。T-FETCH-006でテストする。
 
+## 2026-11-07 Muse移行: Runtime CLIとTrusted Fetchの区別
+
+既存のHTTP Fetchは信頼された境界でURL/redirect/SSRF/timeout/byte/bodyを検査するToolのまま。AgentのCell内curl/Python requests/Node fetchも**同じSentinel最終出口制御とカーネル強制**の対象で、HTTP Toolを使わず直接ソケットでプロキシ/認可を迂回してはいけない。Opaque TLS requestのmethod/path/body/副作用を安全と推測しない。外部writeが必要なら認可済みTyped HTTP/ConnectorとSide-effect Ledgerを利用する。SC-19/22。
