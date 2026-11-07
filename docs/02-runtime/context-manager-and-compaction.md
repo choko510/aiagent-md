@@ -529,3 +529,135 @@ Task詳細に「使用Context」「維持した必須条件」「圧縮/退避�
 - **見送り**: Prompt全文をVector DBへ永久保存、全MemoryをSystem messageに注入、LLMに自身の権限やSecretを記憶させる、古い結果の自動真実化、モデルの主観スコアのみで安全判断、長時間の無限Single Run、子Agentのprivate state共有、ユーザーの同意なしの永続Preference追加。
 - **Experimental**: 小型LLMの階層要約、学習型reranker、source affinity cache、階層ごとのL2/L3 compression。採用には匿名fixture上でHard gates完全維持かつQualityとCostの再現可能な改善を必須とする。実機測定前に仕様の必須経路へ追加しない。
 - **Owner未合意の境界**: context manifestとcommon event schema、Retrieval APIとACL、Artifact locator/retention、quality thresholds、Source TTL、Model tokenizer capabilities、UI最終API/計測単位。これらをPRマージだけでLOCKEDと称さない。
+
+### 18.18 P0: Semantic Fact entailment と Typed Goal Anchor（未Locked）
+
+**検証すべきものは出典の存在ではなく、出典の特定範囲が主張の各属性を支持するかである。** 参照・Digest・Locatorのみの検査はデータ同一性を示すが、意味的支持を示さない。数値・日付・料金・人数・単位・税/手数料内外・肯定/否定・条件/例外の要約を`SourceBackedFact`に正規化する。自動的なVerifierが対応できない自由文は`UNVERIFIED`に落とし、決定的な照合なしに`VERIFIED_WITH_SOURCE`にしない。
+
+~~~ts
+type ValueKind = "MONEY"|"DECIMAL"|"DATE_TIME"|"LOCAL_DATE"|"BOOL"|"ENUM"|"TEXT";
+type FactSupport = "SUPPORTED_BY_SPAN"|"DERIVED_BY_RULE"|
+ "REFUTED_BY_SPAN"|"UNDETERMINED"|"SOURCE_MISSING";
+interface SourceBackedFact {
+ factId:string; predicate:string; kind:ValueKind;
+ canonicalValue:string|null; // exact decimal / ISO / enum, null=unknown
+ operator:"EQ"|"NE"|"LTE"|"GTE"|"IN"|"NOT_IN"|"EXISTS"|"NOT_EXISTS";
+ unit?:string; currency?:string; timeZone?:string;
+ taxTreatment?:"INCLUDED"|"EXCLUDED"|"UNKNOWN";
+ feeTreatment?:"INCLUDED"|"SEPARATE"|"UNKNOWN";
+ modality:"ASSERTED"|"NEGATED"|"CONDITIONAL"|"UNKNOWN";
+ conditionRefs:string[];
+ sourceArtifactRef:string; locatorRef:string; sourceSpanDigest:string;
+ parserRevision:string; observationRef?:string;
+ observedAt?:string; validUntil?:string;
+}
+interface SemanticVerificationReceipt {
+ claimId:string; sourceBackedFactRefs:string[];
+ support:FactSupport; checkedSourceRefs:string[];
+ checkedLocatorRefs:string[]; checkedAt:string;
+ deterministicRuleRef?:string; verifierRevision:string;
+ counterEvidenceRefs:string[];
+}
+~~~
+
+**独立したGoal型**: GoalはWeb出典ではなく本人が明示したUser Message/GoalRevisionが正本。`SourceBackedFact`をGoalに流用して`sourceArtifactRef`を要求しない。`GoalConstraintValue`は値・operator・unit/currency/TZ・肯定/否定・REQUIRED/FORBIDDEN/SOFT・条件スコープ・曖昧性を持ち、`TypedGoalAnchor`にはversion/digestと構造化した制約値を保持する。詳細正本は`docs/02-runtime/goal-and-planner.md`の「P0 Typed Goal」節。
+
+**8人・2泊・48,000円・駐車別途2,000円**という資料では、`accommodation_total=48000 JPY`、`parking_fee=2000 JPY, feeTreatment=SEPARATE`を別Factにする。「駐車込み48,000円」は正しい出典が付いていても`REFUTED_BY_SPAN`。合計50,000円の導出には決定的なdecimal演算と、駐車台数・日数・税・その他料金の適用条件の検証が必要。条件不明なら`UNKNOWN`（確定総額とは言わない）。
+
+**照合順序**: ACL/retention/source digest→original locator span取得→version固定parserのField抽出→claimの型付き正規化→値・演算・否定/conditional・含有条件を突合→`SUPPORTED_BY_SPAN` / `DERIVED_BY_RULE` / `REFUTED_BY_SPAN` / `UNDETERMINED`。LLMやNLIの同意は参考であり決定的合格証明ではない。出典が記載することと、現実の真実・最新性・予約可能性は区別する。反証/資料間競合を消してはいけない。
+
+### 18.19 P0: Disjoint Token Budget と Sealed ModelRequestSnapshot
+
+**Token会計**: 各最終Provider Request内のContent Partは一つだけの`accountingPath`を持つ。A0/Policy最小Projectionは`Tsys`、A1/Goalは`Tgoal`、A2/Controlは`Tctrl`に一度だけ入れる。`Tframe`はRole区切りやProvider付加情報のみ、`Ttool`はTool schemaのみ。`Tmandatory`と`Tinput`は*最終シリアライズされた全要求*をtokenizeした値であり、項目別Tokenの足し算がTokenizer境界の影響で一致しない場合は最終値を優先し差分を記録する。`Tinput+R+S<=W`の最終Adapter admissionを必須とする。Tokenizer不明なら保守的な上限証明か拒否。Output上限がShared Windowか独立なのかもModelProfileで定義する。
+
+**ModelRequestSnapshot**は候補選択用`ContextManifest`とは独立した、保護された**最終送信入力**の監査・復元契約。Manifestの`contextDigest`だけではModelへの実際の入力は再現できない。
+
+~~~ts
+interface ModelRequestSnapshot {
+ snapshotId:string; runId:string; stepOrdinal:string; attemptId:string;
+ contextManifestRef:string; promptTemplateRevision:string; promptTemplateDigest:string;
+ serializerRevision:string; canonicalizationRevision:string;
+ providerAdapterRevision:string; modelId:string; tokenizerId:string; schemaVersion:1;
+ messages:ReadonlyArray<{
+  ordinal:number; role:"system"|"developer"|"user"|"assistant"|"tool";
+  parts:ReadonlyArray<{ordinal:number; kind:"text"|"image"|"file_ref"|"tool_result";
+   sourceLocatorRef?:string; sealedContentRef?:string;
+   redactedProjectionRef?:string; partDigest:string}>;
+ }>;
+ toolSchemas:ReadonlyArray<{ordinal:number; schemaRef:string; digest:string}>;
+ continuation?:{mode:"NONE"|"PINNED_OPAQUE"|"UNAVAILABLE";
+  providerId?:string; sealedProviderStateRef?:string; stateDigest?:string};
+ providerPayloadDigest:string;
+ policyVersion:string; goalRevision:string; memorySourceEpoch:string;
+ modelInputTokens:string; outputReserveTokens:string;
+ recipientAdmissionDecisionRef:string; dispatchAdmissionRef:string;
+}
+~~~
+
+- Promptテンプレート、Role/順序、Content Partの形式・正確なSource Locator、Tool schemaの内容/順序、SerializerとProvider変換のRevision、Opaque continuationを記録。`ContextManifest`は選択の正本、`ModelRequestSnapshot`は実際の送信組立の正本、Event/Tool receiptは別正本。
+- 可逆なPrompt本文を保存する必要がある場合は**暗号化済みSealed Content**と厳格ACL/保持期間/鍵破棄。通常Trace・UI・非信頼Cellに平文PromptやSecretを出さない。保存禁止/失効/原本消去で本文がないなら`UNAVAILABLE`、Digestしかない場合も完全再現とは表現しない。
+- 再開に必要なProvider continuationはProvider固定とし、Provider切替時は`NEW ATTEMPT`で新Snapshotを作り、旧Attemptの再送で重複Tool/課金を発生させない。Crashとlost ACKの扱いはCheckpoint/Ledgerに従う。
+- 保存順: Final serialization→Sealed snapshot durability→Memory/Goal/Policy/Provider admission→送信開始→Usage/Reply commit。Sealed dataの書込みが拒否された場合は再現性を偽装せず`BLOCKED_SNAPSHOT`か、Policyで明示的に許可された*内容非保存の非再現可能モード*を別状態として記録し、二重送信はしない。
+
+### 18.20 P0: Memory削除・Model送信のAdmission線形化
+
+モデル送信直前の`sourceEpoch`再読込だけでは、確認直後の削除競合を防げない。**Memory Writerの削除commit**と**Protected Model Gatewayの送信Admission commit**を、同一のMemory scope/tenant/subject epoch rowを使った短いDB transactionで順序づける。Provider送信I/OのためにDB row lockを保持しない。
+
+~~~text
+build request snapshot (still unsent)
+protected ModelGateway short DB tx:
+  lock scope_epoch + Task/Run current version
+  check Memory sourceEpoch, revocations, Goal, policy, lease, budget
+  check recipient policy/consent for exact provider + data classification
+  unique (tenant, attemptId), requestDigest/idempotencyKey
+  INSERT dispatch_admission(ADMITTED, epoch, recipient, payloadDigest)
+  COMMIT
+sender:
+  recheck ticket/revocation in protected sender; mark STARTING / MAY_HAVE_SENT
+  initiate bounded network I/O; persist response/usage receipts (or UNKNOWN)
+memory delete/correction:
+  same scope row lock + CAS tombstone + increment sourceEpoch + outbox
+  find admitted/in-flight attempts; invalidate unstarted tickets, cancel if feasible
+  record possible exposure for started/ambiguous attempts
+~~~
+
+**線形化保証**: DELETE commitが先なら旧Memoryを含む**新規Admissionは0**。Admissionが先なら送信が始まった可能性があるので、取消しを試みても**プロバイダ到達を否定できない**。Admissionと物理1byte目の送信は同一atomic transactionにできず、「DELETE commit後に一切のbyteが絶対届かない」とは主張しない。`NOT_ADMITTED` / `ADMITTED_NOT_SENT` / `MAY_HAVE_SENT` / `CONFIRMED_SENT` / `CANCEL_REQUESTED`を区別。ACK喪失やネットワーク断は`MAY_HAVE_SENT`であり「未送信」にしない。
+
+複数Gateway replicaのin-process mutexだけに頼らず、scope row lock、epoch CAS、unique Attempt、lease fenceを正本としてテストする。Memoryの一件削除でもSnapshotの各Projection SourceRefを照合し、すべてのTask/子Task/Cacheで失効を強制。既にモデルへ送った情報は回収不能であることをユーザーへ説明する。認証の失効やRecipient変更もAdmissionで同じく再検査する。
+
+### 18.21 P1: 補完仕様と運用上の境界
+
+- **Sealed OriginalとRedacted Projection**: 正当に保持できる原本は暗号化し、用途別のRetention、ACL、Hashを与える。LLM向けRedacted Projectionは別のDerived Artifactで、別Hash・原文と投影のLocatorMapを持つ。Cookie/APIキー等の不要なSecretは保存禁止/隔離。原本消去後にProjectionだけを新しい原本だと偽装しない。
+- **A0/A2最小化**: PolicyとEffect/Approval台帳はProtected Servicesの正本。LLMへは安全性・状態説明に必要な最小の`ModelVisiblePolicyProjection`/`ControlProjection`だけ渡す。未公開Policy全文・認証トークン・Sentinel管理操作・秘密は出さない。Tool GatewayはProjectionとは独立して必ず最終再検査。
+- **HistoryとCurrentを分離**: Sourceが期限切れでも、歴史的観測として問われた時点に限り観測日時/有効時点/出典付きで使用できる。現在値の判定からは除外する。期限切れ情報を0円/空室なし/現在値へ自動変換しない。
+- **Token効率**: まずP0/P1を確保し、P2/P3はToken残余下でmarginal utility（採用済みSourceとの重複を除いたCoverage/Quality ÷追加Token）最大の候補を繰り返し選ぶ。`rankScore`はAuthorityにならない。Score先頭ソートによるutility死文化は禁止。
+- **Provider別データ転送**: Fallback前にProvider ID/地域/保持・学習利用設定/契約・データ感度/Recipient許可/Consentを保護Policyで再判定。不許可なら別Provider送信0、明示同意かRedaction/Partial。旧Providerの許可を再利用しない。
+- **Child Result受入**: Parentは現行Goal/lease/authorization/child lineage、Source ACL/digest/time/Locator、Evidence矛盾、Effect Ledgerを再確認し、結果を`CHILD_STALE`/`UNAUTHORIZED`/`PARTIAL`等に分類。遅延した子の「成功」だけでParentをSUCCESSにしない。
+- **GC/物理参照**: Artifact/Manifest/ModelRequestSnapshot/Checkpoint HEADの生存参照・TTL・retention・legal eraseを管理。Live HEADが示す資料を無断GCせず、保持義務の削除時はHEAD/SourceをEXPIRED・DEGRADEDとし、引用不可にする。孤立Manifestはpending writer/leaseの可能性を考慮した短期GC待機。外部StorageとDBの非原子的な境界を復旧/監査で検出。
+- **失敗履歴Task Journal**: immutable`{attemptId, logicalToolCallId, inputDigest, failureCategory, effectState, retryEligibility, retryAfter, rejectedApproachRef, evidenceRefs, nextPlannerEligibility}`を保持。Plannerは同じ失敗原因のblind retryをしない。UNKNOWN side-effectはどのSummaryからも再実行指示へ変えない。
+- **Context差分復旧**: ManifestのGoal/Policy/Memory/Recipient/Prompt/Source digestと現行ACLを比較し、変更されていない認可済みEvidence部分のみ再利用。Steerで古いGoal・Memory・Approval・Provider Promptを使い回さず、新Snapshotとdiff reasonを保存。
+- **Context Cache**: cache key案はtenant/owner/task/GoalRevision/Policy Epoch/Source digest+ACL/Memory Epoch/Model+Tokenizer+Prompt/Redaction/Recipient class。跨tenantのPrompt/Content共有は不可。Public immutable cacheはprivate tenant contextと物理/論理分離し、cache hit後もdispatch admissionを再実行。削除/失効/Source GC/Consent変更ですぐ無効。
+- **Coverage Checker**: Dispatch前にGoal condition IDs、Evidence必須slot、否定条件、Source freshness、Unresolved、Tool call/result pairing、UNKNOWN effectsを検査。Tokenが足りていてもSource不足なら`COVERAGE_INCOMPLETE`。有限なread-by-locatorで補完できなければ`PARTIAL_INSUFFICIENT_CONTEXT`か`BLOCKED_CONTEXT_CAPACITY`。検証可能な出典を追加取得せずに「揃っている」と扱わない。
+
+### 18.22 追加の受入テスト (ACM-T21..T36、全て設計のみ)
+
+| Test | Input/fault | Oracle |
+|---|---|---|
+| ACM-T21 | 正しいSourceRef、別途駐車料金を「込み」に変造 | Source-backed Fact support REFUTED、verified claim 0 |
+| ACM-T22 | A0 Policyをsysとanchorへ二重計上 | unique accountingPath、最終Provider input tokens一致 |
+| ACM-T23 | Template/Message順/Role/Tool schema変更後resume | Snapshot digest違い検出、exact replay誤認0 |
+| ACM-T24 | Memory v10取得→削除commit→Model Admission | 旧Projection Admission 0、送信0 |
+| ACM-T25 | Admission commit後に削除→Provider ACK lost | Cancel試行、MAY_HAVE_SENT、未送信と断定0 |
+| ACM-T26 | 8人・2泊・禁煙・金額税込/税別・日付未指定・否定条件 | 型付きHard/Soft/Unresolvedと元Value保持 |
+| ACM-T27 | 原本PDFとRedacted Projection、原本GC | 各Digest/LocatorMap分離、失効Source verified 0 |
+| ACM-T28 | Expired価格の現在検索と歴史検索 | current reject / historicalに時点付き |
+| ACM-T29 | Provider A同意、B未同意でfallback | B送信0、Consentの再取得またはPartial |
+| ACM-T30 | Cross-tenant Cache hitとMemory delete | hit拒否・invalidate、旧Prompt admission 0 |
+| ACM-T31 | Parent Steer中にChild DONE | Goal/ACL/Evidence再検査、旧Child統合0 |
+| ACM-T32 | Artifact/Manifest GCとHEAD CAS競合 | dangling ref成功0、Orphan適切GC |
+| ACM-T33 | 同じTool失敗3回・異なる代替案 | Journal履歴をPlannerが読みblind retry 0 |
+| ACM-T34 | Model切替とGoal Steer | 未変更Evidenceのみ安全reuse、Prompt再生成 |
+| ACM-T35 | Context上限内でも必須Evidence slot不足 | COVERAGE_INCOMPLETE、bounded rehydrate/Partial |
+| ACM-T36 | Sealed snapshot保持不可・Continuation失効 | 再現不能を宣言、無条件再送0 |
+
+**現状は仕様書/静的検証のみで実装Fixtureは未実行。** QA Ownerがgolden source spans、期待TypedFacts、DB行/Attempt、Provider request transcript、Killpoint/CAS競合、Budget/Consent/Artifact GCを含む実行可能fixtureへ落とし込む。
