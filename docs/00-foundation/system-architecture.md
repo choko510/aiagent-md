@@ -132,7 +132,7 @@ Unit schema/codecs, real PostgreSQL FK/concurrent CAS/migration upgrade, Browser
 - Any current direct Gateway→External arrows represent a **logical invocation**, not a direct unfiltered socket route. Actual network/connector authority is Sentinel. All legacy no-arbitrary-code statements must be understood as host/protected-service prohibition, not Runtime Cell limitation.
 - The shared transaction/approval contracts are Draft; no explicit implicit lock or VM implementation is implied by this revision. Full implementation requires OWNER reconciliation + TEST SC-17..22.
 
-## 11. Autonomous Development & Campaign Extension (2026-11-07, Draft)
+### 13.1 Autonomous Development & Campaign Extension (2026-11-07, Draft)
 
 既存Orchestrator/Trusted VM、Tool Gateway/Approval/Sentinel、Untrusted VM、Browser Worker/DB/Artifact Storeを**再利用**し、次の論理サービスを追加する（API/DDL/EventsはOwner協議前の提案）：
 
