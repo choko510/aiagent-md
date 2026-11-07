@@ -36,7 +36,7 @@ TEST_OWNERS = {
 SEMANTIC_MARKERS = {
     MODULES["DEV-03"]: ("demo:interact", "REQUIRE_USER_APPROVAL", "AUTO_RECOMMEND", "PREAUTHORIZED_BOUNDED_AUTO"),
     MODULES["DEV-05"]: ("PreviewCapabilityV2", "originGeneration", "runLeaseEpoch", "DEV-BLD-T14"),
-    MODULES["DEV-07"]: ("integration HEAD", "DEV-REV-T08"),
+    MODULES["DEV-07"]: ("integration review", "DEV-REV-T08"),
     MODULES["DEV-08"]: ("logicalWorkItemId", "INTEGRATED", "DEV-FF-T11"),
     MODULES["DEV-09"]: ("campaign:control", "designPolicy", "demoAcceptancePolicy"),
     MODULES["CAM-01"]: ("QuotaWaitReceiptV1", "CampaignChildAdmissionV1", "controlVersion", "CAM-T18"),
@@ -74,7 +74,7 @@ for module_id, path in MODULES.items():
         errors.append(f"abbreviated test ID: {path}:{body.count(chr(10), 0, match.start()) + 1}")
 for prefix, (module, maximum) in TEST_OWNERS.items():
     body = read(MODULES[module])
-    pattern = rf"(?m)^\s*(?:[-*]\s*)?{re.escape(prefix)}-T(\d{{2}})\b"
+    pattern = rf"(?m)^\s*(?:[-*]\s*)?(?:\*\*)?{re.escape(prefix)}-T(\d{{2}})\b"
     numbered = [int(i) for i in re.findall(pattern, body)]
     if sorted(numbered) != list(range(1, maximum + 1)):
         errors.append(f"{prefix} definitions expected 01..{maximum:02d}, got {numbered}")
