@@ -504,3 +504,7 @@ CreateTask APIはcommandIdを受け取れること、更新APIはexpectedVersion
 **Cross-team proposals:** CHAT_10 PR #10: UUIDv7 default、nullable Conversation、recordVersion=1、Run lease列、GoalRevision/activeRun、owner映射とatomic outbox。CHAT_08 PR #8: nullable TaskView、lossless resourceVersion。CHAT_09 PR #9: Tenant/User/Workspace policy。CHAT_02 PR #1: epoch/fenceとGoal revision safe boundary。CHAT_03 PR #6: approval/side-effect UNKNOWNとfence。CHAT_07 PR #11 およびCHAT_13: trigger key≠domain ID。CHAT_00: ADR ratification、CHAT_11: contract/fault fixtures。
 
 **未解決P0:** R2-04/05/06/07/08。他ownerが実際に修正/合意した証拠はない。Draftを維持しLockedとはしない。
+
+## 2026-11-07: Muse型SandboxExecution/Workspaceドメイン契約案
+
+Task/Run/Conversation/Watchの正本は維持し、**SandboxExecution (一つのRunに属する実行)**、**RuntimeCell (隔離実体/attestation)**、**WorkspaceRevision (owner/tenant/taskスコープ付き)**を新規子ドメインとして扱う。ExecutionIDはRunIDの別名ではなく、同一Run内の複数実行を識別する。ExecutionにはownerUserId、tenantId、taskId、runId、goalRevision、leaseEpoch、toolIntentId、cellId、runtimeProfile、imageDigest、policyEpoch、workspaceRevision、limits、start/end、exit/signal、effectState、artifact refsを関連づける。Workspaceは可変なポインタを持っても内容のcommitはimmutable revision + owner CAS。既存のEvidence/Artifactは実行ログ/生成ファイルのProvenanceを保持する。外部ActionのApproval/GrantはExecutionと独立したGateway/Sentinel契約としてbindする。共有型は[Sandbox Exec](../02-runtime/sandbox-execution.md)のProposed ShapeをOwner review後にcanonical化。採用前に全ownerが状態/ID/索引/イベントを合意し、勝手にLockedとしない。SC-17/18/21。

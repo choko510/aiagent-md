@@ -279,3 +279,6 @@ Validate (a) `sourceSha256` matches immutable source raw bytes and owner; (b) al
 CHAT_10 PR #10 proposes `parser_jobs/artifact_derivations` with physical FK; CHAT_15 maintains parser behavior. The JSON payload above is proposed to CHAT_01 reviewer; may not be a new `CitationLocator` union until tests pass.
 Tests EVD-R4-T01 OCR rotated table maps to original page bbox; T02 XLSX sheet/cell preserved; T03 hash mismatch returns quarantine; T04 cross-user derived evidence forbidden; T05 parser crash leaves no verified claim; T06 malicious PDF/Office scripts do not run inside parser jail (security integration test required). SC-15/07/08. Design not executable Harness.
 
+## 2026-11-07: Generated Code / Console / Workspace Provenance
+
+EvidenceはTask Goalの検証可能な事実。Execution stdout/stderr、生成コード、インストールしたpackage、Workspace snapshot、compiled outputは**raw or derived Artifact**であり、既にVerified Evidenceではない。Artifact refsにはhash、出所、source line/offset、owner/tenant/task/run/execution、image digest、workspace revision、capture time、trust class、redaction/retention metadataを保持。Host pathやcredential/surrogateは記録しない。Console logsはfinite byte limits and redaction required; Generated SkillsはcandidateでありSkill publish承認の代替にならない。SC-17/20/21/22。

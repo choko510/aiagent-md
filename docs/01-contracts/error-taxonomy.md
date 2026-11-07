@@ -260,3 +260,7 @@ Keep Draft until owners approve and full contract tests pass.
 **Review gates:** P0 contracts remain, all tests are designs rather than execution. Not Locked.
 
 **MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
+
+## 2026-11-07: Secure Runtime固有のエラー候補
+
+新分類案: EXEC_UNSAFE_RUNTIME (VM/Cell/kernel attestation missing), EXEC_POLICY_DENIED (Command/Privilege violation), EXEC_RESOURCE_EXCEEDED (CPU/PID/memory/disk/output), EXEC_EGRESS_DENIED (Sentinel final deny), EXEC_PROCESS_LOST (child process status unproven), EXEC_WORKSPACE_CONFLICT (owner/version CAS), EXEC_RESULT_UNCERTAIN (external effect unknown), EXEC_CREDENTIAL_UNAVAILABLE (Broker denies), EXEC_BROWSER_BROKER_DENIED (direct CDP). Error wire name/HTTP status/Run transitionは既存taxonomy Ownerの統合レビューで決める。Sandbox failureを自動的に安全なRetry条件としない。未知の外部効果は0件と断言しない。コード名・例外はProvisional、SC-17..22。

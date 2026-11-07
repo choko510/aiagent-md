@@ -256,3 +256,7 @@ Do not mark Locked until Tool Gateway and schema dialect are agreed.
 **Review gates:** Tool Gateway policy, Schema dialect and owner/lease DB contract unresolved. Tests designed but not run, Draft only.
 
 **MCP license evidence (Docs verified, pinned 39ae8e6, 2026-10-30):** https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/LICENSE (MIT→Apache-2.0 transition); https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/core-internal/package.json (license: Apache-2.0). This project copies no upstream source code.
+
+## 2026-11-07: sandbox.exec Tool I/Oと外部Grantの交差
+
+新登録Tool sandbox.exec はargv配列、cwd scoped workspace、environment allowlist、imageDigest、workspaceRevision、runtimeProfile、stdinArtifactRef、cpu/wall/ram/pids/output/network budget、Run/lease/GoalRevision/PolicyEpochをstrict schemaで受け取る。返却はexecutionId, bounded stdout/stderr artifact refs, exitCode/signal, produced Artifact refs, attestationRef, execution state と external effect status (none_verified/known/uncertain)。stdoutを自由なJSON Tool Schemaや権限として扱わない。外部Connector/egrは別のIntent/Approval/Sentinel grant; Scriptから直接任意の認証情報を渡すツール型は許可しない。canonical schemaはCHAT_01とCHAT_02/03/09の同意後採用。SC-17/18/19/21。
