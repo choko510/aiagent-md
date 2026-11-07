@@ -414,3 +414,15 @@ Backups must include `agent.event_retention_floors`, tenant counters, domain_eve
 A durable Workspace commit contains owner/tenant/task, immutable content manifest, SHA-256 of each referenced Artifact and root manifest digest, source/lineage, package archive/checksum, image/policy generation, encryption scope and expiration/retention. Restore validates every item (scope ACL, hash, revocation, retention, quarantine/malware decision) before exposing any byte. Missing/expired/corrupted Artifact => **RESTORE_BLOCKED**, not partially synthesized workspace or silent deletion. Updates use expectedWorkspaceRevision CAS to prevent concurrent lost updates. Temp credentials, IPC grants, ephemeral package scripts and process memory are never part of a snapshot.
 
 VM pool may reuse only within same owner/tenant, after actual cleanup of cgroups/PIDs/IPC/egress grants/overlay/session/caches; cross-tenant reuse requires destroying guest and provisioning a fresh image. Finite configured idle TTL and max concurrent Execution VM/Cells are mandatory; capacity/performance claims wait for measured startup/RSS/CPU data. If cleanup/attestation fails, destroy VM and deny new work. Recovery never blurs external UNKNOWN effects into success. SC-18/21.
+
+## 2026-11-07 再監査: PITR前後のRestoreIncarnationを別信頼境界として確定する案
+
+`REC-X02`の具体化（**Draft/提案**）。Run.leaseEpochはPITRで巻き戻るため、DBの過去値と一致した旧Workerが操作可能になってはいけない。`restoreIncarnation` は巻き戻らないOperator管理ストアに単調発行し、`(clusterIdentity,restoreIncarnation,tenant,owner,runId,leaseEpoch,goalRevision,policyEpoch)` を全Worker/Broker/Tool/Notifier/Browser send grantの認可材料にする。単に新UUIDを作るだけでは稼働中の旧Workerの物理通信を止められない。
+
+1. `QUIESCING`: Operatorが新規DispatchとSender Grantを停止。既存Worker/VMのネットワーク経路を隔離してin-flight効果をUNKNOWNとして記録する。
+2. `RESTORED_QUARANTINED`: PITR実施、Manifest/Artifact/Secret/Consent/Revocation高水位を確認。復元DBの古い認証Session、Approval、Handoff Ticket、通知Grantは復活させない。独立世代Storeが未到達ならreadiness BLOCKED。
+3. `ROTATED`: Operatorが新世代を独立ストアへdurable commitし、Enforced Egress Transportが旧世代を拒否することを確認。旧VM/旧Senderがまだ送信可能ならREADY禁止。
+4. `RECONCILING`: Provider外部効果とOutbox/Watch/X Cursorを照合し、ACK不明はUNKNOWNのまま隔離。別Systemの購買/投稿/通知が実際に成立していた可能性はDB復元だけで消えない。
+5. `READY`: Fresh Auth/Goal/Consent/Policy/Quotaを照合した新Claimのみを発行。旧Incarnation付きSocket/Queue Job/Grant/Checkpoint更新は拒否。
+
+**REC-T23〜REC-T27（DESIGNED / NOT RUN）**: T23旧Incarnation Worker送信0、T24 ACK喪失UNKNOWN/no auto-replay、T25独立Store停止でReady0、T26失効済みConsent/Memoryを復元してもdispatch0、T27Outbox内の既配信通知を二重送信0（Provider照会不能ならQuarantine）。REC-T11/12/20/22と合わせ実Postgres/VM/Transport試験が必要。

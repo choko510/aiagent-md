@@ -15,7 +15,10 @@
       ]
     },
     "args": {
-      "type": "object"
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 32,
+      "description": "Broker validates args against pinned registered Tool schema; envelope shape alone never authorizes."
     },
     "requestId": {
       "type": "string",
@@ -27,5 +30,44 @@
     "operation",
     "args",
     "requestId"
+  ],
+  "description": "Untrusted envelope only; no permission. Broker MUST apply registered operation-specific schema, authentication, policy, quota and Sentinel/Transport enforcement.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "http.read"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "minLength": 9,
+                "maxLength": 8192,
+                "pattern": "^https://"
+              },
+              "method": {
+                "enum": [
+                  "GET",
+                  "HEAD"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
   ]
 }

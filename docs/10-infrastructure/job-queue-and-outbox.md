@@ -97,12 +97,12 @@ interface QueuePort {
 interface OutboxRelay {
   claimBatch(max:number, now:string):Promise<OutboxPointer[]>;
   publishPointer(record:OutboxPointer):Promise<void>;
-  acknowledge(record:OutboxPointer, fenceEpoch:number):Promise<void>;
+  acknowledge(record:OutboxPointer, fenceEpoch:string):Promise<void>; // canonical int64 decimal string
   reconcile():Promise<void>;
 }
 ```
 
-**Validation:** UUIDv7 v1 public IDs（CHAT_01）、integer safe ``0..9007199254740991`` for leaseEpoch、size`<=8KiB` pointer, allowlisted topic/version, validated schema, signed/verified internal hop if crossing process boundary, no executable code or SQL. Queue name is hardcoded allowlist. Queue adapter does not accept arbitrary network command. DB-owned `outbox_messages` remains authoritative; internal queue job expiry does not delete Task.
+**Validation:** UUIDv7 v1 public IDs（CHAT_01）、canonical signed-int64 decimal string for leaseEpoch (0..INT64_MAX, never cast through JS Number)、size`<=8KiB` pointer, allowlisted topic/version, validated schema, signed/verified internal hop if crossing process boundary, no executable code or SQL. Queue name is hardcoded allowlist. Queue adapter does not accept arbitrary network command. DB-owned `outbox_messages` remains authoritative; internal queue job expiry does not delete Task.
 
 ## 6. Sequence and lifecycle
 
@@ -233,7 +233,7 @@ Eventの唯一の保存正本はCHAT_10 `database-schema-and-migrations.md`の`a
 
 ## 11. Persistence / migrations
 
-`agent.outbox_messages` proposal to PR #10: add relay lease/owner/fence and status audit, compare async migration ordering; keep same workspace=tenant not dual naming. `pgboss` library schema version is managed only by the queue migration owner, **not** by arbitrary Agent start. If queue DB schema incompatible, API may accept Task while durable outbox remains; do not pretend workers are running. Worker drain must be done before breaking queue upgrade. Add indices for `(next_attempt_at,id) WHERE dispatched_at IS NULL` and `(tenant_id,topic,dedupe_key) UNIQUE`; heartbeat scheduled jobs never replace Watch state.
+`agent.outbox_messages` proposal to PR #10: add relay lease/owner/fence and status audit, compare async migration ordering; keep tenantId, ownerUserId and workspaceId distinct; resolve workspace via trusted authorization, never alias resource IDs. `pgboss` library schema version is managed only by the queue migration owner, **not** by arbitrary Agent start. If queue DB schema incompatible, API may accept Task while durable outbox remains; do not pretend workers are running. Worker drain must be done before breaking queue upgrade. Add indices for `(next_attempt_at,id) WHERE dispatched_at IS NULL` and `(tenant_id,topic,dedupe_key) UNIQUE`; heartbeat scheduled jobs never replace Watch state.
 
 ## 12. API / UI / other modules
 
@@ -317,3 +317,10 @@ Remain Draft while P0 contracts are unresolved. Avoid a second Queue/event sourc
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+## 2026-11-07 再監査: Queue identity・64bit Fence・復旧世代
+
+Queueに渡るtenantIdはスコープ参照でありownerUserId/workspaceIdと同一視しない。Trusted DB/Auth resolverが個別のresource ownerを解決する。Job PayloadはCapabilityではない。
+- Relay `fenceEpoch` / Run `leaseEpoch` は非負int64の正規十進文字列wire・BigInt内部・Postgres BIGINTで処理。2^53+1でも無損失、JS Numberへキャスト禁止。
+- PITR/Failover後に復元されたOutbox行・Queue Jobは旧 `restoreIncarnation` の送信権限を保持しない。独立Storeの新世代とRun/Goal/Identity/Policyを確認してから新Grant発行。既に送信された可能性のある外部操作はUNKNOWNで隔離してProvider照会なし再送禁止。
+- **設計試験**: 同Tenant別Owner/Workspace 0越境、2^53+1 fenceの新旧比較、古い世代Queue jobの送信0、ACK失われた通知の重複0。実行証拠は未取得。

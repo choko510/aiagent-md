@@ -28,7 +28,7 @@ Agent→ToolGateway→BrowserSessionManager(CH04)→EngineFactory→(Chromium ba
                        ↘ CapabilityProbe+FeatureGate→ActionEngine read-only→Evidence
 ```
 
-[PROVISIONAL: CHAT_01/02/09/10] 公開IDのUUIDv7、`Task.conversationId: null`、`recordVersion`初期値1とDB `revision`初期値0、Run `leaseEpoch` number vs bigint/DB未保存、`tenantId/ownerUserId` vs `workspace_id`の不一致を解消する。独自のDB Schema・共有Error/Eventを再定義しない。認証済みTask ownerと有効なRun/BrowserSession fenceは**各外部呼出し前後**に確認。Session IDは偶然似た文字列でも別領域で区別する。
+[PROVISIONAL: CHAT_01/02/09/10] 公開IDのUUIDv7、`Task.conversationId: null`、`recordVersion`初期値1と`Run.leaseEpoch`の現行DB列はCHAT_10で設計上修正済み（旧Round1の不一致は履歴）、`tenantId/ownerUserId`と`workspace_id`の認可済み写像を実装・実DBで検証する。独自のDB Schema・共有Error/Eventを再定義しない。認証済みTask ownerと有効なRun/BrowserSession fenceは**各外部呼出し前後**に確認。Session IDは偶然似た文字列でも別領域で区別する。
 
 ## 4. Requirements
 
@@ -162,3 +162,7 @@ P0契約未LockedのためDraft維持。
 ## 2026-11-07 Muse移行: ブラウザエンジンの差替えも安全境界固定
 
 Lightpanda/Chromiumなどエンジンの選択はBrowser Broker内の互換アダプタとしてのみ許可。Browser sandbox、Tenant/Owner isolation、CDP限定公開、Sentinelのネットワーク強制が満たせなければ実験用のみに制限してproduction fail-closed。起動速度を優先してno-sandbox/privilegedや直接CDP経路へ切替えない。SC-18/19。
+
+## 2026-11-07 再監査: 現行DB契約の参照
+
+冒頭§3に残るUUIDv4 DB default・recordVersion初期0・Run leaseEpoch未永続化の差分はRound1の歴史的記録。現行CHAT_10案は論理上修正済みだが、Owner/Workspaceの認可と実Runtime/Browser/Parser/Transportの負試験は未実施。旧注記を現在のP0と誤認せず、現行Shared Contractと未検証のテスト結果を分離する。

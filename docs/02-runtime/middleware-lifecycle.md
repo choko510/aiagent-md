@@ -27,7 +27,7 @@ Task + Run authenticated principal (CHAT_01/09)
            -> DB/Checkpoint/Usage/Outbox (CHAT_10)
            -> SSE/UI (CHAT_08)
 ~~~
-Task.conversationId null可（Watch/Event）。Run.leaseEpochはsafe integer/DB bigintのproposal、Task.recordVersionは初期1、goalRevisionとRun Epoch/Tool attempt fenceは相互代用禁止。Task.activeRunIdとRun.owner/tenantが一致しなければfail closed。
+Task.conversationId null可（Watch/Event）。Run.leaseEpochはint64十進文字列wire/BigInt内部/DB BIGINTの契約案、Task.recordVersionは初期1、goalRevisionとRun Epoch/Tool attempt fenceは相互代用禁止。Task.activeRunIdとRun.owner/tenantが一致しなければfail closed。
 
 ## 4. 要求定義
 | REQ | Strength | Observable contract | SC |
@@ -119,7 +119,7 @@ Hook execution p50/p95, failure modes, retry counts, redacted patch sizes, bypas
 
 ## 11. Persistence/Migration [PROVISIONAL: CHAT_10]
 Hook registrations versioned/immutable; run snapshot stores hook manifest digest, execution ledger unique (runId,stepOrdinal,stage,hookId,attempt), patch ref and immutable redacted audit. Stateful effects must use Tool Gateway; no separate direct external network side effect from Hook. Migration upgrades should not change hook behavior midrun without revalidation.
-Shared DDL不一致: UUIDv7とgen_random_uuid、nullable Task.conversationId、recordVersion初期値1対DB revision0、Task.goalRevision/activeRunId、Run.leaseEpoch保存の解消がP0。新規table/columnsの最終名称を本書で勝手に確定しない。expand/contractと旧snapshot schema adapter/停机migrationを設計。
+**履歴訂正:** UUIDv4 default/Conversation NOT NULL/revision初期0/Run lease列欠落は現行CHAT_10のDB設計では修正済みで、古いRound1の矛盾を現在のP0として計上しない。未解決なのはHook attemptの物理保存、current Run/Owner/Goal/Policy/RestoreIncarnation検証、idempotent resumeを本物のGatewayとDBで実証すること。
 
 ## 12. REST/UI/Telegram [PROVISIONAL: CHAT_08]
 Show safe Hook lifecycle status and reason codes; no full prompt/log secrets. Operators can disable future Hook loads but in-flight replan/restart honors policy. Untrusted website cannot install/enroll Middleware.
