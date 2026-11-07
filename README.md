@@ -62,3 +62,7 @@ Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格�
 LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き固定領域とし、Evidence原本のArtifact offload、関連度・鮮度で選択したWorking/Memory投影、根拠付きSummary、Checkpoint復旧/Model変更時の再構築を組み合わせる。[詳細: Context Manager 18節](docs/02-runtime/context-manager-and-compaction.md) / [ADR-023〜028](docs/00-foundation/architecture-decisions.md) / [QA ACM-T01〜20](docs/11-qa/benchmark-and-release-gates.md)。
 
 Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。
+
+## サーバーブラウザのライブ閲覧（追加設計、未実装）
+
+[Browser Live Observation](docs/08-interfaces/browser-live-observation.md) は、Agentがサーバー上で操作するBrowser画面をWeb管理画面から閲覧するための補足仕様です。見るだけのObserveはAgentを停止せず、入力操作は従来のHuman Takeoverへ明示的に切り替えます。認証/セッション隔離、機密画面の全面遮断、映像非保存、WebRTCまたは認証済みWebSocket、SC-23/テスト案を含みます。既存88件の正本モジュール数は変えません。現在はDraftで本体コード・映像配信はありません。
