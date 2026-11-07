@@ -225,3 +225,7 @@ source capability, region, query kind, token reserved/consumed/unknown, item cou
 - **Upstream PR examined, evidence grade=Issue/PR report**: [akaszynski/keepa#203](https://github.com/akaszynski/keepa/pull/203) describes removing redundant proactive `/token` requests in main API call path; `AsyncKeepa.wait_for_tokens` still exists in pinned file. Thus *SDK method exists* ≠ *all queries proactively poll tokens*. Our design uses quota reservations and actual response accounting, never assumes a fixed extra `/token` request.
 - **Bug report examined, evidence grade=Issue report**: [price-parser#62](https://github.com/scrapinghub/price-parser/issues/62) supplies string "2 pairs from $349" parsing an unrelated leading 2. Thus the amount parser MUST consume a site-profile-selected **price field**, not a whole product paragraph; requires a regression fixture added to AMK-T06/T07 as `AMK-T15`: ambiguous marketing text must not become purchase price, expected status partial/unknown when price element cannot be selected. All tests designed, not run.
 - **Changelog/version**: upstream commit pinned; no local CI or live token/account capability verified. This section supersedes earlier statement that LICENSE contents were only located.
+
+## 2026-11-07 Muse移行: EC ProviderをPrivsepで実行
+
+Amazon/Keepaの鍵付きAPIはCredential Broker/Trusted PrivsepとSentinelで認証/送信先/実操作/Quotaを制御。Agent生成のShell/Scriptから生のAPIキーを直接使わせない。Public price fetchは独立Sentinelの具体的ネットワークチェックを経由し、会員価格などPrivateデータの送信/転載は適切なowner/approvalに従う。Product purchaseは実際のcheckout actionごと明示承認が必要。SC-19/22。

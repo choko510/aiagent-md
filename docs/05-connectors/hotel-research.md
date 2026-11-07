@@ -215,3 +215,7 @@ Unresolved: no partner credentials or actual live rate test, unknown exact API p
 - LICENSE **actual contents** read: [amadeus-python](https://github.com/amadeus4dev/amadeus-python/blob/0bc7089cb2e49b5b662ee890a5fe611f59ad4332/LICENSE) and [amadeus-node](https://github.com/amadeus4dev/amadeus-node/blob/c4f00ea7929571dd6dabfb66bbf7fc140d821ce4/LICENSE) are MIT. This is an OSS SDK license, NOT booking API/redistribution/affiliate entitlement.
 - **Merged upstream PR inspected** [amadeus-node#188](https://github.com/amadeus4dev/amadeus-node/pull/188): Hotel Search V2 was decommissioned/migrated to V3. Thus preserve endpoint version `/v3/shopping/hotel-offers` in provider manifest and reject unverified legacy V2. **Issue report examined** [amadeus-node#133](https://github.com/amadeus4dev/amadeus-node/issues/133): legacy `/v2/shopping/hotel-offers` returned authorization error for one reporter although token worked on other endpoints; not evidence that V3 is available for our credentials.
 - Add to HTL-T01/T13: fail-closed on obsolete API version or plan entitlement with no automatic V2 fallback; record approved API version, status and account credentials scope without exposing tokens. CI/integration and live availability tests remain **not executed**.
+
+## 2026-11-07 Muse移行: ホテル検索と予約操作
+
+AgentはRuntime Cell内でホテル比較用のコードを作成できるが、ログインCookie/Booking credentialはBrowser/Privsep Brokerの外に漏らさない。検索結果のURL/時刻/人数/税込総額/空室の条件を保持し、実際の予約確定/決済は別の不可逆ActionとしてGateway Intent、人間Approval、Sentinelの具体的最終許可が必須。ShellのHTTPS POSTでこの承認を回避できない。SC-17/19/22。

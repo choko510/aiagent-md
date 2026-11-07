@@ -579,3 +579,7 @@ async function executeApproved(approved, signal) {
 
 ### 18.4 Round-2 pseudocode consistency check
 The ``7.1` method is a **proposed adapter-local design**, not a directly importable library API. Corrected the example to enforce one credential refresh **across the entire logical invocation** and to call an idempotent `settleOrReleaseOrMarkUnknown` rather than double-committing a lease after a successful HTTP response but failed Evidence write. The quota method itself is [PROVISIONAL: CHAT_10]; the implementation must use an atomic state transition with legal paths `RESERVED→RELEASED_PRE_SEND` or `RESERVED→UNKNOWN_CONSUMED/SETTLED` (terminal), and reject `SETTLED→UNKNOWN_CONSUMED` double accounting. Design test `CON-FW-T33`: successful billed HTTP response, Evidence sink fails, then exception reconciliation; expect exactly one provider-unit settlement, Evidence status uncertain, and no duplicate HTTP send. This test extends ``CON-FW-008/025` and SC-07/09. **Not executed.**
+
+## 2026-11-07 Muse移行: PrivsepとGenerated Connectorの別管理
+
+Trusted ConnectorはRuntime Cell**外**のPrivsep Workerで実行し、Vault plaintextは独立Credential Brokerのみ保持。Connector Workerにprovider別credential allowlistと認証済みTool Intent bindingを要求し、Sentinelが最終External Connector Action/egrを許可する。Agentが生成したCustom API/CLI/ScraperはRuntime Cell内のUntrusted codeであり、Trusted Connectorへ自動昇格しない。Typed Connectorとuser-written raw HTTPSの送信は同等ではなく、opaqueな書込みはSentinelで拒否。Source/observation/quota/effect ledgerは既存契約を保つ。SC-17/19/22。

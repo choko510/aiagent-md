@@ -153,3 +153,7 @@ P0契約未LockedのためDraft維持。
 - **[Issue report]** [Scrapling #413](https://github.com/D4Vinci/Scrapling/issues/413) はHTTP MCPの認証を既定強制にすべきという報告。[PR #414](https://github.com/D4Vinci/Scrapling/pull/414) は**merged**であり、現行固定commit `26dc85a` の `scrapling/core/ai/server.py::serve` では`http=true`/tokenなし/`allow_unauthenticated=false`の組合せでValueErrorを送出する。CLI `scrapling/cli.py` は`--no-auth`を明示した時のみ非認証で許す。**これはIssue報告時の「既定非認証」が現行でも残るという意味ではない。**
 - **[Code verified: test read, not run]** `tests/ai/test_ai_mcp.py::test_http_without_a_token_refuses_to_serve` と `test_allowed_hosts_enable_dns_rebinding_protection` を確認。テストが存在することと我々のSidecarへの統合安全性は別。**SCR-T01/02/05/08** ではHTTP非認証起動試行を拒否し、`--no-auth` を本Harnessのdeploymentから不可にする。MCP内の`allowed_hosts`はSSRF/egressの正本に代わらず、CHAT_09の完全なNetwork Policy必須。
 - **追加Source URL:** [server.py at pinned SHA](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/core/ai/server.py), [cli.py at pinned SHA](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/scrapling/cli.py), [test_ai_mcp.py at pinned SHA](https://github.com/D4Vinci/Scrapling/blob/26dc85a4fa307257fb5c669c80aa44b15acb84c4/tests/ai/test_ai_mcp.py).
+
+## 2026-11-07 Muse移行: ParserとGenerated Script境界
+
+Scrapling/Python Sidecarの内容抽出は引き続き非信頼Web入力を扱う制限付き処理。Agentが追加のPython Scraperを作成する場合は別Sandbox Exec/Runtime Cellとして実行し、ホストPythonやProtected Connector内へ昇格させない。ブラウザCDPはBroker所有、あらゆる外部接続はSentinelで強制評価。Generated ScraperのstdoutはEvidenceではなくArtifact候補で、出典/時刻/検証が必要。SC-17/19/22。

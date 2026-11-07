@@ -260,3 +260,7 @@ Vendor documentation reviewed 2026-10-30 (**Docs verified**, not integration tes
 - [CapSolver Terms and acceptable-use restrictions](https://www.capsolver.com/legal/terms)
 
 **Definition of Done:** HND-T08 and HND-T17…T23 pass in approved fixtures; no provider call for unapproved origin; no cross-tenant token or API-key leak; no duplicate spend under replay; no stale result after revoke; provider-ready-but-page-blocked never resumes; cross-owner ADR/permissions contract is approved. Until then Draft / PROVISIONAL.
+
+## 2026-11-07 Muse移行: 人間介入はBroker-owned Context内
+
+Sandbox Execで自由なShell/CLIが使えても、保護ブラウザのCookie/OTP/PasswordをWorkspaceに渡さない。人間のログイン/HandoffはCell外のBrowser Brokerが管理する現在Owner/lease付き一時セッションで行い、Userの操作をSentinel/Approvalの上位権限にしない。Remote CDP/DevTools socketをCellへ公開しない。未知のCAPTCHA/非対応サービスは承認待ち/利用不可と明示、勝手に回避成功を保証しない。SC-18/19/22。
