@@ -37,13 +37,13 @@ Secrets/Signing Brokerは鍵を決してCell/Model/traceへ露出させず、署
 ## Build manifest / tests
 Build Manifest: projectId, sourceSha, imageDigest, dependencyLockDigest, testReceipts, artifactSha256, toolchainInfo, previewRef, signedStatus。 
 - DEV-BLD-T01 pinned toolchain offline buildと再現、hash mismatch reject。
-- T02 scriptsがhost/secret/Internet/Dockerへ到達不可。
-- T03 WebSocket/HMR/HTTPが許可したpreview routeのみ動作。
-- T04 previewからSSRF/private/別tenant/CDP試行全DENY。
-- T05 expiry/old generation/revokeで旧viewer・実行grant拒否。
-- T06 push ACK loss→remote SHA再照会、重複releaseなし。
-- T07 Android emulator/macOS runner unavailableはUNAVAILABLE表示、偽成功なし。
-- T08 CI/署名鍵/利用者データがArtifact/Modelへ露出0。
+- DEV-BLD-T02 scriptsがhost/secret/Internet/Dockerへ到達不可。
+- DEV-BLD-T03 WebSocket/HMR/HTTPが許可したpreview routeのみ動作。
+- DEV-BLD-T04 previewからSSRF/private/別tenant/CDP試行全DENY。
+- DEV-BLD-T05 expiry/old generation/revokeで旧viewer・実行grant拒否。
+- DEV-BLD-T06 push ACK loss→remote SHA再照会、重複releaseなし。
+- DEV-BLD-T07 Android emulator/macOS runner unavailableはUNAVAILABLE表示、偽成功なし。
+- DEV-BLD-T08 CI/署名鍵/利用者データがArtifact/Modelへ露出0。
 
 ## 2026-11-08 P0-01 — Preview Capability / Origin / Socket Isolation (normative proposal)
 

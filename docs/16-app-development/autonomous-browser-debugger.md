@@ -42,12 +42,12 @@ Preview Brokerは [DEV-05](build-preview-release.md) の専用認証routeだけ�
 
 ## Tests
 DEV-DBG-T01 click成功で状態変化なし→FAIL。
-T02 狭幅のボタンはみ出し・重なり→DOM+画像で検出。
-T03 HTTP500とConsole stack/server request ID/source map相関。
-T04 offline/slow/reload/back/empty data/invalid inputのシナリオ実施。
-T05 approved demoとの意図しない差分→FAIL。
-T06 PII/secret入りHAR/Traceをmodel/UIへ生送信0。
-T07 閲覧中/操作handoff中にagent操作が権限逸脱0。
-T08 Browser Worker crash→未完scenarioはUNKNOWN、復旧して再確認。
-T09 別tenant/CDP/private bridge/他port不可。
-T10 新SHAでerror再現が消え回帰PASSした時だけFIXED_VERIFIED。
+DEV-DBG-T02 狭幅のボタンはみ出し・重なり→DOM+画像で検出。
+DEV-DBG-T03 HTTP500とConsole stack/server request ID/source map相関。
+DEV-DBG-T04 offline/slow/reload/back/empty data/invalid inputのシナリオ実施。
+DEV-DBG-T05 approved demoとの意図しない差分→FAIL。
+DEV-DBG-T06 PII/secret入りHAR/Traceをmodel/UIへ生送信0。
+DEV-DBG-T07 閲覧中/操作handoff中にagent操作が権限逸脱0。
+DEV-DBG-T08 Browser Worker crash→未完scenarioはUNKNOWN、復旧して再確認。
+DEV-DBG-T09 別tenant/CDP/private bridge/他port不可。
+DEV-DBG-T10 新SHAでerror再現が消え回帰PASSした時だけFIXED_VERIFIED。
