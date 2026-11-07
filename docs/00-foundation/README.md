@@ -17,3 +17,7 @@ X subscription ingress/receipts, canonical retailer/storefront identity, digest 
 All specs: MUST/SHOULD/non-goals; typed ports/schema; determinism and budget; race/crash/replay/security; evidence/version/provenance; alternatives; Unit/Integration/E2E/Fault/Security/Benchmark; REQ→TEST→SC. For exact mapping see `docs/00-foundation/review-gates.md`. Only owner branches may modify corresponding MDs. No merge without maintainer approval.
 ## Release gate
 `Draft`=proposed, `Reviewed`=independently examined, `Locked`=shared contracts settled and implementable, `Implemented`=code exists, `Verified`=actual tests passed. Green prose/CI smoke alone is never production approval.
+
+## 2026-11-07: Muse型Secure Runtimeの追加正本
+
+Userの製品要求によりUbuntu Secure VMのRuntime CellでShell/Python/Node/CLIと生成コードを扱う。Host/Protected Services Shellは禁止。独立Sentinelが外部通信とConnector操作の最終許可を持ち、GatewayがTask Intent/Approval/Side-effect Ledgerを維持する。既存の85 Draftに新規3 Draftを加えて**88件**。実装済みやVerifiedを意味しない。参照 [Sandbox Execution](../02-runtime/sandbox-execution.md), [Runtime Cell Isolation](../09-security/runtime-cell-isolation.md), [Sentinel Authority](../09-security/sentinel-authority.md)。

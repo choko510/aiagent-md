@@ -48,3 +48,20 @@
 Avoid `Session` without qualifying Browser/Provider/User; `Event` without Domain/External/Notification; `Owner` without Tenant/User/Resource; `Version` without record/goal/lease/checkpoint/schema; `Result` without Tool receipt/Goal verification/Notification receipt. Treat a Source post's `createdAt`, provider observation `observedAt`, Event `committedAt`, and notification `sentAt` as distinct times.
 ## Review tests
 GLOSS-T01: human reads 20 mixed scenarios and maps each ID to only one canonical type; GLOSS-T02: raw X post does not become Domain Event without durable validated ingestion; GLOSS-T03: Task-less Watch accepted; GLOSS-T04: read-only cached browser action that auto-POSTs is rejected; GLOSS-T05: missing price never becomes zero; GLOSS-T06: external effect UNKNOWN not labeled delivered. Links to SC-01,02,07,08,11,13,16. Tests designed, not executed.
+
+## 2026-11-07: Muse型Secure Runtimeの用語追加（Provisional）
+
+| Term | Meaning / trust-boundary |
+|---|---|
+| Physical Ubuntu Host | 人間OperatorのOS、KVM/QEMU/libvirt等のVM管理とBackupの責務。Agentから操作禁止 |
+| Secure VM | セルフホストの本番候補。内部にUntrusted CellとProtected Servicesを分離 |
+| Runtime Cell | Agent/Shell/Python/Node/CLI/Generated codeを動かす制限付き非信頼Linux namespace |
+| Protected Services | Cell外のSentinel, Auth/Credential Broker, Browser/CDP Broker, Privsep Connector, DB, Gateway |
+| Sentinel | **外部Connector操作とネットワーク出口の唯一の最終許可主体**。Agent/Cellから変更不可 |
+| Credential Broker / Privsep | Vault秘密の管理と代理利用。Cellへ生Credentialを渡さない |
+| SandboxExecution | Task/Runに従属する有限なローカルProcess実行。Task成功そのものではない |
+| WorkspaceRevision | Owner/Taskに束縛された、内容digest付き作業領域のcommit版 |
+| Development-only profile | VM隔離など本番要件を満たしていない低権限開発環境。本番と同等扱い不可 |
+| Opaque TLS egress | method/body/dataの実際をSentinelが確認できない通信。安全read-onlyと推定禁止 |
+
+共有Domain型/State/Status/SQLはCHAT_01/02/09/10の調整後にLocked。

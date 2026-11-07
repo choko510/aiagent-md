@@ -321,3 +321,6 @@ function canReplay(step:ReadActionV1,ctx:SessionPolicy):boolean {
 **Tests (designed not run):** LBA-R4-T01 benign snapshot opt-in replay→0 new mutation; T02 click triggers POST→never automatically executed; T03 fill causes auto-save→never replayed; T04 GET destination redirects/sets state→deny unless specifically approved; T05 same tenant different account cookie→deny; T06 DOM fingerprint drift→invalidate without clicking; T07 policy revoked during replay→stop at dispatch boundary. SC-13/07/08. Owner decision CHAT_03/04/09/14, retained Draft.
 **Old Round1 UUIDv7/v4, nullable Task Conversation and recordVersion0 assertions in §3 are historical and superseded in current PR #10; do not reopen as current P0 without rechecking latest HEAD.**
 
+## 2026-11-07: Generated Scriptと学習済みBrowser Actionの相互作用
+
+AIがSandbox Execにより新しいBrowser recipe/CLIを生成・評価できても、Broker-owned CDPへ直接接続させない。Browser Actionは現在Session/Owner/GoalRevision/lease/DOM generationとGateway Approvalを満たし、Sentinelがネットワークと実副作用を最終許可。学習済みread-only labelがPOST安全を証明することはない。Temporary generated RecipeはCell Task内で試行できるが、恒久自動ReplayにはReview/Regression/Explicit scopeが必要。SC-18/19/20/22。
