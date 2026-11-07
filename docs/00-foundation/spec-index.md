@@ -129,3 +129,14 @@
 
 既存の仕様数は**88件のまま**で、新しい独立MDは増やさない。実装可能な詳細契約は **02-08 [Context Manager and Compaction](../02-runtime/context-manager-and-compaction.md) の18節** に追記。これを中心に02-03/06/09/10/12、06-01/02、08-04、09-05、11-01/04、01/10の各正本・横断提案を整合させる。ADR-023〜028とDEC-P0-08〜10、DEC-P1-06は [Architecture Decisions](architecture-decisions.md) を確認。**PR #68 Muse secure architectureに依存するDraft proposal** であり、承認・実装・QA実行済みではない。
 
+## 2026-11-07 Browser Live Observation companion design
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) は04-03 BrowserSessionと08-05 Browser Takeoverの**共同補足仕様**。サーバー側Browserのライブ閲覧を`browser:observe`で追加し、見るだけではAgentを停止せず、操作は別のHuman Takeoverに限定する。BLO-001〜17 → BLO-T01〜16 / BLO-OFF-T01〜03 → SC-23。既存88件の正本モジュール数は維持し、ADR-029と関連文書を横断更新する（Draft / 実装無し）。
+
+### Audited companion specifications (outside 88 canonical module count)
+
+| Companion ID | Path | Owners | Status |
+|---|---|---|---|
+| COMP-01 | `docs/08-interfaces/browser-live-observation.md` | CHAT_04/08/09/10/11 | Draft / PROVISIONAL |
+
+`COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。PR #71/#72統合時のManifest再生成は `python3 audit/muse/refresh_spec_provenance.py` を実行し、続けて `python3 audit/muse/validate_spec_migration.py` を実行する。

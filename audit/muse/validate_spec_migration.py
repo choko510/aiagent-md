@@ -77,6 +77,22 @@ for path in ("README.md", "AGENTS.md", "docs/00-foundation/spec-index.md", *REQU
         candidate = (ROOT / path).parent / dest
         if not candidate.exists():
             errors.append(f"Broken relative link in {path}: {dest}")
+# Companions are audited without inflating the canonical 88-module inventory.
+# Parse COMP IDs and paths from the same spec-index as human readers, compare
+# membership+content hash against manifest and fail on missing/extra companions.
+companion_records = re.findall(
+    r"^\|\s*(COMP-\d+)\s*\|\s*\x60(docs/[^\x60]+\.md)\x60\s*\|",
+    text, re.M,
+)
+companion_ids = [key for key, _ in companion_records]
+companion_paths = [path for _, path in companion_records]
+if len(set(companion_ids)) != len(companion_ids) or len(set(companion_paths)) != len(companion_paths):
+    errors.append("Duplicate companion IDs or paths in spec-index.md")
+for path in companion_paths:
+    cp = ROOT / path
+    if not cp.is_file() or len(cp.read_text(encoding="utf-8")) < 600:
+        errors.append(f"Missing/thin audited companion: {path}")
+
 # Do not mistake historical Round6/Round7 pinned-85 provenance workflows
 # for the updated 88-module design validation.
 
@@ -91,6 +107,11 @@ else:
     blobs = provenance.get("modules", {})
     if provenance.get("moduleCount") != 88 or set(blobs) != set(paths):
         errors.append("Current provenance manifest does not match 88-module inventory")
+    companions = provenance.get("companionSpecs", {})
+    if provenance.get("companionCount") != len(companion_paths) or set(companions) != set(companion_paths):
+        errors.append("Provenance companion inventory diverges from spec-index")
+    # Use the identical Git blob content verification for canonical and companion files.
+    blobs = {**blobs, **companions}
     for source_path, source_blob in blobs.items():
         if not re.fullmatch(r"[0-9a-f]{40}", str(source_blob)):
             errors.append(f"Malformed git blob hash: {source_path}")
@@ -154,14 +175,38 @@ for path, bad_terms in {
     for bad in bad_terms:
         if bad in body:
             errors.append(f"Stale unsafe number/epoch codec: {path}: {bad}")
+# SC headings in the foundation document, not a hard-coded old marker, own the
+# current scenario count. An added SC must receive P/N E2E cases before CI passes.
+foundation = (ROOT / "docs/00-foundation/acceptance-scenarios.md").read_text(encoding="utf-8")
+scenario_ids = [int(n) for n in re.findall(r"^#{2,3}\s+SC-(\d{2})\b", foundation, re.M)]
+if not scenario_ids or scenario_ids != list(range(1, len(scenario_ids) + 1)):
+    errors.append(f"SC inventory not unique/continuous: {scenario_ids}")
+scenario_count = len(scenario_ids)
 qa = require("docs/11-qa/end-to-end-acceptance.md",
-    ["22シナリオ", "QA-E2E-017", "QA-E2E-022"])
-for i in range(17,23):
-    for k in (f"QA-E2E-T{i:02d}P",f"QA-E2E-T{i:02d}N",f"SC-{i:02d}"):
+    ["QA-E2E-017", "QA-E2E-022", "QA-E2E-T23F", "QA-E2E-T23OFF"])
+# Narrative number is validated against the scenario inventory; scenario changes
+# cannot be hidden by leaving a stale '22シナリオ' string elsewhere in the file.
+match = re.search(r"採用は\*\*(\d+)シナリオ", qa)
+if not match or int(match.group(1)) != scenario_count:
+    errors.append(f"QA E2E narrative count does not equal foundation SC count={scenario_count}")
+for i in scenario_ids:
+    for k in (f"QA-E2E-T{i:02d}P", f"QA-E2E-T{i:02d}N", f"SC-{i:02d}"):
         if k not in qa:
             errors.append(f"E2E traceability lacks {k}")
-    if f"SC-{i:02d}" not in (ROOT/"docs/00-foundation/acceptance-scenarios.md").read_text(encoding="utf-8"):
-        errors.append(f"Foundation missing SC-{i:02d}")
+if scenario_count >= 23:
+    companion = ROOT / "docs/08-interfaces/browser-live-observation.md"
+    if not companion.is_file():
+        errors.append("SC-23 missing Browser Live Observation companion design")
+    else:
+        cbody = companion.read_text(encoding="utf-8")
+        for k in ("BLO-001", "BLO-017", "BLO-T01", "BLO-T16",
+                  "BLO-OFF-T01", "restoreIncarnation", "REVOKED_BARRIER_COMMITTED",
+                  "HUMAN", "PRIVACY_BLOCKED"):
+            if k not in cbody:
+                errors.append(f"Browser Live Observation lacks {k}")
+    for k in ("QA-E2E-T23P", "QA-E2E-T23N", "QA-E2E-T23F", "QA-E2E-T23OFF"):
+        if k not in qa:
+            errors.append(f"E2E missing SC-23 variant {k}")
 for path,required in {
  "docs/09-security/secrets-and-credentials.md":["sensitivity","DENY"],
  "docs/06-memory-skills/skill-lifecycle.md":["Package Broker","offline"],
@@ -174,9 +219,9 @@ archived2=(ROOT/".github/workflows/round7-integrated-premerge.yml").read_text(en
 if "LEGACY_85_BASE_SHA" not in archived1 or "8b153c238c8a4cc18b6e9d258e55d3265e5249d5" not in archived2:
     errors.append("Historical original 85-source workflows not separated from current 88-source provenance")
 
-print(f"muse_contract: modules={len(inventory)} counts={dict(counts)}")
+print(f"muse_contract: modules={len(inventory)} companions={len(companion_paths)} scenarios={scenario_count} counts={dict(counts)}")
 if errors:
     for error in errors:
         print("ERROR:", error, file=sys.stderr)
     sys.exit(1)
-print("PASS: Static 88-module inventory/marker/link validation. NOT runtime verification.")
+print(f"PASS: Static {len(inventory)}-module + {len(companion_paths)}-companion inventory; {scenario_count} scenarios checked. NOT runtime verification.")

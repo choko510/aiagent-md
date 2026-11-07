@@ -356,3 +356,12 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 `ACM-T21〜36`を従来T01〜T20へ加え、次のHard gatesを必須化する。**引用が正しいだけで出典不支持の数値をverified化 0、Goal typed value/否定/税・費用修飾の変造0、Policy二重計上での不必要Block 0、Token Window超過0、RequestSnapshot不一致のReplay 0、DELETE先行Commit後旧Memory付きAdmission 0、無承認Provider fallback 0、Expired OriginalをVerified Evidence利用0、Child stale merge 0、Head/Artifact dangling Success 0、CrossTenant Cache leak 0、Coverage不足の誤Success 0**。
 
 速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。
+
+## 2026-11-07: Browser Live Observation Release Gate（設計のみ）
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のBLO-T01〜12 / SC-23を追加。**Blocking gate:** 別Tenant/同Tenant別owner漏えい0、CDP/credential公開0、Observeに起因するAGENT lease喪失や入力操作0、機密/不明ページのframe送信0、revoke/cancel/worker交代後の旧frame送信0、raw frameの永続保存0、再接続の別Task誤表示0。**Live Viewer enabled**: BLO-T01〜11およびBLO-T13〜16・QA-E2E-T23P/N/Fが失敗/未実施ならViewer提供不可。**Live Viewer disabled**: BLO-OFF-T01〜03とT23OFFを必須とし、他のAgent releaseまでViewer未実施を理由にブロックしない。**性能評価:** 実機でLAN/WAN fps・p50/p95 end-to-end遅延、CPU/RAM、bandwidth、同時viewer、slow-clientのqueue長、Agent Browser actionのp95劣化を視聴OFF/ONで比較。5〜15fps・LAN p95 2秒は開発目標でSLAではない。現時点は`NOT RUN`。
+
+
+## 2026-11-07 PR #71再監査・追加Gate
+
+Media `REVOKED_BARRIER_COMMITTED`以降の新送出Packet/Frame 0件と、Client画面上の最終Frameクリアを**別の判定器**として検証。Takeoverが`HUMAN/HANDOFF_REQUESTED/RECLAIMING`の間のCreate/Offer/ICE/WS/Tab操作0件。機密SafePermitのorigin allowlist、SPA、iframe、canvas、動画、DOM変化、判定器故障で全面遮断。PITR後の旧`restoreIncarnation`のmedia grant拒否。ICE host/srflx/private IP candidate漏えい0、TURN-only強制と実ネットワークdenyを検査。配信内容のCrash/Core dump、Proxy、Mediaログ/Backup残留0。正常系はRead-onlyのサイトだけで構成し、デフォルトdenyを機能不良として緩めない。`BLO-T13〜16`をLive Viewer enabled gateへ追加（NOT RUN）。
