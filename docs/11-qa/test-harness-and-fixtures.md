@@ -491,3 +491,15 @@ Evidence grade はコード/テスト実見を **Code verified**、公式文書�
 ### 実際に実施した作業と未実施作業
 - 実施：指定mainの必須資料/CHAT_11指示、OSS 3件の実ファイル・テストソース、Playwright issueと公式API docsを読んで比較し、テストケース・合否基準を設計。
 - **未実施**：本Agent本体を使ったE2E試験、fixture実体生成、Browser/HTTP replayの実行、CI・セキュリティ実測、performanceベンチマーク、live serviceへのアクセス、外部副作用。これらは仕様執筆から自動的に完了したとは見なさない。
+
+## 2026-11-07: Muse Runtime Security Fixture Matrix (SC-17..22)
+
+本番VMを再現するQA laneは**実際のKVM/QEMU guest + Cell userns/seccomp/LSM/cgroup + Protected Services + enforced Sentinel egress**を固定し、Mock policy/LLMだけの試験をVM隔離の証拠とみなさない。Fixtures:
+- F17: Agent生成Python/Node/Shell、exitcode、Artifact、Workspace CASとresource billing。
+- F18: Host/Protected DB/Vault/CDP/docker/libvirt/metadata,/proc, mount namespaceアクセスprobe、正常task-local IO。
+- F19: curl/requests/fetch/子Process、raw TCP/UDP/IPv6/DNS/DoH/QUIC/WebSocket、proxy env改変、DNS Rebinding、opaque TLS書込み、Gateway停止。
+- F20: Temp Skill/package installと悪意のpostinstall hook。Permanent activationにはレビュー。
+- F21: Worker/Cell/VM kill、Cancel/Steer/Lease change、Process tree reparent、外部ACKとDB commit間Crash、Artifact競合。
+- F22: Hostile HTML/PDF/email/X/MCP/tool stdout命令、DNS/HTTPによる秘密流出、他Tenant参照。
+
+Assert **zero successful forbidden Host/Network/Secret operations** under tested setup. Positive normal compute/authorized read must work. Host kernel, guest kernel, VM image/Cell profile/policy hashes/egress setupを固定しテスト証跡を保存する。Test runnerの特権はAgentへ与えない。

@@ -331,3 +331,15 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 ### 19.1 Round 5 observed CI status
 [GitHub Actions run 40959094493](https://github.com/choko510/aiagent-md/actions/runs/40959094493) has four green jobs: draft PostgreSQL 16 migrations/FKs/32-writer sequence, 24-worker X ingress SQL Task dedup and transaction rollback/revoke, generic Chromium/SSRF reference tests, restricted Docker ZIP/Office reference parser, and all 61 PR / 85 MD static scan with 11 contract-presence gates. Explicit **not exercised**: actual agent Runtime, provider X entitlement/signed ingress, DomainEvent+Outbox full path, real sender ACK-loss and consent race, Browser EgressGuard, actual multimodal parser and migration runner. Static marker gates only indicate required strings/sections exist; they do not prove semantic consistency. This changes QA testing evidence status only for the synthetic fixtures, not the acceptance outcomes for SC-01..16.
 
+## 2026-11-07: SC-17..22 E2E受入条件
+
+| SC | 正常動作 | 攻撃/異常入力の合格条件 |
+|---|---|---|
+| SC-17 | Python/Node/ShellがCell内で動作しArtifact生成 | Hostパス/Env/Workspace越境不可、stdoutをEvidenceへ自動昇格しない |
+| SC-18 | 本番VM/Cell attestationを実施 | Host/Docker/VM/Vault/CDP/metadata到達0、KVMなし本番はBLOCKED |
+| SC-19 | 承認済みpublic GETはSentinel経由で記録 | 直接ソケット、DNS/IPv6/UDP/QUIC/WS、opaque raw POSTは禁止、proxy fail-closed |
+| SC-20 | Temporary Skillをタスク内で試行 | Policy/Skill Registry/Host自己変更不可、永続化に明示審査 |
+| SC-21 | Cancel/restartで全Processと旧grantを停止 | 外部UNKNOWNは再実行しない、旧lease書込み拒否 |
+| SC-22 | Brokerの正常スコープ操作可能 | Prompt Injectionで秘密/OTP/CDP/他Userが漏れない |
+
+全SC-17..22にpositive/negative/fault injectionと実際のVM・Kernel・Network証拠が必要。安全失敗を他の成功率で相殺しない。従来SC-01..16の非退行は必須。Requirements: CELL-001..016, SENT-001..016, GW-017..021, LOOP-021..023, PRD-020..025。

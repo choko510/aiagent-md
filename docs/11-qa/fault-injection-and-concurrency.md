@@ -292,3 +292,16 @@ P0未解決、OSSのテストを実行せず、実Harness未存在なので**Dra
 
 **Owner cross-links**: CHAT_01 #23 canonical Event, CHAT_02 #27 Checkpoint, CHAT_02 #21 Retry, CHAT_08 #17/#8 SSE/REST, CHAT_10 #10 DDL, CHAT_10 #22 Queue, CHAT_09 auth. This test suite must fail if any incompatible old Task-only Event schema or single-Step checkpoint uniqueness returns. Until executed: status **DESIGNED ONLY / NOT VERIFIED**.
 
+## 2026-11-07: Exec/VM/Egress fault injection
+
+FaultをGateway Intent前後、Cell admission前後、fork/child spawn中、Sentinel grant前後、外部成功〜DB receipt間、Workspace CAS、Cancel/Steer/revoke中、Browser takeover/Privsep Credential inject、VM power loss/restartで注入する。Oracles:
+1. Intent commit以前には外部I/O不可。
+2. External effectが実行された可能性があればUNCERTAIN、自動再送しない。
+3. Stale Run/ExecutionはArtifact commit/新Process/Network送信不可。
+4. direct Socket (IPv6/UDP/QUIC/DNS/alt proxy) はAgentが意図的に迂回しても拒否。
+5. Cross-user Files/Cookies/Approval/Credential/Browser CDPはアクセス0。
+6. Cancel/revokeはBackground/nohup/disown/process group reparentでも全子終了・grant無効。
+7. Proxy/Policy/VM/Chromium sandboxがない場合fail-closed、insecure fallback禁止。
+8. Logs/console/artifactsにraw secret/surrogateなし。
+
+Host/VM/Kernel/Policy exact versions、fault point、side-effect receipts、evidenceを保存。MockだけをRuntime VERIFIEDと表示しない。SC-18/19/21/22。

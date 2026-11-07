@@ -326,3 +326,15 @@ BENCH-PR5 CI report/HTML+JSON immutable evidence, policy review/rollback and opt
 
 **Gate rules:** all GATE-R3-01..06 have runnable fixtures, independent assert against DB/network observations, version-pinned environment, recorded evidence SHA and nonzero process exit on failure; zero P0/P1 unaccepted conflicts before `Locked`; actual executed green tests plus rollout/restore for `Verified`. Any skipped required test is **not pass**. Runtime/DB schema may remain Draft until named owners reconcile; this spec's list is not a substitute for executing tests.
 
+## 2026-11-07: Muse Secure VM production gate
+
+Production BLOCKED unless all verified:
+- KVM guest and Untrusted Runtime Cell separate from Protected Services; shell works only inside Cell.
+- Every child Process, package hook, browser/MCP path and direct socket forced through Sentinel; DNS rebinding/IPv6/UDP/QUIC/opaque TLS fails closed.
+- No Credential Broker secret/CDP in Cell/model/logs; scopes and ownership validated.
+- Gateway Intent, Current Run/Lease/Goal/Budget/Human Approval, Sentinel Policy allow/deny, crash recovery/side-effect UNCERTAIN are coherent.
+- Development-only profile never claims production; missing kernel prerequisites explicit BLOCKED.
+- Original SC-01..16 regression and SC-17..22 positive+adversarial+fault tests pass; security failures are hard blockers.
+- Record actual startup cold/warm latency, RAM/CPU, quotas, network/Browser overhead, concurrent subagents and provider/token costs before claiming SLA.
+
+Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgroup/profile hash, Sentinel rules, Test time and traces. Static Markdown gate verifies only design syntax, not runtime isolation.
