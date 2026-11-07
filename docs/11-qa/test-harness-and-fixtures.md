@@ -503,3 +503,15 @@ Evidence grade はコード/テスト実見を **Code verified**、公式文書�
 - F22: Hostile HTML/PDF/email/X/MCP/tool stdout命令、DNS/HTTPによる秘密流出、他Tenant参照。
 
 Assert **zero successful forbidden Host/Network/Secret operations** under tested setup. Positive normal compute/authorized read must work. Host kernel, guest kernel, VM image/Cell profile/policy hashes/egress setupを固定しテスト証跡を保存する。Test runnerの特権はAgentへ与えない。
+
+## 2026-11-07 Adaptive Context fixtureセット案
+
+参照: [Context 18.15 ACM-T01〜20](../02-runtime/context-manager-and-compaction.md#1815-実装優先度release-gate)。既存HarnessのOSS fixture/Mock機能を使用し、別の「コンテキスト専用ランタイム」は作らない。
+
+Fixture manifest v1（QA-owned proposal）に次を含める: fixture ID、fixed clock/locale/TZ、run/step/goalRevision、Model caps & tokenizer revision、tenant/owner principal、current policy/Memory epoch、raw event log、typed hard anchors、Artifact bytes/digests/locators、source timestamps & validity、private/secret redaction markers、expected selected refs/offload/reason codes、expected summary grounded claims、expected ContextManifest & errors、expected effect ledger/approval、expected Token Budget and costs、Child handoff/result source IDs。
+
+QA OracleはLLM出力テキストの単純一致だけでなく、(a)機械的anchor equality、(b)出典claim locator coverage、(c)Event/Checkpoint/Artifact durability/lease fencing、(d)cross-tenant non-interference、(e)Memory revocation read barrier、(f)Provider overflow retry ceiling、(g)UNKNOWN effect no replay、(h)Parent-child stale/dedupを独立判定する。
+
+Required fault injection: Long HTML/PDF+table locator; missing source; malformed embedded instruction; expired data; concurrent memory-delete vs dispatch; old Goal vs Steer; Model 128k→4k; provider overflow; unknown tokenizer; Child×4 conflicting results; Artifact offload killpoint; unsupported snapshot schema; Sandbox stdout attack; Executor process killed; no Network in offline lane; unpriced token usage。各fixtureは予算/時間上限と固有のTest IDを持ち、学習用Promptを使ってoracleを上書きしない。
+
+レポートはtimestamp、git SHA、model/tokenizer/fixture version、pass/fail/degraded、引用source count、delta tokens/cost/p95と匿名化根拠を含める。必要なSource locatorを意図的に省略した場合はunknown/partial扱い。すべて未実行、FakeModel/MockGateway/実PostgreSQLで実装後に回す計画。

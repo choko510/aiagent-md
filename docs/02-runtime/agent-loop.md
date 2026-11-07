@@ -575,3 +575,11 @@ Cross-team source of truth: #23 Event, #27 Checkpoint, #10 DDL, #21 Task/Run, #8
 ## 2026-11-07 Muse移行: 隔離コードを選べるAgent Loop
 
 従来のModel→Tool Gateway→Approved Executorは維持し、Registered Tool sandbox.execの利用を許可する。LLMはShell/CLI/Python/Nodeのコマンドや生成コードを提案できるが、その提案は実行権限ではない。Gatewayがargv/cwd/workspaceRevision/imageDigest/GoalRevision/LeaseEpoch/予算をfreezeしIntent永続化→Runtime Cell入場のVM/namespace/seccomp/cgroup attestation→Supervisorが子プロセスを実行する。**ローカルコード実行と外部APIへの許可は別**であり、Sentinelが全socketとConnectorの最終認可。Host・Protected ServicesへのShellは禁止。Shell exit 0はTask成功を意味せず、VerifierはEvidenceと外部効果を確認。Crash/Cancel/Steerに伴う子processと旧grantを失効し、外部UNKNOWNは盲目的再試行禁止。LOOP-021..023 MUST。SC-17/18/19/21/22。正本[Sandbox Exec](sandbox-execution.md)、[Cell](../09-security/runtime-cell-isolation.md)、[Sentinel](../09-security/sentinel-authority.md)。
+
+## 2026-11-07 Context admission at model boundary
+
+Agent Loopのstepモデル呼出前に[Adaptive Context 18節](context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)の順序を組込む: canonical Goal/Policy/Run lease再取得→Context候補のACL/有効期限filter→ModelRouter capability/token budget→Artifact offload/grounded compaction→ContextManifest耐久化とHEAD CAS→Memory epoch/Goal revision/PolicyVersion再検証→LLM dispatch。OLD snapshotなら再構築。
+
+Model full reply確定→Tool proposal正規化→Gateway intent/approval ledger commitまではToolを実行しない。Steer/Delete/Cancel/Model fallback/Provider overflowで古いContextPlanを流用しない。Context再構築はUser操作や外部副作用の承認ではない。System/Goal/Policyが容量超過ならTool/Modelを止めPartial/blockerを表示する。
+
+Stepごとに ManifestRef、anchorDigest、sourceEpoch、tokenizer revision、source coverage、offload count、failure/degraded reasonをTrace（秘密抜き）へ記録。ACM-T01/T04/T06/T08/T09/T14/T16の受入を追加する。現在は設計のみ。

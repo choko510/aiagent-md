@@ -184,3 +184,14 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: Model Adapterは実行ポリシーを管理しない
 
 Modelはsandbox.exec Tool proposalを生成できるが、実Exec/Workspace/Network/Connector許可はGateway/Cell Admission/Sentinelの権限境界に委ねる。保護されたModel Gatewayへ必要部分だけ送信し、Cell内CLIが生のProvider API鍵を使って推論/課金/権限を迂回できない。モデル切替、プロンプト更新、コンパクションからHost/Protected ServicesのShell・Vault・CDP権限を得られない。SC-18/19/22。
+
+## 2026-11-07 ContextManifest compatibility on model switch
+
+[Adaptive Context 18.5/18.7](context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)により、ModelRouterはcontextWindow、maxOutput、tokenizerId、tool schema ability、capability revision、pricing snapshotをModelAttemptへ固定し、ContextManifestへ反映する。旧ProviderのToken見積を無条件に新Providerへ渡さない。
+
+- fallback時は現在GoalRevision/Memory sourceEpoch/PolicyVersion/Artifact hashesを再検証し、Context計画とoutput reserveを新Modelで作り直す。
+- Provider continuation固有の状態を保持する場合はそのproviderにピン留めし、完全移植不可なら別Run stageの安全な再構築/partialを選ぶ。
+- Inputが収まらなければPolicy/Goalを切らず別ModelかBLOCKED_CONTEXT_CAPACITY。Context overflowの縮小再試行は最大1回、同一Payloadのループ0。
+- Tool calling/vision/citationsの必要能力を欠くModelへの静かなfallbackは禁止。Price/usageとToken traceの比較はversionを揃える。
+
+Model switching/Provider 429、Tool schema増大、Tokenizer missing、Model Window過小をACM-T06/T07で検証。これらの本Harness実測は未実施。

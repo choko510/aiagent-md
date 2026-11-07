@@ -255,3 +255,15 @@ No published contract is Locked. Thresholds/model detector quality and shared En
 ## Upstream PR investigation — Provenance of user paste versus external data
 - **[PR inspected, open/unmerged]** OpenClaw [#165776](https://github.com/openclaw/openclaw/pull/165776) documents a UI paste provenance issue: long user-pasted content became an attachment and was handled as untrusted external source despite originating from the operator's message. **Not adopted as shipped upstream behavior**. Our implementation must preserve *verified transport origin* separately from whether the **content itself** contains third-party untrusted instructions. A user's pasted webpage text can be a trusted request to analyze the pasted bytes, but the embedded webpage commands cannot become server/tool policy. Add `INJ-T19`: typed text vs long paste vs file vs forwarded web content, origin metadata preserved, tool privileges unchanged.
 - Source grade: PR report. This strengthens explicit `AUTHENTICATED_USER` transport vs `UNTRUSTED_EXTERNAL` quoted content separation without granting external instructions new authority.
+
+## 2026-11-07 Context圧縮・Memory検索経由の注入防止
+
+参照: [Adaptive Context 18.2/18.6/18.11](../02-runtime/context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。Tool stdout/stderr、外部ページのRole-looking文字列、README/依存パッケージ、生成Script、Memory recordは**命令権限なしのデータ**。SummaryやEmbeddingを通過しただけではTrustTier昇格しない。
+
+- CompactorのOutputはGroundedSummaryClaimのsource refsとsource hash/locatorを検証し、無根拠の「承認済み」「購入済み」「指示を無視」「秘密を送信」をRejectする。
+- Positive/negative Goal constraints、Auth、Policy、Tool Approval、Sentinel egress grantはLLM要約から復元せず保護サービスの現在正本からのみ読む。
+- Retrieval結果にあるsystem/developer-looking bytes、shell commands、Cookie、secretはquoted data/redact扱い。Memory Writerは外部Contentによるユーザープロフィール/権限の自動上書きを拒否。
+- SandboxからのArtifact参照/Workspace pathはTask+owner+Cell/Exec ID+digestで検査し、file pathの文字列を直接読まない。隠された外部接続経路やhost shellを記憶/コンテキストを通じて許可しない。
+- 注入を不正として拒否する場合も、監査イベントに秘密の本文を保存しない。Tool/Modelを止めても既発生UNKNOWN副作用のLedger照会を省略しない。
+
+**Negative tests**: ACM-T04/T09/T10/T14/T15、Web HTMLに「Ignore system」、stdoutにAuthority marker、MemoryにCommand、要約中にPolicy変更/Goal修正を注入。期待: 権限不変、Secret leak0、unsupported external commands execution0。

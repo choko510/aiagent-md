@@ -338,3 +338,15 @@ Production BLOCKED unless all verified:
 - Record actual startup cold/warm latency, RAM/CPU, quotas, network/Browser overhead, concurrent subagents and provider/token costs before claiming SLA.
 
 Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgroup/profile hash, Sentinel rules, Test time and traces. Static Markdown gate verifies only design syntax, not runtime isolation.
+
+## 2026-11-07 Adaptive Context 合格基準の追加（設計、未実行）
+
+正本: [Context 18.15](../02-runtime/context-manager-and-compaction.md#1815-実装優先度release-gate)。既存のSC-01〜22や安全ゲートを緩和しない。ACM試験は**Kernel/Cell実機安全性を保証しない**。Contextに対するoffline contract/fault/benchmark laneを追加する提案。
+
+**Blocking invariants**: hard anchors消失/変造0、旧Goal/Model/Memory projection誤使用0、未承認権限昇格0、scope/secret漏洩0、無出典の料金・在庫・承認・Task success 0、UNKNOWN side-effect retry0、old lease commit0、Provider unchanged-input infinite retry0。fixture全ケースで0を要求。失敗したらQualityの改善率がよくてもRelease不可。
+
+**Quality measures**: Evidence Recall@FixedBudget、precision of cited source locators、claim-to-source coverage、contradiction retention、context tokens/step、model+summarization total USD/task、retrieval and compaction p50/p95 latency、crash recovery success、source freshness compliance、cross-child duplicate claims。モデル・Tokenizer/Tool schema・Provider price snapshot・Locale/TZ・Source ages・seedを固定して再現。どの閾値も実装とBaseline測定前に製品保証値と表記しない。
+
+**Regression comparison**: safe full source (小規模fixtureのみ)、safe bounded tail、artifact offload only、ACMの4案を同一Data、同じModel/Tool allowance、同じBudgetで比較。価格だけ改善して根拠精度を下げる変更は拒否。長期Taskは複数の有限Run/Watchで測定し、1 Run無制限にしない。
+
+**Evidence**: Test transcriptをSecret/PII redactedで保存し、試験のFailを隠すretryをしない。Harness本体が未実装のためACM-T01〜T20はNOT RUN、CI上のMarkdown検証をruntime validationと表示しない。

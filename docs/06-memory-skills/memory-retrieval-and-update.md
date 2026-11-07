@@ -270,3 +270,19 @@ One entity chain vs branch ambiguity never expands the target, and tenant/user s
 ## 2026-11-07: Generated code from Memory is not trusted
 
 Agentは過去WorkspaceやMemoryのコード/コマンドを参照して新しいTemporary Toolを生成可能。ただしMemoryから取得した文字列は権限のソースではなく、直接実行する場合も現在RunのGateway sandbox.exec + Cell Admission + Sentinel強制Networkを経由する。過去の承認やCredential/Tool scopeを再利用せず、owner/version/expiryをチェック。Embedding検索/Auto-summary経由で外部の不正命令をsystem roleへ昇格させない。SC-20/22。
+
+## 2026-11-07 Context admission・選択・回復の確定案
+
+参照: [Adaptive Context仕様](../02-runtime/context-manager-and-compaction.md#18-adaptive-context-management--実装判断横断契約2026-11-07)。既存のkeyword-first + optional vectorという検索順序を採用したまま、注入決定を次の通り厳格化する。未実装。
+
+1. Search: 現Task intentとGoalRevisionからMemoryQueryを構築。User/Project/Task scope・tenant ACLをserver principalから導出し、metadata/keywordで上限80件、optional semantic候補40件を取得。候補IDのみを非信頼Indexerから受け取る。
+2. Filter: DB正本でactive、sourceEpoch、status、consent、expiry、source availability、記憶のscopeを再照合。現在Goalと矛盾する候補を抑制。否定・訂正・tombstoneは最優先。エラーは無言でMemory採用せずdegradedを返す。
+3. Rank: 採用できる記憶のみをContext仕様のP3/P2へ分類。好みの明示性、関連性、時点、source completenessで安定順位。Relevanceは信頼権限でなく選択順位。
+4. Project: instructionAuthority=none、sourceRefs/recordRevision/assertedAt/validUntil付きのread-only Projectionへ。一般Tool結果や外部Web命令をRole instructionへ変換しない。
+5. Admit: 残存Token budgetに従い既存の8件/1,500 tokens（最大20件/2,000）を上限として切り詰め、selected refsとsourceEpochをContextManifestへ記録。Agentが記憶を省略した場合は記憶0件を「好みなし」という事実に変換しない。
+6. Dispatch: Modelへ送る直前にSourceEpoch/PolicyVersion/GoalRevision/Run fenceを再検証。更新済みならRequestを破棄し、必要情報だけ再検索・再投影。旧版の上に新しいsummaryを上書きしない。
+7. Feedback: Preference変更はUser explicit/consented record CASでのみ確定し、Task Noteから自動永続Profileを作らない。APIを利用する子Taskも同じWriterと認可を通る。
+
+**Failure gates**: semantic unavailable→keyword-onlyとdegraded、DB unavailable→Memoryなしで限定回答または停止、Memory delete race→次dispatchに旧投影0、budget exhausted→Memory省略と可視化、conflicting memory→Current Goal優先、stale source→historical/uncertainの明示。
+
+**QA**: ACM-T02/T09/T10/T17に加え、Source Epochが同じでもrecordRevisionが変わる場合、Auto candidateがapproveされていない場合、同じTaskを2 Workerが同時に再投影する場合、UserがUndo中のRunをCancelする場合を境界テスト。MemoryからTool approval/authorityへの昇格0件をRelease gateにする。

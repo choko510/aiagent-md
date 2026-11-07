@@ -239,3 +239,20 @@ MUST trace: DASH-001→T01; 002→T02; 003→T03; 004→T04,T11; 005→T05; 006�
 ## 2026-11-07: Secure VM / Execution Dashboard
 
 Task detailにExecution count/current command summary/Cell profile/attestation status、stdout/stderr Artifact refs、generated file list、サブプロセス/CPU/RAM/期限、Sentinel ALLOW/ASK/DENY/Unknown、Budget usageを追加候補として表示。Watch一覧に最後のSandboxExecutionの安全失敗/通信拒否を価格取得失敗や0円と区別して表示。Production KVM/Cell required、Development-onlyの安全レベルを区別。Userが承認した実行でもホストShellは使えない。Execution actionsは従来Task/Run API+Gateway commandを通し、direct process control/host terminal API禁止。SC-17..22。
+
+## 2026-11-07 Context/Memory provenance パネル案（未実装）
+
+参照: [Adaptive Context 18.12](../02-runtime/context-manager-and-compaction.md#1812-ui可観測性ユーザー操作案chat_08へ提案)。既存のTask/Watch UI、Approval、Trace/Source表示の責務を置換せず追加。
+
+**Task詳細のread-only項目**: Context容量（Model Window、予約Output、Used Tokensの見積/実測区分）、圧縮回数、Offload bytes、必須条件の確認、Source coverage、古いSourceと未解決対立、summary/原本への認可済みlocator、記憶の関連scopeとassertedAt、利用できなかった資料/degraded、子Task resultの出典、再開/Model変更での再構築理由、UNKNOWN effect警告。すべてowner/tenant ACLでfilter後に表示する。
+
+**User操作**:
+- 「タスク条件の変更」はSteer/GoalRevision commandとして実行。Summaryの編集でTask条件/外部承認を書き換えない。
+- 「記憶を修正/忘れる/Undo」は単一Memory WriterとCAS・Consentを通す。すでに外部Modelへ送信した情報は撤回できない旨を明示。
+- 「出典を確認」はread-by-locatorの期限/ACL/Byte予算を再検査。外部ページの再取得は別のAuthorized Tool Intent。
+- 「コンテキスト再構築」は現状の耐久データから再構成する要求であり、検索/購入/ブラウザ操作を勝手に追加起動しない。
+- Context使用量・信頼ラベルを表示してもモデルの内部推論やSecret/Host socketを露出しない。未測定「98%正確」等の性能表記は禁止。
+
+**API proposal**: GET task scoped context summary (manifest id, goal revision, source coverage, selected/omitted reason codes, token-estimate and freshness), GET authorized source locator, POST rebuild-intent (If-Match + idempotency)。Route/SchemaはCHAT_08/01/09のReview前に確定しない。
+
+**Acceptance**: ACM-T02/T05/T09/T10/T12/T17。特に別Tenantや失効Memory本文を一覧・Token集計から推測させず、degraded/partial/uncertainを区別する。SSE tentative tokenをverified Evidenceと表示しない。

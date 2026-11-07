@@ -294,3 +294,16 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: サブエージェントへのCell権限の縮小委任
 
 子Taskは独立ExecutionId/WorkspaceGeneration/Process groupを持つRuntime Cellまたは同等の厳格namespace内で稼働する。親と同じSecure VMでもBrowser Context/秘密/Mutable Workspace/Grantを自動共有しない。権限は親×子×現行Sentinel Policyの積集合、Budgetは原子分配、親Cancel/Steer/Revokeが子Process/通信Grantまで伝播。子が生成したコードやSkillは親の権限へ自己昇格できず、出力は非信頼データ。SC-17/18/20/21/22。
+
+## 2026-11-07 Adaptive Context Handoff仕様
+
+参照: [Context仕様18.9](context-manager-and-compaction.md#189-親子エージェントの情報伝達とconflict統合)。本追加はSUB-008/SUB-013を具体化する案で、既存のTask/Run・budget・approval境界を維持。実装テストは未実施。
+
+- ChildAdmissionの前に親Run/GoalRevision/Policy/leaseEpoch、権限、Budgetをfresh DBで検査。ChildContextHandoffは親の全文Historyでなく、目的・hard constraint refs・必須Evidence locators・未解決疑義・期限・子のTool cap・予約済Budgetだけを持つ。
+- Parent Handoff digestはcanonical serializationで保存し、Child開始時にcurrent parent controlVersionと照合。Blob/Artifact ACLを子へ自動拡張しない。参照不許可なら子Taskの開始を拒否するか明示的部分実行にする。
+- 子のWorkspace、stdout/stderr、exec Cell、Browser Cookie、private journalは親/兄弟へ直接共有せず、明示的に公開可能になったEvidence Manifestのみを検証して受け取る。
+- ChildResultはDONE/PARTIAL/UNCERTAIN/FAILED、source refs、observedAt、hash、conflicting claims、uncompleted work、UNKNOWN effectsを必須構造化出力とする。親のResultVerifierでGoalの要件とSource coverageを再確認し、子の自然言語の「完了」を信用しない。
+- 同一Source digestとcanonical identityで重複候補を統合し、独立ソース数を水増ししない。相反する価格・事実・日付は両方保持する。親Steer後の旧Goalの子結果はSTALE、親の現Goalを変更しない。
+- 親Cancel/Revocationは子のModel/Tool/Cell/Sentinel grantへ伝播させる。外部操作のUNKNOWNは再実行せず照会/承認へ。親子全階層のBudget reservationは原子的に有限。
+
+**追加検証**: ACM-T05/T11/T12/T14を必須。Handoff時の子数超・親budget不足・private Artifact参照・時点不一致・Child result偽成功・親steerと子commit競合に対するfail closedを確認。親子コンテキストを全文复制する方式は採用しない。

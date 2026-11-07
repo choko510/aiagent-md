@@ -184,3 +184,16 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: Sandbox Execの非LLM資源予算
 
 Task/Run/親子の予約済み予算へCell ProcessのCPU/Wall/RAM/PID/FD/ディスク/一時パッケージ/ログ/同時数/Network bytesを追加し、実cgroup・Sentinel計測で精算する。子プロセスやサブエージェントが親予算を重複取得できない。Quota超過で全process groupを安全に停止し、Artifactの部分出力と外部effectのUnknownを別に記録する。VM同時Cell数と費用はベンチマークで決め、無制限のデフォルト禁止。SC-17/21。
+
+## 2026-11-07 コンテキスト長・圧縮費用の予算取扱い
+
+参照: [Adaptive Context 18.5](context-manager-and-compaction.md#185-モデル別の動的token予算)。既存のTask/Runの費用・時間・step・tool上限を維持し、モデルのContext Windowを**Budgetとは別の**ハード上限にする。
+
+- Input capはModelRouterで検証済みcontextWindowから必要Output予約、Policy/Tool schema overhead、安全marginを差し引いて算出。Prompt cache hitや要約による節約予想をコンテキスト上限の免罪符にしない。
+- Anchor/P1 mandatoryが収まらなければBLOCKED_CONTEXT_CAPACITY。安全条件を勝手に縮めて費用だけ節約しない。
+- optional Memory/Working/Evidenceは18.5の仮cap内で配分し、空き枠は再配分。初期70%/85%圧縮トリガーはreplay可能なversioned config、ベンチによる見直し対象。
+- Tokenizer version変更、Model切替、Tool schema変更時には必ず再計測。unknown usageは0扱いにしない。
+- Summarization/rerank/extra source readには別のmodel/tool attempt idで費用/使用量を予約・精算。繰り返しCompactionでBudgetを迂回してはならない。Childの検索/圧縮費用も親に原子配賦。
+- 予算を超える場合は追加入力・追加検索・圧縮LLMを起動せず、保存済みEvidenceでpartial結果を返す。無期限監視は新finite Runを起動する。
+
+**QA**: ACM-T01/T06/T07/T19/T20。Provider overflowの1回限り縮小、unknown pricing、out-of-budget rerank、parallel Child reservations、very-small modelでA0/A1/A2が収まらない場合のfail closedを検証。初期割合は実測前の提案であり費用削減実績ではない。
