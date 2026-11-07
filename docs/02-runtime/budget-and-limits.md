@@ -27,7 +27,7 @@ Task + Run authenticated principal (CHAT_01/09)
            -> DB/Checkpoint/Usage/Outbox (CHAT_10)
            -> SSE/UI (CHAT_08)
 ~~~
-Task.conversationId null可（Watch/Event）。Run.leaseEpochはsafe integer/DB bigintのproposal、Task.recordVersionは初期1、goalRevisionとRun Epoch/Tool attempt fenceは相互代用禁止。Task.activeRunIdとRun.owner/tenantが一致しなければfail closed。
+Task.conversationId null可（Watch/Event）。Run.leaseEpochはint64十進文字列wire/BigInt内部/DB BIGINTの契約案、Task.recordVersionは初期1、goalRevisionとRun Epoch/Tool attempt fenceは相互代用禁止。Task.activeRunIdとRun.owner/tenantが一致しなければfail closed。
 
 ## 4. 要求定義
 | REQ | Strength | Observable contract | SC |
@@ -123,7 +123,7 @@ per model/Tool provider input/output/cached tokens, reserved/settled/unknown mic
 
 ## 11. Persistence/Migration [PROVISIONAL: CHAT_10]
 BudgetEnvelope versioned by task/Run with parent budget link, reservations unique (scope,attemptId), cost usage receipts eventId unique; atomic parent+child reserve. Distinguish reserved/settled/actual and estimated, data sources and currency. Transactions hold DB locks only while reserve/settle, external request outside.
-Shared DDL不一致: UUIDv7とgen_random_uuid、nullable Task.conversationId、recordVersion初期値1対DB revision0、Task.goalRevision/activeRunId、Run.leaseEpoch保存の解消がP0。新規table/columnsの最終名称を本書で勝手に確定しない。expand/contractと旧snapshot schema adapter/停机migrationを設計。
+**履歴訂正（現行契約はDraft、実装未検証）:** 旧UUIDv4 DB default、非nullable Task.conversationId、recordVersion初期0、Run lease列不足はCHAT_10の現行物理案では設計修正済み。現時点のP0はBudget reservation/settlementの原子性、実際のOwner認可、Goal/Run leaseとのCAS、unknown usageの精算およびForward Migrationの実行検証。旧適用済みmigrationを書き換えず新しいversioned migrationで対処する。
 
 ## 12. REST/UI/Telegram [PROVISIONAL: CHAT_08]
 Display hard cap, spent/held/unknown, estimated USD and time; when limit reached, show preserved evidence and Partial. Admin config changes do not silently authorize a previously denied irreversible action.

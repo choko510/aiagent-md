@@ -25,7 +25,7 @@ Search/Fetch/Browser(CH04)→Raw Artifact(CH01/10)→static CSS/XPath/JSON-LD pa
 ```
 - BrowserSession/PageはCHAT_04 Browser Worker所有。Tool approval/side effect classificationはCHAT_03正本。Secret/Authenticator/egressはCHAT_09正本。REST+WebSocket/SSE UXはCHAT_08、state/Event/Evidence/Error/公開UUIDv7はCHAT_01、Task/Run checkpoint/goalRevisionはCHAT_02、物理DDLはCHAT_10。
 - CHAT_01のBrowserSessionはtenant+task+optional activeRunIdに束縛。Task.conversationIdは**nullable**で良い設計だがCHAT_10とCHAT_08が異なるDraft。外部から`tenantId/ownerUserId`の任意指定を受けない。
-- `recordVersion`初期1 vs DB `revision`初期0、Run `leaseEpoch` number vs bigint/DB列不足、UUIDv7 vs DB `gen_random_uuid()`、Tenant vs Workspaceは**未合意P0**。具体的CASで旧ownerが操作できない保証をOwnerに提案。本書の型はローカルで[PROVISIONAL]。
+- **旧Round1衝突（現行では設計修正済み）:** UUIDv7 vs UUIDv4 default、recordVersion1 vs revision0、nullable Conversation、Run lease未保存はCHAT_10現行DB案で設計上整合。現在の未決P0は実装されたtenant/owner/workspace mapping、DB/Run/BrowserのfenceとEvidence源の照合および実Parser/Browser E2E。歴史的差分を現在の未解決として扱わない。
 
 ## 4. Requirements
 | ID | Level | 要件 | 期待値（assert可能） | SC |
