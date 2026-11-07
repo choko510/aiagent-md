@@ -180,3 +180,7 @@ Evidence: Code verified = precise source function inspection; Test definition ve
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: Sandbox Execの非LLM資源予算
+
+Task/Run/親子の予約済み予算へCell ProcessのCPU/Wall/RAM/PID/FD/ディスク/一時パッケージ/ログ/同時数/Network bytesを追加し、実cgroup・Sentinel計測で精算する。子プロセスやサブエージェントが親予算を重複取得できない。Quota超過で全process groupを安全に停止し、Artifactの部分出力と外部effectのUnknownを別に記録する。VM同時Cell数と費用はベンチマークで決め、無制限のデフォルト禁止。SC-17/21。

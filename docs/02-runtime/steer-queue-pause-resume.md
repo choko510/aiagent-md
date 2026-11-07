@@ -160,3 +160,7 @@ Code verified=ソース関数確認、Test definition verified=テスト本文�
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: Cancel/Steer/Pauseと実行子プロセス
+
+Pauseは新Exec/外部リクエストを止め、現在のProcessは安全境界で停止または限度時間内に強制終了する。CancelはRun fenceと同時にCell Supervisorが全子プロセスを終了しSentinel grant失効/Workspaceの旧write拒否を指示。SteerはGoalRevisionを更新し古いIntent/Execを新条件へ無条件転用しない。ACKはProcess停止完了ではない。既送外部操作はロールバックと推測せずUNKNOWN照会。復旧後旧PID/Cell内の認証Grantを再利用しない。SC-21。

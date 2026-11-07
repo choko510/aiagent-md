@@ -180,3 +180,7 @@ Code verified = GitHub source functions inspected. Test definition verified = re
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: Model Adapterは実行ポリシーを管理しない
+
+Modelはsandbox.exec Tool proposalを生成できるが、実Exec/Workspace/Network/Connector許可はGateway/Cell Admission/Sentinelの権限境界に委ねる。保護されたModel Gatewayへ必要部分だけ送信し、Cell内CLIが生のProvider API鍵を使って推論/課金/権限を迂回できない。モデル切替、プロンプト更新、コンパクションからHost/Protected ServicesのShell・Vault・CDP権限を得られない。SC-18/19/22。

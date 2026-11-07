@@ -174,3 +174,7 @@ Evidence: Code verified = precise source function inspection; Test definition ve
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: SandboxExec Middlewareの安全なHook
+
+pre-execはRun owner/lease、Tool Intent永続化、schema/budget/approval、Runtime Cell VM/カーネル/ネットワーク強制のattestationを検証。post-execはprocess group終了、Artifact digest、外部effect ledger、Run lease現行性を確認してコミット。AgentやSkillのhookをTrusted Servicesのプロセスで直接実行しない。例外/Timeout時はfail-closed、古いcallbackが新しい外部dispatchを作れない。SC-18/21/22。

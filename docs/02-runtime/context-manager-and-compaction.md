@@ -169,3 +169,7 @@ Code verified = GitHub source functions inspected. Test definition verified = re
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: ターミナル・Workspace・生成コードの信頼区分
+
+Shell/CLIのstdout/stderr、package installログ、ダウンロードしたREADME、生成コード、Skills/Hook候補、子エージェント結果はuntrusted Tool outputとして扱う。Context圧縮後も外部情報をSystem/Developer/権限へ昇格させない。ExecId/WorkspaceRevision/Cell profile/image digestとArtifact refsは復旧用に保持し、期限切れ承認やUNKNOWN副作用を消さない。環境変数から生のCredential、Vault tokenや署名鍵をLLMに流さない。ログはサイズ制限・redact・Provenance付き。SC-17/20/22。

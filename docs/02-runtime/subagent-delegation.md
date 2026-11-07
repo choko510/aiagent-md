@@ -290,3 +290,7 @@ Task詳細には親子TaskのGoal、状態（Queued/Running/Waiting/Partial/Unce
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: サブエージェントへのCell権限の縮小委任
+
+子Taskは独立ExecutionId/WorkspaceGeneration/Process groupを持つRuntime Cellまたは同等の厳格namespace内で稼働する。親と同じSecure VMでもBrowser Context/秘密/Mutable Workspace/Grantを自動共有しない。権限は親×子×現行Sentinel Policyの積集合、Budgetは原子分配、親Cancel/Steer/Revokeが子Process/通信Grantまで伝播。子が生成したコードやSkillは親の権限へ自己昇格できず、出力は非信頼データ。SC-17/18/20/21/22。
