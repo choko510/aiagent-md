@@ -81,7 +81,7 @@ Project Brief, Architecture Rules, SC-01..16 and extension file at main; represe
 | PRD-034 | MUST | 同一現行SHAで3レビュー、未解決P0/P1=0、必須テスト実測PASSでのみ完了 | DEV-REV-T01..06 / SC-28 |
 | PRD-035 | MUST | Toolchain/Package/Preview/Git/CI/Deployを既存Sentinel/VM/Approval内に閉じる | DEV-BLD-T01..08 / SC-29 |
 | PRD-036 | MUST | Campaignは有限Cycleを停止/件数/費用/上限まで継続、復旧で二重count/dispatchなし | CAM-T01..11 / SC-30 |
-| PRD-037 | MUST | Feature Factoryはデモ承認済みdistinct実装10件等だけをVerified Progressに計上 | DEV-FF-T01..06 / SC-31 |
+| PRD-037 | MUST | Feature Factoryの既定達成条件はcurrent統合HEADで検証済みのdistinct 10件（再検証で減算可能） | DEV-FF-T01..12 / SC-31 |
 | PRD-038 | MUST | User decision待ちの一機能で、独立した別機能の作業を停止させない | DEV-FF-T03 / SC-31 |
 | PRD-039 | MUST | Demo Consentと外部Tool Approval/Browser Human Takeoverを区別 | DEV-UI-T02..05 / SC-25,29 |
 

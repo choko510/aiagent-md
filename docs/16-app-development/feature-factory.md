@@ -53,3 +53,7 @@ The default for `"アプリに10機能追加"` is **10 distinct INTEGRATED**. A 
 **DEV-FF-T09**: two features conflict in API/schema/UX → no merged count until combined-head gate succeeds.
 **DEV-FF-T10**: feature recreated at new SHA/new Cycle/new proposed ID but same logical identity → exactly one count.
 **DEV-FF-T11**: old integration-head review is stale after concurrent merge; reset integration verification and stop target recognition until new gate passes.
+
+### Current HEAD re-evaluation without recounting
+The first eligible count receipt is immutable. On each new integrated HEAD, a new `campaign_count_evaluations` entry determines current eligibility of that work item using current-head regression, security and triple-review receipts. `effectiveCompletedCount` is derived using **current SHA evaluation**, not the historical first integration SHA. If the count drops after an unrelated merge, show `REVALIDATION_REQUIRED`; do not silently keep TARGET_REACHED. Revalidated identical logical work items reuse the original count identity, avoiding double-counting.
+**DEV-FF-T12**: verified ten on old head, current head revalidation fails two => effective count eight; after retest becomes ten without new work item rows.

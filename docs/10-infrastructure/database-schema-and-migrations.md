@@ -1606,6 +1606,7 @@ CREATE TABLE agent.development_integration_receipts (
  triple_review_receipts_ref text NOT NULL, verdict text NOT NULL,
  verified_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,id),
+ UNIQUE(tenant_id,project_id,work_item_id,id),
  UNIQUE(tenant_id,project_id,work_item_id,integration_head_sha),
  FOREIGN KEY(tenant_id,project_id) REFERENCES agent.development_projects(tenant_id,id),
  FOREIGN KEY(tenant_id,project_id,work_item_id)
@@ -1674,11 +1675,28 @@ CREATE TABLE agent.campaign_count_receipts (
   REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id,project_id,dev_work_item_id),
  FOREIGN KEY(tenant_id,project_id,dev_work_item_id)
   REFERENCES agent.development_work_items(tenant_id,project_id,id),
- FOREIGN KEY(tenant_id,project_id,integration_receipt_id)
-  REFERENCES agent.development_integration_receipts(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id,integration_receipt_id)
+  REFERENCES agent.development_integration_receipts(tenant_id,project_id,work_item_id,id),
  CHECK(counted_stage IN ('VERIFIED','INTEGRATED','RELEASED')),
  CHECK((counted_stage <> 'INTEGRATED') OR
        (integration_receipt_id IS NOT NULL AND project_id IS NOT NULL AND dev_work_item_id IS NOT NULL))
+);
+-- This is the per-head *eligibility* history; count receipt is once-per-work-item identity.
+CREATE TABLE agent.campaign_count_evaluations (
+ tenant_id uuid NOT NULL, id uuid NOT NULL,
+ campaign_id uuid NOT NULL, work_item_id uuid NOT NULL,
+ project_id uuid NOT NULL, dev_work_item_id uuid NOT NULL,
+ integration_head_sha text NOT NULL,
+ integration_receipt_id uuid NOT NULL, criterion_version text NOT NULL,
+ attempt integer NOT NULL, verdict text NOT NULL,
+ verified_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,campaign_id,work_item_id,integration_head_sha,attempt),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_count_receipts(tenant_id,campaign_id,work_item_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id,integration_receipt_id)
+  REFERENCES agent.development_integration_receipts(tenant_id,project_id,work_item_id,id),
+ CHECK(attempt>0 AND verdict IN ('PASS','FAIL','INCOMPLETE'))
 );
 CREATE TABLE agent.campaign_quota_wait_receipts (
  tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
@@ -1743,3 +1761,9 @@ SQL above is **designed only** and has not been executed against PostgreSQL in t
 
 **DEV-DB-T09**: A Campaign with Project A cannot count an integration receipt for Project B even under same Tenant; cross-project composite FKs reject it.
 **DEV-DB-T10**: A generic research Campaign without a Project uses a campaign-scoped logical work item and cannot smuggle a development integration receipt into its count.
+
+### Current-head count revalidation (P1-03 / P1-10)
+The immutable `campaign_count_receipts` row represents **the first successful qualification of a logical work item** and is inserted exactly once. It cannot itself prove that the feature is still valid on a later Project integration HEAD. Each subsequent integration HEAD requires a fresh append-only `campaign_count_evaluations` row against the current HEAD and a correspondingly matching `development_integration_receipts` PASS. The current `effectiveCompletedCount` is a query over eligible unique work item IDs with the latest evaluation for the **current Project integration SHA** passing required tests and reviewer receipts (or over fixed result receipts for non-project Campaign modes). Updating the HEAD never overwrites the historical counted receipt, but may **reduce current eligible progress** and transition a previously TARGET_REACHED campaign into `REVALIDATION_REQUIRED` until the combined-head gate passes. This is not automatic permission to resume billed work or deploy; the campaign owner policy and budget must be rechecked. Transactionally commit the new head, integration evaluation/receipt, current count projection and outbox under project+campaign CAS. A competitor merge invalidates older eligibility evidence.
+
+**DEV-DB-T11**: after ten integrated feature receipts, another merge changes head and invalidates two integration evaluations → current progress falls to eight, no stale target assertion.
+**DEV-DB-T12**: new evaluation PASS for the same logical work item on new head restores eligibility but does not create a second count receipt.

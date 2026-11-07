@@ -116,3 +116,7 @@ On 429/quota result, record `QuotaWaitReceiptV1` with provider, category, observ
 **CAM-T16** stale wake on old resumeGeneration after owner revoke → no new cycle.
 **CAM-T17** same logical work item in 3 distinct SHAs / criterion revisions → one eligible count.
 **CAM-T18** integrated HEAD changed after count → current count recalculated from integration receipts, no stale TARGET_REACHED.
+
+### Integration head invalidation of previously reached targets
+For Project-linked Feature Factory Campaigns, TargetReached remains **valid only while** the current integration HEAD has PASS eligibility for at least targetCount distinct logical work items. On a later HEAD change, evaluate the immutable first-count receipt plus latest per-head `campaign_count_evaluations` evidence; if below target, display `REVALIDATION_REQUIRED` and block false “10/10” status. This does not silently re-enable a stopped or cost-exhausted Campaign. For generic non-Project research Campaigns, `INTEGRATED` is not a valid completion criterion and no fake integration receipt is required. Re-evaluation uses a separate record_version and controlVersion admission on any new work.
+**CAM-T19**: current integration HEAD changes after TARGET_REACHED; eligibility falls, status REVALIDATION_REQUIRED and no automatic spend; re-evaluation PASS restores target without duplicate count.
