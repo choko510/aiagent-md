@@ -199,7 +199,7 @@ if scenario_count >= 23:
         errors.append("SC-23 missing Browser Live Observation companion design")
     else:
         cbody = companion.read_text(encoding="utf-8")
-        for k in ("BLO-001", "BLO-012", "BLO-T01", "BLO-T16",
+        for k in ("BLO-001", "BLO-017", "BLO-T01", "BLO-T16",
                   "BLO-OFF-T01", "restoreIncarnation", "REVOKED_BARRIER_COMMITTED",
                   "HUMAN", "PRIVACY_BLOCKED"):
             if k not in cbody:
