@@ -263,12 +263,17 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-T22P | malicious data cannot exfiltrate personal content or credentials | explicit positive Oracle and recorded evidence | SC-22 |
 | QA-E2E-T22N | adversarial/fault equivalent for malicious data cannot exfiltrate personal content or credentials | zero unauthorized effect; hard release block on failure | SC-22 |
 
+| QA-E2E-T23P | 2ユーザー同Tenant＋別Tenant、隔離BrowserContextとread-only公開fixture、Agentがnavigate/click/scroll。OwnerがObserve開始→Tab選択→正常終了、映像ON/OFF比較 | 最新Pageの映像のみ、AgentのAGENT lease不変/作業継続、owner以外media byte 0、ACKとENDED区別、認可済みWSS/WebRTC、UIのLIVE/STALE正しい | SC-23 |
+| QA-E2E-T23N | HUMAN/HANDOFF_REQUESTED/RECLAIMINGで新規Observe、同Tenant別owner・Task readのみ・管理者role・別Task、login/OTP/payment/iframe/canvas/SPA changeでcapture、悪意ICE candidate/旧ETag・URL tokenで接続 | すべて該当media send 0、入力/Approval権限昇格0、機密/unknown全面遮断、maskだけで許可しない、誤404/409から他owner存在を漏らさない | SC-23 |
+| QA-E2E-T23F | fake clockでEncoder/Relay queue中revoke/Logout/Cancel/Worker kill、Handoff CAS競合、PITRでrestoreIncarnation更新、WS/ICE切断、ICE trickle禁止、slow viewer、非表示Tab | REVOKED_BARRIER_COMMITTED後新送信0、Track/Peer/Queue停止とClient wipeを別Oracleで確認、旧restoreIncarnationの媒体拒否、同一Observer再利用不可、Run継続、Raw Frame永続化0 | SC-23 |
+| QA-E2E-T23OFF | observe_enabled=falseの本番構成でAPI・Media listener・TURN・WSSをprobe、通常Agent Browserを操作 | BLO-OFF-T01〜03: 全媒体ソケット非公開、全Observe受付拒否、従来SC-01..22は実行可能。disabledの通常ReleaseをBLO有効時未試験でブロックしない | SC-23 |
+
 ## 14. 全MUST REQ → TEST → SC追跡
 
 | REQ | Designed tests | SC |
 |---|---|---|
-| QA-E2E-001 | QA-E2E-T01P〜22N | SC-01〜23 |
-| QA-E2E-002 | QA-E2E-T01P〜22N | SC-01〜23 |
+| QA-E2E-001 | QA-E2E-T01P〜23N（＋T23F/T23OFF） | SC-01〜23 |
+| QA-E2E-002 | QA-E2E-T01P〜23N（＋T23F/T23OFF） | SC-01〜23 |
 | QA-E2E-003 | QA-E2E-T01P/03P/04P/10P/14P/15P/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-004 | QA-E2E-T01N/03N/04N/05N/10N/38 | SC-01/03/04/05/10/14/15 |
 | QA-E2E-005 | QA-E2E-T01N/04N/06N/07N/08N/13N | SC-01/04/06/07/08/13 |
@@ -277,12 +282,12 @@ E2E-PR5: CI reportとcross-team contract drift suite、旧fixture migration/chec
 | QA-E2E-008 | QA-E2E-T06N/08N/13N/15N/16N/37 | SC-06/07/08/13/15/16 |
 | QA-E2E-009 | QA-E2E-T02N/07N/11N/13N/36 | SC-02/07/11/13 |
 | QA-E2E-010 | QA-E2E-T02P/06P/07P/11P/33〜36 | SC-02/06/07/11 |
-| QA-E2E-011 | QA-E2E-T01P〜22N | SC-01〜23 |
+| QA-E2E-011 | QA-E2E-T01P〜23N（＋T23F/T23OFF） | SC-01〜23 |
 | QA-E2E-012 | QA-E2E-T10P〜16N | SC-10〜16 |
-| QA-E2E-013 | QA-E2E-T01P〜22N/40 | SC-01〜23 |
+| QA-E2E-013 | QA-E2E-T01P〜23N（＋T23F/T23OFF）/40 | SC-01〜23 |
 | QA-E2E-014 | QA-E2E-T33〜37 | SC-02/06/07/08/11 |
 | QA-E2E-015 | QA-E2E-T05N/07N/09P/39 | SC-05/07/09/11 |
-| QA-E2E-016 | QA-E2E-T01P〜22N | SC-01〜23 |
+| QA-E2E-016 | QA-E2E-T01P〜23N（＋T23F/T23OFF） | SC-01〜23 |
 
 | QA-E2E-017 | QA-E2E-T17P/T17N | SC-17 |
 | QA-E2E-018 | QA-E2E-T18P/T18N | SC-18 |
@@ -374,3 +379,19 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 ## 2026-11-07: SC-23 browser live observation E2E（NOT RUN）
 
 [SC-23](../00-foundation/acceptance-scenarios.md) に対し [BLO-001〜012 / BLO-T01〜12](../08-interfaces/browser-live-observation.md) を公開API・read-only Web UI・隔離Browser Workerの同一fixtureに追加する。Owner AのAgentはnavigate/click/scroll中も継続、Observer B（同Tenant別owner）/C（他Tenant）のMedia byteは0、ログイン/決済/canvas/unknownはframe全面遮断、HandoffまでAgent lease不変。Worker kill/revoke/Cancel/Tab交換後の旧frame送信0、全てのRaw frameがDB/Log/SSE/Evidence/Backupに混入0、slow viewer/relay切断でもRun Cancel 0。BLO-T01〜11が欠ける/落ちる場合はRelease Block。ライブサイトの成功をテスト結果に代用しない。テスト未実行。
+
+
+## 2026-11-07 PR #71再監査：正式SC-23追跡とRelease Profile
+
+`QA-E2E-T23P`/`QA-E2E-T23N`/`QA-E2E-T23F`/`QA-E2E-T23OFF`は既存の`QA-E2E-T01P〜22N`と同じ正式設計テスト群に登録する。`T23P`はPositive、`T23N`はNegative、`T23F`はFault Injection、`T23OFF`は機能無効Release用。`BLO-T01〜16`はBrowser Owner/Privacy/Auth/Mediaの専門Oracleであり、T23P/N/Fから要求IDsとArtifact/Packet Observationを明示参照。未実施をpass扱いしない。
+
+| E2E-Test | 必須下位試験 | 独立確認先 | 判定 |
+|---|---|---|---|
+| QA-E2E-T23P | BLO-T01/02/03/04/07/09/10/11/12 | Browser Worker Agent action ledger、認証Principal/ACL、E2E画面更新 | safe-only positive、Observer起動でRun継続 |
+| QA-E2E-T23N | BLO-T01/03/04/05/11/13/15 | Auth denied Media bytes、Privacy Barrier、ICE/WebRTC、Handoff CAS | 不許可のframe 0・入力0 |
+| QA-E2E-T23F | BLO-T06/07/08/14/16 | DB CAS、独立restoreIncarnation、Media Packet send Gate、Client wipe | 失効Barriers後送信0と端末消去を別々に観測 |
+| QA-E2E-T23OFF | BLO-OFF-T01/02/03 | API/ReverseProxy Socket listener/Workerのdisabled profile | 映像0、Task/Takeoverは既存通り |
+
+合否は`test fixture ID, run profile(enabled/disabled), Browser/Relay image digest, DB schema revision, restoreIncarnation, policyEpoch, source commit, packet boundary event log hash`を記録して検証する。スクリプトのMarkdown marker checkは実行済みE2Eではない。
+
+**Release Gateの条件分岐:** Live Viewer `enabled`の時だけBLO-T01〜11・13〜16と`T23P/N/F`がhard blocking。Live Viewer `disabled`時はBLO-OFF-T01..03・T23OFFがblocking（実装が無ければ構成とソケット非公開を証明）、その他の既存Agent E2Eを通常どおり実施する。`HITL-014 MUST`はLive Viewer機能有効プロファイルに条件付きで適用。未実装の本仕様リポジトリは全項目`NOT RUN`。
