@@ -136,7 +136,7 @@ async function releaseHandoff(authenticatedConnection,principal) {
 One-time ticketはnonce hashとサーバー側消費、短いexp、User/Tenant/Task/BrowserSession/audience/epoch binding。人間Browser画面もe.g.クロスオリジンのpop-up/file upload/clipboardにアクセス制限し、Local hostファイルと共有しない。人間の入力Cookie/password/OTPをLLMから完全に隔離。録画/スクショは既定無効、ページ内JSやプロンプト注入はPolicy変更できない。サイトとユーザーが許す認証手続きを尊重。
 - ページのHTML/Script/Metadata/視覚テキストはuntrusted data。DOM内「システム指示」は無権限。認証・秘密・PIIはLLM、Trace、Raw Artifactへ出さない。制限付きResourceとして必要最低限保持。
 - Host Shell/SSH/Docker socket/privilegedコンテナ禁止。購入/予約/投稿/送金の承認なし実行禁止。
-- **予算初期提案**: ticket TTL5分、Human idle timeout15分、Task毎同時ticket1個、1 Taskで再handoff最大3回、worker 1 Session/agent tab per mode（提案値）。Gatewayの厳格な総量上限・ユーザー拒否が優先。外部請求も含めfinite。
+- **予算初期提案**: ticket発行→redeem期限60秒、Human idle timeout10分、Human lease絶対期限30分（CHAT_08 §7と同一Provisional値）、Task毎同時ticket1個、1 Taskで再handoff最大3回、worker 1 Session/agent tab per mode（提案値）。Gatewayの厳格な総量上限・ユーザー拒否が優先。外部請求も含めfinite。
 - Metrics: task/run/owner-safe trace ID、epoch、toolAttempt、source snapshot checksum、before/after status、observation time、parse success、unknown率、latencyMs、memory RSS、redaction failures、model token/total cost。原文・URL tokenはログではmask。
 - 同一fixture（日本語/英語、HTML変更、タイムゾーン差、認証済み/非認証、滞留ページ）の成功/誤判定率と費用を測定する。実測値なし。
 
@@ -264,3 +264,9 @@ Vendor documentation reviewed 2026-10-30 (**Docs verified**, not integration tes
 ## 2026-11-07 Muse移行: 人間介入はBroker-owned Context内
 
 Sandbox Execで自由なShell/CLIが使えても、保護ブラウザのCookie/OTP/PasswordをWorkspaceに渡さない。人間のログイン/HandoffはCell外のBrowser Brokerが管理する現在Owner/lease付き一時セッションで行い、Userの操作をSentinel/Approvalの上位権限にしない。Remote CDP/DevTools socketをCellへ公開しない。未知のCAPTCHA/非対応サービスは承認待ち/利用不可と明示、勝手に回避成功を保証しない。SC-18/19/22。
+
+## 2026-11-07 再監査: Handoff Ticket期限とADR-009の境界
+
+CHAT_04 Browser WorkerとCHAT_08 UIで **発行→一回限りredeem 60秒**、**redeem後のHuman lease無操作10分**、**絶対期限30分**を同一サーバーclock/Session管理のProvisional値として統一する。UIはWorkerから現在期限・失効理由を受け取って表示し、独自タイマーで権限を延長しない。期限切れ・Agent再開・owner/Goal/restoreIncarnation変更・worker crashでTicket/relayの再利用は不許可。
+
+§18のCapSolverは、ADR-009で禁止されたアクセス制限の回避を許可したものではない。サイト規約/利用資格・本人の明示権限・第三者データ共有・費用・対象の合意を別々に確認し、CHAT_00/03/09の正式判断までは `DISABLED`。WAF access denied/MFA/OTPをSolvable CAPTCHAと混同しない。許可不明ならHuman Handoffまたは安全停止し、規約回避へのfallbackをしない。
