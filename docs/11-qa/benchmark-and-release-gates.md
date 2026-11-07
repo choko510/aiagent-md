@@ -356,3 +356,7 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 `ACM-T21〜36`を従来T01〜T20へ加え、次のHard gatesを必須化する。**引用が正しいだけで出典不支持の数値をverified化 0、Goal typed value/否定/税・費用修飾の変造0、Policy二重計上での不必要Block 0、Token Window超過0、RequestSnapshot不一致のReplay 0、DELETE先行Commit後旧Memory付きAdmission 0、無承認Provider fallback 0、Expired OriginalをVerified Evidence利用0、Child stale merge 0、Head/Artifact dangling Success 0、CrossTenant Cache leak 0、Coverage不足の誤Success 0**。
 
 速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。
+
+## 2026-11-07: Browser Live Observation Release Gate（設計のみ）
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のBLO-T01〜12 / SC-23を追加。**Blocking gate:** 別Tenant/同Tenant別owner漏えい0、CDP/credential公開0、Observeに起因するAGENT lease喪失や入力操作0、機密/不明ページのframe送信0、revoke/cancel/worker交代後の旧frame送信0、raw frameの永続保存0、再接続の別Task誤表示0。BLO-T01〜11未実施/失敗はRelease不可。**性能評価:** 実機でLAN/WAN fps・p50/p95 end-to-end遅延、CPU/RAM、bandwidth、同時viewer、slow-clientのqueue長、Agent Browser actionのp95劣化を視聴OFF/ONで比較。5〜15fps・LAN p95 2秒は開発目標でSLAではない。現時点は`NOT RUN`。
