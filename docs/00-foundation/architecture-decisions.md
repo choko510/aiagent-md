@@ -21,6 +21,13 @@
 | ADR-014 | PROPOSED | user Feedback has scoped Memory Writer, undo/tombstone, cannot change authority | self-mutating runtime logic, overwriting facts | CHAT_06/14; SC-16 |
 | ADR-015 | PROPOSED | untrusted file parser isolated no-network, raw→derived artifact + coordinates | model alone executing embedded PDF/Office content | CHAT_01/09/10/15; SC-15 |
 | ADR-016 | PROPOSED | migration expand→backfill→switch→contract, pinned CI PostgreSQL+Browser+Docker+SSRF evidence | altering an already-applied migration or declaring smoke test production-safe | CHAT_10/11; SC-07,08 |
+| ADR-017 | PRODUCT_FIXED | Allow bounded Shell/Python/Node/CLI and generated code inside isolated Runtime Cell, deny host/protected service code; maintain General Agent goal | permanent deny of any code; unprivileged host shell | CHAT_00/02/09; SC-17,18,21 |
+| ADR-018 | PROPOSED | Production KVM/QEMU dedicated VM with userns restricted Runtime Cell and independent Protected Services; no unsafe fallback, dev-only container distinct | Docker-only asserted equivalent to VM; one privileged process | CHAT_09/10/11; SC-18,21 |
+| ADR-019 | PRODUCT_FIXED | Independent Sentinel is final authority for all connector operations and network egress, regardless of generated subprocess; Gateway retains intent/effect ledger | tool-only routing, environment-variable proxy without kernel route block | CHAT_03/09/10; SC-19,22 |
+| ADR-020 | PROPOSED | Credential Broker/Privsep and Browser Broker external to Cell; agent never sees raw tokens or direct CDP | token env injection or unowned browser socket | CHAT_04/05/09; SC-18,22 |
+| ADR-021 | PROPOSED | SandboxExecution and Workspace child contracts, lifecycle/kill tree/UNCERTAIN reconciliation and temp Skills | uncontrolled daemon, automatic self-upgrade of protected runtime | CHAT_01/02/03/06/10/11; SC-17,20,21 |
+| ADR-022 | EXPERIMENT | Compare eBPF taint provenance and MicroVM-per-task after production mandatory path established | assume Meta's kernel data flow tracking implemented | CHAT_09/10/11; SC-19,22 |
+
 ## Cross-team conflict register
 | ID | Blocker | Required owner handshake | Closure evidence |
 |---|---|---|---|
@@ -32,6 +39,11 @@
 | DEC-P1-02 | Change baseline/provider source lineage not ratified | CHAT_01+07+10+12+13 | CAS baseline + source variant key + retention/error tests |
 | DEC-P1-03 | direct Provider access entitlements/quotas | CHAT_05+09+12+13 | authorized provider contract smoke or explicit unsupported state |
 | DEC-P1-04 | old Source conflict notes refer to superseded SQL | respective owner of each Draft PR | current HEAD reconciliation and superseded annotations |
+| DEC-P0-05 | Execution/Workspace IDs, output/error/state and Run ownership crossing Gateway, Cell, DB and UI | CHAT_01/02/03/08/09/10/11 | canonical schema, migration, kill and crash E2E |
+| DEC-P0-06 | Sentinel as sole final connector/network permission authority vs Gateway Approval ledger and egress backend | CHAT_03/04/05/09/10/11 | one authorize path, no bypass in curl/IPv6/UDP/opaque TLS/Browser |
+| DEC-P0-07 | Secure VM + nspawn + Chrome sandbox production readiness and dev-only mode | CHAT_09/10/11 | actual kernel attestation, QA isolated profiles and fault test |
+| DEC-P1-05 | Temporary generated Skill activation vs durable Skill publication/secret access | CHAT_02/03/06/09/11 | bounded temp use, reviewed promotion, revocation tests |
+
 ## Locking and decision escalation
 1. Core Owner publishes canonical proposed contract with schema version, precise examples, invariants, migration and negative tests.
 2. Affected Owners review the HEAD and explicitly accept/reject or propose a compatible alternative; don't silently assume agreement.

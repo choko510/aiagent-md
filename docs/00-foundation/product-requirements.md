@@ -1,11 +1,11 @@
 # Product Requirements — Universal Personal Agent Harness
 > Status: **Draft / owner CHAT_00 / 2026-10-30**. Canonical user intent: [Project Brief](project-brief.md), verification: [Acceptance Scenarios](acceptance-scenarios.md). These are design requirements, NOT evidence of implementation.
 ## 1. Mission and boundaries
-A self-hosted Ubuntu/Docker **general-purpose research Agent Harness** which accepts a natural-language goal, plans, discovers tools, reads authorized sources, reasons, calculates, verifies evidence, and reports results. Supports unattended bounded background execution, condition monitoring and notifications. Not an agent for server administration, code execution on host, scraping as sole purpose, or autonomous buying, posting, reservation or transfers.
+A self-hosted Ubuntu / Secure VM **general-purpose personal Agent Harness** which accepts a natural-language goal, plans, discovers tools, reads authorized sources, reasons, calculates, verifies evidence, and reports results. Supports unattended bounded background execution, condition monitoring and notifications. Not an agent for server administration, code execution on host, scraping as sole purpose, or autonomous buying, posting, reservation or transfers.
 ### Personas and scope
 Owner is authenticated human; additional users are strictly isolated by tenant, workspace, resource ownership and capability. Operators have separate explicit auditable capabilities. All external/provider content, websites, emails, social posts, PDFs, images and Excel rows are **untrusted data**, never system instruction or capability.
 ### Non-goals
-No arbitrary SSH/host shell or Docker socket/tool install; no evasion of site protection guarantees; no unlicensed data acquisition, unlimited spending or unapproved purchases/reservations/messages; no universal exactly-once external side effects. No implicit declaration of a price/stock/booking as real-time.
+No arbitrary SSH/host shell or Docker socket/host package install; sandboxed Cell shell and ephemeral package installation are allowed only within strict isolation; no evasion of site protection guarantees; no unlicensed data acquisition, unlimited spending or unapproved purchases/reservations/messages; no universal exactly-once external side effects. No implicit declaration of a price/stock/booking as real-time.
 ## 2. Verifiable priority-ordered requirements
 | REQ | Level | Contract-level expected outcome | Tests / SC |
 |---|---|---|---|
@@ -27,7 +27,13 @@ No arbitrary SSH/host shell or Docker socket/tool install; no evasion of site pr
 | PRD-016 | MUST | User can Pause/Resume/Cancel/Steer; revocation/Cancel wins before a new external dispatch boundary, already sent effects remain auditable | PRD-T16 / SC-07 |
 | PRD-017 | MUST | Enforce finite model tokens, browser tabs/time, provider calls, external events/minute, job retries and daily monetary ceilings; expose usage | PRD-T17 / SC-09,11 |
 | PRD-018 | SHOULD | Telegram supports a restricted subset of authenticated Web UI functions and shares the same persistent state | PRD-T18 / SC-02,05 |
-| PRD-019 | MUST | Every module has testable REQ→TEST→SC, uncertainty/operational evidence and version-specific provider limitations | PRD-T19 / SC-01..16 |
+| PRD-019 | MUST | Every module has testable REQ→TEST→SC, uncertainty/operational evidence and version-specific provider limitations | PRD-T19 / SC-01..22 |
+| PRD-020 | MUST | Isolated Runtime Cell supports bounded Shell/Python/Node/CLI and generated code; no physical host/Protected Services access | PRD-T20 / SC-17,18 |
+| PRD-021 | MUST | Sentinel is final independent permission authority for all concrete network egress and connector actions, including child processes | PRD-T21 / SC-19,22 |
+| PRD-022 | MUST | Credential Broker/Privsep/Browser Broker separate from Cell; no plaintext credentials/CDP to Agent | PRD-T22 / SC-18,19,22 |
+| PRD-023 | MUST | Temporary Skills may be built/tested in Cell but durable activation/policy edits require approval | PRD-T23 / SC-20 |
+| PRD-024 | MUST | Cell exec lifecycle and child processes obey Task/Run fences, cancellation, budgets, workspace CAS and UNCERTAIN side-effect reconciliation | PRD-T24 / SC-21 |
+| PRD-025 | MUST | Production starts only after VM + kernel sandbox + egress attestation; container-only development mode never claims production isolation | PRD-T25 / SC-18,22 |
 ## 3. User-visible results and definitions
 - **Succeeded**: Goal Verifier evaluates all mandatory user success criteria against current evidence and recorded side-effect outcomes. A successful LLM response alone does not meet it.
 - **Partial**: Some criteria met, other constraints explicitly failed or unverified; include blockers and known gaps.

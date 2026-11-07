@@ -1,33 +1,45 @@
 # System Architecture — Runtime and Trust Boundaries
 > Status: **Draft**. Owner CHAT_00. Every component below is a proposed logical responsibility, not a deployed service. Physical tables, protocol message types and approval logic belong to other Owner specs.
-## 1. Process topology
-```mermaid
-flowchart LR
- U[Web UI / Telegram] --> API[Authenticated API + Command validation]
- API --> PG[(PostgreSQL: Task Run Event Outbox)]
- API --> SCH[Scheduler / Watch evaluator]
- SCH --> PG
- PG --> Q[Durable Job Relay]
- Q --> AR[Agent Runtime Workers]
- AR --> MODEL[Model Router]
- AR --> G[Tool Gateway / policy / effect ledger]
- G --> HTTP[Network-guarded HTTP / provider connectors]
- G --> BW[Browser Worker session/page owner]
- BW --> CB[Chromium / Playwright]
- G --> PS[Sandboxed parser sidecar]
- AR --> PG
- PG --> OB[Outbox / Notification delivery]
- OB --> U
-```
-All external and browser/server-sidecar egress is denied unless explicitly allowed by network policy. Trusted model outputs never bypass command validation; provider documents remain untrusted.
+## 1. Process topology — Muse型 Secure VM (proposal)
+
+~~~mermaid
+flowchart TB
+    OP[Ubuntu Host / KVM-QEMU Operator] --> VM[Secure VM]
+    U[Web UI / Telegram] --> API
+    subgraph VM [Secure VM]
+      subgraph PROTECTED [Protected Services / Trusted Domain]
+        API[Authenticated API] --> PG[(PostgreSQL and Outbox)]
+        PG --> Q[Scheduler / Durable Job Relay]
+        GW[Tool Gateway / Approval / Ledger] --> SENT[Sentinel Final Egress and Connector Authority]
+        SENT --> AUTH[Credential Broker / Privsep Connector]
+        SENT --> BB[Browser Broker / CDP owner]
+        MODEL[Model Gateway]
+      end
+      subgraph CELL [Untrusted Runtime Cell / User Namespace]
+        AR[Agent Loop and Subagents] --> EXEC[Sandbox Exec / Shell / Python / Node]
+        EXEC --> WS[Scoped Task Workspace]
+      end
+      Q --> AR
+      AR --> GW
+      AR --> MODEL
+      EXEC -->|forced network path| SENT
+      BB --> CH[Chromium Sandbox]
+      CH -->|enforced egress| SENT
+    end
+    SENT --> INTERNET[Authorized Public Services]
+    AUTH --> INTERNET
+~~~
+
+Trust boundaries, including how forced egress works in the kernel and the actual IPC identities, are defined in ../09-security/runtime-cell-isolation.md and ../09-security/sentinel-authority.md. Protected Services run outside the untrusted Cell **inside the Secure VM**, not on the physical Ubuntu host. This is proposed topology, not deployed proof. Agent may execute arbitrary *local Cell code*, but cannot own privileged API, network ACLs, vault, DB or Browser CDP. KVM/QEMU VM and nspawn are candidates requiring verification. Existing Docker-only diagrams lower in historical specs are not production trust-boundary authority.
+
 ## 2. Logical components and ownership
 | Component | Canonical owner | Exposes (proposal) | Must not do |
 |---|---|---|---|
 | Web/Telegram/API | CHAT_08 | Task/Watch/create/read/approve/stream DTO, auth-scoped cursor | directly mutate Run internals or contact Tool without Gateway |
-| Auth/Secrets | CHAT_09 | authenticated principal, capabilities, credential handles, egress deny | raw secrets inside LLM prompt |
-| Runtime Host / Agent Loop | CHAT_02 | claim/recover/steer/cancel/checkpoint, model broker | arbitrary tool dispatch, indefinite recursive loop |
+| Auth/Secrets / Sentinel | CHAT_09 | authenticated principal, protected Vault, final network/connector permission and egress enforcement | raw secrets in Cell/prompt or LLM-editable policies |
+| Runtime Host / Agent Loop + Sandbox Exec | CHAT_02 | claim/recover/steer/cancel/checkpoint, bounded shell/code in Cell | host/protected-services command, direct unapproved external tool dispatch |
 | Tool Gateway | CHAT_03 | manifest validate→risk/approval→durable attempt→dispatch | tool self-authorization, blind effect retry |
-| Browser owner | CHAT_04 | session lease, bounded page operations, screenshot evidence | concurrent cross-owner Page control |
+| Browser Broker | CHAT_04 | exclusive CDP/session lease, bounded page operations and screenshot evidence | direct CDP to Cell, concurrent cross-owner Page control |
 | Provider layer | CHAT_05 | read/adapt Amazon/Keepa/X/hotel data with provenance | raw provider text as trusted instructions |
 | Memory/Skills | CHAT_06 | scoped reversible Memory Writer and gated Skill promotion | mutate source Evidence or grant new Tool power |
 | Scheduler/Watch/Outbox | CHAT_07 | occurrence, observation compare, delivery intent | new Agent runtime or provider-specific duplicate queue |
@@ -60,7 +72,7 @@ sequenceDiagram
  Worker->>DB: checkpoint VERIFY and Goal result
  DB-->>User: Signed snapshot/SSE stream
 ```
-A model can propose tools but the trust boundary is Tool Gateway. If provider sends a response but crashes before ACK, permanent external effect is **UNKNOWN**, not retried automatically.
+A model can propose tools, including local Shell/Exec; the trust boundaries are the Gateway's persisted intent/side-effect ledger plus the independently enforcing Sentinel and Runtime Cell isolation. If provider sends a response but crashes before ACK, permanent external effect is **UNKNOWN**, not retried automatically.
 ## 4. Main state and ownership
 - `Conversation` optional on Task (Watch/External Event can create Task without Conversation). `Task` holds user goal and its terminal state; `Run` is one attempt and its lease epoch; Worker recovery reclaims the same Run with new leaseEpoch; terminal Task retry creates a new Task linked to previous Task but never mutates history.
 - `DomainEvent` aggregate sequence is per aggregate, `deliveryOffset` per tenant; durable event/outbox state and consistent projection snapshot precede a signed SSE cursor. Provider-originated Event and user-visible Domain Event are **different identities**.
@@ -95,3 +107,10 @@ Proposed TS packages: `api, runtime, gateway, browser-worker, connectors, automa
 Unit schema/codecs, real PostgreSQL FK/concurrent CAS/migration upgrade, Browser POST trap, cross-tenant authorization, Event snapshot→SSE gap, event trigger duplicate/revoke, external provider entitlements, isolated malicious file parser, Watch/Outbox UNKNOWN and budget enforcement. No `Verified` until code and tests exist.
 ## 12. ADR / cross-team decision pointers
 [ADR decisions](architecture-decisions.md), [Glossary](domain-glossary.md), [Spec Index](spec-index.md). Owner-specific proposals remain Draft until their corresponding PR HEAD documents the resolved schema and cross-owner reviewer accepts.
+
+## 9. Muse migration: ownership invariant and compatibility (2026-11-07)
+
+- Existing Task/Run/Conversation/Watch, Evidence, Actor/tenant, Scheduler and approval identities remain canonical; Execution/Workspace are child resources and must not create duplicate Task state.
+- For sandbox.exec: Gateway persist intent → Cell admission/attestation → isolated process and mediated egress → durable stdout/artifact/effect receipts → Goal verification. External connector activity goes through Sentinel's final ALLOW/ASK/DENY; incomplete/opaque TLS activity cannot be silently classified read-only.
+- Any current direct Gateway→External arrows represent a **logical invocation**, not a direct unfiltered socket route. Actual network/connector authority is Sentinel. All legacy no-arbitrary-code statements must be understood as host/protected-service prohibition, not Runtime Cell limitation.
+- The shared transaction/approval contracts are Draft; no explicit implicit lock or VM implementation is implied by this revision. Full implementation requires OWNER reconciliation + TEST SC-17..22.

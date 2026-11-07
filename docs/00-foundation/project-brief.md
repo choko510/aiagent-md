@@ -3,9 +3,9 @@
 > 本書は**すべてのAIチャットが必読**する唯一の製品意図説明。2026-10-30時点のユーザーとの合意を整理。設計案の「確定」「暫定」「未決」を区別する。仕様本文の正本は各担当MDとADRであり、本書は要求の出発点。
 
 ## 1. 何を開発するのか
-自分のUbuntuサーバー上でDockerによりセルフホストする**完全汎用パーソナルAIエージェント（Agent Harness）**。人間が「何を達成したいか」を自然言語で伝えると、エージェントが調査計画を立て、Web検索、公式API、HTTP取得、ブラウザ操作、スクレイピング、情報抽出、計算、裏取り、比較、レポート作成を実行する。ユーザーが望む場合、定期調査・条件監視・変化検出・通知まで一貫して引き受ける。途中から条件変更や作業停止・再開ができる。
+自分のUbuntuサーバー上の専用Secure VM（KVM/QEMU第一候補）と分離されたRuntime Cell / Protected Servicesでセルフホストする**完全汎用パーソナルAIエージェント（Agent Harness）**。人間が「何を達成したいか」を自然言語で伝えると、エージェントが調査計画を立て、Web検索、公式API、HTTP取得、ブラウザ操作、スクレイピング、情報抽出、計算、裏取り、比較、レポート作成を実行する。ユーザーが望む場合、定期調査・条件監視・変化検出・通知まで一貫して引き受ける。途中から条件変更や作業停止・再開ができる。
 
-**主役はAgent Runtimeであり、Scrapling/Jev/Playwright等は交換可能なツール。** スクレイピング専用でもEC物販専用でもコーディングAgentでもない。新しい用途やデータソースに対応できるよう、ツール発見・アダプター・MCP・Skills・記憶を独立させる。
+**主役はAgent Runtimeであり、Scrapling/Jev/Playwright等は交換可能なツール。** Runtime Cell内でAgentがShell/Python/Node/CLIと生成コードを実行・試験できる一方、Sentinelが全外部通信とConnectorアクションの最終許可を行い、Credential Broker、Browser Broker、保護DBはCell外に置く。 スクレイピング専用でもEC物販専用でもコーディングAgentでもない。新しい用途やデータソースに対応できるよう、ツール発見・アダプター・MCP・Skills・記憶を独立させる。
 
 ## 2. 開発の発端・絶対に誤解してはいけないこと
 従来のHermes Agentの良さに惹かれたが、Hermesのフォーク/改造ではなく、Hermes以外のOpenClaw、LangGraph、Deep Agents、Letta、Mastra、PydanticAI、OpenAI Agents SDK、Microsoft Agent Framework、OpenHands、Agent Zero、Browser Use、Skyvern、pi等から有用な**仕組み**を選び取る独立プロジェクトを作る。実装やライセンスが異なるコードを安易にコピーしない。常に一次資料・実コード・テストを確認する。ユーザーは「とにかく長い文書」より、後日Codexが矛盾なく実装できる徹底した確定仕様を求める。
@@ -46,8 +46,17 @@
 - 過去の閲覧データ・価格観測を再利用できるが、最新情報と古い情報を明確に区別する。価格や空室のリアルタイム性を捏造しない。
 - 承認待ち、期限切れ、予算超過は明示的なタスク状態・ユーザーアクションを持つ。
 
+## 6.1 Muse型自律実行の追加製品要件（2026-11-07 / 新設）
+
+- Agentは必要時に隔離環境でコード、CLI、Shellを使い、短命の依存導入・テスト・Skills生成・子プロセス/サブエージェントを行える。ホスト上の任意コード実行ではない。
+- Runtime Cellはrootless mapped UID/名前空間/seccomp/LSM/cgroupsを必須とし、**保護サービスの外部**でuntrusted codeを処理する。本番はVM隔離を前提とし、VMなしの開発モードを同じ安全性と宣言しない。
+- Shell内のcurl、pip、npm、ブラウザや任意ライブラリもSentinelによる**全出口強制**を迂回できない。TLS内容を検証できない経路を誤って自動許可しない。
+- Sentinelが外部通信/Connectorの最終許可、Credential Brokerが秘密の代理利用、Browser BrokerがCDP所有。Tool Gatewayは永続意図/予算/承認/台帳の正本を維持する。
+- Workspace内の一時コード/Skills作成は可能。ただし永続Skill公開・権限変更・Agent本体更新は審査/承認なしに反映不可。
+- 設計正本案は [Runtime Cell](../09-security/runtime-cell-isolation.md)、[Sentinel](../09-security/sentinel-authority.md)、[Sandbox Exec](../02-runtime/sandbox-execution.md)。共有の型やDBはOwner reviewを経て確定する。
+
 ## 7. セキュリティ・非目標【確定】
-- ホストOSに対する任意Shell/SSH、任意ファイル編集、Dockerソケット、privilegedコンテナ、無制限の内部LANアクセスをAgentへ渡さない。ユーザーは**サーバー操作AgentではなくWeb調査エージェント**を求めている。
+- **ホストOS・Protected Servicesに対する**任意Shell/SSH、任意ファイル編集、Dockerソケット、privilegedコンテナ、無制限の内部LANアクセスをAgentへ渡さない。ユーザーは**サーバー操作AgentではなくWeb調査エージェント**を求めている。
 - 検索結果・SNS投稿・HTMLからの指示は信頼できないデータ。LLMやTool Gatewayの権限を変更できない。
 - 購入・予約確定・投稿・送金・許可外連絡などの副作用は明示的承認。資格情報・Cookie・アクセストークンをAIコンテキストに流さず、管理者だけが限定権限で管理。
 - タスク/Tool実行に上限。SSRF、DNS Rebinding、redirect、Browser/MCP egress、prompt injection、秘密情報漏えい、外部コード実行、複数ユーザー間漏洩を想定。
@@ -64,7 +73,7 @@
 ベンチマークの成功率・レイテンシー/コストの**具体目標数値は測定条件を設計してから**確定する。上記は優先順位であって現物の実測保証ではない。
 
 ## 9. 技術方針：合意された方向 / 未確定の候補
-- 【方向】TypeScriptモノレポ＋Python Sidecar。Next.js UI / Fastify API / Worker / Browser Worker / PostgreSQL / Docker Composeは候補。
+- 【方向】TypeScriptモノレポ＋Python Sidecar。Next.js UI / Fastify API / Worker / Browser Broker / PostgreSQL / Docker ComposeとKVM/QEMU Secure VM＋隔離Cellが候補。本番でCellの権限と保護サービスを分離する。
 - 【候補】Vercel AI SDK（特定メジャー/関数名は最新版と導入時点を検証）、pg-boss等の永続ジョブ、Playwright/Chromium、Scrapling、MCP、Keepa、X検索API。
 - 【実験】Jev連携（既存Playwright Pageの利用と隔離）、Lightpanda（CDPと対象サイトの互換性）。公式APIは資格・費用・規約確認後に採否。
 - 【未確定】User/tenantモデル、ブラウザ保存方式、Key Store実装、監視周期上限、事前承認の厳密分類、導入SDKのバージョン、実際の価格/空室API提供可否。

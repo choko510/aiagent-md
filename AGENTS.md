@@ -7,6 +7,7 @@
 - `README.md` と `docs/00-foundation/project-brief.md`、`product-requirements.md`、`system-architecture.md`、`acceptance-scenarios.md`、`architecture-rules.md`、`architecture-decisions.md`
 - `docs/00-foundation/spec-index.md` で対象機能の正本と依存MDを特定する。
 - 共通の型/イベント/状態は `docs/01-contracts/`、Toolと副作用は `docs/03-tools/`、Securityは `docs/09-security/`、DB/運用は `docs/10-infrastructure/`、受入テストは `docs/11-qa/` を参照する。
+- `docs/02-runtime/sandbox-execution.md`、`docs/09-security/runtime-cell-isolation.md`、`docs/09-security/sentinel-authority.md` を新しい信頼境界の正本案として読む。
 - `governance/round6/contract-lock-candidate.md` の CL-01〜12 は承認待ち。Draft仕様はLockedでなく、CIの静的検証も実動作の証拠ではない。
 
 ## Implementation rules
@@ -16,11 +17,13 @@
 3. 実装を小さく縦に切り、実際のテストを追加・実行する。再起動、同時実行、二重配信、キャンセル、未知の副作用結果、期限切れ、予算超過などの異常経路を検証する。
 4. 外部ライブラリ、API、ライセンス、価格、認証要件は実装時点で一次資料とソースを再確認する。古い調査結果を現在の保証として引用しない。
 5. REQ-ID→TEST-ID→SC-IDの追跡性、メトリクス、Error/Evidenceの一貫性を維持する。`Designed`/`Tested`/`Verified`の表記を混同しない。
-6. 変更は原則として目的別のブランチとPRで提案する。85件のモジュール原本は元の執筆PRとSHA照合されるので、仕様変更時は原本の証跡検証をどう移行するかも記録する。
+6. 変更は原則として目的別のブランチとPRで提案する。88件のモジュール原本は元の執筆PRとSHA照合されるので、仕様変更時は原本の証跡検証をどう移行するかも記録する。
 
 ## Non-negotiable security boundaries
 
-- Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。
+- Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
+- 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はRuntime Cell外のSentinelで強制評価し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
+- 本番はVM境界とCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
 - 任意のTool Callはschema検証、policy、budget、approval、side-effect ledgerを通す。LLMが自分の操作を自己承認しない。
 - 購入・予約確定・送金・投稿・対外メッセージ送信は個別承認。UNKNOWN効果を盲目的に再試行しない。
 - APIキー・Cookie・認証トークンをLLMコンテキスト、Evidence、ログに漏らさない。
