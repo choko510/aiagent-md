@@ -44,3 +44,44 @@ Build Manifest: projectId, sourceSha, imageDigest, dependencyLockDigest, testRec
 - T06 push ACK loss→remote SHA再照会、重複releaseなし。
 - T07 Android emulator/macOS runner unavailableはUNAVAILABLE表示、偽成功なし。
 - T08 CI/署名鍵/利用者データがArtifact/Modelへ露出0。
+
+## 2026-11-08 P0-01 — Preview Capability / Origin / Socket Isolation (normative proposal)
+
+**Preview != public Browser navigation.** Security authority: CHAT_09; Broker admission/effect is CHAT_03, Browser Worker/session ownership CHAT_04, DB atomic lease/retention CHAT_10. The following server-minted types are **proposals to be reconciled with CHAT_01 and CHAT_09**, not permission that a model can create:
+
+```ts
+type PreviewCapabilityV2 = Readonly<{
+  previewId:string; tenantId:string; ownerUserId:string; projectId:string;
+  taskId:string; runId:string; runLeaseEpoch:string;
+  executionId:string; executionGeneration:string; workspaceRevision:string;
+  boundPort:number; protocol:"http"|"https"; originId:string; originGeneration:string;
+  browserSessionId:string; browserLeaseEpoch:string; capabilityId:string;
+  capabilityVersion:string; policyEpoch:string; identityVersion:string;
+  issuedAt:string; expiresAt:string; allowedMethods:readonly ("GET"|"HEAD"|"POST")[];
+  allowedModes:readonly ("observe"|"demo_interact"|"debug_synthetic")[];
+  maxBytes:string; maxConcurrentConnections:number; maxLifetimeSeconds:number;
+}>;
+type PreviewConnectionAdmissionV2 = {
+  capabilityId:string; operationId:string; requestDigest:string;
+  expectedRunLeaseEpoch:string; expectedBrowserLeaseEpoch:string;
+  expectedPolicyEpoch:string; expectedOriginGeneration:string;
+  targetProtocol:"http"|"https"|"ws"|"wss"; targetPath:string;
+  mode:"observe"|"demo_interact"|"debug_synthetic";
+};
+```
+The Capability token itself is server-only, opaque and non-exportable; the UI receives **only** a scope-reduced viewer/session reference. `PreviewCapabilityV2` is persisted in trusted control; never hand its raw fields to Cell JS or browser page. Tenant/owner/project/task/run/execution/port/origin/session/lease/identity/policy epochs must be resolved afresh from DB, not accepted from page, request Host header, AI or URL. **Fail CLOSED** if any binding missing or revoked. Each individual stream admission and every redirect/WS upgrade is independently reauthorized with current generation. Hold a short-lived revocable stream-lease on the protected transport; Stop/revoke/session change closes established HTTP streaming/WS/HMR sockets as well as preventing new ones. Lost revocation channel → bounded lease expiry + fail closed; no socket survives a stale lease grace period.
+
+**Origin security:** Allocate cryptographically unpredictable project+session scoped origin IDs, isolated per-project top-level site and BrowserContext; never reuse origin on a different project or generation. Scope Cookie, localStorage, IndexedDB, CacheStorage and Service Worker to the project session context; destroy/partition storage on reuse, after revocation and on worker crash. Service Workers are disabled by default for preview/debug unless explicitly tested, scope-limited, and scrubbed. Block cross-project navigation, `window.open`, iframe cross-origin embeds, cross-context messaging, top-level opener access, CORS wildcard abuse, credentialed fetch to internal services, and untrusted page initiated protected Browser Worker operations. Render preview with no owner login, Vault token, bridge APIs, or browser extensions. Headers: strict frame sandbox, no ambient session cookies, CSP/connect-src restricted to scoped origin, Referrer-Policy=no-referrer. Browser sandbox stays enabled. Treat malicious JS in the preview as adversarial; origin partition is defense-in-depth, not authority.
+
+**Binding actual process:** on each connection, verify VM attestation, guest identity, Execution PID namespace/handle, process generation, selected bound port, kernel socket owner and lease via trusted supervisor; a port number or model claim alone cannot bind a listening process. Allow only the intended process's HTTP listener, not the guest's arbitrary TCP services. Connection to a different PID/port/execution instance or resurrected PID rejects even if the URL string is identical. No generic CONNECT tunnel, arbitrary DNS lookup, proxy environment override, raw TCP/UDP, internal host route, or redirect to new target.
+
+**HTTP/WS matrix:** normalize scheme, host, path, headers before policy; reject absolute-form proxy requests, CONNECT, TRACE, cross-scheme redirect, redirect to other virtual origin, malformed Host/Origin, DNS rebinding, IPv4/IPv6 literals, IP-zone identifiers, userinfo, CRLF/smuggling and WebSocket subprotocol surprises. Upgrade is a **new** authenticated admission with connection deadline, token limits, message size/rate cap and periodic current-epoch checks; Server-Sent Events/long polling similarly. If the preview service issues a redirect, check the next hop before following; never let Browser navigate an unscoped destination through Preview. The Browser Worker remains sole CDP owner. Browser Live Observation #71, if separately merged, is read-only and never grants `demo_interact`.
+
+### P0-01 negative and fault verification
+- **DEV-BLD-T09**: two projects with same port/cookie/Service Worker → zero cross-context state leakage; a reused origin must be rejected.
+- **DEV-BLD-T10**: stolen/expired/revoked capability, mismatched tenant/Task/Run/Execution/browser lease/Policy epoch/owner → reject at admission.
+- **DEV-BLD-T11**: concurrent Stop/Worker restart/revoke while WS/HMR/SSE already established → old sockets forcibly close and no further bytes admitted.
+- **DEV-BLD-T12**: redirect/Upgrade/Host/Origin/IPv6/DNS rebinding/cross-origin iframe/opener attempts → no internal LAN, metadata, admin, other project, or raw CDP reachability.
+- **DEV-BLD-T13**: attacker-controlled JS + fake Browser Action instructions → no privileged cookie, secret or Broker capability exfiltration; no executable callback to Trusted Plane.
+- **DEV-BLD-T14**: reused PID, old Execution generation, port hijack and wrong VM attestation → preview denied despite matching port.
+All **NOT RUN** until trusted-VM, browser, network and WebSocket fault tests execute.

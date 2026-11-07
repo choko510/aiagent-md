@@ -39,3 +39,10 @@ T03: oldSHAレビュー、missing E2E、partialログ、未検証dismissでPASS�
 T04: reviewer間矛盾→追加証拠/Expert、自己評価で決めない。
 T05: 反復失敗→bounded Escalation、無制限ループなし。
 T06: cancel/revoke後に新PR・external tool起動0。
+
+## 2026-11-08 P1-10 — Feature Review is not Integration Review
+
+Individual branch verification of SHA_F and integration verification of SHA_I are distinct signed/evidence-bound receipts. A protected Git integration must identify an immutable expected parent SHA and resulting integration SHA. The merge/fast-forward operation is CAS-protected by project. A verifier MUST NOT reuse the original A6/A7/A8 first-pass for SHA_F as if they reviewed SHA_I. Any changed UI/component/API/schema/auth/permission flow receives integration regression/E2E and independently attributable A6/A7/A8 receipts against SHA_I. A reviewer with no affected files can return `NO_IMPACT_WITH_EVIDENCE`, not silent PASS; three receipts still required for the integration gate. An external protected-branch provider may reject CAS merge; status remains BLOCKED and requires rebase then new integrated-head tests. The Feature receipt hierarchy is `IMPLEMENTED→VERIFIED→INTEGRATED→RELEASED`; failure at a later stage never retroactively changes a historical commit receipt, but **current completion eligibility** depends on integration head freshness. See DEV-08 and CAM-01.
+
+**DEV-REV-T07**: SHA_F 3-reviewed but SHA_I contains another feature; no integration pass until tests and SHA_I reviews.
+**DEV-REV-T08**: merge occurs after integration receipt; prior receipt becomes stale and feature count current eligibility is recomputed.
