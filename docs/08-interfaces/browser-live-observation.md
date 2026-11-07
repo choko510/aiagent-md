@@ -75,7 +75,7 @@ MVP候補は1 BrowserSessionにつき1視聴者（設定で有限の上限）、
 3. 08-01/08-05/08-04 Subscription API、ライブUI、Handoffと別権限の明確化。
 4. 11 QA/実機PoCで画面漏えい・競合・Worker kill・ネットワーク不良・性能を検証する。仕様通過だけでVerifiedと言わない。
 
-## 8. Requirements / tests / scenarios（全て設計・NOT RUN）
+## 8. Requirements / tests / scenarios（BLO-001〜017、全て設計・NOT RUN）
 
 | REQ | Level | Oracle | TEST | SC |
 |---|---|---|---|---|
@@ -91,6 +91,11 @@ MVP候補は1 BrowserSessionにつき1視聴者（設定で有限の上限）、
 | BLO-010 | MUST | LIVE/STALE/PRIVACY_BLOCKED/ENDEDが正しい | BLO-T10 | 06/23 |
 | BLO-011 | MUST | signaling/WS/ICE/Auth/Origin/CSRF/revokeの保護 | BLO-T11 | 08/23 |
 | BLO-012 | SHOULD | 目標fps/遅延/資源影響を計測し未達なら開示 | BLO-T12 | 09/23 |
+| BLO-013 | MUST (Viewer enabled) | HUMAN/HANDOFF_PENDING/RECLAIMING中のCreate/Reconnect/Offer/Tab/Sendは0。再引継後も新規Subscriptionだけ | BLO-T13 | 06/07/23 |
+| BLO-014 | MUST (Viewer enabled) | Revoke送信Barrier後の新規Frame送出0、Track/Peer/Queue停止とClient wipeを別判定 | BLO-T14 | 07/08/23 |
+| BLO-015 | MUST (Viewer enabled) | Allowlist/DOM/iframe/canvas/SPA感度不明時は全画面ブロック。Capture前後で再検証 | BLO-T15 | 08/23 |
+| BLO-016 | MUST (Viewer enabled) | PITR後の旧restoreIncarnation/旧MediaGrantからの送出0 | BLO-T16 | 07/08/23 |
+| BLO-017 | MUST (Viewer disabled) | observe_enabled=falseでMedia API/Socket非公開、通常Agent Runは妨害しない | BLO-OFF-T01〜03 | 09/23 |
 
 Fixture: 複数owner/tenant、popup+tab switch、login/payment+iframe/canvas、late frames、Worker kill、Cancel、revoke、Handoff race、slow viewer、invalid Origin/ICE、mobile/hidden tab、network loss。BLO-T01〜11は **Live Viewer を有効にするリリースの必須ゲート**。無効の通常リリースではBLO-OFF-T01〜03だけを実行し、全media route/socket/offerが閉じていることを検証する。安全性を性能目標達成で相殺できない。
 
@@ -103,7 +108,7 @@ Fixture: 複数owner/tenant、popup+tab switch、login/payment+iframe/canvas、l
 
 ## 10. PR #71 再監査修正：閲覧権限・送信境界・感度判定の正本案
 
-> この節は第2〜8節の未確定部分を具体化する規範であり、矛盾する古い記述より優先する。**仕様の合意提案であって実装・実機検証済みではない**。BLO-T01〜12、BLO-OFF-T01〜03、QA-E2E-T23P/N/Fに対応。
+> この節は第2〜8節の未確定部分を具体化する規範であり、矛盾する古い記述より優先する。**仕様の合意提案であって実装・実機検証済みではない**。BLO-T01〜16、BLO-OFF-T01〜03、QA-E2E-T23P/N/Fに対応。
 
 ### 10.1 TakeoverとObserveの排他Admission（P1-01）
 
