@@ -95,3 +95,13 @@
 
 ## 12. User-approved expansion requests (2026-10-30)
 The user wants proactive opportunity discovery beyond monitoring fixed SKUs; cross-site product/hotel/entity matching; **event-driven tasks triggered by a named X account posting**, Gmail sale mail or other approved external changes; validated replay of prior successful browser actions; meaningful Web page diff; X/price/buyback trend fusion; risk-adjusted deterministic profit analysis; PDF/image/Excel ingestion; importance-ranked, deduplicated notifications; user feedback learning; and source reliability profiles. See `feature-expansion-2026-10.md` for the 11 assigned spec modules and boundaries. These are **approved items for detailed design**, not declarations that the implementation has already been completed. General-purpose functionality remains the objective.
+
+## 13. User-approved expansion: software development & continuous campaigns（2026-11-07 / Draft detailed design）
+
+汎用Agentであることは変えず、**アプリ開発**を追加ユースケースとして扱う。自然言語で新しいWeb/API/Android/desktop/iOSアプリ、既存GitHub projectの修正を依頼し、隔離されたWorkspaceで設計・コード作成・実行・単体/E2E・PRを実施する。最初の優先対象はWeb/APIと既存GitHub。Android/desktopとiOS(macOS builder必要)は後続段階。
+
+希望する既定ワークフローは**3独立AIで提案→1AIが比較・統合→ユーザー任意の設計選択→操作可能なUI Demoを作成→ユーザー任意のDemo確認→1AIが実装→3独立AIが同一SHAをレビュー→重大なP0/P1を繰り返し修正・再検証・コミット**。同じ問題で行き詰まれば高性能モデルのExpert Advisorに有界相談を依頼できる。ユーザーが選択する場合、デザインは名称だけでなく**画像・操作できる実Demoで直感的に比較**する。UIの採用と購入/投稿/外部送信/デプロイなどのセキュリティ承認は別の権限行為。
+
+**Endless Run** は上位Campaignとして、全体最適化、UI/UX改善、新機能追加、バグ発見、一般研究の継続サイクルを開始する。停止ボタン・目標(例10件の完成済み機能)・設定費用/リクエスト/利用枠/時間上限まで、作業が残る限り継続する。承認待ちがあっても独立できるタスクは進めるが、承認が必要な当該機能の本実装はしない。各Run/Child Taskの有限limit・Gateway/Consent/Sentinel/隔離は維持し、無制限課金や安全性を失うfallbackは認めない。Browser Workerを本格デバッグに用い、操作/スクリーンショット/Console/Network/Trace/性能/モバイル崩れを再現、ソースと結合し再修正の品質ゲートに使う。
+
+[DEV章](../16-app-development/README.md) / [CAM-01](../07-automation/endless-run-campaign.md) / [SC-24〜31](acceptance-scenarios.md)。2026-11-07 時点では設計案であり実装済みではない。

@@ -62,3 +62,13 @@ Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格�
 LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き固定領域とし、Evidence原本のArtifact offload、関連度・鮮度で選択したWorking/Memory投影、根拠付きSummary、Checkpoint復旧/Model変更時の再構築を組み合わせる。[詳細: Context Manager 18節](docs/02-runtime/context-manager-and-compaction.md) / [ADR-023〜028](docs/00-foundation/architecture-decisions.md) / [QA ACM-T01〜20](docs/11-qa/benchmark-and-release-gates.md)。
 
 Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。
+
+## 自律アプリ開発・Endless Run（2026-11-07 新規仕様案）
+
+本Harnessは汎用機能を維持したまま、**自然言語からのソフトウェア設計・実装・デバッグ・レビュー・GitHub PR**を扱う追加開発ワークスペースを提案します。[仕様索引](docs/16-app-development/README.md)。
+- **8AI開発チーム**：3独立提案→1統合→1Builder（操作可能なDemo・本実装）→3独立レビュー→P0/P1修正ループ。相談先として限定予算の高性能 **Expert Advisor** を追加。
+- **Visual Design Picker**：デザイン名だけでなく同一内容のサムネイル/実Demoを比較。任意の設計判断・Demo採用を経て本実装。未承認のFeatureは実装しない。
+- **Autonomous Browser Debugger**：実ブラウザ操作・UI見切れ・Console/Network/Trace/視覚回帰・source相関・修正後再検証。開発Previewはprivate-network禁止を緩めず専用認証Brokerを使用。
+- **Endless Run**：[Campaign正本案](docs/07-automation/endless-run-campaign.md)を通じ、改善/全体最適化/UIUX/Feature Factory/任意研究を有限Cycleで繰り返し、停止・目標件数・Quota/費用/安全制約まで継続。新機能の例は承認済み10件の実装。ユーザー判断待ちがあっても独立作業は進む。
+
+[受入試験一覧 SC-24〜31](docs/16-app-development/acceptance-and-rollout.md)と[追加ADR-030〜034](docs/00-foundation/architecture-decisions.md)を参照。**初期88個の既存Draft正本とは別の新規11仕様（DEV-01〜10、CAM-01）**であり、計99件の設計案（別PR #71のBrowser Live Observationは未統合）。本体は未実装、仕様・テスト・脅威モデル・APIはDraft/PROVISIONAL、実行済みのテストはありません。

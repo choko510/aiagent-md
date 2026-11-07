@@ -129,3 +129,22 @@
 
 既存の仕様数は**88件のまま**で、新しい独立MDは増やさない。実装可能な詳細契約は **02-08 [Context Manager and Compaction](../02-runtime/context-manager-and-compaction.md) の18節** に追記。これを中心に02-03/06/09/10/12、06-01/02、08-04、09-05、11-01/04、01/10の各正本・横断提案を整合させる。ADR-023〜028とDEC-P0-08〜10、DEC-P1-06は [Architecture Decisions](architecture-decisions.md) を確認。**PR #68 Muse secure architectureに依存するDraft proposal** であり、承認・実装・QA実行済みではない。
 
+## 2026-11-07 Development & Endless Campaign extension（Provisional）
+
+従来の**88件は歴史的な基礎仕様の件数**であり、この節の11件は新たなDraft設計案として追加される。現行PRベースで **88 + 11 = 99 件の提案モジュール**（別PR #71のBrowser Live Observationは未統合）。既存の歴史的Countを削除・上書きするのではなく、採用時にindexを移行する。どれもLocked/Implemented/Verifiedではない。
+
+| ID | New draft | Integration owner |
+|---|---|---|
+| DEV-01 | [Project/Workspace/Git](../16-app-development/project-workspace-and-git.md) | CHAT_01/02/03/05/09/10 |
+| DEV-02 | [Multi Agent Development](../16-app-development/multi-agent-development.md) | CHAT_01/02/03/08/09/10 |
+| DEV-03 | [Visual Design and Demo](../16-app-development/visual-design-and-demo.md) | CHAT_01/02/04/08/09/10 |
+| DEV-04 | [Expert Advisor](../16-app-development/expert-advisor.md) | CHAT_02/03/08/09/10 |
+| DEV-05 | [Build Preview Release](../16-app-development/build-preview-release.md) | CHAT_02/03/04/05/08/09/10 |
+| DEV-06 | [Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) | CHAT_02/03/04/08/09/10/11 |
+| DEV-07 | [Review Repair Gates](../16-app-development/review-and-repair-gates.md) | CHAT_01/02/03/08/10/11 |
+| DEV-08 | [Feature Factory](../16-app-development/feature-factory.md) | CHAT_01/02/07/08/09/10/11 |
+| DEV-09 | [Development API/UI](../16-app-development/development-api-and-ui.md) | CHAT_01/03/04/07/08/09/10 |
+| DEV-10 | [Acceptance & rollout](../16-app-development/acceptance-and-rollout.md) | CHAT_00/01/02/03/04/07/08/09/10/11 |
+| CAM-01 | [Endless Run Campaign](../07-automation/endless-run-campaign.md) | CHAT_01/02/03/07/08/09/10/11 |
+
+Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-development/acceptance-and-rollout.md) → referenced 01/02/03/04/07/08/09/10/11 canonical specs。将来の実装で定義重複があればこちらの型を勝手に正本化しない。差分で変更した基礎ファイルは本PRのOwner合意待ち。
