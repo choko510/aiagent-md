@@ -1,0 +1,20 @@
+name: muse-secure-runtime-spec-audit
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'AGENTS.md'
+      - 'README.md'
+      - 'audit/muse/**'
+      - '.github/workflows/muse-secure-runtime-spec-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docs-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Muse migration docs and links
+        run: python3 audit/muse/validate_spec_migration.py
