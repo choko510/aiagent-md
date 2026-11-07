@@ -70,7 +70,7 @@ All UI views must come from authoritative GET \`/api/v1/approvals/{id}\` and \`/
 | HITL-011 | SHOULD | short-lived take-over capability minted behind server-side one-time exchange + device/session binding | 06,08 |
 | HITL-012 | SHOULD | audit history of decisions/lease release to authorized user (no secrets) | 07,08 |
 | HITL-013 | LATER | multi-operator peer review / delegated approvals after ADR & tenancy migration | 07 |
-| HITL-014 | EXPERIMENT | visual live preview masked, only after threat-model / privacy and resource test | 06,09 |
+| HITL-014 | MUST | Ownerが手動起動するread-only live Observe。Agent leaseは維持。機密/不明画面の全面遮断とBLO-001〜012の認可/fencing/非保存が必須 | 06,09,23 |
 
 ## 5. Public DTO proposals [PROVISIONAL CHAT_01/03/04/09]
 
@@ -275,3 +275,7 @@ MUST map: 001→T01; 002→T02; 003→T03; 004→T04; 005→T05; 006→T06; 007�
 ## 2026-11-07: Sentinel承認とSandbox Execの分離
 
 Sandbox Execのローカル起動、SentinelのネットワークALLOWED/ASK/DENY、外部副作用のHuman Approval、Browser Human Takeoverは別の意味を持つ。ASK画面は実操作(対象/HTTP method/data scope/Account/金額/期限/Action digest)、現在Run/owner/lease/policy versionを表示し、実行/ネットワークGrantをユーザーのチャット一言で無期限化しない。ユーザーのApprovalはTool Gatewayに永続化され、Sentinelが具体的効果を最終認可する。Browser HandoffはBroker-owned Context内に限定し、shellへCookie/CDPを公開しない。Sentinelに要求対象を正確に把握できないHTTPS送信は自動Allowせず、Trusted Connectorへ切替/deny/明示承認待ち。SC-18/19/21/22。
+
+## 2026-11-07: Observe（閲覧）とHuman Takeover（操作）は独立
+
+[Browser Live Observation](browser-live-observation.md) に従い、Task ownerは `browser:observe` 権限でサーバーBrowserを**見るだけ**にする。ObserveでAgent leaseを停止しない。Viewerからのクリック、入力、clipboard、CDP、任意Browser操作は禁止。Observe権限を`browser:takeover`/Approvalへ昇格させない。機密/不明画面は全面ブロックし、旧frameを画面から消す。「操作を引き継ぐ」を明示した時のみ既存の短命ticket・AGENT/HUMAN排他遷移を用い、その時点でObserve subscriptionは失効する。BLO-T01〜12 / SC-23（未実装）。
