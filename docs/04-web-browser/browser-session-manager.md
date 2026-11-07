@@ -219,3 +219,8 @@ Browser WorkerがCDP/Context/Page/Sessionの唯一の所有者である方針を
 ## 2026-11-07: Browser Live Observation（読み取り専用・非排他）
 
 [Browser Live Observation](../08-interfaces/browser-live-observation.md) のBLO-001〜012、SC-23を04-03のBrowserSessionに追加。Browser WorkerだけがContext/Page/CDPと内部Captureを所有し、Agent/Cell/クライアントにCDP・credentialを渡さない。Observeは独立した閲覧権限であり、**開始/視聴/終了でAGENT leaseをHUMANに変更しない**。frameごとにtenant/owner/task/session generation/page generation・revokeを再検証する。機密/不明ページは全面遮断し古い画像を捨てる。Handoff時だけ従来の排他leaseを使う。raw frameは揮発memoryのみで、障害時は画面だけ切断してAgent Runを続ける。テストはBLO-T01〜12（未実施）。
+
+
+## PR #71 P1再監査: BrowserSession Observe Admissionと復旧世代
+
+BrowserSessionのObserver新規許可条件は`mode=AGENT`・`takeoverPhase=NONE`・`observeBlocked=false`に限定し、Handoff要求を保存した瞬間に`observeAdmissionEpoch`を増分して新規`Create/Reconnect/Offer/WS/Tab/Send`を拒否する。Handoffの人間操作Ticketを有効化する前に旧Mediaの`REVOKED_BARRIER_COMMITTED`とTrack/Peer/Queue停止を待つ。Releaseは`HUMAN→RECLAIMING→AGENT`のCAS確定とWorkerのSession/Page再観測までObserve不可。`restoreIncarnation`をPR #72と同じDB独立世代から取得し、Media grant/Producer/Browser sessionと紐づけ、PITR旧Worker拒否。`BLO-013〜017`/`BLO-T13〜16`、`QA-E2E-T23F`に準拠（NOT RUN）。
