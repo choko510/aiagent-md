@@ -201,3 +201,6 @@ CHAT_10 PR #10 proposes `discovery_plans`, `discovery_slots`, `opportunity_candi
 Promotion must atomically verify Source/Provider entitlement and Terms (CHAT_05/09), `retailer_storefront` and SKU variant/mappingRevision (CHAT_12 Entity), exact price Evidence time/condition and `risk_decision_receipts` from deterministic engine. If identity/availability/taxes/fee/coupon/buyback condition unknown, stage remains `needs_identity/needs_risk/unknown`, not `verified_candidate`. Source quality can prioritize, not authorize. Sending to Watch is a separate user-approved receipt via CHAT_07, not implicit enrollment.
 Tests RAD-R4-T01 two workers same slot→single candidate; T02 expired buyback→no verified profit; T03 retailer mapping split→invalidate previous candidate; T04 provider denial/budget→honest partial coverage; T05 restart after charge with UNKNOWN→no blind re-billing; T06 zero candidate search→observable coverage/no fabricated finds. SC-01/10/14. DRAFT.
 
+## 2026-11-07: 自律発掘はSecure Runtimeで有限実行
+
+Opportunity RadarがAI生成Python/CLIを使って候補探索や比較を行う場合、Runに属する短命SandboxExecutionを起動し、現在のBudget/Policy/Workspace/Cell Attestationを検査。全外部取得はSentinelの最終Egress許可を受け、Agentが新たなドメインやSNSを発掘しても無制限の自動送信/購入権限にはならない。生成コードの数値結果はEvidenceとは別のArtifactとして記録し、商品同一性や価格の根拠を保存する。SC-17/19/22。
