@@ -3,7 +3,7 @@
   "status": "DRAFT_SOURCE_INVENTORY_NOT_RUNTIME_VERIFICATION",
   "moduleCount": 88,
   "historicalSourceBase": "8b153c238c8a4cc18b6e9d258e55d3265e5249d5",
-  "gitRevisionSource": "8f63a54a5a8170e4aec92a72cf4901ab4ee910be",
+  "gitRevisionSource": "ed44ee4c45ee8c07eb980687c820585451a45f7c",
   "note": "88 canonical module blobs + audited COMP-01 live browser companion; PR #71 updated after safety/QA re-audit. Historical 85-source and other PR #72 base are not merged; content provenance only, NOT runtime verification.",
   "modules": {
     "docs/00-foundation/README.md": "cdce27db727f11d837f30fb773cb5cda35b8d626",
@@ -37,7 +37,7 @@
     "docs/03-tools/tool-execution-gateway.md": "ad1d084b97ade9c3fb3a6ba5d7083741d5488b1d",
     "docs/03-tools/tool-registry-and-discovery.md": "a72677fef1e472c9662ad9ef7aa51c829b97ed9b",
     "docs/04-web-browser/browser-action-engine.md": "fe6cae636ea95afbaa68c20de1283bdc5379a953",
-    "docs/04-web-browser/browser-session-manager.md": "2c1f312c40933c73b5abd9d546356b97d0dcdf63",
+    "docs/04-web-browser/browser-session-manager.md": "c557c8976bea6a8fc9b9f41ef5c28a1e23388612",
     "docs/04-web-browser/data-extraction-and-normalization.md": "ab7069562a16446a0b78827271f1141ff10c0523",
     "docs/04-web-browser/http-fetch.md": "cedd735739e9fa39ef969f9db29dc940d13934d4",
     "docs/04-web-browser/jev-adapter.md": "9c78d31a850da46f8868fe530fbd5cb765eeecd0",
@@ -80,7 +80,7 @@
     "docs/10-infrastructure/job-queue-and-outbox.md": "305cf2fe59be10b96717b91ee9200ee61c39c6e3",
     "docs/10-infrastructure/observability-and-cost-tracing.md": "263771dd6c935e78899569b3b36fc447c2a7e010",
     "docs/11-qa/benchmark-and-release-gates.md": "43d075f4a96b2c61eab8747965a2a27e087c4c6f",
-    "docs/11-qa/end-to-end-acceptance.md": "50e75e71bab51ed3ad9d2c38ffa0ef5f92c662b9",
+    "docs/11-qa/end-to-end-acceptance.md": "ff98eba858cd960c9b285c9b88d7d189e17dde73",
     "docs/11-qa/fault-injection-and-concurrency.md": "99a365a63f00104a156a5288079d4f0cda601726",
     "docs/11-qa/test-harness-and-fixtures.md": "257ce16398bb3bb49749c2f07533bc27464ce589",
     "docs/12-intelligence/decision-risk-engine.md": "7ad5cdb3651970ee80b8c3e6585e6c6010832dbc",
@@ -97,6 +97,6 @@
   },
   "companionCount": 1,
   "companionSpecs": {
-    "docs/08-interfaces/browser-live-observation.md": "84fc1a0602731646946ec4c478f045348e183130"
+    "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e"
   }
 }
