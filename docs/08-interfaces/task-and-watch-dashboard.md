@@ -264,3 +264,7 @@ Context欄ではToken総量をProvider最終シリアライズに基づく`Tinpu
 Memory削除後のProvider送信表示は`NOT_ADMITTED`、`ADMITTED_NOT_SENT`、`MAY_HAVE_SENT`、`CONFIRMED_SENT`、`CANCEL_REQUESTED`を区別。『削除済み』は新規送信の遮断の意味であり、既に外部に到達した情報まで取り消したと断言しない。Provider fallbackのRecipient Consent未取得は明示的にブロック表示。
 
 失敗Journalと差分復旧の再利用/除外理由、Context Cacheの失効、Coverage Checkerで見つかった不足資料をTask詳細の監査可能なサマリーとして表示。ユーザー操作はCAS/認可でSteer、Memory更新、Source再取得を分離。モデル用Sealed Prompt、Browser Cookie、Policy秘匿内容はUIに配信しない。ACM-T21〜36の状態表示の受入を追加。
+
+## 2026-11-07: Browser Live Observationパネル
+
+Task詳細にBrowserSessionが存在する場合「ブラウザをライブ表示」を追加する。正本: [Browser Live Observation](browser-live-observation.md)。許可されたTabの映像/現在ホスト/最終frame時刻/`LIVE・STALE・PRIVACY_BLOCKED・DISCONNECTED・ENDED`を表示し、視聴開始は手動。AgentはObserve中も継続。「閲覧を停止」はAgent/BrowserSessionを停止せず、「操作を引き継ぐ」は別権限・別Handoffフローへ遷移。秘密画面/切断後の古いframeを表示しない。Tab/Logout/Task switch時にsubscriptionを終了し、別owner/別Taskの映像が混ざらない。BLO-T01/T02/T05/T07/T10、SC-23（設計のみ）。
