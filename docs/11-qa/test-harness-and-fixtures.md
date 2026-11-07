@@ -516,7 +516,7 @@ Required fault injection: Long HTML/PDF+table locator; missing source; malformed
 
 レポートはtimestamp、git SHA、model/tokenizer/fixture version、pass/fail/degraded、引用source count、delta tokens/cost/p95と匿名化根拠を含める。必要なSource locatorを意図的に省略した場合はunknown/partial扱い。すべて未実行、FakeModel/MockGateway/実PostgreSQLで実装後に回す計画。
 
-## 2026-11-07 P0/P1: ACM-T21〜36 Fixture・Oracle具体化
+## 2026-11-07 P0/P1: ACM-T21〜ACM-T36 Fixture・Oracle具体化
 
 Source of truth: `Context 18.22`。Fixtureは`testId, fixedClock, tenant, principal, GoalRevision/typed values, Model/Tokenizer/Provider, ordered Tool Schemas, Source original digest/span/locator, redacted projection/map, Memory sourceEpoch/revisions, Adapter/template revisions, expected ContextManifest/ModelRequestSnapshot/dispatchAdmission rows, Parent/Child versions, expected sendAttempts, killpoint, errorCode`を備える。
 
