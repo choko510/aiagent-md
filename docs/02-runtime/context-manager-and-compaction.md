@@ -176,7 +176,7 @@ Shell/CLIのstdout/stderr、package installログ、ダウンロードしたREAD
 
 ## 18. Adaptive Context Management — 実装判断・横断契約（2026-11-07）
 
-> Status: **Draft / PROVISIONAL**。本節はCT​​X-001〜011を置換せず具体化する補助規範。依存: PR #68 Muse型隔離Runtime、CHAT_01/02/03/06/08/09/10/11。共有DTO/DDL/Eventはオーナー承認前にLocked扱いしない。テストは定義のみ、Harness本体では未実行。過去に承認されたような架空の測定値は置かない。
+> Status: **Draft / PROVISIONAL**。本節はCTX-001〜011を置換せず具体化する補助規範。依存: PR #68 Muse型隔離Runtime、CHAT_01/02/03/06/08/09/10/11。共有DTO/DDL/Eventはオーナー承認前にLocked扱いしない。テストは定義のみ、Harness本体では未実行。過去に承認されたような架空の測定値は置かない。
 
 ### 18.1 到達目標と明示的な非保証
 

@@ -306,4 +306,4 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 - 同一Source digestとcanonical identityで重複候補を統合し、独立ソース数を水増ししない。相反する価格・事実・日付は両方保持する。親Steer後の旧Goalの子結果はSTALE、親の現Goalを変更しない。
 - 親Cancel/Revocationは子のModel/Tool/Cell/Sentinel grantへ伝播させる。外部操作のUNKNOWNは再実行せず照会/承認へ。親子全階層のBudget reservationは原子的に有限。
 
-**追加検証**: ACM-T05/T11/T12/T14を必須。Handoff時の子数超・親budget不足・private Artifact参照・時点不一致・Child result偽成功・親steerと子commit競合に対するfail closedを確認。親子コンテキストを全文复制する方式は採用しない。
+**追加検証**: ACM-T05/T11/T12/T14を必須。Handoff時の子数超・親budget不足・private Artifact参照・時点不一致・Child result偽成功・親steerと子commit競合に対するfail closedを確認。親子コンテキストを全文複製する方式は採用しない。

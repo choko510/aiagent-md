@@ -47,5 +47,5 @@
 
 [Context Manager 18節](../02-runtime/context-manager-and-compaction.md) とADR-023〜028を追加参照。A0:Policy/Approval、A1:Task Goal、A2:Control/Effect Ledgerは原本参照を維持する非圧縮領域。Evidence/Raw Artifact、Working Journal、Long-term Memory、Skill/Workspaceは独立正本であり、LLMへのProjectionはどれも権限を生成しない。
 
-各Model callの入力は (1)当前Goal・ACL/Source Epoch/Lease検査、(2)Model固有Tokenizer/Output reserve/Limit検査、(3)権限済み候補だけを関連性/出典/時刻で選択、(4)大きな原本をArtifactに退避しGrounded Summary、(5)ManifestをDurable checkpoint、(6)dispatch前に最新版再検証という順序を原則とする。失敗時はPartial/Blockedで停止し、条件削除・架空のEvidence・権限の推定補完を禁止。Sandboxの生成Script、stdout、外部HTML、Memoryは非信頼DataとしてSentinel/Gateway境界を越えない。選択Scoreは権限でない。実装未着手・未検証。
+各Model callの入力は (1)現在のGoal・ACL/Source Epoch/Lease検査、(2)Model固有Tokenizer/Output reserve/Limit検査、(3)権限済み候補だけを関連性/出典/時刻で選択、(4)大きな原本をArtifactに退避しGrounded Summary、(5)ManifestをDurable checkpoint、(6)dispatch前に最新版再検証という順序を原則とする。失敗時はPartial/Blockedで停止し、条件削除・架空のEvidence・権限の推定補完を禁止。Sandboxの生成Script、stdout、外部HTML、Memoryは非信頼DataとしてSentinel/Gateway境界を越えない。選択Scoreは権限でない。実装未着手・未検証。
 

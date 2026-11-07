@@ -26,13 +26,13 @@
 | ADR-019 | PRODUCT_FIXED | Independent Sentinel is final authority for all connector operations and network egress, regardless of generated subprocess; Gateway retains intent/effect ledger | tool-only routing, environment-variable proxy without kernel route block | CHAT_03/09/10; SC-19,22 |
 | ADR-020 | PROPOSED | Credential Broker/Privsep and Browser Broker external to Cell; agent never sees raw tokens or direct CDP | token env injection or unowned browser socket | CHAT_04/05/09; SC-18,22 |
 | ADR-021 | PROPOSED | SandboxExecution and Workspace child contracts, lifecycle/kill tree/UNCERTAIN reconciliation and temp Skills | uncontrolled daemon, automatic self-upgrade of protected runtime | CHAT_01/02/03/06/10/11; SC-17,20,21 |
+| ADR-022 | EXPERIMENT | Compare eBPF taint provenance and MicroVM-per-task after production mandatory path established | assume Meta's kernel data flow tracking implemented | CHAT_09/10/11; SC-19,22 |
 | ADR-023 | PROPOSED | Adaptive ContextはPolicy/Goal/Controlをimmutable typed anchorsとして固定し、Evidence/Memory/Tool/Journalを別権限のData層として扱う。LLM summaryは正本/権限/成功判定を代替しない | last-N-only truncation、全History/MemoryをSystemへ常時注入 | CHAT_01/02/03/06/09/10; ACM-T01/T02/T04/T09 |
 | ADR-024 | PROPOSED | Context priority P0〜P3とACL/freshness hard filterを先に適用し、Model版別Tokenizer+Output reserve+Margin内でprovenance/dedup付き選択を行う | Embeddingスコアだけで配置・権限を決定、Prompt cache hitをWindow拡大扱い | CHAT_02/06/09/11; ACM-T03/T06/T07/T10 |
 | ADR-025 | PROPOSED | Raw Artifactとlocators、grounded summary claims、immutable ContextManifest/HEAD CAS、run journalを独立保存し、Worker Crash/Steer/Memory revoke/Model swapでrehydrate | summaryを原本化、旧Goal/旧Memory/旧leaseを無条件復元 | CHAT_01/02/06/10/11; ACM-T08/T09/T13/T15/T18 |
 | ADR-026 | PROPOSED | 長時間Taskは複数有限Run/Watchを原本に接続し、鮮度とsource identityで必要情報のみ再取得。子Taskにはtyped Handoffと出典付きChildResultだけを共有 | 無期限Single Run、全History+Secretsを子Taskへコピー、子Agentの自称完了で成功 | CHAT_01/02/03/07/09/10; ACM-T11/T12/T17/T20 |
 | ADR-027 | PROPOSED | Sandbox/Browser/MCP/Generated Script/Memory由来のコンテキストはTrustTierを引き上げず、Sentinel/Gateway/Protected Serviceが権限を再検証する | 要約/Embedding済み文字列にPolicy/Approval権限を与える | CHAT_02/03/06/09/11; ACM-T04/T10/T14/T15 |
 | ADR-028 | PROPOSED | Context監査UIとsource確認/訂正/再構築のCommandsを版付きで定義し、Hard gatesをQuality gatesより優先してRelease判定する | 「精度99%」など無実測指標、Summary編集でGoal/Receiptを書換 | CHAT_08/11/02; ACM-T01〜T20 |
-| ADR-022 | EXPERIMENT | Compare eBPF taint provenance and MicroVM-per-task after production mandatory path established | assume Meta's kernel data flow tracking implemented | CHAT_09/10/11; SC-19,22 |
 
 ## Cross-team conflict register
 | ID | Blocker | Required owner handshake | Closure evidence |
