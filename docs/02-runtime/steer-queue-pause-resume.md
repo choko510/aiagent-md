@@ -165,3 +165,15 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: Cancel/Steer/Pauseと実行子プロセス
 
 Pauseは新Exec/外部リクエストを止め、現在のProcessは安全境界で停止または限度時間内に強制終了する。CancelはRun fenceと同時にCell Supervisorが全子プロセスを終了しSentinel grant失効/Workspaceの旧write拒否を指示。SteerはGoalRevisionを更新し古いIntent/Execを新条件へ無条件転用しない。ACKはProcess停止完了ではない。既送外部操作はロールバックと推測せずUNKNOWN照会。復旧後旧PID/Cell内の認証Grantを再利用しない。SC-21。
+
+## P1 exact subordinate-process transition rule (2026-11-07)
+
+| Control | New Exec admitted? | Existing spawned tree | Broker/Egress grant | Effect and resumed state |
+|---|---|---|---|---|
+| PAUSE | No | default graceful termination, then bounded cgroup.kill/reap; cgroup.freeze only if proven safe and checkpointable | reject new RPC immediately | resume via a **new Admission** from immutable Workspace/Checkpoint, no memory-exact replay claimed |
+| STEER | old GoalRevision denied | terminate old process and invalidate old proposal | revoke old grant before new intent dispatch | new Goal+Proposal; old results quarantined, external UNCERTAIN reconciled |
+| CANCEL | No | revoke access, cgroup.kill complete process descendants, verify cgroup empty | revoke/deny new sends | final cancel may follow graceful timeout, sent effect remains UNKNOWN |
+| REVOKE/POLICY CHANGE | only if freshly reauthorized | terminate unsafe old group | invalidate grants/Approval | new policy/lease validation |
+| VM FAILURE | No until recovery | mark process status unknown, reconcile | old channel denied | only digest-verified Workspace Artifact restore |
+
+`cgroup.kill` requires cgroup v2 and compatible guest kernel; startup attestation checks actual availability. Process-granularity kill/reap without a verifiable cgroup-empty result is NOT a secure production fallback. No promise that kill rolls back already sent effects. Tests EXEC-T17, CELL-T06, SC-21.

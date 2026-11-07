@@ -294,3 +294,7 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: サブエージェントへのCell権限の縮小委任
 
 子Taskは独立ExecutionId/WorkspaceGeneration/Process groupを持つRuntime Cellまたは同等の厳格namespace内で稼働する。親と同じSecure VMでもBrowser Context/秘密/Mutable Workspace/Grantを自動共有しない。権限は親×子×現行Sentinel Policyの積集合、Budgetは原子分配、親Cancel/Steer/Revokeが子Process/通信Grantまで伝播。子が生成したコードやSkillは親の権限へ自己昇格できず、出力は非信頼データ。SC-17/18/20/21/22。
+
+## P1 parent-child isolation matrix (2026-11-07)
+
+Subagent always creates its own canonical **child Task/Run**, and `SandboxExecution` is a subresource of **that child Run**, never a duplicate parent Run or privileged subagent process. Parent budget reservation is split transactionally; child granted capabilities = parent effective set ∩ child requested ∩ current Sentinel policy. Execution guest VM reuse only within same owner/tenant after verified cleanup; siblings have independent PID/cgroup mount/network namespace, read-write Workspace revisions, IPC grants, source/provenance. A parent may share immutable **explicitly selected Artifact references** with a child; raw parent memory/Cookies/all Workspace filesystem/credentials and actor authority are never implicitly inherited. Child expiration/revoke/Cancel inherits tighter parent limit; parent exit revokes all child grants and terminates child execution process trees before reporting completion. Allow different users in same Trust Control VM only with tenant ACL/DB isolation; Execution VM is not simultaneously shared across users. SC-18/20/21/22.
