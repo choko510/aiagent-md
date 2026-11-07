@@ -117,3 +117,5 @@ Input: 「全体最適化を停止/利用上限まで継続」。Expected: bound
 Input: 「本実装に近いDemoを確認して、10機能完成させて」。Expected: featureごとに提案→Demo決定→実装→test→3review→Count。確認待ち中も独立Task継続。Negative: 10案だけ、同じ機能の二重完了、未承認実装。
 
 REQ→TESTの参照は [DEV-10](../16-app-development/acceptance-and-rollout.md) を正本案とする。各SCはmock data/invalid credentials/SSRF/VM killpoint/tenant concurrency/Browser faultを含む positive & negative E2Eが必要。**未実施でありVerifiedではない**。
+
+**SC-31 revalidation fault addendum (2026-11-08):** After a feature factory reaches 10 INTEGRATED, a later merged change to current Project HEAD invalidates two feature regressions. Expected current eligibility/progress falls to 8 and a `REVALIDATION_REQUIRED` state is reported; no automatic new charge or blind resume. After a fresh current-head 3AI review and tests pass, progress returns to 10 without second count receipts for the same logical work items. Designed / NOT RUN.

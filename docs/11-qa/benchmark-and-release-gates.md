@@ -371,8 +371,8 @@ The previous generic statement that `DEV-REQ` and `CAM-T` are always product rel
 |---|---|---|---|
 | generic Agent Harness; development disabled | AUTH/VM/Tool/Sentinel/Existing SC-01..22 | DEV/CAM E2E not required for a release with both features disabled; disabled API must be denied | fail on shared-gate issue |
 | development workspace enabled / app-generation advertised | all shared gates | DEV-REQ, DEV-WS/TEAM/DES/BLD/DBG/REV, SC-24..29 plus relevant DB/Auth/Event | do not enable or advertise development |
-| Endless Campaign enabled | all shared gates | CAM-T01..18, SC-30 + active mode's prerequisite tests | do not enable or advertise campaign |
-| Feature Factory enabled | all shared gates | DEV-FF-T01..11, SC-31, current Integration HEAD & USER demo acceptance | do not enable or count feature |
+| Endless Campaign enabled | all shared gates | CAM-T01..19, SC-30 + active mode's prerequisite tests | do not enable or advertise campaign |
+| Feature Factory enabled | all shared gates | DEV-FF-T01..12, SC-31, current Integration HEAD & USER demo acceptance | do not enable or count feature |
 | Browser Preview enabled | all shared gates | DEV-BLD-T09..14, origin/WS/SSRF/Revocation runtime proof | deny Preview admission |
 
 A disabled feature must be **fail-closed**: routes may return 404/403/feature unavailable, not silently admit a new Task/Tool/Preview. Documentation, feature flags, UI and capability advertisement must agree. A development-only sandbox profile may not claim production eligibility. A PASS test covers only its actual image/git SHA/profiles and cannot be reused after changing policy/Browser/sandbox/outbox code without impact analysis and rerun. New static validation checks schema/test/SC existence but cannot substitute PostgreSQL, KVM, browser or source runtime tests.

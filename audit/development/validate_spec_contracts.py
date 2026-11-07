@@ -29,9 +29,9 @@ TEST_OWNERS = {
     "DEV-BLD": ("DEV-05", 14),
     "DEV-DBG": ("DEV-06", 10),
     "DEV-REV": ("DEV-07", 8),
-    "DEV-FF": ("DEV-08", 11),
+    "DEV-FF": ("DEV-08", 12),
     "DEV-UI": ("DEV-09", 10),
-    "CAM": ("CAM-01", 18),
+    "CAM": ("CAM-01", 19),
 }
 SEMANTIC_MARKERS = {
     MODULES["DEV-03"]: ("demo:interact", "REQUIRE_USER_APPROVAL", "AUTO_RECOMMEND", "PREAUTHORIZED_BOUNDED_AUTO"),

@@ -74,7 +74,7 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 | P1-03 | Integrated current HEAD default count for 10 features | DEV-FF-T07/08, QA-E2E-T31P/N | CHAT_07/10 pending |
 | P1-04 | stable logicalWorkItemId, criterion distinct from identity, unique count | DEV-FF-T10, CAM-T17 | CHAT_01/07/10 pending |
 | P1-05 | STOP controlVersion per dispatch, QuotaWaitReceipt, resumed generation | CAM-T12..16 / QA-E2E-T30F | CHAT_02/07/10 pending |
-| P1-06 | additive candidate physical SQL/FK/CAS/outbox/forward migration | DEV-DB-T01..08 | CHAT_01/09/10 pending |
+| P1-06 | additive candidate physical SQL/FK/CAS/outbox/forward migration | DEV-DB-T01..12 | CHAT_01/09/10 pending |
 | P1-07 | explicit Auth registry actions + typed Event kinds | AUTH-DEV-T01..06, EVT-DEV-T01..05 | CHAT_01/08/09 pending |
 | P1-08 | SC-24..31 P/N/F fixtures and dedicated CI spec checks | QA-E2E-T24P..T31F | CHAT_11 pending |
 | P1-09 | shared security gates vs opt-in Development/Campaign feature gates | GATE-DEV-T01..04 | CHAT_09/11 pending |
@@ -82,8 +82,8 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 
 **New requirements**:
 - **DEV-REQ-14** MUST: preview capability isolation, live revoke and malicious script safe origin. DEV-BLD-T09..14 → SC-29.
-- **DEV-REQ-15** MUST: Campaign stop/quota epochs and stable logicalWorkItem identity and count. CAM-T12..18 → SC-30.
-- **DEV-REQ-16** MUST: integrated HEAD, triple integration review, counting only current eligible receipts. DEV-FF-T07..11 + DEV-REV-T07..08 → SC-28/31.
+- **DEV-REQ-15** MUST: Campaign stop/quota epochs and stable logicalWorkItem identity and count. CAM-T12..19 → SC-30.
+- **DEV-REQ-16** MUST: integrated HEAD, triple integration review, counting only current eligible receipts. DEV-FF-T07..12 + DEV-REV-T07..08 → SC-28/31.
 - **DEV-REQ-17** MUST: conditional feature gates with common security always enforced. GATE-DEV-T01..04 → SC-29/30.
 - **DEV-REQ-18** MUST: real authenticated Demo choice and per-mode Preview interactions. DEV-DES-T07..11 + DEV-UI-T07..10 → SC-25.
 
@@ -92,3 +92,5 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 **Integration with in-flight PRs #71/#72:** As of the audit's HEAD, PR #71 and #72 were parallel to this branch and overlap Browser/REST/Sentinel/Sandbox/Provenance. This PR neither cherry-picks nor assumes they have merged. Before merging #73 after either, rebase on new main and recompute `audit/muse/spec-provenance.json` from **actual Git blob SHAs**; rerun both baseline audits and the new Development-spec audit. Resolve ADR-029/SC-23 from #71 and preview/Live Viewer privileges separately. #72 has precedence for secure-runtime common-contract reconciliation; no unreviewed trust-boundary relaxations accepted.
 
 **Verification label:** Static contract checks can be PASS while all VM, Browser, DB, concurrent execution and real feature tests remain **NOT RUN**. This addendum is an implementation plan and testable interface proposal, not a claim of Owner consensus or runtime correctness.
+
+**Regression acceptance extension:** [DEV-DB-T11/T12](../10-infrastructure/database-schema-and-migrations.md), DEV-FF-T12, CAM-T19 require old/current integration HEAD comparison and immutable first-count identity. A previously reached Campaign must not advertise stale completion when current-head eligibility falls. Static schema checks cannot assert runtime transaction correctness.
