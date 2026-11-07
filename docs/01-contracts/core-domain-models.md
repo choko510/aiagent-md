@@ -518,3 +518,23 @@ CHAT_01が最終承認すべき独立の資産/IDは`TaskGoalRevisionRef`（値�
 - DispatchAdmissionは`tenant/owner/task/run/attempt/scopeEpoch/modelRecipient/payloadDigest/status`を保持し、MemoryWriterの削除/訂正commitとスコープ単位で直列化。削除が先なら旧Memory付きAdmissionは0。先行Admissionの既送信可能性は記録。
 - Evidenceの支持判定をSummaryやContextManifestのdigestだけで満たした扱いにしない。非数値の判断やProvider独自の曖昧さは`UNVERIFIED`を尊重する。
 - 共有Schema/enum/error/event名はCHAT_01 Ownerの明示承認とCHAT_10物理Migration前にPROVISIONAL。各別Ownerが同名型を独断で正式化しない。ACM-T21〜26に追跡。
+
+## 2026-11-08 DEV/CAM shared domain extensions (Proposal to CHAT_01, NOT LOCKED)
+
+The domain distinguishes `Project` (long-lived source/workspace), `DevelopmentCycle` (finite DAG of children under an existing Task/Run family), `FeatureWorkItem` (stable logical behavior), `IntegrationReceipt` (current project HEAD gate), `Campaign` (continuing goal and finite cycles), `CampaignCycleReceipt` (append-only result), and `PreviewCapabilityRef` (server-owned scoped authority). They have **separate IDs**: do not overload TaskId, RunId, BrowserSessionId, ApprovalId, or Git SHA with a Project/Campaign/WorkItem ID. All are owner/tenant bound, server UUIDv7 and canonical int64-decimal versions, with `recordVersion` distinct from `controlVersion`, `goalRevision`, Run `leaseEpoch` and preview `originGeneration`. Official API schema/DDL remains with 08/10 after Owner agreement.
+
+```ts
+type DevelopmentAggregateKind = "project"|"development_cycle"|"feature_work_item"|
+ "integration_receipt"|"campaign"|"campaign_cycle"|"preview_session";
+type CompletionCriterionV1 = "VERIFIED"|"INTEGRATED"|"RELEASED";
+type FeatureMilestoneV1 = "PROPOSED"|"DEMO_READY"|"APPROVED"|"IMPLEMENTED"|
+ "VERIFIED"|"INTEGRATION_BLOCKED"|"INTEGRATED"|"RELEASED";
+type ScopedDevRefV1 = { id:string; tenantId:string; ownerUserId:string;
+  projectId?:string; campaignId?:string; goalRevision:string; recordVersion:string };
+type IntegrationReceiptRefV1 = { projectId:string; workItemId:string;
+ integrationHeadSha:string; expectedParentSha:string; testManifestDigest:string;
+ reviewerReceiptsRef:string; verdict:"PASS"|"FAIL"|"INCOMPLETE" };
+```
+`DesignDecision` is an immutable requirement choice, not a Tool Approval. `DemoAcceptance` is either real authenticated owner decision or a scoped revocable preauthorized acceptance grant (not inferred from AUTO_RECOMMEND); neither authorizes Git push/deployment/purchase. A `logicalWorkItemId` denotes an outcome independently of source commit; equivalence criteria and human rejection history prevent relabeling duplicates for additional progress. Campaign `completedCount` is derived, and `TARGET_REACHED` means active completion criterion holds on the **current** integration HEAD rather than stale branch test receipts. Stop/Quota/Run control change are distinct event and revision boundaries. Evidence and raw Artifacts remain immutable and references must remain tenant/owner checked.
+
+**Domain tests designed:** DEV-DOM-T01 type+ID separation/UUIDv7, DEV-DOM-T02 large int64 wire CAS, DEV-DOM-T03 old integration receipt cannot make current HEAD passed, DEV-DOM-T04 revoked Demo grant cannot be elevated to external Approval, DEV-DOM-T05 semantic duplicate work item cannot be counted twice.

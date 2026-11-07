@@ -529,3 +529,32 @@ CHAT_01 PR #23 defines Domain Events for Task/Run/Watch/Tool/Approval/Evidence/N
 - Expected tests **designed only**: `AUTH-R3-T01` Task-less Watch Event from same tenant another owner →0 bytes; `AUTH-R3-T02` operator audit event in normal task stream→0 bytes; `AUTH-R3-T03` valid signed cursor then revoke membership→stream closes; `AUTH-R3-T04` cursor replay as other tenant/viewer/filter→deny, zero Event data.
 
 This is a scope-level proposal to support the existing canonical Event/DB/SSE design, not a claim of implemented runtime security. Cross-owner review and actual tests still required.
+
+## 2026-11-08 P1-07 — Development/Auth action registry extension (Provisional / NOT RUN)
+
+Existing broad `Action` values `read/create/modify` do not silently cover the higher-risk Development/Campaign API. Add an exact action discriminant (owner-approved contract revision required) and deny unknown actions:
+
+```ts
+type DevelopmentActionV1 =
+ | "project:create" | "project:read" | "project:edit"
+ | "dev:run" | "dev:read" | "dev:decide" | "dev:integrate" | "dev:release"
+ | "preview:observe" | "demo:interact" | "browser:handoff"
+ | "debug:read" | "campaign:create" | "campaign:read" | "campaign:control";
+type DevelopmentResourceV1 = {
+  kind:"project"|"cycle"|"preview"|"demo"|"debug"|"campaign"|"integration";
+  tenantId:string; id:string; ownerUserId:string; projectId?:string;
+  cycleId?:string; campaignId?:string; currentGoalRevision?:string;
+  controlVersion?:string; previewGeneration?:string;
+};
+```
+The **server** resolves tenant, owner, membership, capability, immutable target resource and mutable versions; no user body/LLM Tool args can set privilege or actor. For shared GitHub repositories, repo membership alone does not establish permission to another user's private Project/Campaign; use explicit project ACL and revalidate for each resource kind. `campaign:control` and Demo approve/reject require owner or a named, revocable per-project grant with action+scope+expiry, never generic `read`. `preview:observe` is view only; `demo:interact` requires an authenticated project-scoped **synthetic fixture** session plus exclusive active input lease and no side effects; `browser:handoff` requires existing strict Human Takeover. Debug raw Trace/PII is not automatically readable by a project viewer; `debug:read` returns classified/redacted artifacts. `dev:integrate` and `dev:release` require extra project branch protection and Gateway deployment approval.
+
+**Worker identity:** a service actor fetches active project/Cycle/Campaign owner and identityVersion/policyEpoch from canonical DB; a queue's user ID, JWT claims at job creation or a contributor's Git credentials cannot create authority. For Campaign STOP, check exact `controlVersion` at each model/Tool/Browser admission; revocation concurrently invalidates active grants. For demo approvals, check digest/goal/design/owner and grant version at decision transaction. The read side must prevent other same-tenant users from reading Project file/preview/debug/evidence. Treat any missing shared-schema mapping as DENY.
+
+**AUTH-DEV-T01**: same-tenant user B sees A's Project URL and Demo ID; no read/write/session leakage.
+**AUTH-DEV-T02**: shared repo contributor but not Project owner cannot create Cycle or control Campaign.
+**AUTH-DEV-T03**: owner transfers Project while Demo approval pending; old principal and grant invalidated.
+**AUTH-DEV-T04**: preview observe cannot control Browser; demo:interact controls mock only, takeover requires separate lease.
+**AUTH-DEV-T05**: old Campaign controlVersion is rejected by all child/model/tool/Browser admission.
+**AUTH-DEV-T06**: debug reader cannot access raw tokens/HAR or other Project's screenshots.
+These are proposed auth contract tests (not executed).
