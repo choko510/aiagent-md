@@ -4,7 +4,7 @@
 
 ## 0. 結論と採用案
 
-「成功したタスクから有益な再利用手順を**候補**として抽出し、人間による検証・レビューを経てSkillへ昇格できる」構造を採用。ただし**モデルの自動自己改造を許可する設計ではない**。Task/Run/Evidenceの正本から権限分離されたoffline learning pipelineを実行、成功判定はCHAT_02 Result VerifierとUser明示評価に依存。候補は発見→提案→構造検証→決定的Replay Test→逆境/セキュリティ評価→人間レビュー→Skill Lifecycle install/enableの順。自動的に権限・Tool定義・approval・Runtimeコードを変更しない。候補生成に失敗しても元Taskの成果や通知を壊さない。
+「成功したタスクから有益な再利用手順を**候補**として抽出し、人間による検証・レビューを経てSkillへ昇格できる」構造を採用。ただし****Protected Harness自体の**モデルによる無承認自己改造を許可する設計ではない（Runtime Cellの一時コード改善は許可）**。Task/Run/Evidenceの正本から権限分離されたoffline learning pipelineを実行、成功判定はCHAT_02 Result VerifierとUser明示評価に依存。候補は発見→提案→構造検証→決定的Replay Test→逆境/セキュリティ評価→人間レビュー→Skill Lifecycle install/enableの順。自動的に権限・Tool定義・approval・Runtimeコードを変更しない。候補生成に失敗しても元Taskの成果や通知を壊さない。
 
 既存の`procedural_hint`（Memory）とSkillは別資産。候補生成の結果が単なる手順メモならMemory提案にとどめる。ブラウザ操作replayの所有者はCHAT_14の学習Action/CHAT_04 browser adapterであり、SelectorをSkill内に保存してもSESSION所有権やApprovalを委譲しない。
 
@@ -13,7 +13,7 @@
 - 成功/部分成功/失敗からの安全な振り返りデータ収集（Runの目的制約・Evidence・正常/異常履歴を条件に）。
 - 重複Skill検出、quality regression、Poisoned training sampleの隔離、source provenance追跡、本人承認とrollback。
 - 問題の発生時、既存enabled Skillへの影響を明示。誤った候補から無断の権限変更が生まれない。
-- **非対象**: 自律的なRuntime source変更、Shell/SSH/Docker socket実行、任意npm/pip install、LLMの無限自己批評ループ、実サービスを勝手にリプレイする評価、Webの悪意ある本文を最上位命令へ昇格。
+- **非対象**: 自律的なRuntime source変更、Shell/SSH/Docker socket実行、ホストへの任意npm/pip install、LLMの無限自己批評ループ、実サービスを勝手にリプレイする評価、Webの悪意ある本文を最上位命令へ昇格。
 - **SC**: SC-01/03/04/05/07/08/09、SC-13（検証済Browser action replay）、SC-16（明示フィードバックによる候補修正）。SC-02/06はWatch/認証状態の誤学習防止。
 
 ## 2. 既存OSSソース調査
@@ -305,3 +305,7 @@ SI-5 rollback/withdrawn/cancel/source delete, fault injection and performance me
 
 ### Round 4 cross-owner int64 reconciliation (2026-10-30)
 Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal string** wire format, validated and compared with internal BigInt and persisted as PostgreSQL BIGINT; JSON number conversion is prohibited. Other scalar number fields (bounded counts, percentages, step ordinals) remain number unless separately versioned. Regression test proposed: `9007199254740992` and `9223372036854775806` round-trip exactly, reject unsafe Number and stale authority; not executed against Harness code.
+
+## 2026-11-07: 自律ツール改善と保護Runtimeの不変性
+
+既存の「Agentは保護Harness自体を無承認で改変しない」を維持しつつ、**隔離Task Workspace内の生成Script・Tool・Temporary Skillの作成/実行/デバッグ/反復改善は自律的に許可**する。Permanent Skillへの昇格は既存のレビュー/署名/版固定/明示承認。Task成功であってもAgentのShellをProtected ServicesやHostへ移動させない。ダウンロードした依存、テスト出力、自己作成READMEを信頼済みInstruction/権限に自動昇格させない。攻撃的なコード/外部Promptを含むCandidateの隔離評価はSandboxExec＋Sentinel deny-egr。SC-17/20/22。

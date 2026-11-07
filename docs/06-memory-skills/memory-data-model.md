@@ -557,3 +557,7 @@ URLはソースcommitへpin。行番号は調査時点の参考、関数/テス�
 - **[S13] Issue report (not current bug verification)** — Hermes #85858, 2026-10-13 closed, concurrency loss narrative: https://github.com/NousResearch/hermes-agent/issues/85858
 
 **Readiness**: 本文のOSS部分はソース/テスト閲覧に基づく。選定したHarnessの論理契約、上限、transaction/index/outbox構造は **proposed design / Hypothesis**。動作試験、負荷試験、統合試験は未実施。Revision/Schema/Privacyのオーナーが承認するまで **Draftのまま**。
+
+## 2026-11-07: Runtime WorkspaceとMemoryの分離
+
+SandboxExecutionのScript、stdout、temporary package、Workspace snapshotを長期Memoryと混同しない。作業中のプロセス/ファイルはuntrustedで、成功したTaskであってもMemoryにコードや秘密・Shell実行権限を自動追加しない。Workspaceの永続Artifactにはowner/tenant/task/run/execution、digest、retention、review statusが必要。Memoryの書込みでSentinel policy、Credential Brokerの許可、正式Tool/Skill Registryを変更できない。SC-20/22。
