@@ -17,7 +17,7 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 | DEV-REQ-08 | MUST | Build/toolchain/package/previewが隔離、Sentinel権限外0 | DEV-BLD-T01..08 | SC-29 |
 | DEV-REQ-09 | MUST | approved limited scopeでGit commit/PR、未知effect再送なし | DEV-WS-T05, DEV-BLD-T06 | SC-29 |
 | DEV-REQ-10 | MUST | Endlessly cycle work until stop/target/quota/safety limit | CAM-T01..11 | SC-30 |
-| DEV-REQ-11 | MUST | Feature 10件はverified distinct countのみ | DEV-FF-T01..06 | SC-31 |
+| DEV-REQ-11 | MUST | Feature 10件はcurrent-INTEGRATED distinct countのみ | DEV-FF-T01..11 | SC-31 |
 | DEV-REQ-12 | MUST | Approvals/ACL/data/egress/runtime isolationを緩めない | DEV-UI-T02..05, DEV-BLD-T04 | SC-29 |
 | DEV-REQ-13 | MUST | restart/429/revoke/unknown effect/partialで正しい復帰 | CAM-T02/T05/T06, DEV-TEAM-T03 | SC-30 |
 
@@ -63,3 +63,32 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 
 ## 6. Test execution status
 本PRはMarkdown仕様だけ。上記SC-24..31、DEV-xx、CAM-Txxは**すべて Designed / NOT RUN**。本体未実装、Providerバージョン/Entitlement/実機隔離/Preview起動/Android/macOS Runnerも未検証。契約のLocked/Verified宣言は禁止。
+
+## 2026-11-08 P0/P1 audit closure matrix / contract readiness
+
+| Finding | Correction now specified | Trace | Runtime owner status |
+|---|---|---|---|
+| P0-01 | Preview scoped Capability + origin isolation + live stream revoke / process attestation | DEV-BLD-T09..14 / QA-E2E-T29N/F | CHAT_03/04/09/10 review pending |
+| P1-01 | `preview:observe` vs mock `demo:interact` vs sensitive takeover | DEV-DES-T07/08/11 / QA-E2E-T25P/N | CHAT_04/08/09 pending |
+| P1-02 | AUTO_RECOMMEND never accepts Demo; user decision or bounded mandate | DEV-DES-T09/10, DEV-UI-T07 | CHAT_03/08 pending |
+| P1-03 | Integrated current HEAD default count for 10 features | DEV-FF-T07/08, QA-E2E-T31P/N | CHAT_07/10 pending |
+| P1-04 | stable logicalWorkItemId, criterion distinct from identity, unique count | DEV-FF-T10, CAM-T17 | CHAT_01/07/10 pending |
+| P1-05 | STOP controlVersion per dispatch, QuotaWaitReceipt, resumed generation | CAM-T12..16 / QA-E2E-T30F | CHAT_02/07/10 pending |
+| P1-06 | additive candidate physical SQL/FK/CAS/outbox/forward migration | DEV-DB-T01..08 | CHAT_01/09/10 pending |
+| P1-07 | explicit Auth registry actions + typed Event kinds | AUTH-DEV-T01..06, EVT-DEV-T01..05 | CHAT_01/08/09 pending |
+| P1-08 | SC-24..31 P/N/F fixtures and dedicated CI spec checks | QA-E2E-T24P..T31F | CHAT_11 pending |
+| P1-09 | shared security gates vs opt-in Development/Campaign feature gates | GATE-DEV-T01..04 | CHAT_09/11 pending |
+| P1-10 | feature SHA vs integration HEAD triple review + revalidation | DEV-REV-T07/08, QA-E2E-T28F | CHAT_02/11 pending |
+
+**New requirements**:
+- **DEV-REQ-14** MUST: preview capability isolation, live revoke and malicious script safe origin. DEV-BLD-T09..14 → SC-29.
+- **DEV-REQ-15** MUST: Campaign stop/quota epochs and stable logicalWorkItem identity and count. CAM-T12..18 → SC-30.
+- **DEV-REQ-16** MUST: integrated HEAD, triple integration review, counting only current eligible receipts. DEV-FF-T07..11 + DEV-REV-T07..08 → SC-28/31.
+- **DEV-REQ-17** MUST: conditional feature gates with common security always enforced. GATE-DEV-T01..04 → SC-29/30.
+- **DEV-REQ-18** MUST: real authenticated Demo choice and per-mode Preview interactions. DEV-DES-T07..11 + DEV-UI-T07..10 → SC-25.
+
+`DEV-REQ-11` from the earlier table is now interpreted as **distinct current-INTEGRATED feature count by default**, not branch-only VERFIED count; this explicitly supersedes earlier wording. `DEV-REQ-07` additionally binds triple review and required tests to combined integration SHA when target head moves. No independent merge/production deployment is authorized by accepting a Demo.
+
+**Integration with in-flight PRs #71/#72:** As of the audit's HEAD, PR #71 and #72 were parallel to this branch and overlap Browser/REST/Sentinel/Sandbox/Provenance. This PR neither cherry-picks nor assumes they have merged. Before merging #73 after either, rebase on new main and recompute `audit/muse/spec-provenance.json` from **actual Git blob SHAs**; rerun both baseline audits and the new Development-spec audit. Resolve ADR-029/SC-23 from #71 and preview/Live Viewer privileges separately. #72 has precedence for secure-runtime common-contract reconciliation; no unreviewed trust-boundary relaxations accepted.
+
+**Verification label:** Static contract checks can be PASS while all VM, Browser, DB, concurrent execution and real feature tests remain **NOT RUN**. This addendum is an implementation plan and testable interface proposal, not a claim of Owner consensus or runtime correctness.

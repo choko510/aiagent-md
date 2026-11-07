@@ -362,3 +362,22 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 [DEV-10](../16-app-development/acceptance-and-rollout.md) のDEV-REQ-01..13、[CAM-01](../07-automation/endless-run-campaign.md)のCAM-T01..11を受入集合へ追加。P0/P1 gate: 最新commit SHAに対し3独立Reviewerの実際のReceiptがある、合格したテストが同一SHA+ImageDigest+FixtureDigest+DesignRevisionにbind、P0/P1 OPEN/UNVERIFIED=0、Demo承認未失効、Browser Debugで主要フローを実際に操作・再検証、隔離/秘密の負例成功0。Skipped/unsupported/unknown/Tool effect uncertainは合格でなくPartial/Blocked。Endless Campaignは各Cycleの結果・費用・件数を再起動後も持続、Stopの前後に新dispatch0、unknown usageを0計上0、Provider429 busy loop0、重複10件カウント0。Provider quotaの実日時・機能検証はOperator環境で記録し、未実測SLOを宣伝しない。
 
 QA fixtureは2 VM+Cell/Preview Broker/Browser Worker/Mock Git・CI・Model・Provider、故障注入を含む。テストカバレッジ表示は「定義済み/実施済み/合格/失敗/未対応」を別計数する。本体コードが存在しない現時点では**すべて未実行**。Static Markdown/Linkチェックは安全・E2E・実機確認を代替しない。
+
+## 2026-11-08 P1-09 — Conditional feature gate matrix (Designed / NOT RUN)
+
+The previous generic statement that `DEV-REQ` and `CAM-T` are always product release blockers is **narrowed**. This is a required distinction:
+
+| Active feature flag / advertised product capability | Shared security gate | Feature-specific gate | On failure |
+|---|---|---|---|
+| generic Agent Harness; development disabled | AUTH/VM/Tool/Sentinel/Existing SC-01..22 | DEV/CAM E2E not required for a release with both features disabled; disabled API must be denied | fail on shared-gate issue |
+| development workspace enabled / app-generation advertised | all shared gates | DEV-REQ, DEV-WS/TEAM/DES/BLD/DBG/REV, SC-24..29 plus relevant DB/Auth/Event | do not enable or advertise development |
+| Endless Campaign enabled | all shared gates | CAM-T01..18, SC-30 + active mode's prerequisite tests | do not enable or advertise campaign |
+| Feature Factory enabled | all shared gates | DEV-FF-T01..11, SC-31, current Integration HEAD & USER demo acceptance | do not enable or count feature |
+| Browser Preview enabled | all shared gates | DEV-BLD-T09..14, origin/WS/SSRF/Revocation runtime proof | deny Preview admission |
+
+A disabled feature must be **fail-closed**: routes may return 404/403/feature unavailable, not silently admit a new Task/Tool/Preview. Documentation, feature flags, UI and capability advertisement must agree. A development-only sandbox profile may not claim production eligibility. A PASS test covers only its actual image/git SHA/profiles and cannot be reused after changing policy/Browser/sandbox/outbox code without impact analysis and rerun. New static validation checks schema/test/SC existence but cannot substitute PostgreSQL, KVM, browser or source runtime tests.
+
+**GATE-DEV-T01** generic-only release may pass common gates with development disabled, while app endpoint requests fail closed.
+**GATE-DEV-T02** development enabled + missing Preview SSRF tests → release blocked.
+**GATE-DEV-T03** feature factory enabled + 10 isolated branches / integration head mismatch → completion blocked.
+**GATE-DEV-T04** STOP fence/Quotawait fault injection failure blocks Campaign feature, not unrelated generic agent module.

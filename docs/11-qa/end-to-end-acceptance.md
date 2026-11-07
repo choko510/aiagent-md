@@ -370,3 +370,39 @@ All tests map to SC-02,07,08,11,15,16 and are distinct from unit and structural 
 | SC-22 | Brokerの正常スコープ操作可能 | Prompt Injectionで秘密/OTP/CDP/他Userが漏れない |
 
 全SC-17..22にpositive/negative/fault injectionと実際のVM・Kernel・Network証拠が必要。安全失敗を他の成功率で相殺しない。従来SC-01..16の非退行は必須。Requirements: CELL-001..016, SENT-001..016, GW-017..021, LOOP-021..023, PRD-020..025。
+
+## 2026-11-08 SC-24〜31 Development / Campaign E2E formal fixture integration (Designed / NOT RUN)
+
+The original QA-E2E-001..022/SC-01..22 remain intact, and SC-23 is reserved by independent Live Observation PR #71. The fixture manifest for the new coverage is [audit/development/scenarios.json](../../audit/development/scenarios.json). Fixtures are synthetic: no real purchase, production API mutation, GitHub push or external deployment. The backend must use actual controlled execution, real PostgreSQL/queue + fake providers for integration, and separate KVM/Browser isolation checks before claiming Verified.
+
+### Fixture schema proposal / required evidence
+```ts
+type DevelopmentQaFixtureV1 = {
+ schemaVersion:1; scenarioId:string; featureGate:"development"|"campaign";
+ fixtureVersion:string; seed:number; repoTreeSha:string; environmentDigest:string;
+ browserImageDigest:string|null; mockProviderDigest:string; tenantTopology:string;
+ requiredAuthRoles:string[]; initialProjectHeadSha:string|null;
+ cases: { positive:QADevCaseV1; negative:QADevCaseV1; fault:QADevCaseV1 };
+ status:"DESIGNED_NOT_RUN"|"RUNNING"|"PASS"|"FAIL"|"BLOCKED";
+};
+type QADevCaseV1 = { id:string; setup:string; action:string; oracle:string;
+ forbidden:string; evidenceRefs:string[] };
+```
+The actual fixture JSON is a **static design inventory**, with no fabricated runtime evidence. The test runner must reject unknown schema versions, missing evidence, skipped required lanes, ambiguous baseline SHA, stale test review receipts or mismatched owner. A release manifest binds the exact scenario ID, case ID, repo/Integration HEAD SHA, user-approved Demo digest, fixture version, browser engine, VM image, provider mock version, admission policy hash, auth scope, date and tested result. LLM scoring is supplementary; independent DB/Browser/security Oracles decide PASS.
+
+| SC | Positive | Negative | Fault | Oracle owner / requirement |
+|---|---|---|---|---|
+| SC-24 | QA-E2E-T24P: 3 independent ideas→A4→A5→3 reviews | QA-E2E-T24N: only 2 plans / mismatched SHA | QA-E2E-T24F: kill a child during join/retry | CHAT_02+11 / DEV-REQ-02 |
+| SC-25 | QA-E2E-T25P: compare visuals, mock Demo interact and explicit acceptance | QA-E2E-T25N: `AUTO_RECOMMEND` cannot approve; real API/cross-origin denied | QA-E2E-T25F: revoke/rotate Preview or ownership during interaction | CHAT_03/04/08/09 / DEV-REQ-03/04/12 |
+| SC-26 | QA-E2E-T26P: Expert escalation for repeated error | QA-E2E-T26N: Advisor cannot write code/Policy | QA-E2E-T26F: 429+budget exhaustion | CHAT_02 / DEV-REQ-05 |
+| SC-27 | QA-E2E-T27P: Browser finds mobile overflow/API500 and correlates evidence | QA-E2E-T27N: click success != functional success, secret HAR denied | QA-E2E-T27F: Browser crash/Trace interrupted | CHAT_04/09/11 / DEV-REQ-06 |
+| SC-28 | QA-E2E-T28P: three latest-SHA reviews, repair P0/P1 | QA-E2E-T28N: stale SHA or skipped test cannot PASS | QA-E2E-T28F: merge another feature after review; integrated HEAD changes | CHAT_02/11 / DEV-REQ-07/11 |
+| SC-29 | QA-E2E-T29P: attested Preview, sandboxed build, scoped Git intent | QA-E2E-T29N: bad origin/host/WS/private/IP/CDP/other project rejects | QA-E2E-T29F: stop/revoke while established WS stream active | CHAT_03/04/09/10 / DEV-REQ-08/09/12/14 |
+| SC-30 | QA-E2E-T30P: bounded cycles continue until stop/target | QA-E2E-T30N: duplicate logical work, over-budget, stale ControlVersion denied | QA-E2E-T30F: simultaneous STOP/child dispatch/429/quota resume | CHAT_02/07/10 / DEV-REQ-10/13/15 |
+| SC-31 | QA-E2E-T31P: 10 distinct approved **INTEGRATED** features | QA-E2E-T31N: 10 isolated verified branches, 0 integrated | QA-E2E-T31F: merge conflict/restore/old HEAD review invalid | CHAT_07/10/11 / DEV-REQ-11/16 |
+
+Every row is three **distinct cases** and each case must run positive, negative, fault. `NO_EVIDENCE` is not PASS. Positive/negative/fault test names and fixture ids are validated in a **new independent static lane**, not by the historical 88-module static audit. CI compliance with fixture metadata is not runtime verification.
+
+**Test suite applicability:** common AUTH/VM/Sentinel/Tool Gateway privacy gates remain mandatory for every deployment regardless of app feature flags. Development/Preview E2E gates are **conditional on the Development/Preview features being enabled or claimed supported**. Campaign/Feature Factory gates are conditional on those modes being enabled or claimed supported. Disabled endpoints MUST deny unauthorized requests even in a normal Agent build. A normal Agent Harness release with Development off is not blocked solely because optional 8AI and Browser tests are NOT RUN. Enabling or advertising the feature without its actual E2E gates is prohibited.
+
+**Additional contract tests:** DEV-DB-T01..08, AUTH-DEV-T01..06, EVT-DEV-T01..05, DEV-DOM-T01..05, DEV-UI-T07..10, CAM-T12..18, DEV-BLD-T09..14, DEV-FF-T07..11, DEV-REV-T07..08, DEV-DES-T07..11. All are **DESIGNED_NOT_RUN**. Fixture owner MUST map these to concrete runner cases before public release.
