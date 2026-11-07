@@ -21,9 +21,9 @@
 
 ## Non-negotiable security boundaries
 
-- Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
-- 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はRuntime Cell外のSentinelで強制評価し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
-- 本番はVM境界とCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
+- Agent OrchestratorはTrusted Control VMでRunを制御するが、**生成されたShell/Scriptは絶対にOrchestrator内で実行しない**。Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
+- 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はTrusted Control VMのSentinelで評価し、同じEgress Transportを通じて実送信を強制し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
+- 本番はTrusted Control VMと別ゲストカーネルのUntrusted Execution VM、Browser Workerの分離、Egress TransportとCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
 - 任意のTool Callはschema検証、policy、budget、approval、side-effect ledgerを通す。LLMが自分の操作を自己承認しない。
 - 購入・予約確定・送金・投稿・対外メッセージ送信は個別承認。UNKNOWN効果を盲目的に再試行しない。
 - APIキー・Cookie・認証トークンをLLMコンテキスト、Evidence、ログに漏らさない。
@@ -35,4 +35,3 @@
 ## Adaptive Context implementation handoff (2026-11-07; draft)
 
 Context実装は [docs/02-runtime/context-manager-and-compaction.md](docs/02-runtime/context-manager-and-compaction.md) の18節を先に読む。ADR-023〜028、Memory 06-01/02、Subagent 02-12、Checkpoint 02-06、Budget 02-10、ModelRouter 02-09、Evidence 01-05、CHAT_09 Sentinel/Cell、QA 11-01/04を同時に確認する。Task Goal / Tool Approval / Memory Writer / EvidenceをContext Summaryに統合して正本を書換えてはいけない。Raw Artifactとgrounded Summary、typed anchors、ContextManifest、Run HEADを別境界として実装。ACM-T01〜T20は未実施であり、コード/試験なしにVerifiedと報告しない。PR #68のMuse型隔離が先行依存。
-

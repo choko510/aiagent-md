@@ -8,9 +8,9 @@
 
 「Shell禁止」の旧仕様は **host shell / trusted services shellは禁止、runtime cell shellは条件付き許可** に改定する。実行権限と外部行為権限は別物であり、ローカルコードが起動できることはネットワーク送信・購入・予約・投稿・外部通知の承認を意味しない。
 
-本番の主要構成: **専用のKVM/QEMU Linux VM** 内の独立したUntrusted Runtime Cell（第一候補systemd-nspawn＋UID/GID namespace）と、その**外側**のProtected Services。親UbuntuホストからVM管理するがAgentからは見えない。Runtime Cellの内側にDB、Vault、Sentinel、Browser CDP、Docker socketを配置しない。単一利用者セルフホストでも内外の信頼境界を省略しない。
+本番の基本構成は **KVM/QEMUの独立した2つのゲスト**（Trusted Control VMとUntrusted Execution VM）。**Vault/DB/Sentinel/Agent OrchestratorはTrusted Control VMに配置し、実行ゲストのカーネルとは絶対に共有しない**。生成Shell/Python/Node/CLIはUntrusted Execution VMのRuntime Cell（追加のUID/GID namespace・seccomp・LSM・cgroups）内だけで起動する。UbuntuホストはVM管理専用でAgentから操作できない。ブラウザWorkerはさらに別の制限された実行ドメイン。単一ユーザーでも信頼境界を省略しない。
 
-VMなしのコンテナ単体は **development_only** として明示し、本番相当の保証を称しない。ハードウェア仮想化がない場合は**起動要件未達**と報告する。unsafeなno-sandbox / privileged fallbackは禁止。Firecrackerは将来の比較候補であり初期採用を断定しない。通常の1 Runにつき専用VMを必須とせず、VM内でタスク単位のCell/名前空間とWorkspaceを分け、リスク/費用に応じてセルの再利用可否を判定する。
+VMなしのコンテナ単体は **development_only** として明示し、本番相当の保証を称しない。ハードウェア仮想化がない場合は**起動要件未達**と報告する。unsafeなno-sandbox / privileged fallbackは禁止。Firecrackerは将来の比較候補であり初期採用を断定しない。実行VMはユーザー/テナント境界で分離し、異なるユーザーへのVM再利用は禁止。単一ユーザー同一テナント内でのVM再利用は、プロセス/Workspace/Capability/IPC/Network状態の完全消去と隔離検証を条件に許可する（高リスクTaskは使い捨て）。詳細は§2/§4で定義。
 
 Meta Muse公開資料は脅威モデル・設計パターンの参考であり、Meta非公開実装やeBPF taint追跡の再現を保証しない。
 - Source: https://research.meta.ai/blog/security-and-safety-for-ai-agents-our-approach-with-muse
@@ -20,18 +20,18 @@ Meta Muse公開資料は脅威モデル・設計パターンの参考であり�
 
 | Boundary | Owns | Must never expose to Runtime Cell |
 |---|---|---|
-| Physical Ubuntu host (operator) | KVM/QEMU, backup, VM image, firewall | SSH, Docker/libvirt/KVM socket, host mounts, root, cloud metadata |
-| Secure VM / Protected Services | Agent command/control API, Task/Run DB, Sentinel, Policy, Credential Broker, privileged Connector, Browser Broker, model gateway | Raw SQL credentials, vault plaintext, signer keys, policy mutators, browser CDP |
-| Untrusted Runtime Cell | Agent programs, shell, child processes, ephemeral packages, restricted workspace | Protected Services unix sockets except specifically authorized gateway interface, root host devices, direct egress |
-| Browser isolation | BrowserContext and session data via Browser Broker, separate browser worker process | Unmediated CDP, plaintext storageState, other tenant sessions |
+| Physical Ubuntu host (operator) | KVM/QEMU, backup, VM manager, physical firewall | SSH, Docker/libvirt/KVM socket, host mounts, root, cloud metadata |
+| **Trusted Control VM (different guest kernel)** | Trusted Agent Orchestrator, Task/Run DB, Sentinel, Gateway, Policy, Vault, Credential Broker, trusted Connector, Browser controller | No direct API/secret/DB/admin socket mounted or reachable inside Execution VM |
+| **Untrusted Execution VM + Cell (different guest kernel)** | Generated programs and shell, restricted workspace, ephemeral dependencies, process supervisor | Trusted VM mount/sockets, VM manager, kernel capabilities, public Internet route; only scoped broker RPC |
+| Browser execution domain (separate sandboxed process/VM) | Chromium renderer and scoped Context through trusted Browser Broker | Direct protected Vault/DB access, unmediated CDP, other owner Context |
 | Artifact Store | Provenance-backed input/output, owner/scope/retention metadata | Direct privileged volume mount, unreviewed symlinks |
 
-All Runtime→Protected communication must use a **narrow authenticated IPC boundary**. If local Unix sockets are used, peer credentials (e.g. SO_PEERCRED) **plus** cgroup/process identity, task/run/lease binding, authorization and anti-replay are required; kernel peer identity alone is not a complete application authorization mechanism. VM↔physical host paths require independently authenticated transports and deny-by-default host firewall.
+All Execution VM→Trusted Control VM communication must use **one narrowly exposed authenticated broker RPC** over an operator-configured VM transport (such as vsock/virtio-serial), not direct DB/Vault/Sentinel/Browser admin sockets. AuthN must bind actual guest/Execution supervisor identity to server-owned tenant/owner/Task/Run/Execution/lease/policy epoch and per-operation scopes/nonce; **guest/process identity alone is never authorization**. VM network adapters have no unrestricted route, including DNS, IPv6, UDP and tunnels. The host/hypervisor firewall rejects every guest attempt except the broker endpoint, even if a guest obtains root. The broker cannot expose generic raw TCP CONNECT. Protected services are not colocated with the guest kernel; guest kernel exploitation must not give access to Vault/DB memory (subject to hypervisor/host compromise residual risk).
 
 ## 2. Execution profile & filesystem
 
 Each execution is bound to user/tenant/task/run/goalRevision/leaseEpoch/executionId/policyEpoch/cellId. Profiles:
-- secure_isolated (production): VM and Cell confinement attested; signed/immutable base image, non-host UID mapping, dropped capabilities, seccomp+LSM, no-new-privileges, no host namespace sharing, bounded cgroups; shell allowed inside Cell only.
+- secure_isolated (production): **separate Trusted Control VM and Untrusted Execution VM guest kernels**, verified VM/hypervisor networking and Cell confinement; immutable image, non-host UID mapping, dropped capabilities, seccomp+LSM/no-new-privileges, bounded cgroups; shell allowed inside untrusted guest only.
 - restricted_compute: no direct network, read-only projections, bounded deterministic transformations.
 - development_only: weaker local debugging explicitly marked; no persistent credentials, external side effects, privileged connector or unattended scheduling by default.
 
@@ -43,7 +43,7 @@ Pseudoterminal allocation may be permitted for an interactive shell only via an 
 
 Production Cell admission requires **actual** rendered runtime checks (not only config intent): current UID/GID maps, effective capabilities, seccomp and AppArmor/SELinux, mount namespace, cgroup quotas, process tree, /proc exposure, socket reachability, network namespace routes, veth and physical host firewall. Probe that an unprivileged process cannot reach host bridge, RFC1918 LAN, VM metadata, Docker/libvirt sockets, Sentinel private admin paths or Browser CDP.
 
-No raw outbound route from Cell: prohibit host networking, NET_ADMIN, SYS_ADMIN, SYS_PTRACE, permissive syscalls (including io_uring until separately reviewed), raw sockets, veth reconfiguration, IPv6 bypass, Unix-domain socket leaks, vsock guest-host escapes, alternate DNS, UDP/QUIC bypass, CONNECT tunnels to arbitrary destinations. Network control is owned by CHAT_09 Sentinel Authority, which must enforce egress beyond an application-level proxy environment variable. The Cell must not contain root CA material that lets untrusted code modify the trusted proxy's verification configuration.
+No outbound Internet route from the entire Untrusted Execution VM (not just the Cell): prohibit host networking, NET_ADMIN, SYS_ADMIN, SYS_PTRACE, permissive syscalls (including io_uring until separately reviewed), raw sockets, veth reconfiguration, IPv6 bypass, Unix-domain socket leaks, vsock guest-host escapes, alternate DNS, UDP/QUIC bypass, CONNECT tunnels to arbitrary destinations. Cell may call **broker_rpc_only** for typed HTTP Fetch/Connector/Package requests. These generate their own Gateway Intent before Sentinel approves and the Trusted Egress Transport sends bytes. Network control is owned by CHAT_09 Sentinel Authority and physical Operator Firewall; it must enforce egress beyond an application-level proxy environment variable. The Cell must not contain root CA material that lets untrusted code modify the trusted proxy's verification configuration.
 
 Chromium sandbox is separate defense-in-depth: Browser Broker remains owner; Browser Worker must enable Chromium sandbox, not --no-sandbox. If kernel/browser combination cannot satisfy it, fail CLOSED.
 
@@ -92,6 +92,16 @@ Workspace restart: only explicitly committed artifacts can survive Cell destruct
 - CELL-T10: dev-only mode cannot use production provider credentials or claim VERIFIED isolation.
 
 Release gate: zero successful isolation bypasses in negative E2E; exact host/guest kernel, Docker/systemd-nspawn/KVM version, image digest, tested config and toolchain recorded. No absolute sandbox escape-proof claim.
+
+## 6.1 Production VM reuse, cleanup and residual threats
+
+VM pool keyed by owner+tenant (never shared across distinct users), immutable imageDigest and security policy epoch. On each Task/Execution: dedicated cgroup/PID namespace, Workspace overlay and per-Execution broker grant. On completion: close IPC handles, revoke all grants, cgroup.kill/reap descendants, unmount & erase writable overlay, flush DNS/network state and verify zero leftover sockets, PIDs and artifacts. Reuse only if all checks pass; if not, destroy/recreate VM. Per-tenant max idle duration and concurrency are finite deploy settings (values benchmarked; no unmeasured hard-coded promises). Cross-tenant reuse **requires VM destruction and image re-creation**, not only nspawn reset. Remaining risks: hypervisor exploit, malicious host operator, compromised trusted control plane/Browser worker, data released legitimately by authorized Tool, and unclassified content sent by trusted connector. These are not described as eliminated by VM isolation.
+
+| CELL-017 | MUST | Protected Services never run under same guest kernel as Agent-generated code |
+| CELL-018 | MUST | Execution VM has no Internet route: only per-Execution authenticated tool broker RPC, network off for shell |
+| CELL-019 | MUST | Separate trusted Orchestrator process never shares PID/UID/Workspace or privileged IPC handles with generated code |
+| CELL-020 | MUST | Guest VM reuse never crosses tenants; grant/Process/Overlay cleanup verified or VM destroyed |
+| CELL-021 | MUST | Privsep/Browser/Notifier egress is also restricted to actual Sentinel-enforced transport |
 
 ## 7. Cross-owner contract checklist
 

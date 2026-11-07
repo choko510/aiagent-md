@@ -276,3 +276,9 @@ Tests use fake providers and canary secrets; no live provider account or real OA
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)
 Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string** on wire, internal BigInt, PostgreSQL BIGINT. Never cast through JSON number or approximate IEEE754. Any bounded operational counts remain distinct. Contract fixtures (designed only): roundtrip 2^53 and INT64_MAX-1, stale revision and revoked owner reject. Harness runtime verification pending.
+
+## P1 data provenance and egress DLP contract (2026-11-07)
+
+Secret **keys** staying outside Execution VM does **not** mean user mail, CSV, search results or generated text are nonsensitive: their plaintext may be explicitly staged in the Cell. Every Artifact exposed to the Cell must carry **owner/tenant/source/type/sensitivity/allowed-audiences/retention** server-owned labels. Derived outputs inherit conservative sensitivity/owner restrictions unless a trusted declassification decision/explicit human consent establishes otherwise; the LLM cannot self-declare declassification or strip labels.
+
+Every brokered outbound action checks original and derived Artifact provenance, intended recipient/service, data class, exact payload digest/preview, user grant and purpose. No automatic public upload of private data, even if destination/domain was previously allowed or API key is not required. If data origin/payload is opaque or insufficiently tracked, **DENY or require a human-approved explicit disclosure through a trusted typed Connector**, not assume clean. Raw Shell outbound sockets are off by default. The implementation does not claim perfect taint tracking of arbitrary process memory; this restriction operates at Broker/Artifact/Connector boundary. HTML/PDF/SNS prompt injection is data and cannot grant disclosure permission. SC-19/22.

@@ -1,43 +1,60 @@
 # System Architecture — Runtime and Trust Boundaries
 > Status: **Draft**. Owner CHAT_00. Every component below is a proposed logical responsibility, not a deployed service. Physical tables, protocol message types and approval logic belong to other Owner specs.
-## 1. Process topology — Muse型 Secure VM (proposal)
+## 1. Process topology — separated VM trust domains (2026-11-07 P0 resolution)
+
+**Production baseline:** Ubuntu Operator Host (KVM/QEMU) manages two **independently kernel-isolated** guests: **Trusted Control VM** and **Untrusted Execution VM**. Agent Orchestrator, policy/approval, PostgreSQL, Sentinel, Credential Vault and Broker are in the Trusted Control VM; **generated code executes only in the Untrusted Execution VM**. The guest kernel running arbitrary code is never the kernel running the Vault or DB. An optional separate Browser Worker sandbox/VM has its own identity and is not a Vault tenant. Operator host/VM-admin sockets are not accessible to any Agent.
 
 ~~~mermaid
 flowchart TB
-    OP[Ubuntu Host / KVM-QEMU Operator] --> VM[Secure VM]
-    U[Web UI / Telegram] --> API
-    subgraph VM [Secure VM]
-      subgraph PROTECTED [Protected Services / Trusted Domain]
-        API[Authenticated API] --> PG[(PostgreSQL and Outbox)]
-        PG --> Q[Scheduler / Durable Job Relay]
-        GW[Tool Gateway / Approval / Ledger] --> SENT[Sentinel Final Egress and Connector Authority]
-        SENT --> AUTH[Credential Broker / Privsep Connector]
-        SENT --> BB[Browser Broker / CDP owner]
-        MODEL[Model Gateway]
-      end
-      subgraph CELL [Untrusted Runtime Cell / User Namespace]
-        AR[Agent Loop and Subagents] --> EXEC[Sandbox Exec / Shell / Python / Node]
-        EXEC --> WS[Scoped Task Workspace]
-      end
-      Q --> AR
-      AR --> GW
-      AR --> MODEL
-      EXEC -->|forced network path| SENT
-      BB --> CH[Chromium Sandbox]
-      CH -->|enforced egress| SENT
-    end
-    SENT --> INTERNET[Authorized Public Services]
-    AUTH --> INTERNET
+  OP[Ubuntu Operator Host / KVM manager]
+  U[Authenticated Web / Telegram]
+  subgraph T[Trusted Control VM - separate guest kernel]
+    API[API / Auth] --> DB[(Task Run Ledger DB)]
+    DB --> Q[Durable Queue / Scheduler]
+    Q --> AR[Agent Orchestrator / Model Loop - no arbitrary code]
+    AR --> GW[Tool Gateway / Intent / Approval / Effect Ledger]
+    GW --> SENT[Sentinel final authorization]
+    GW --> EXECADMIT[Execution Admission / Scoped RPC]
+    GW --> BCTRL[Browser Broker controller - CDP policy owner]
+    GW --> CONN[Privsep Connector / Notification Worker]
+    GW --> FETCH[Trusted HTTP Fetch / Package Broker]
+    CRED[Credential Vault / Broker] --> CONN
+    CRED --> BCTRL
+    SENT --> NET[Enforced Egress Transport / Network Gateway]
+    CONN --> NET
+    FETCH --> NET
+  end
+  subgraph X[Untrusted Execution VM - distinct guest kernel]
+    SUP[Execution Supervisor / Kernel cgroups]
+    CELL[Generated Shell / Python / Node / CLI]
+    WS[Task Workspace overlay]
+    SUP --> CELL
+    CELL --> WS
+  end
+  subgraph B[Isolated Browser Worker domain]
+    BW[Chromium sandbox / Contexts]
+  end
+  OP --> T
+  OP --> X
+  OP --> B
+  U --> API
+  EXECADMIT -->|authenticated execution grant| SUP
+  CELL -->|only scoped broker RPC; no public network| GW
+  BCTRL --> BW
+  BW -->|forced mediated web transport| NET
+  NET --> WEB[Approved external destinations]
 ~~~
 
-Trust boundaries, including how forced egress works in the kernel and the actual IPC identities, are defined in ../09-security/runtime-cell-isolation.md and ../09-security/sentinel-authority.md. Protected Services run outside the untrusted Cell **inside the Secure VM**, not on the physical Ubuntu host. This is proposed topology, not deployed proof. Agent may execute arbitrary *local Cell code*, but cannot own privileged API, network ACLs, vault, DB or Browser CDP. KVM/QEMU VM and nspawn are candidates requiring verification. Existing Docker-only diagrams lower in historical specs are not production trust-boundary authority.
+**No** `AUTH --> INTERNET`, `Privsep --> INTERNET`, `Browser --> INTERNET`, `Cell --> INTERNET` or dual-homed egress bypass exists. Egress transport is the only component with an operator-controlled permitted Internet route; all others are firewall/namespace-denied direct route. Sentinel decisions and exact transport recipient/action are bound and checked by the same enforcement boundary. Trusting a token or proxy environment variable alone is insufficient. Credential Broker provides **recipient-bound just-in-time injection inside trusted Workers**, not secrets/surrogates to guest.
+
+Local `sandbox.exec` is **offline** by default. Generated code may request a narrow `broker_rpc_only` IPC to trusted HTTP Fetch / Typed Connector / Package Broker through Gateway; **each concrete operation** creates its own durable Tool Intent / Side-effect Ledger entry, Sentinel permit/approval and a Transport receipt before actual network I/O. Arbitrary raw Internet sockets, HTTP CONNECT and opaque TLS tunnels from the execution guest are always denied. VM vsock/virtio serial/other IPC is restricted to a per-Execution authenticated endpoint, verified by server-side Run/Lease/Capability; source VM identity alone does not convey tool authority. See [Exec](../02-runtime/sandbox-execution.md), [Cell](../09-security/runtime-cell-isolation.md), [Sentinel](../09-security/sentinel-authority.md).
 
 ## 2. Logical components and ownership
 | Component | Canonical owner | Exposes (proposal) | Must not do |
 |---|---|---|---|
 | Web/Telegram/API | CHAT_08 | Task/Watch/create/read/approve/stream DTO, auth-scoped cursor | directly mutate Run internals or contact Tool without Gateway |
 | Auth/Secrets / Sentinel | CHAT_09 | authenticated principal, protected Vault, final network/connector permission and egress enforcement | raw secrets in Cell/prompt or LLM-editable policies |
-| Runtime Host / Agent Loop + Sandbox Exec | CHAT_02 | claim/recover/steer/cancel/checkpoint, bounded shell/code in Cell | host/protected-services command, direct unapproved external tool dispatch |
+| Agent Orchestrator (trusted) / Sandbox Exec (untrusted VM) | CHAT_02 | claim/recover/steer/cancel in Control VM; bounded code inside distinct Execution VM | untrusted code in trusted Orchestrator, privileged shell or direct Internet |
 | Tool Gateway | CHAT_03 | manifest validate→risk/approval→durable attempt→dispatch | tool self-authorization, blind effect retry |
 | Browser Broker | CHAT_04 | exclusive CDP/session lease, bounded page operations and screenshot evidence | direct CDP to Cell, concurrent cross-owner Page control |
 | Provider layer | CHAT_05 | read/adapt Amazon/Keepa/X/hotel data with provenance | raw provider text as trusted instructions |
@@ -108,9 +125,9 @@ Unit schema/codecs, real PostgreSQL FK/concurrent CAS/migration upgrade, Browser
 ## 12. ADR / cross-team decision pointers
 [ADR decisions](architecture-decisions.md), [Glossary](domain-glossary.md), [Spec Index](spec-index.md). Owner-specific proposals remain Draft until their corresponding PR HEAD documents the resolved schema and cross-owner reviewer accepts.
 
-## 9. Muse migration: ownership invariant and compatibility (2026-11-07)
+## 13. Muse migration: ownership invariant and compatibility (2026-11-07)
 
 - Existing Task/Run/Conversation/Watch, Evidence, Actor/tenant, Scheduler and approval identities remain canonical; Execution/Workspace are child resources and must not create duplicate Task state.
-- For sandbox.exec: Gateway persist intent → Cell admission/attestation → isolated process and mediated egress → durable stdout/artifact/effect receipts → Goal verification. External connector activity goes through Sentinel's final ALLOW/ASK/DENY; incomplete/opaque TLS activity cannot be silently classified read-only.
+- For sandbox.exec: Agent proposal -> trusted Gateway persistent Intent -> execution Admission (server-owned identity/policy) -> offline Execution VM process -> scoped Tool RPC for each external action -> Gateway concrete Intent/Ledger -> Sentinel -> enforced Egress Transport -> recorded effect receipt. No shared guest kernel with Vault/DB and no direct Internet.
 - Any current direct Gateway→External arrows represent a **logical invocation**, not a direct unfiltered socket route. Actual network/connector authority is Sentinel. All legacy no-arbitrary-code statements must be understood as host/protected-service prohibition, not Runtime Cell limitation.
 - The shared transaction/approval contracts are Draft; no explicit implicit lock or VM implementation is implied by this revision. Full implementation requires OWNER reconciliation + TEST SC-17..22.

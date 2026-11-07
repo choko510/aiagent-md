@@ -4,7 +4,7 @@
 
 ## 0. Decision / trust boundary
 
-**Sentinel is the independent final permission authority for all external connector actions and every concrete network egress** originating from Runtime Cell code, child processes, scheduled jobs, generated Skills, browser/network adapters, remote MCP and subagents. Unlike the Agent, Sentinel and policy store live outside the untrusted Cell. An Agent's request is a proposal, not an authorization. Sentinel cannot be replaced by an LLM instruction, MCP descriptor, generated program, model judge, Browser JS or operator-supplied user prompt.
+**Sentinel is the independent final permission authority for all external connector actions and every concrete network egress** originating from Runtime Cell code, child processes, scheduled jobs, generated Skills, browser/network adapters, remote MCP and subagents. Unlike the Agent, Sentinel and policy store live in a **separate Trusted Control VM guest kernel**, outside the entire Untrusted Execution VM. An Agent's request is a proposal, not an authorization. Sentinel cannot be replaced by an LLM instruction, MCP descriptor, generated program, model judge, Browser JS or operator-supplied user prompt.
 
 Separation of duties:
 - Tool Gateway (CHAT_03): freezes signed intent, schema, ownership, budget, current Run lease, approval ledger and side-effect bookkeeping. **Does not itself provide a network bypass**.
@@ -12,17 +12,27 @@ Separation of duties:
 - Credential Broker (CHAT_09): alone holds actual secret material/keys and returns scoped surrogate or injects just-in-time after recipient verification. Agent, Cell, generated code, tool stdout and model receive no real secret.
 - Connector Privsep Worker (CHAT_05/09): executes credential-capable integrations outside Cell, with per-service identity and credential allowlist; agent can request via Gateway only.
 - Browser Broker (CHAT_04): sole CDP owner; screen/DOM/action API subject to Gateway/Sentinel and current owner lease; UI takeover is separate.
-- Egress enforcement (CHAT_09/10): kernel/network namespace/firewall + compulsory proxy. Optional model classifiers help triage but are not policy authority.
+- Egress enforcement (CHAT_09/10): physical host/VM firewall **denies all Execution VM direct Internet**, including alternate L3/L4 routes. Trusted HTTP Fetch/Connector/Browser/Notification workers each have no direct Internet route and must send bytes through a dedicated Enforced Egress Transport whose admission is bound to current Sentinel authorization. Optional model classifiers are never authority.
 
 Meta Muse's public security design is a reference model, not proof this self-hosted implementation is equivalent: https://research.meta.ai/blog/security-and-safety-for-ai-agents-our-approach-with-muse
 
 ## 1. Enforcement must cover actual sockets, not tool names
 
-Untrusted runtime can create subprocesses and arbitrary user-space code; therefore instrumenting only HTTP client libraries or routing only registered Tools is insufficient. At admission: attach Cell identity (cgroup/UID/network namespace and signed task/lease metadata). At each outbound connection enforce allowlisted route through network controller; deny direct sockets, alternate namespaces, raw sockets, IPv4/IPv6, TCP/UDP/QUIC, DNS bypass, Unix/vsock escape, loopback, private/internal/meta ranges and CONNECT tunnels. Recheck DNS A/AAAA, SNI/cert, all redirects, proxy authentication, websocket/iframe/subresources, network interface changes and source attribution.
+Untrusted runtime creates arbitrary subprocesses; therefore **do not allow raw external sockets from the Execution VM at all**. A per-Execution authenticated broker_rpc_only interface is the **only** communication path out of the guest (not a TCP proxy or CONNECT tunnel). All requests are typed Tool RPCs to Trusted Control Plane. Each concrete external operation creates a new persisted Gateway Intent and separate Side-effect Ledger record, then Sentinel authorizes the exact action and **enforced Transport performs the connection and captures the result**. Instrumenting HTTP libraries/Tool name only is insufficient. At admission: bind Execution VM/Cell and signed broker channel to owner, task, Run, execution, lease, toolIntent, policy. Hypervisor bridge firewall denies all raw outbound routes and direct access to trusted VM control endpoints. Trusted workers (HTTP Fetch, Privsep Connectors, Browser, Notification) run in separate namespaces with only one permitted egress-transport path, and Transport validates Sentinel grant against the **actual** socket's recipient, protocol and current epoch. A final decision without matching transport enforcement is insufficient. Recheck DNS A/AAAA, SNI/cert, all redirects, proxy authentication, websocket/iframe/subresources, network interface changes and source attribution.
 
-**TLS content limit**: Sentinel cannot claim to understand encrypted request paths, methods, bodies, exfiltrated content or side effects when it sees only L4 metadata. For such opaque traffic, do not mark it read-only. Require bounded trusted HTTP client/Connector that can inspect concrete destination+method+body, a client-side mediated grant with faithful final enforcement, or user approval for narrow explicit destination/operation. Unverifiable sensitive egress is denied; arbitrary public HTTPS is not a blanket safe allowlist. User-data taint classification is conservative: unless auditable enforcement exists, "clean" must not be inferred from a process's reported intent. eBPF LSM-based taint propagation is **experimental**, not a current capability.
+**TLS content limit**: Sentinel cannot claim to understand encrypted request paths, methods, bodies, exfiltrated content or side effects when it sees only L4 metadata. For such opaque traffic, do not mark it read-only. Only allow bounded **trusted HTTP Fetch API** for read operations (broker can inspect origin, URL, method, headers, body size and redirect hops), and **trusted typed Connector** for authenticated/read-write effects with intent/approval/ledger. No arbitrary raw TLS/CONNECT tunnel or broad user-approved domain tunnel from Shell. Where Browser TLS requests are opaque, the Browser Broker must enforce permitted actions/origins and the transport must constrain subresources; if the actual effect/recipient cannot be verified, block the sensitive action and request human intervention. Unverifiable sensitive egress is denied; arbitrary public HTTPS is not a blanket safe allowlist. User-data taint classification is conservative: unless auditable enforcement exists, "clean" must not be inferred from a process's reported intent. eBPF LSM-based taint propagation is **experimental**, not a current capability.
 
-A user-approved domain is not a blanket approval for POST, paid action, sending email, login, cookie exfiltration, or transferring user data. Every destination/method/action/scope is checked at dispatch and again before egress. No implicit approval from old Skill success, cron registrations, or Tool annotations.
+Even when a user approves a domain, it is not blanket approval for POST, paid action, sending email, login, cookie exfiltration, or transferring user data. Every destination/method/action/scope is checked at dispatch and again before egress. No implicit approval from old Skill success, cron registrations, or Tool annotations.
+
+## 1.1 Three explicit execution/network modes (P0 resolution)
+
+| Code or operation | Network path | Authority/effect rules |
+|---|---|---|
+| Arbitrary Shell / Python / Node / CLI / package install hooks | **no direct network at all** | confined within Untrusted Execution VM; only scoped Tool Broker RPC allowed |
+| Public Web data read | `exec -> broker RPC -> Gateway concrete read Intent -> Sentinel -> Trusted HTTP Fetch -> enforced Transport` | HTTPS decrypted only within trusted Fetch library under operator policy; TLS pinned and redirect/DNS checked; no unbounded CONNECT; response is untrusted data |
+| Authenticated or external write, payment, notification, upload | `exec -> broker RPC -> Gateway concrete write Intent/Approval/Ledger -> Sentinel -> Privsep/Browser Broker -> enforced Transport` | exact recipient/body/effect scope, current lease, explicit fresh approval where required; no generic raw request if side effect cannot be classified |
+
+Shell package manager downloads are **not an exception**: offline pre-staged package artifacts delivered by Package Broker after verification. Trusted Connector workers never receive arbitrary Shell-provided Authorization/Cookie headers. Browser Worker and Notifier share the mandatory physical egress transport but not user/credential scopes. Trusted service compromise remains a residual risk; without a secure egress implementation production cannot start.
 
 ## 2. Proposed permission model (provisional)
 
@@ -36,11 +46,11 @@ Risk classes remain those from CHAT_03 Tool Approval & Policy: read, sensitive, 
 
 ## 3. Credential surrogation & irreversible operations
 
-Vault master key and plaintext secrets never enter Cell, even as environment variables or temporary files. CredentialRef is opaque to model. Broker may produce short-lived scope-limited surrogate token; only Sentinel/Privsep may redeem it at the verified endpoint after checking current owner/task/action/budget/approval, receiver, policy version and expiry. No raw Authorization header, Cookie, refresh token or browser storageState is returned to Cell or included in trace. Scrub before LLM and analytics; prevent credential transfer across redirect/downgrade/cross-origin and ensure no shadow network path can transmit the surrogate to arbitrary destinations. A surrogate is still sensitive: redact from stdout/logs and revoke on Run cancel/restart.
+Vault master key and plaintext secrets never enter Cell, even as environment variables or temporary files. CredentialRef is opaque to model. Broker may produce short-lived scope-limited surrogate token; only Sentinel/Privsep may redeem it at the verified endpoint after checking current owner/task/action/budget/approval, receiver, policy version and expiry. No raw Authorization header, Cookie, refresh token or browser storageState is returned to Cell or included in trace. There is no Credential Broker -> Internet direct route; Privsep/Browser/Notification requests must use Enforced Egress Transport. Scrub before LLM and analytics; prevent credential transfer across redirect/downgrade/cross-origin and ensure no shadow network path can transmit the surrogate to arbitrary destinations. A surrogate is still sensitive: redact from stdout/logs and revoke on Run cancel/restart.
 
 Browser manual login happens in Broker-owned context so password/OTP never passes through Cell. Browser display/screenshot/DOM can still reveal personal data; scope and redact accordingly. Some websites cannot safely be automated with this separation: **explicitly report unsupported/human handoff**, do not bypass.
 
-For external POST or other non-idempotent requests, Gateway must durably persist the intent and idempotency material BEFORE final Sentinel authorization/dispatch. Timeout between external acceptance and local commit gives UNCERTAIN; no blind retry. An agent-created curl command cannot substitute for a trusted connector to bypass this ledger.
+For **each concrete external request generated by a child process**, Gateway must durably persist a distinct immutable intent and (for POST/non-idempotent operations) idempotency material BEFORE Sentinel authorization and the Enforced Transport dispatch. Timeout between external acceptance and local commit gives UNCERTAIN; no blind retry. An agent-created curl command cannot substitute for a trusted connector to bypass this ledger.
 
 ## 4. Compatibility & ownership
 
@@ -66,6 +76,17 @@ CHAT_09 network-egress-and-ssrf remains the canonical URL/DNS/transport rules; t
 | SENT-014 | Side-effect classification includes browser click/fill and arbitrary sandbox code at last-mile enforcement |
 | SENT-015 | Ensure no raw direct path via local LAN, metadata, DNS, UDP, DoH, WebSocket, QUIC or tunneling |
 | SENT-016 | Budget, bandwidth and rate ceilings apply per task, tenant, destination and provider |
+
+## 5.1 Network enforcement requirements added by P0 resolution
+
+| ID | MUST / Observable check |
+|---|---|
+| SENT-017 | Entire Execution VM has zero raw outbound public/LAN/DNS routes even with guest root; only scoped broker RPC accessible |
+| SENT-018 | Every concrete broker RPC (read/write) creates Gateway intent+effect record before trusted transport |
+| SENT-019 | Privsep, Browser, MCP and Notification Workers cannot use any alternate outbound socket/proxy bypass; no direct AUTH -> Internet |
+| SENT-020 | Trusted transport rechecks actual recipient and policy epoch/lease immediately before send and correlates receipts |
+| SENT-021 | Raw TLS/CONNECT from arbitrary code is always denied; exact HTTP Fetch/Typed Connector are the only allowed Internet methods |
+| SENT-022 | Personal data disclosure checks include provenance/sensitivity/owner/receiver not only credentials; fail closed on unknown |
 
 ## 6. Required E2E/security evidence
 
