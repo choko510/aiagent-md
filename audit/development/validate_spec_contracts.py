@@ -36,7 +36,7 @@ TEST_OWNERS = {
 SEMANTIC_MARKERS = {
     MODULES["DEV-03"]: ("demo:interact", "REQUIRE_USER_APPROVAL", "AUTO_RECOMMEND", "PREAUTHORIZED_BOUNDED_AUTO"),
     MODULES["DEV-05"]: ("PreviewCapabilityV2", "originGeneration", "runLeaseEpoch", "DEV-BLD-T14"),
-    MODULES["DEV-07"]: ("integration review", "DEV-REV-T08"),
+    MODULES["DEV-07"]: ("integration verification", "DEV-REV-T08"),
     MODULES["DEV-08"]: ("logicalWorkItemId", "INTEGRATED", "DEV-FF-T11"),
     MODULES["DEV-09"]: ("campaign:control", "designPolicy", "demoAcceptancePolicy"),
     MODULES["CAM-01"]: ("QuotaWaitReceiptV1", "CampaignChildAdmissionV1", "controlVersion", "CAM-T18"),

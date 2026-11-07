@@ -1605,7 +1605,8 @@ CREATE TABLE agent.development_integration_receipts (
  fixture_digest text NOT NULL, test_manifest_digest text NOT NULL,
  triple_review_receipts_ref text NOT NULL, verdict text NOT NULL,
  verified_at timestamptz NOT NULL DEFAULT now(),
- PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,work_item_id,integration_head_sha),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,project_id,id),
+ UNIQUE(tenant_id,project_id,work_item_id,integration_head_sha),
  FOREIGN KEY(tenant_id,project_id) REFERENCES agent.development_projects(tenant_id,id),
  FOREIGN KEY(tenant_id,project_id,work_item_id)
   REFERENCES agent.development_work_items(tenant_id,project_id,id),
@@ -1619,12 +1620,27 @@ CREATE TABLE agent.campaigns (
  target_count integer, criterion text NOT NULL DEFAULT 'INTEGRATED',
  budget_envelope_ref text NOT NULL, stop_committed_at timestamptz,
  PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,owner_user_id,id),
+ UNIQUE(tenant_id,id,project_id),
  FOREIGN KEY(tenant_id,owner_user_id) REFERENCES agent.tenant_memberships(tenant_id,user_id),
  FOREIGN KEY(tenant_id,owner_user_id,project_id)
   REFERENCES agent.development_projects(tenant_id,owner_user_id,id),
  CHECK(goal_revision>0 AND record_version>0 AND control_version>0),
  CHECK(target_count IS NULL OR target_count>0),
  CHECK(criterion IN ('VERIFIED','INTEGRATED','RELEASED'))
+);
+CREATE TABLE agent.campaign_work_items (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
+ project_id uuid, dev_work_item_id uuid, logical_key text NOT NULL,
+ semantic_equivalence_key text NOT NULL,
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,campaign_id,id),
+ UNIQUE(tenant_id,campaign_id,logical_key),
+ UNIQUE(tenant_id,campaign_id,id,project_id,dev_work_item_id),
+ FOREIGN KEY(tenant_id,campaign_id) REFERENCES agent.campaigns(tenant_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,project_id) REFERENCES agent.campaigns(tenant_id,id,project_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id)
+  REFERENCES agent.development_work_items(tenant_id,project_id,id),
+ CHECK((project_id IS NULL AND dev_work_item_id IS NULL) OR
+       (project_id IS NOT NULL AND dev_work_item_id IS NOT NULL))
 );
 CREATE TABLE agent.campaign_cycles (
  tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
@@ -1634,6 +1650,8 @@ CREATE TABLE agent.campaign_cycles (
  PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,campaign_id,id),
  FOREIGN KEY(tenant_id,owner_user_id,campaign_id)
   REFERENCES agent.campaigns(tenant_id,owner_user_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id),
  CHECK(record_version>0)
 );
 ALTER TABLE agent.development_cycles ADD CONSTRAINT dev_cycles_campaign_owner_fk
@@ -1641,7 +1659,8 @@ ALTER TABLE agent.development_cycles ADD CONSTRAINT dev_cycles_campaign_owner_fk
  REFERENCES agent.campaigns(tenant_id,owner_user_id,id);
 CREATE TABLE agent.campaign_count_receipts (
  tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
- work_item_id uuid NOT NULL, criterion_version text NOT NULL,
+ work_item_id uuid NOT NULL, project_id uuid, dev_work_item_id uuid,
+ criterion_version text NOT NULL,
  cycle_id uuid NOT NULL, result_sha text NOT NULL,
  integration_head_sha text, integration_receipt_id uuid,
  counted_stage text NOT NULL, committed_at timestamptz NOT NULL DEFAULT now(),
@@ -1649,10 +1668,17 @@ CREATE TABLE agent.campaign_count_receipts (
  UNIQUE(tenant_id,campaign_id,work_item_id),
  FOREIGN KEY(tenant_id,campaign_id,cycle_id)
   REFERENCES agent.campaign_cycles(tenant_id,campaign_id,id),
- FOREIGN KEY(tenant_id,integration_receipt_id)
-  REFERENCES agent.development_integration_receipts(tenant_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id),
+ FOREIGN KEY(tenant_id,campaign_id,work_item_id,project_id,dev_work_item_id)
+  REFERENCES agent.campaign_work_items(tenant_id,campaign_id,id,project_id,dev_work_item_id),
+ FOREIGN KEY(tenant_id,project_id,dev_work_item_id)
+  REFERENCES agent.development_work_items(tenant_id,project_id,id),
+ FOREIGN KEY(tenant_id,project_id,integration_receipt_id)
+  REFERENCES agent.development_integration_receipts(tenant_id,project_id,id),
  CHECK(counted_stage IN ('VERIFIED','INTEGRATED','RELEASED')),
- CHECK((counted_stage <> 'INTEGRATED') OR integration_receipt_id IS NOT NULL)
+ CHECK((counted_stage <> 'INTEGRATED') OR
+       (integration_receipt_id IS NOT NULL AND project_id IS NOT NULL AND dev_work_item_id IS NOT NULL))
 );
 CREATE TABLE agent.campaign_quota_wait_receipts (
  tenant_id uuid NOT NULL, id uuid NOT NULL, campaign_id uuid NOT NULL,
@@ -1714,3 +1740,6 @@ DB-level `UNIQUE(tenant,campaign,work_item)` is count idempotency, not semantic-
 **DEV-DB-T07**: backup/restore and GC retain Review/Approval/Count immutable evidence, revoke transient grants.
 **DEV-DB-T08**: count receipt from other campaign/project cross-owner → rejected by composite keys and authorization.
 SQL above is **designed only** and has not been executed against PostgreSQL in this PR.
+
+**DEV-DB-T09**: A Campaign with Project A cannot count an integration receipt for Project B even under same Tenant; cross-project composite FKs reject it.
+**DEV-DB-T10**: A generic research Campaign without a Project uses a campaign-scoped logical work item and cannot smuggle a development integration receipt into its count.
