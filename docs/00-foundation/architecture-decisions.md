@@ -34,6 +34,7 @@
 | ADR-027 | PROPOSED | Sandbox/Browser/MCP/Generated Script/Memory由来のコンテキストはTrustTierを引き上げず、Sentinel/Gateway/Protected Serviceが権限を再検証する | 要約/Embedding済み文字列にPolicy/Approval権限を与える | CHAT_02/03/06/09/11; ACM-T04/T10/T14/T15 |
 | ADR-028 | PROPOSED | Context監査UIとsource確認/訂正/再構築のCommandsを版付きで定義し、Hard gatesをQuality gatesより優先してRelease判定する | 「精度99%」など無実測指標、Summary編集でGoal/Receiptを書換 | CHAT_08/11/02; ACM-T01〜T20 |
 | ADR-029 | PROPOSED | サーバーBrowser映像は唯一OwnerのWorker内でCaptureし、認証済み一方向Media relayを通じてTask ownerへ見せる。ObserveはAgent leaseを奪わず、Takeoverは別の短命ticket/排他権限。生frame非保存、機密/不明ページは全面遮断 | raw CDP/VNCを公開、SSEにframe混入、Observeを操作権限と混同、未知感度をmaskのみで安全扱い | CHAT_04/08/09/10/11; BLO-T01〜12, SC-23 |
+
 ## Cross-team conflict register
 | ID | Blocker | Required owner handshake | Closure evidence |
 |---|---|---|---|
