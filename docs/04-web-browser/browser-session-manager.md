@@ -216,6 +216,15 @@ BSESS-T16はFake Providerの遅延応答と2 worker raceを注入し、solve中�
 
 Browser WorkerがCDP/Context/Page/Sessionの唯一の所有者である方針をさらに強化。Untrusted Runtime CellのShell、Node/Playwright、生成Browser Skillsからの直接CDP/remote-debugging socketアクセスは不可。Cellにはopaque BrowserSessionIdと狭いBrowser Action APIのみを渡す。Browser Broker controllerはTrusted Control VM内、Chromium Browser Workerは**別の隔離実行ドメイン**に配置し、両者は独立したprocess/user/namespace、Secrets/Browser storageStateはCredential Broker管轄で、UI Human Handoffは別Owner lease。Chromium sandboxが本番で有効化できなければfail-closed; BrowserのWebSocket/iframe/download含む全外部通信はSentinelの許可を検証する**Enforced Egress Transport**で強制制御。SC-18/19/21/22。
 
+## 2026-11-07: Browser Live Observation（読み取り専用・非排他）
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のBLO-001〜012、SC-23を04-03のBrowserSessionに追加。Browser WorkerだけがContext/Page/CDPと内部Captureを所有し、Agent/Cell/クライアントにCDP・credentialを渡さない。Observeは独立した閲覧権限であり、**開始/視聴/終了でAGENT leaseをHUMANに変更しない**。frameごとにtenant/owner/task/session generation/page generation・revokeを再検証する。機密/不明ページは全面遮断し古い画像を捨てる。Handoff時だけ従来の排他leaseを使う。raw frameは揮発memoryのみで、障害時は画面だけ切断してAgent Runを続ける。テストはBLO-T01〜12（未実施）。
+
+
+## PR #71 P1再監査: BrowserSession Observe Admissionと復旧世代
+
+BrowserSessionのObserver新規許可条件は`mode=AGENT`・`takeoverPhase=NONE`・`observeBlocked=false`に限定し、Handoff要求を保存した瞬間に`observeAdmissionEpoch`を増分して新規`Create/Reconnect/Offer/WS/Tab/Send`を拒否する。Handoffの人間操作Ticketを有効化する前に旧Mediaの`REVOKED_BARRIER_COMMITTED`とTrack/Peer/Queue停止を待つ。Releaseは`HUMAN→RECLAIMING→AGENT`のCAS確定とWorkerのSession/Page再観測までObserve不可。`restoreIncarnation`をPR #72と同じDB独立世代から取得し、Media grant/Producer/Browser sessionと紐づけ、PITR旧Worker拒否。`BLO-013〜017`/`BLO-T13〜16`、`QA-E2E-T23F`に準拠（NOT RUN）。
+
 ## 2026-11-07 DEV-06: 開発用Browser Debug Sessionの追加提案（Draft）
 
-[Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。未マージのBrowser Live Observation PR #71への直接依存は置かず、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。
+[Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。マージ済みBrowser Live Observation PR #71のObserve-only権限を継承しつつ、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。

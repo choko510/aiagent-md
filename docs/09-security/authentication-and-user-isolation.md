@@ -131,7 +131,8 @@ type AuthenticatedPrincipal = Readonly<{
 type ResourceRef = Readonly<{ kind: string; id: string }>;
 type Action =
   | "read" | "create" | "modify" | "cancel" | "subscribe"
-  | "download" | "handoff" | "approve" | "manage_credentials";
+  | "download" | "handoff" | "approve" | "manage_credentials"
+  | "browser:observe"; // Live Viewer専用: generic read/subscribe/handoffとは独立
 interface AuthorizationService {
   requireAccess(p: AuthenticatedPrincipal, action: Action, resource: ResourceRef):
     Promise<AuthorizedResource>;
@@ -529,6 +530,17 @@ CHAT_01 PR #23 defines Domain Events for Task/Run/Watch/Tool/Approval/Evidence/N
 - Expected tests **designed only**: `AUTH-R3-T01` Task-less Watch Event from same tenant another owner →0 bytes; `AUTH-R3-T02` operator audit event in normal task stream→0 bytes; `AUTH-R3-T03` valid signed cursor then revoke membership→stream closes; `AUTH-R3-T04` cursor replay as other tenant/viewer/filter→deny, zero Event data.
 
 This is a scope-level proposal to support the existing canonical Event/DB/SSE design, not a claim of implemented runtime security. Cross-owner review and actual tests still required.
+
+
+## 2026-11-07: Browser Observe認可の正本 [PROVISIONAL, BLO-T01/T11/T13/T16]
+
+`browser:observe`を正式な`Action` unionとroute authorization mapに追加する。`read` / `subscribe` / `handoff` / `browser:takeover` /管理者ロール/Task Readからの暗黙授権は禁止。初期導入は**当該BrowserSessionのTask owner本人だけ**を許可し、委譲不可。将来の委譲は専用ACL・本人確認・明示Consent・失効可能なResource-scoped capability・Owner変更時のrekeyを含む別ADRで承認されるまで無効。
+
+AuthZは`(principal.tenantId, principal.userId, sessionId, taskId, task.currentOwnerUserId, browserSession.ownerUserId, browserSession.tenantId, currentTaskRun, sessionGeneration, pageGeneration, restoreIncarnation, observeAdmissionEpoch, authEpoch)`をTrusted DB/独立復旧Storeの正本で突合する。Client指定のuserId/tenantId/owner/roleを採用しない。`mode !== AGENT`、`takeoverPhase !== NONE`、Handoff Request受理後、Release確認前、Task Cancel/不活性、Worker復旧中、`observe_enabled=false`では`POST create`、`GET resource`、`Offer/ICE`、`WS Upgrade`、`Tab select`、**送信境界ごとのMedia delivery**をdeny。既存Observerもrevokeして送信Barriersを完成させる。
+
+Owner変化/ユーザー無効化/Logout/Session revoke/Auth権限改定/PITR後は`authEpoch`と`restoreIncarnation`を変更し、既存Grantを失効。Auth cacheやTLS/ICE接続維持を理由に生かさない。Media relayはAuth Providerへ到達不能時fail-closed。HTTPは401/404（非owner存在を秘匿）/409（本人のmode競合）を区別し、誰のBrowserかをエラーメッセージに書かない。`AUTH-BLO-T01`は同Tenant別owner/他TenantからどのMediaにも0byte、`AUTH-BLO-T02`は同owner TaskReadだけではObserve不可、`AUTH-BLO-T03`はOwner変更/Logout/Takeover/restoreの送信Barrier以降0新規frame、`AUTH-BLO-T04`はDelegate/Admin roleによる暗黙閲覧不可を検証（すべてNOT RUN）。
+
+文書上の既存`AuthorizationService.requireAccess`はここで新規Actionを明示的に型として扱う。実装では`browser:observe`の許可は再使用できる一般`AuthorizedResource`ではなく、各MediaSession世代/Viewerに紐づく一回限りのserver-only delivery grantであり、Grant自身からtakeover/approvalを発行できない。詳細: [Browser Live Observation `10](../08-interfaces/browser-live-observation.md#10-pr-71-再監査修正閲覧権限送信境界感度判定の正本案)。
 
 ## 2026-11-08 P1-07 — Development/Auth action registry extension (Provisional / NOT RUN)
 

@@ -29,6 +29,10 @@ def signed_int64(v: object) -> bool:
 def nonnegative_int64(v: object) -> bool:
     return signed_int64(v) and int(v) >= 0
 
+@checker.checks("positive-int64-decimal")
+def positive_int64(v: object) -> bool:
+    return signed_int64(v) and int(v) >= 1
+
 def validator(filename: str) -> Draft202012Validator:
     raw = json.loads((HERE / filename).read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(raw)
@@ -75,6 +79,12 @@ a = {
     "expiresAt":"2026-11-08T12:00:00Z","oneUseNonce":"nonce-1"
 }
 must_pass(admission,a,"server admission including int64 max")
+for value in ("1","9007199254740993"):
+    trial=copy.deepcopy(a);trial["goalRevision"]=value
+    must_pass(admission,trial,"positive revision "+value)
+for value in ("0","-0","-1","-9223372036854775808","+1"):
+    trial=copy.deepcopy(a);trial["goalRevision"]=value
+    must_fail(admission,trial,"nonpositive revision "+value)
 for key in ("runtimeProfile","leaseEpoch","policyDigest","limits","vmIdentity"):
     forged=copy.deepcopy(a);forged.pop(key)
     must_fail(admission,forged,"missing trusted key "+key)
@@ -96,6 +106,13 @@ forged={**e,"operation":"tcp.connect"}
 must_fail(external,forged,"raw internet tunnel")
 forged={**e,"args":"https://example.com"}
 must_fail(external,forged,"untyped args")
+for operation in ("http.read","connector.invoke","browser.action","notify.send","package.fetch"):
+    must_fail(external,{"operation":operation,"args":{},"requestId":"empty"},"empty "+operation+" args")
+for args in ({"method":"GET"},{"url":"http://example.com"},{"url":"https://example.com","method":"POST"}):
+    must_fail(external,{"operation":"http.read","args":args,"requestId":"bad-http"},"invalid read-only HTTP envelope")
+for operation,args in (("connector.invoke",{"connectorRef":"c","toolRef":"t","input":{}}),("browser.action",{"action":"snapshot"}),("notify.send",{"bindingRef":"b"}),("package.fetch",{"packageRef":"p"})):
+    must_pass(external,{"operation":operation,"args":args,"requestId":"positive"},"nonempty "+operation)
+# Broker Tool schema, Auth, DNS, policy and Transport checks are NOT part of this envelope test.
 
 print("PASS Muse schema/positive/negative tests: model vs admission, int64, broker envelope.")
 print("NOTE: runtime, transport, exfiltration and VM isolation remain NOT TESTED.")

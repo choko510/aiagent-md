@@ -27,7 +27,7 @@ ProducerのdemoManifestは`proposed`のみ、ユーザーが権限付きUIから
 Demoは本実装に近いコンポーネント構成、ルート・操作・主要レスポンシブ設計を実装。モック接続を実装済みAPIと誤認しない。承認済みDemoをscreenshot golden baseline/Interaction contractとして保存し、実装後にviewport別visual regression・アクセシビリティ・ユーザーフローとの一致を確認。微細な差分（font rendering等）と機能破壊差分を区別するthresholdは初期仮値で、false-positive fixtureで校正し、LLMによる「似ている」だけで合格にしない。
 
 ## 5. 分離/権限
-開発Previewは固定Project/Worktree/Revision/portのPreview Broker経由。Browser WorkerがPage/CDPを単独保持する。閲覧専用とモック環境限定demo:interactを別Capabilityとして区別し、端末へのraw CDP/secret/localhost bridgeを出さない。機密Browser takeoverは別の既存専有leaseで管理。Preview contentは攻撃者が変更可能な低信頼Webコンテンツとして扱う。Browser Live Observation (#71) が未mergeでも通常の静止画プレビューと受入APIは成立する。
+開発Previewは固定Project/Worktree/Revision/portのPreview Broker経由。Browser WorkerがPage/CDPを単独保持する。閲覧専用とモック環境限定demo:interactを別Capabilityとして区別し、端末へのraw CDP/secret/localhost bridgeを出さない。機密Browser takeoverは別の既存専有leaseで管理。Preview contentは攻撃者が変更可能な低信頼Webコンテンツとして扱う。Browser Live Observation (#71) の仕様はmainに存在するが、そのRuntime実装の有無にかかわらず通常の静止画プレビューと受入APIは成立する。
 
 ## 6. Tests
 DEV-DES-T01: 3案が同一fixture/content/viewport、画像クリックで正しい候補を選択。

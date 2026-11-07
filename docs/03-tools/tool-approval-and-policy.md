@@ -318,6 +318,17 @@ All cross-service `goalRevision`, `recordVersion`, `definitionRevision`, and `le
 
 **sandbox.execの起動許可はシェルによる外部リクエストやConnector操作の承認ではない。** Local process admission / concrete network egress Sentinel authorization / sensitive or irreversible Human Approval are distinct. Arbitrary shell HTTPS POST with unverifiable method/body/effect must not be classified read: deny or require a mediated trusted Connector with scoped exact approval. Tool Gateway retains Approval Record and Side-effect Ledger; Sentinel is final egress/Connector permission authority, never a second approval DB. All permissions bound to owner/Run/lease/goal/intent/destination/budget/policyEpoch and checked immediately before dispatch. Browser fill/click and CLI HTTP also count. SC-17/19/21/22。
 
+## 2026-11-07 再監査: 承認対象の永続Bindingと消費境界
+
+**CHAT_03/09/10横断の未Lock契約。** §5の `ApprovalBinding` と現状の `approval_records` の物理列が一致していないため、後者単独で承認を復元/再検証しない。immutable `approval_binding_snapshots` を新規forward migrationでTool Intentに結合し、既存承認は認証済みowner・Target・Goal/Policy版と完全照合できない場合 `REAPPROVAL_REQUIRED` として隔離する。
+1. Proposal時はTrusted Authからtenant/owner/requestingActor/expectedApproverを導出。Task・Run・immutable GoalRevision、Tool/Registry schema digest、canonical Args SHA、正規化method・origin・account/target digest・金額/通貨/fee、credentialBindingVersion・policyEpoch・期限を凍結する。ユーザーに表示する説明はこの凍結値から導出し、自然言語要約の変更によって対象を変更できない。
+2. Decisionは現在の認証済みApprover、保留中の同一Snapshot、期限、CAS recordVersion、Consentを確認し、単一決定を永続化。ApprovalIdの所持自体は権限でない。別User/変更後の金額・対象・認可・Goalに古いApprovalを流用しない。
+3. Dispatchは常に current Run claim/leaseEpoch・activeRun・GoalRevision・PolicyEpoch/credential version・Ownerおよび外部 `restoreIncarnation` を再評価。承認時leaseEpochは履歴情報で、再Claim後に新epochのWorkerが同じ承認を安全に消費することは許すが、旧Workerは拒否。
+4. `APPROVED→CONSUMED` は冪等な一回限りのGateway claimとして記録。外部送信の前にTool Intent/Side-effect Ledger、後に結果・UNKNOWNを記録し、ACK喪失時に同じ承認で盲目的再送しない。外部I/Oの間DB行ロックを保持しない。
+5. 既存レコードはexpand→authorized backfill→quarantine unknown→read-switch→contractで移す。古いApprovalを自動Approveに変換しない。DBの複合FKは必要条件に過ぎず、外部のauthenticated principal照合はアプリの必須検査。
+
+**受入（設計のみ/NOT RUN）**: 同Tenant別User承認、2件の同時決定、Goal/金額/対象/Policy変更、旧lease・旧restoreIncarnation、lost ACK、復旧後の不確定副作用、旧承認Backfillをすべて実DBとEnforced Transportで確認。静的SQL/FK検証だけで安全性を宣言しない。
+
 ## 2026-11-07 DEV: Design ConsentとTool Approvalの明確な分離（Draft）
 
-[Visual Design & Demo](../16-app-development/visual-design-and-demo.md) の「このデザインを採用」「このDemoで本実装」は人間の**要件合意**であり、この文書のApprovalRecord(不可逆外部Tool)に流用不可。ユーザーが`demoChoice=AUTO`を選んでもGit push/PR・release/deployment/本番API変更/購入/メール等を自動承認した意味ではない。Git Provider/Package Broker/Preview session/CI/Signing/Deploymentは各々versioned typed Tool Descriptorとimmutable Intent、effect classification、Sentinel final auth、Budget/Run fenceの検査を要求。事前に明示して許可した限定branch push/PR scopeは厳格なrevocable grantとして表現し、merge/force-push/production deploy権限へ拡大しない。UNKNOWN external effectはblind retry禁止。Chat/Browser/UIから渡すapproval digestをそのまま信じずTrusted serverが再計算。SC-25,29、DEV-UI-T03、DEV-BLD-T06..08。Draft/NOT RUN。
+[Visual Design & Demo](../16-app-development/visual-design-and-demo.md) の「このデザインを採用」「このDemoで本実装」は人間の**要件合意**であり、この文書のApprovalRecord(不可逆外部Tool)に流用不可。ユーザーが`designPolicy=AUTO_RECOMMEND`を選んでもGit push/PR・release/deployment/本番API変更/購入/メール等を自動承認した意味ではない。Git Provider/Package Broker/Preview session/CI/Signing/Deploymentは各々versioned typed Tool Descriptorとimmutable Intent、effect classification、Sentinel final auth、Budget/Run fenceの検査を要求。事前に明示して許可した限定branch push/PR scopeは厳格なrevocable grantとして表現し、merge/force-push/production deploy権限へ拡大しない。UNKNOWN external effectはblind retry禁止。Chat/Browser/UIから渡すapproval digestをそのまま信じずTrusted serverが再計算。SC-25,29、DEV-UI-T03、DEV-BLD-T06..08。Draft/NOT RUN。

@@ -24,7 +24,7 @@
 - 本章の `Project`, `DevelopmentCycle`, `DesignDecision`, `DemoBuild`, `ReviewFinding`, `Campaign` は**論理契約案**。Task/Run/Approvalに同名の別正本を作らず、ownerとtenantを必ずサーバー認証から解決する。各資源はsource/decision/approval/commitのimmutable lineageを保持する。
 - 全てのゲスト実行は独立 Untrusted Execution VM 内の Runtime Cell。Trusted Control VMにはAgent生成コードを置かず、host Shell/SSH/Docker socket/CDPへのアクセスを許さない。外部操作はGateway→Sentinel→Enforced Transportと個別ledgerを通す。[Sandbox Exec](../02-runtime/sandbox-execution.md)、[Runtime Cell](../09-security/runtime-cell-isolation.md)、[Sentinel](../09-security/sentinel-authority.md)を優先する。
 - 開発者用Previewと外部一般Browser操作を混同しない。認可された対象プロジェクトの実行サーバーだけへ明示的に接続し、任意LAN/管理ホスト宛て接続の抜け道を作らない。
-- [PR #71](https://github.com/choko510/aiagent-md/pull/71) のBrowser Live Observationは進行中の**別PR**。利用可能ならObserve-only UIとして連携するが、そのPRをマージ済みと仮定せず、CDPや実映像の公開を前提条件にしない。
+- [PR #71](https://github.com/choko510/aiagent-md/pull/71) のBrowser Live Observationは**mainへマージ済みのDraft仕様**。Observe-only UIと連携するが、実装・検証済みの映像配信、CDPや操作権限の公開を意味しない。
 
 ## 共通の完了定義
 Modelが「成功」と発言しただけで成功にしない。Goalに結び付いたコードのdiff、Git commit SHA、依存/ビルド環境digest、実行したテスト、ブラウザtrace、独立レビュー3件、P0/P1未解決0、ユーザー合意したDemo版と差分をVerifierで照合。未実行・不確定はPartial/Blockedと明示。機能追加数は**承認済み・実装・必須試験・レビューを通過した**distinct feature IDのみ数える。
@@ -45,4 +45,4 @@ Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resol
 - P1-03/04/10: [Feature Factory](feature-factory.md) and [Review Gates](review-and-repair-gates.md) require current integration HEAD and stable logicalWorkItem identity.
 - P1-05: [Campaign](../07-automation/endless-run-campaign.md) specifies Stop/Quota/CAS fences and receipts.
 - P1-06/07/08/09: DB/Auth/Event/QA and separate release gates are extended in their respective owner specifications and CI. The full app requirements are not implied by the initial 88-module static audit.
-- PR #71 and #72 are concurrent independent branches, not merged into this PR. Their impact is tracked at the end of [DEV-10](acceptance-and-rollout.md), and must be reconciled if either becomes main.
+- PR #71（Live Observation）と #72（Secure Runtime再監査）はmainへマージ済み。両者の契約を維持して本章を統合し、ProvenanceとCIを更新する。Owner合意・実機検証は依然として未完了。

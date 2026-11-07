@@ -35,7 +35,7 @@ type DebugFindingV1 = {
 承認済み [Demo Manifest](visual-design-and-demo.md) をbaselineに、同一viewport/theme/font/fixture/browser/runtime/animation状態を揃えたpixel+layout geometry+semantic assertions。差分しきい値/マスクは誤検知fixtureで校正し、意図しないUI変更を「改善」として自動承認しない。デザイン修正時だけ承認済みrevisionを更新。パフォーマンス改善も同一条件の前後実測が必要。
 
 ## Real-time debugging UX
-ブラウザ映像(可能な場合)、before/after画像、操作タイムライン、Console、Network、trace、DOM/ARIA、source path、再現ボタン、修正コミットへジャンプ。実映像は別PR [Browser Live Observation #71](https://github.com/choko510/aiagent-md/pull/71) の適用/検証後のみ依存。未mergeの間は静止画/trace上で成立。Observe-onlyとhuman takeoverを分け、閲覧がbrowser operation権限とならない。
+ブラウザ映像(可能な場合)、before/after画像、操作タイムライン、Console、Network、trace、DOM/ARIA、source path、再現ボタン、修正コミットへジャンプ。実映像は別PR [Browser Live Observation #71](https://github.com/choko510/aiagent-md/pull/71) の適用/検証後のみ依存。実映像のRuntimeが未実装でも静止画/trace上で成立。Observe-onlyとhuman takeoverを分け、閲覧がbrowser operation権限とならない。
 
 ## Security & remediation
 Preview Brokerは [DEV-05](build-preview-release.md) の専用認証routeだけ許す。本番DB/API/実支払/メール/削除/投稿に向けた破壊的操作は使い捨てfixture/mockで検査。Agent自動操作はBrowser Tool Gatewayと個別必要承認を通し、login handoff中は専有leaseを失う。診断はA8や専門サブAgentが担当可、修正・Git書込はA5 Builderに限定。修正前に再現シナリオを保存し、新SHAで不具合テスト+既存回帰を再実行。古いSHAのPASSでは解決としない。

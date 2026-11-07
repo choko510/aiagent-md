@@ -357,6 +357,15 @@ Release evidence: Git SHA, VM image digest, host & guest Kernel, LSM/seccomp/cgr
 
 速度と節約率はSafetyをすべて満たす場合のみ評価する。Fixture Version/Model/Tokenization/provider serializer/templateのRevision、Source original/projection hash、Policy/Consent、Scope/Memory Epoch、Killpointを固定して比較。CIで静的MarkdownがPASSしても実装試験/検証済みとは記載しない。T21〜36は実装コードがないためNOT RUN。
 
+## 2026-11-07: Browser Live Observation Release Gate（設計のみ）
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のBLO-T01〜12 / SC-23を追加。**Blocking gate:** 別Tenant/同Tenant別owner漏えい0、CDP/credential公開0、Observeに起因するAGENT lease喪失や入力操作0、機密/不明ページのframe送信0、revoke/cancel/worker交代後の旧frame送信0、raw frameの永続保存0、再接続の別Task誤表示0。**Live Viewer enabled**: BLO-T01〜11およびBLO-T13〜16・QA-E2E-T23P/N/Fが失敗/未実施ならViewer提供不可。**Live Viewer disabled**: BLO-OFF-T01〜03とT23OFFを必須とし、他のAgent releaseまでViewer未実施を理由にブロックしない。**性能評価:** 実機でLAN/WAN fps・p50/p95 end-to-end遅延、CPU/RAM、bandwidth、同時viewer、slow-clientのqueue長、Agent Browser actionのp95劣化を視聴OFF/ONで比較。5〜15fps・LAN p95 2秒は開発目標でSLAではない。現時点は`NOT RUN`。
+
+
+## 2026-11-07 PR #71再監査・追加Gate
+
+Media `REVOKED_BARRIER_COMMITTED`以降の新送出Packet/Frame 0件と、Client画面上の最終Frameクリアを**別の判定器**として検証。Takeoverが`HUMAN/HANDOFF_REQUESTED/RECLAIMING`の間のCreate/Offer/ICE/WS/Tab操作0件。機密SafePermitのorigin allowlist、SPA、iframe、canvas、動画、DOM変化、判定器故障で全面遮断。PITR後の旧`restoreIncarnation`のmedia grant拒否。ICE host/srflx/private IP candidate漏えい0、TURN-only強制と実ネットワークdenyを検査。配信内容のCrash/Core dump、Proxy、Mediaログ/Backup残留0。正常系はRead-onlyのサイトだけで構成し、デフォルトdenyを機能不良として緩めない。`BLO-T13〜16`をLive Viewer enabled gateへ追加（NOT RUN）。
+
 ## 2026-11-07 Autonomous Development/Endless Run quality gates（Designed / NOT RUN）
 
 [DEV-10](../16-app-development/acceptance-and-rollout.md) のDEV-REQ-01..13、[CAM-01](../07-automation/endless-run-campaign.md)のCAM-T01..11を受入集合へ追加。P0/P1 gate: 最新commit SHAに対し3独立Reviewerの実際のReceiptがある、合格したテストが同一SHA+ImageDigest+FixtureDigest+DesignRevisionにbind、P0/P1 OPEN/UNVERIFIED=0、Demo承認未失効、Browser Debugで主要フローを実際に操作・再検証、隔離/秘密の負例成功0。Skipped/unsupported/unknown/Tool effect uncertainは合格でなくPartial/Blocked。Endless Campaignは各Cycleの結果・費用・件数を再起動後も持続、Stopの前後に新dispatch0、unknown usageを0計上0、Provider429 busy loop0、重複10件カウント0。Provider quotaの実日時・機能検証はOperator環境で記録し、未実測SLOを宣伝しない。

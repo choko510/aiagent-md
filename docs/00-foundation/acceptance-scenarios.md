@@ -88,9 +88,19 @@ Input: 悪意あるHTML/PDF/メールがShell実行、資格情報の流出、Se
 
 **全SC-17..22にpositive/negative/fault injection、実際のVM・kernel・ネットワーク強制の証拠が必要。設計テストを実行済み扱いしない。**
 
+## SC-23 Server Browser Live Observation（設計のみ、未実施）
+
+Given: 認証済みUser AのTask/RunがBrowser WorkerのSession Sでnavigate/click/scrollを実行。User Bは同Tenant別owner、User Cは別Tenant。TaskはAgentが継続処理中。
+
+When: AがWebダッシュボードTask詳細で「ブラウザをライブ表示」を開始、Tabを選び、停止/再接続。Worker kill、revoke、Logout、Task cancel、機密/感度不明なログイン画面、TakeoverとRaceを注入。
+
+Expected: Aが安全なBrowser画面のリアルタイム変化を観察できる。Observe中のAIは停止せず、閲覧経路にマウス/キーボード制御なし。B/Cへframe 0byte。機密/未知ページは全面ブロック、旧frameも消去。ObserveだけでHuman Takeoverや外部Approvalは許可されず、明示Takeover時のみ排他leaseでAIを止める。失効/再起動/旧Tab由来frameを拒否。録画/永続保存は行われない。映像の切断・停止はRunのCancelではない。
+
+Negative: public CDP/VNC公開、許可なき録画、別Task/別Tenantのframe、古い映像の貼り付き、Mask不十分なSecret映像、SSEへのraw frame、Observe→Takeover権限昇格。BLO-001〜017 → BLO-T01〜16 / BLO-OFF-T01〜03 → SC-23。詳細: [Browser Live Observation](../08-interfaces/browser-live-observation.md)。
+
 ## 2026-11-07 Autonomous App Development / Endless Run (SC-24〜31, Designed / NOT RUN)
 
-SC-23は別PR #71のBrowser Live Observation用に予約。DEVとCAM仕様の正式番号は当該PRの統合時に追跡性を再確認。
+SC-23はマージ済みPR #71のBrowser Live Observationとして登録済み。DEVとCAM仕様の正式番号は当該PRの統合時に追跡性を再確認。
 
 ### SC-24 8AIによる開発
 Input: 「Webアプリを考えて作り、検証してPRにして」。Expected: 3独立提案と1統合・1Builder・3同SHAの独立Reviewer、テスト/差分/実Commit、P0/P1未解決0。Negative: 2提案を3提案と表示、他SHA reviewerによる合格、未実行テストを成功扱い。

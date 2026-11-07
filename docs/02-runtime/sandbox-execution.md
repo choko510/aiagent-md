@@ -129,6 +129,13 @@ Workspace restore verifies a signed manifest of file hashes, provenance, owner s
 
 EXEC-T13: Agent provides server-only keys in Proposal => DENY. EXEC-T14: raw curl/CONNECT to Internet => denied; typed broker http.read succeeds. EXEC-T15: forged Execution/broker token/replay of scoped action => denied. EXEC-T16: offline staged pip/npm works but lifecycle network is denied. EXEC-T17: Pause/Steer/Cancel kills descendants/revokes grants, effect remains UNKNOWN when sent. EXEC-T18: exact typed Connector write has its own persisted Intent/Approval/Sentinel/Transport receipt.
 
+## 2026-11-07 再監査: Admission整数値域とBroker二段階検証
+
+- `SandboxExecutionAdmissionV1.goalRevision` は正整数 `1..INT64_MAX`。旧 `signed-int64-decimal` だと0/負数が通るため、Schemaの `positive-int64-decimal` + `^[1-9][0-9]*$` とFormatCheckerの上下限を併用する。Run `leaseEpoch` / `workspaceRevision` は0許可の別型のまま。別言語実装でも同じ値域を契約試験で検証する。
+- `ExternalActionProposalV1` は信頼しない子RPCの外側Envelope。空argsを禁止し、`http.read` ではHTTPS URLと省略またはGET/HEAD methodのみを最低限検査する。ただしこれは**送信許可ではない**。`connector.invoke`・`browser.action`・`notify.send`・`package.fetch` を含め全操作で、Trusted Brokerは必ずregistry generation/digestでpinした**操作別Tool Schema**、現在のOwner/Run/Scope、予算/Approval、SentinelとEnforced Transportを再検証する。未登録のArgs Schemaは外部送信0・UNSUPPORTED_OPERATION。
+- URLに「https://」があるだけで公開宛先とは断定しない。リダイレクト・DNS・実送信先・本体/ヘッダ・機密データ分類はBroker/Sentinelの専有する独立判定。Envelope検証PASS/Policy ALLOW/Transport送信/外部効果の確定を混同しない。
+- **Designed / NOT RUN:** revision 0/-1/overflowを拒否、max int64を許可、空argsとhttp.read POST/plain HTTPを拒否。未知fieldや未登録Tool別argsのBroker側拒否、実Socketの禁止は別途integration/security試験が必要。
+
 ## 2026-11-07 DEV-05/06: Build/PreviewはCell Shellの権限ではない（Draft）
 
 コード生成・依存インストール・ビルド・Testは本仕様のUntrusted VM sandbox.exec。Git provider/Package Broker/Preview Broker/Deployment等の**外部操作は子プロセスを含め別個のtyped Tool Intent**とし、Sentinel/Transportとeffect ledgerを必ず通す。モデルがrun image/port/runtimeProfile/host bridge/policyを指定して権限を得ることを拒否。初期Web/APIのToolchainはoffline staged; GradleやAndroid/Flutterなどのビルド時の暗黙fetchはBrokerで封じ、対応しない環境はUNAVAILABLEと明示。長時間Previewは独立した有限Execution+WorkspaceRevisionにbindして実行し、Task終了後無許可で生き続けない。Previewの外部からの閲覧は [DEV-05](../16-app-development/build-preview-release.md) の専用認証routeのみ、一般TCP・RAW CONNECT・LAN・CDP直通不可。DEV-BLD-T01..08/SC-29を所有者レビュー待ちの隔離受入試験に加える。

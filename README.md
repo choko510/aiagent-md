@@ -63,6 +63,10 @@ LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き�
 
 Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。
 
+## サーバーブラウザのライブ閲覧（追加設計、未実装）
+
+[Browser Live Observation](docs/08-interfaces/browser-live-observation.md) は、Agentがサーバー上で操作するBrowser画面をWeb管理画面から閲覧するための補足仕様です。見るだけのObserveはAgentを停止せず、入力操作は従来のHuman Takeoverへ明示的に切り替えます。認証/セッション隔離、機密画面の全面遮断、映像非保存、WebRTCまたは認証済みWebSocket、SC-23/テスト案を含みます。既存88件の正本モジュール数は変えません。現在はDraftで本体コード・映像配信はありません。
+
 ## 自律アプリ開発・Endless Run（2026-11-07 新規仕様案）
 
 本Harnessは汎用機能を維持したまま、**自然言語からのソフトウェア設計・実装・デバッグ・レビュー・GitHub PR**を扱う追加開発ワークスペースを提案します。[仕様索引](docs/16-app-development/README.md)。

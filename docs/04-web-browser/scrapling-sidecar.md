@@ -27,7 +27,7 @@ Runtime→Tool Gateway→HTTP Fetch/ArtifactStore→Python Sidecar RPC (Selector
                                    BrowserWorker Playwright owns tabs; Scrapling MCP dynamic session is NOT canonical
 ```
 
-[PROVISIONAL: CHAT_01/02/09/10] 公開IDのUUIDv7、`Task.conversationId: null`、`recordVersion`初期値1とDB `revision`初期値0、Run `leaseEpoch` number vs bigint/DB未保存、`tenantId/ownerUserId` vs `workspace_id`の不一致を解消する。独自のDB Schema・共有Error/Eventを再定義しない。認証済みTask ownerと有効なRun/BrowserSession fenceは**各外部呼出し前後**に確認。Session IDは偶然似た文字列でも別領域で区別する。
+[PROVISIONAL: CHAT_01/02/09/10] 公開IDのUUIDv7、`Task.conversationId: null`、`recordVersion`初期値1と`Run.leaseEpoch`の現行DB列はCHAT_10で設計上修正済み（旧Round1の不一致は履歴）、`tenantId/ownerUserId`と`workspace_id`の認可済み写像を実装・実DBで検証する。独自のDB Schema・共有Error/Eventを再定義しない。認証済みTask ownerと有効なRun/BrowserSession fenceは**各外部呼出し前後**に確認。Session IDは偶然似た文字列でも別領域で区別する。
 
 ## 4. Requirements
 
@@ -157,3 +157,7 @@ P0契約未LockedのためDraft維持。
 ## 2026-11-07 Muse移行: ParserとGenerated Script境界
 
 Scrapling/Python Sidecarの内容抽出は引き続き非信頼Web入力を扱う制限付き処理。Agentが追加のPython Scraperを作成する場合は別Sandbox Exec/Runtime Cellとして実行し、ホストPythonやProtected Connector内へ昇格させない。ブラウザCDPはBroker所有、あらゆる外部接続はSentinelで強制評価。Generated ScraperのstdoutはEvidenceではなくArtifact候補で、出典/時刻/検証が必要。SC-17/19/22。
+
+## 2026-11-07 再監査: 現行DB契約の参照
+
+冒頭§3に残るUUIDv4 DB default・recordVersion初期0・Run leaseEpoch未永続化の差分はRound1の歴史的記録。現行CHAT_10案は論理上修正済みだが、Owner/Workspaceの認可と実Runtime/Browser/Parser/Transportの負試験は未実施。旧注記を現在のP0と誤認せず、現行Shared Contractと未検証のテスト結果を分離する。

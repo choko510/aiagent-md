@@ -1542,6 +1542,57 @@ model_dispatch_admissions(
 
 **Test suite**: ACM-T22〜25,27,30〜32,36。二つのModel GatewayとMemory Writer100並列、Snapshot commit→HEAD CAS Killpoint、GCとretention race、MAY_HAVE_SENT、CrossTenant ownership、Provider change Consent。物理実行0。
 
+## 2026-11-07 再監査: Approval BindingとRestore FenceのForward Migration契約案（未適用）
+
+以下は**将来の新しいversioned migrationの候補**であり、既存の適用済み`0001〜0003`、そのchecksumを編集しない。提案SQLのため現時点で本番DDLが存在することも統合試験が成功したことも意味しない。CHAT_01/02/03/09/10/11の正式合意が必要。
+
+```sql
+-- PROPOSED 0004+ FORWARD MIGRATION ONLY; NOT EXECUTED
+CREATE TABLE agent.approval_binding_snapshots (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL,
+  tool_intent_id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
+  requesting_actor_ref text NOT NULL,
+  expected_approver_ref text NOT NULL,
+  task_id uuid NOT NULL, run_id uuid NOT NULL,
+  goal_revision bigint NOT NULL CHECK (goal_revision BETWEEN 1 AND 9223372036854775807),
+  lease_epoch_at_proposal bigint NOT NULL CHECK (lease_epoch_at_proposal >= 0),
+  tool_key text NOT NULL, tool_revision text NOT NULL,
+  registry_schema_digest char(64) NOT NULL,
+  args_sha256 char(64) NOT NULL,
+  target_digest char(64) NOT NULL,
+  policy_epoch text NOT NULL,
+  credential_binding_version text,
+  amount_currency text, amount_minor_units bigint,
+  expires_at timestamptz NOT NULL,
+  binding_digest char(64) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id,id),
+  UNIQUE (tenant_id,tool_intent_id,id),
+  FOREIGN KEY (tenant_id,tool_intent_id)
+    REFERENCES agent.tool_intents(tenant_id,id),
+  FOREIGN KEY (tenant_id,owner_user_id)
+    REFERENCES agent.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,task_id,run_id)
+    REFERENCES agent.runs(tenant_id,task_id,id),
+  CHECK ((amount_currency IS NULL) = (amount_minor_units IS NULL))
+);
+-- Proposed forward ALTER: approval_records.binding_snapshot_id uuid NULL;
+-- Add composite FK (tenant_id,tool_intent_id,binding_snapshot_id)
+-- referencing agent.approval_binding_snapshots(tenant_id,tool_intent_id,id).
+-- Authenticated legacy backfill; UNKNOWN/ambiguous binding must be REAPPROVAL_REQUIRED.
+-- After successful read-switch, live approvals require NOT NULL binding_snapshot_id.
+```
+
+Approval Decisionのauthenticated principal / fresh IdentityVersion / CAS / single-use consumeとCurrent Goal/Policy/lease/RestoreIncarnationはTrusted Serviceが保証する。FKのみで本人性や送信権限を証明しない。Secretを含むRaw ArgsはDB列ではなく専用Secret/Artifact境界で管理し、Digest・暗号化Refとユーザーに表示する安全なtarget summaryを別管理する。
+
+`restore_incarnation` は**PITR対象DB以外のOperator信頼ストア**で厳格に前進し、復旧前旧Workerの同じleaseEpochが再使用されても権限にならない。DB内の世代値は参照・監査用の投影にすぎない。外部Transport/Browser/Notification/Model dispatchが独立世代の最新値を検証できない限り再開禁止。古い送信が成功済みかUNKNOWNなら照合なし自動再送禁止。
+
+ContextManifest/ModelRequestSnapshot/Execution/Workspace、MemoryScopeEpochの物理DDLは別の提案中であり、本提案だけでそれらが移行済みにはならない。
+
+**Designed / NOT RUN:** DB-APV-R01〜R08＝cross-owner、金額/target/goal revision変更、同時consume、expired policy、旧restore generation、legacy incomplete approval隔離、外部ACK lost、旧migration checksum不変。DB複合FK + Auth principal + 実Gateway/Transportを連動検証する。
+
 ## 2026-11-08 DEV/CAM P1-06 — Physical persistence and migration proposal (NOT APPLIED)
 
 This section is an **additive forward migration candidate** for the new logical resources DEV-01..10/CAM-01. It is not a claim that migration files, a production database, or those services already exist. CHAT_01/07/09/10 must agree on states/IDs and tenant-owned behavior before locking. Never edit checksums of applied 0001..0003; if the deployment already used a number, allocate the next unused version with a checksum-bound migration runner.

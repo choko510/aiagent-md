@@ -111,7 +111,7 @@ Initial provisional finite gates: 24 model turns, max60 Tool proposals, 30-minut
 
 ## 11. DB/transaction/migration [PROVISIONAL: CHAT_10]
 Append-only result_verification (proposal; CHAT_10 owns DDL) keyed runId/goalRevision/evidenceManifestHash/verifierVersion; terminal result CAS when Run leaseEpoch and Task current revision agree. Evidence artifact remains immutable even if stale; UI labels stale instead of overwrite.
-Task recordVersion init1 vs current SQL revision default0, public UUIDv7 vs SQL gen_random_uuid(), nullable Task.conversationId vs SQL NOT NULL, Run.leaseEpoch/Task.activeRunId missing from SQL: cross-team blockers, not silently fixed by planner. At every commit use CAS by latest Run leaseEpoch + task recordVersion and store Event/Outbox atomically; retry only transactional writes, never foreign effects.
+**Current contract (supersedes historical Round1 conflict):** CHAT_10現行DB案はtrusted UUIDv7, nullable Conversation, recordVersion initial 1, persisted Run leaseEpoch and Task activeRunId/GoalRevisionを設計上整合させた。なおShared契約は未Locked、実Postgres/Runtimeテスト未実施。全commitで現在のRun leaseEpoch + Task recordVersion + owner/GoalRevisionのCASを確認し、Event/Outboxを同じTXに保存する。送信済みか不明な外部副作用をblind retryしない。
 
 ## 12. API/UI [PROVISIONAL: CHAT_08]
 Show claim table with criterion, exact source URL, observation age, confirmed/conditional/estimated and reason for uncertainty. A 0-result hotel search is not silently broadened. Mobile/Telegram shorten presentation but preserve evidence IDs.

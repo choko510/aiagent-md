@@ -89,7 +89,7 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 
 `DEV-REQ-11` from the earlier table is now interpreted as **distinct current-INTEGRATED feature count by default**, not branch-only VERFIED count; this explicitly supersedes earlier wording. `DEV-REQ-07` additionally binds triple review and required tests to combined integration SHA when target head moves. No independent merge/production deployment is authorized by accepting a Demo.
 
-**Integration with in-flight PRs #71/#72:** As of the audit's HEAD, PR #71 and #72 were parallel to this branch and overlap Browser/REST/Sentinel/Sandbox/Provenance. This PR neither cherry-picks nor assumes they have merged. Before merging #73 after either, rebase on new main and recompute `audit/muse/spec-provenance.json` from **actual Git blob SHAs**; rerun both baseline audits and the new Development-spec audit. Resolve ADR-029/SC-23 from #71 and preview/Live Viewer privileges separately. #72 has precedence for secure-runtime common-contract reconciliation; no unreviewed trust-boundary relaxations accepted.
+**Integration with merged PRs #71/#72 (2026-11-08):** PR #71とPR #72はmainへ統合済み。本PRは両者のBrowser/REST/Sentinel/Sandbox/Provenanceの最新契約を保持してmergeし、88正本とCOMP-01のGit blob SHAを実際の統合treeに合わせる。ADR-029/SC-23のLive Observationは維持し、Preview/Live Viewer権限を混同しない。#72のSecure Runtime再監査で追加されたSentinel/Tool承認・フェンシング要件を優先し、信頼境界は緩和しない。
 
 **Verification label:** Static contract checks can be PASS while all VM, Browser, DB, concurrent execution and real feature tests remain **NOT RUN**. This addendum is an implementation plan and testable interface proposal, not a claim of Owner consensus or runtime correctness.
 

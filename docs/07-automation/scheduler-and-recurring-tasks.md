@@ -479,3 +479,7 @@ Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string*
 ## 2026-11-07: 無人ジョブのSecure Runtime制約
 
 従来のWatchの価格比較/差分検出は可能な限り決定的Workerで実行し、AgentやSandbox Execが不要なら起動しない。自律コード・生成Skillsを使う定期ジョブは都度独立した有限Run/ExecutionとしてVM/Cell Admission・Sentinel強制Egress・TaskBudgetを再評価する。過去のApproval/ネットワークGrantを無期限に使いまわさず、Watchの削除/停止/permission revokeが新プロセス生成を阻止。夜間の自律発掘でもホストShellやPrivate LANにアクセスさせない。SC-17/19/21。
+
+## 2026-11-07 再監査: Round2履歴と最新Queue/DB契約
+
+§18のC07-01〜06は2026-10-30時点の**歴史的差分表**であり、UUIDv4 DB defaultやRecordVersion0を現在の実装要件として再導入しない。現行CHAT_10案では設計修正済みだが、本番でのmigration/Run CASは未検証。現在必要なのは `tenantId / ownerUserId / workspaceId` の独立認可、Occurrence unique + Outbox同一TX、int64 lossless lease/relay fence、復旧時の `restoreIncarnation`、期限切れ同意の再照合と実DB Fault試験である。旧表が現在の正本を上書きしない。

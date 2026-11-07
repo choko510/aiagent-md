@@ -33,6 +33,7 @@
 | ADR-026 | PROPOSED | 長時間Taskは複数有限Run/Watchを原本に接続し、鮮度とsource identityで必要情報のみ再取得。子Taskにはtyped Handoffと出典付きChildResultだけを共有 | 無期限Single Run、全History+Secretsを子Taskへコピー、子Agentの自称完了で成功 | CHAT_01/02/03/07/09/10; ACM-T11/T12/T17/T20 |
 | ADR-027 | PROPOSED | Sandbox/Browser/MCP/Generated Script/Memory由来のコンテキストはTrustTierを引き上げず、Sentinel/Gateway/Protected Serviceが権限を再検証する | 要約/Embedding済み文字列にPolicy/Approval権限を与える | CHAT_02/03/06/09/11; ACM-T04/T10/T14/T15 |
 | ADR-028 | PROPOSED | Context監査UIとsource確認/訂正/再構築のCommandsを版付きで定義し、Hard gatesをQuality gatesより優先してRelease判定する | 「精度99%」など無実測指標、Summary編集でGoal/Receiptを書換 | CHAT_08/11/02; ACM-T01〜T20 |
+| ADR-029 | PROPOSED | サーバーBrowser映像は唯一OwnerのWorker内でCaptureし、認証済み一方向Media relayを通じてTask ownerへ見せる。ObserveはAgent leaseを奪わず、Takeoverは別の短命ticket/排他権限。生frame非保存、機密/不明ページは全面遮断 | raw CDP/VNCを公開、SSEにframe混入、Observeを操作権限と混同、未知感度をmaskのみで安全扱い | CHAT_04/08/09/10/11; BLO-T01〜12, SC-23 |
 
 ## Cross-team conflict register
 | ID | Blocker | Required owner handshake | Closure evidence |
@@ -88,4 +89,4 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | **ADR-033** | 分離Preview Broker→独立Browser WorkerでConsole/Network/Trace/Visual regressionと安全なE2E。PR #71はoptional observe layer | localhost/任意TCP raw proxy、Cell直接CDP、private IP allowlistを一律緩和 | CHAT_03/04/09/10/11 pending。Bridge SSRF/secret試験必須 |
 | **ADR-034** | 永続Campaignはbounded Cycleを成果物で連鎖。10件等のprogressはVerified distinct receipt。停止/Quota/費用上限はハードゲート | 無制限1 Run、空tickごとにModel呼出し、Unknown課金をゼロ、承認待ちで全タスクを停止 | CHAT_01/02/07/08/09/10/11 pending |
 
-`ADR-029` は別PR #71のBrowser Live Observation用に予約されている。**本PRはそのPRのマージを前提としない**。Shared schema・外部Provider API・実際のKVM/Preview/Browserテストが揃うまで各ADRは採用候補でありLOCKEDと呼ばない。
+`ADR-029` はマージ済みPR #71のBrowser Live Observation仕様。ADR-030〜034はそのObserver/Takeover権限分離を継承する。Shared schema・外部Provider API・実際のKVM/Preview/Browserテストが揃うまで各ADRは採用候補でありLOCKEDと呼ばない。

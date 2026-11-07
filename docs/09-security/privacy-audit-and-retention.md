@@ -395,3 +395,12 @@ Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string*
 - **Retention**: Manifest/ContextCache/Sealed Snapshot/Derived Artifact/Backup/Indexの全派生へのpurge・key shred・revocation watermarkを追跡。合法保存中のSourceでも所定の保持期限切れでread-by-locatorをdenyする。
 
 Acceptance: ACM-T24/25/27/29/30/32。未実装、Owner CHAT_09/10/11 review必須。
+
+## 2026-11-07: Browser Live Observation — 機密画面と非保存
+
+[Browser Live Observation](../08-interfaces/browser-live-observation.md) のvideo frameはユーザーによる明示起動時だけ生成し、揮発bufferを除いて保持しない。DB、Log、Artifact/Evidence、SSE、Trace、Backup、Analytics、Crash dumpへのraw frame保存を禁止。権限はtenant/owner/task/session/page世代に縛り、配信中もrevokeを監視する。Password/OTP/決済/個人情報/iframe/canvas等の機密または不明なページはDOM input maskingだけでは漏えいを防げないため**frame全面遮断**し、最後のframeも非表示にする。Auditは開閉/拒否/byte数等の内容を含まないmetadataのみ。Takeover用操作relayと異なる閲覧権限、録画無しを規範化。BLO-T01/05/06/08/11、SC-23（未実行）。
+
+
+## 2026-11-07 PR #71 P1追加: Privacy Permit失効とCrash dump
+
+安全判定は`(origin/route, pageGeneration, frameTreeGeneration, sensitivityPolicyEpoch, restoreIncarnation)`に結び、Allowlistに入っていないサイト・見分けられないcanvas/iframe/動画/OTP/Payment/SPA mutationは全面`PRIVACY_BLOCKED`。Capture前後でDOM/route再観測と送信直前のPermit検証ができない場合も全面遮断。初期MVPは明示的に安全と確認したデモ/合成コンテンツだけで有効化する。Core dump/Heap dump/Swap/Proxy body logging/Backup/Browser persistent cacheを無効にする運用検査がBLO-T08/T15の一部。敏感な画面の可視化を安易に広げない。詳細: [BLO `10](../08-interfaces/browser-live-observation.md)。
