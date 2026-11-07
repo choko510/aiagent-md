@@ -40,6 +40,10 @@
         },
         "fault": {
           "id": "QA-E2E-T24F",
+          "setup": "Kill one of A1-A3 after storing only a partial proposal",
+          "action": "Restart coordinator and attempt A4 join",
+          "oracle": "Missing child is retried or marked partial, never counted as a third valid proposal",
+          "forbidden": "A4 silently fabricates a third completed proposal",
           "evidenceRefs": []
         }
       }
@@ -81,6 +85,10 @@
         },
         "fault": {
           "id": "QA-E2E-T25F",
+          "setup": "Restart Browser Worker after interactive mock session issued a scoped capability",
+          "action": "Attempt stale-generation form entry then resume with new capability",
+          "oracle": "Stale action denied and new synthetic session cannot access external application data",
+          "forbidden": "Old demo capability revives on Browser Worker restart",
           "evidenceRefs": []
         }
       }
@@ -122,6 +130,10 @@
         },
         "fault": {
           "id": "QA-E2E-T26F",
+          "setup": "Expert provider returns 429 just after reserved token budget was committed",
+          "action": "Retry routing with current quota wait and held usage receipt",
+          "oracle": "Provider request is bounded, uncertain usage retained, no blind fallback to forbidden provider",
+          "forbidden": "Same prompt resubmitted repeatedly without quota/budget check",
           "evidenceRefs": []
         }
       }
@@ -155,14 +167,18 @@
         },
         "negative": {
           "id": "QA-E2E-T27N",
-          "setup": "browser worker crashes midtrace",
-          "action": "reclaim workflow",
-          "oracle": "incomplete test not PASS, no double side effect",
-          "forbidden": "raw HAR credential leak",
+          "setup": "Playwright locator click succeeds but UI state unchanged",
+          "action": "Ask verifier to report success from click status",
+          "oracle": "Verifier returns FAIL with missing expected state transition",
+          "forbidden": "Click returned success is treated as user-goal success",
           "evidenceRefs": []
         },
         "fault": {
           "id": "QA-E2E-T27F",
+          "setup": "Browser Worker crashes during evidence recording for an API500 flow",
+          "action": "Recover fixture state, restart scenario and correlate source traces",
+          "oracle": "Incomplete trace remains unknown until re-executed, old logs not treated as passed",
+          "forbidden": "Partially collected HAR with credential is sent to model",
           "evidenceRefs": []
         }
       }
@@ -196,14 +212,18 @@
         },
         "negative": {
           "id": "QA-E2E-T28N",
-          "setup": "another feature merged changes integration HEAD",
-          "action": "run integration gate",
-          "oracle": "must re-review combined HEAD before count",
-          "forbidden": "stale branch-only verification",
+          "setup": "Three reviewer receipts exist on an outdated feature SHA",
+          "action": "Attempt release on a changed integration HEAD",
+          "oracle": "Release blocked until new combined-head test and review evidence",
+          "forbidden": "Old-SHA review reused as current verification",
           "evidenceRefs": []
         },
         "fault": {
           "id": "QA-E2E-T28F",
+          "setup": "Another feature changes the integration HEAD after A6/A7/A8 reviewed feature SHA",
+          "action": "Attempt to count feature against new combined HEAD",
+          "oracle": "All combined-head required regression and independent review receipts are refreshed",
+          "forbidden": "Feature counted only on old branch review SHA",
           "evidenceRefs": []
         }
       }
@@ -237,14 +257,18 @@
         },
         "negative": {
           "id": "QA-E2E-T29N",
-          "setup": "Stop/revoke during open websocket connection",
-          "action": "verify stream lease revocation",
-          "oracle": "old WS closes, no protected network bytes",
-          "forbidden": "internal network or CDP access",
+          "setup": "Adversarial preview content issues Host rebind, IPv6 literal and arbitrary WS upgrade",
+          "action": "Try reaching another Project / metadata / CDP under an old origin",
+          "oracle": "Every attempt denied before egress, no privileged credential exposed",
+          "forbidden": "Raw TCP CONNECT succeeds to protected service",
           "evidenceRefs": []
         },
         "fault": {
           "id": "QA-E2E-T29F",
+          "setup": "Authenticated preview WS/HMR stream is active when preview session and policy are revoked",
+          "action": "Commit revoke, close stream, attempt cross-port and old-origin reconnect",
+          "oracle": "Established socket is terminated, no bytes after lease rejection, all reconnects denied",
+          "forbidden": "Old streaming socket bypasses revocation policy",
           "evidenceRefs": []
         }
       }
@@ -278,14 +302,18 @@
         },
         "negative": {
           "id": "QA-E2E-T30N",
-          "setup": "STOP concurrent with provider 429 and worker wake",
-          "action": "reconcile quota wait and stop",
-          "oracle": "one recorded transition, no busy loop",
-          "forbidden": "duplicate count or unauthorized cost",
+          "setup": "Duplicate logical feature outcome emitted from two different Cycle SHAs",
+          "action": "Commit two count receipts for one logicalWorkItemId",
+          "oracle": "Database unique key rejects second count, total remains one",
+          "forbidden": "Duplicate work item counted by commit SHA",
           "evidenceRefs": []
         },
         "fault": {
           "id": "QA-E2E-T30F",
+          "setup": "A campaign STOP and a child-dispatch transaction race at the same controlVersion",
+          "action": "Linearize STOP and attempt stale quota wake / child model admission",
+          "oracle": "One control transition, after STOP no new admission and already sent effect classified UNKNOWN",
+          "forbidden": "New child started after STOP commit with stale controlVersion",
           "evidenceRefs": []
         }
       }
@@ -319,14 +347,18 @@
         },
         "negative": {
           "id": "QA-E2E-T31N",
-          "setup": "integration merge conflict after approved branch reviews",
-          "action": "retest combined HEAD and count",
-          "oracle": "no completed milestone until integrated reviews pass",
-          "forbidden": "stale HEAD counted twice",
+          "setup": "Ten Demo-approved features independently reviewed on ten branches but no integration",
+          "action": "Attempt to mark campaign TARGET_REACHED on verified branch receipts",
+          "oracle": "Default integrated feature progress is zero, not ten",
+          "forbidden": "Unmerged isolated branches counted as deployed app features",
           "evidenceRefs": []
         },
         "fault": {
           "id": "QA-E2E-T31F",
+          "setup": "Concurrent merges of two individually verified feature branches modify same API and Project HEAD",
+          "action": "Rebase and re-test integration HEAD with faults injected",
+          "oracle": "Unmerged branch and stale integration receipts are not counted; new combined-head tests required",
+          "forbidden": "Two branch-level tests reported as two integrated features",
           "evidenceRefs": []
         }
       }
