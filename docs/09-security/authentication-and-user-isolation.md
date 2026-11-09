@@ -108,7 +108,7 @@ SSO/OIDC、組織共有、ゲストリンク、公開APIキー発行、外部ユ
 | AUTH-024 | SHOULD | 高危険操作/資格情報・通知先変更で再認証し、可能ならWebAuthn/PasskeyまたはMFAを備える | 08 |
 | AUTH-025 | SHOULD | PostgresでRLSと専用最小権限DB roleを追加し、アプリ認可の防御層を増やす | 06,08 |
 | AUTH-026 | LATER | 招待、他者との共有、Org RoleとResource ACLを独立ADRのもとで実装する | 06 |
-| AUTH-027 | EXPERIMENT | Better Auth adapterを導入しDBセッション失効、CSRF/Origin、proxy/TLS、Fastify/Next.js共存を試験 | 08 |
+| AUTH-027 | EXPERIMENT | （2026-11-09: 分類C）Python-first後のAuthProvider候補でDBセッション失効、CSRF/Origin、proxy/TLS、FastAPI/React共存を試験。Better AuthはNode/TSライブラリのため、Backendに採用する場合は独立Node Sidecarが必要となり既定不採用。旧記述: Better Auth adapterとFastify/Next.js共存 | 08 |
 
 ## 5. 内部契約候補・API・入力検証
 
@@ -570,3 +570,15 @@ The **server** resolves tenant, owner, membership, capability, immutable target 
 **AUTH-DEV-T05**: old Campaign controlVersion is rejected by all child/model/tool/Browser admission.
 **AUTH-DEV-T06**: debug reader cannot access raw tokens/HAR or other Project's screenshots.
 These are proposed auth contract tests (not executed).
+
+## 2026-11-09 Python-first: 認証実装の再検討（STEP 1、分類C）
+
+`AuthProvider`契約（DB-backed session、即時失効、CSRF/Origin、fresh auth、tenant isolation、RLS防御層）は不変。Better Auth（TS）の調査は設計参考として保持するが、Backendが[ADR-036](../00-foundation/architecture-decisions.md)でPythonになったため、**自作の認証基盤を第一候補に固定しない**。STEP 2で次を先に比較し、aiagent-md独自実装は**Principal/Session（tenant・role・auth epoch）へのAdapterと認可Policy境界**に限定する。
+
+| 候補 | 想定 | 評価観点（共通） |
+|---|---|---|
+| 外部IdP（自己ホストのKeycloak、Authentik、Ory Kratos/Hydra 等、OIDC） | ログイン・MFA・パスワード管理・OIDCをIdPへ委譲し、FastAPIはOIDC RP＋サーバ側Session | 保守状況・ライセンス、Session即時失効（back-channel logout/epoch）、MFA/認証強化、Postgres統合または運用負荷、tenant分離 |
+| Python認証ライブラリ（fastapi-users、Authlib（OIDC client）、argon2-cffi 等） | FastAPI内でSession/OIDC連携を構成 | DB-backed Sessionと失効、CSRF/Origin、Cookie属性、Postgres（async driver）統合、テストの有無 |
+| 自作`AuthProvider` | 上記が要件を満たさない部分のみ | 検証範囲が最大になるため、比較結果とADRがある場合だけ |
+
+いずれを選んでも、opaque session/Cookie属性、CSRF/Origin検査、fresh auth、tenant isolation、RLS防御層、即時失効の既存契約とAUTH-T系試験は変更しない。候補のソース・テスト・保守状況・ライセンスは未確認（STEP 2）。Cookie属性・CSRF・Origin検査はFastAPI middleware/dependencyで全routeに強制し、AUTH-T22はFastAPI＋reverse proxy構成で実施する（未実行）。

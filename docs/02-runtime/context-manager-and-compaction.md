@@ -837,3 +837,12 @@ Observation/ReflectionはCHAT_06のLong-term Memoryへ勝手に書込まない�
 | ACM-OSS-T14 | Correction retryと総予算枯渇 | 有界回数、旧HEAD維持、PARTIAL/BLOCKED |
 
 **比較ベンチ**: same Model/Tokenizer/Tool schema/Policy/Goal/Source/Total Budgetでsmall safe-full、safe-tail、offload-only、offload+audit、offload+audit+OMを比較。Recall@FixedBudget、Source locator精度、TypedFact support、否定/未解決条件、Tool pair、100-cycle fidelity、p50/p95 Latency、Model+Observer+Reflector+Recall総費用、GC/保存bytesを記録。P0違反が1件でもあれば速度が良くてもRelease不可。改善率は未測定。
+
+## 20. Python-first移行時の圧縮OSS方針（2026-11-09、STEP 1 / Draft）
+
+§19のOSS Hybrid Compactionは**DeepAgents JS**（`langchain-ai/deepagentsjs`）を静的閲覧した設計だが、Python-first（[ADR-036〜040](../00-foundation/architecture-decisions.md)）では**DeepAgents Python**（`langchain-ai/deepagents`、PyPI `deepagents 0.7.34`、MIT、requires-python >=3.11）を第一調査対象とする。main `0279f1d036a8a73ea0d99bf04583e9c9a9598ef2` に `libs/deepagents/deepagents/middleware/summarization.py`、`_blob_offload.py`、`_message_eviction.py`、`backends/store.py` の存在だけを確認した（**内容監査・JS版との挙動同等性・テスト実行は未実施**）。
+
+- CTX-OSS-A（Offload＋Tool pair保護）はDeepAgents Pythonの対応middlewareで再監査し、§19.3の「Offload失敗でもSummaryを続行する既定動作は採用禁止」をPython版でも同じ故障注入（ACM-OSS-T01）で確認する。JS版で確認した挙動をPython版の事実として扱わない。
+- CTX-OSS-B（OpenClaw式品質監査）とCTX-OSS-C（Mastra Observational Memory）はTypeScript実装にのみ存在するため**直接移植しない**。必要な機構（5セクション構造監査、Part cursor連続性、Buffer/Activation分離、Reflection世代切替）は§19の仕様どおり**aiagent-md独自のPython Port**（`CompactionAuditor`、`ObservationBuffer`）として実装し、上流コードは設計参照に留める（分類C）。
+- 候補B（DeepAgents Python＋LangGraph）を採用しない場合も、DeepAgents Pythonのsummarization/offloadはContext Manager内部の交換可能Adapterとして評価できる。いずれもRaw履歴の耐久保存、Source-backed Summary、A0〜A2固定、ContextManifest、Sealed ModelRequestSnapshot、Memory consent/削除、Quality Audit、Failed Compaction Recoveryの既存契約に従い、Framework側Summaryを正本にしない。
+- Long-term Memory候補（PostgreSQL＋pgvector、Graphiti、Mem0）は[Memory Retrieval](../06-memory-skills/memory-retrieval-and-update.md)の2026-11-09節に従う。

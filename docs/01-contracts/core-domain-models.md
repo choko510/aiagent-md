@@ -43,7 +43,7 @@ Universal Personal Agent Harnessは、セルフホストUbuntu/Docker上で、�
 | C. 役割別のdomain IDs + DB-managed CAS + 外部アダプタID | 保存・ACL・検索は増えるが、再開、監査、適切なライフサイクル、OSS差し替えに強い。 | **採用** |
 | D. イベントソーシングのみを唯一の状態ストアにする | audit replayに強みはあるが初期段階のprojection/upgrade/restoreが複雑。event logは別途保持し、現在状態はtransactional rowに持つ。 | **初期却下/将来ADR** |
 
-性能・処理速度の比較は未実施。MITコードの転写はせず、抽象設計のみ採り入れる。Pythonに依存した形はTypeScript中心+Python sidecar候補とは別の契約とする。
+性能・処理速度の比較は未実施。MITコードの転写はせず、抽象設計のみ採り入れる。特定言語・Frameworkに依存した形を共有契約にしない（旧記述: Pythonに依存した形はTypeScript中心+Python sidecar候補とは別の契約とする。ADR-036でPython-firstへ移行後も、正本は言語非依存のcanonical JSON Schema: ADR-037）。
 
 ## 3. 依存関係と正本・一意な関係
 
@@ -229,6 +229,14 @@ LLM/外部HTML/SNS/MCP tool responseは**どのactionでも直接の権限主体
 クラス配置提案（**本番repoの実在ファイルではない**）:
 
 ~~~text
+# 2026-11-09 Python-first（ADR-036/037）後の配置提案。下の旧TS配置は履歴として保持
+contracts/domain/*.schema.json             // CHAT_01 canonical JSON Schema（正本）
+backend/domain/ (generated Pydantic v2)    // ids/entities/commands: strict, extra=forbid
+backend/domain/validators.py               // cross-field and FK validators
+backend/api/services/{conversation,tasks}.py // FastAPI service, tenant auth context
+backend/runtime/run_claims.py              // lease/fencing
+web/src/api/generated.ts                   // UI用生成型（手書き禁止）
+# --- 旧TS配置（superseded）---
 packages/domain/src/ids.ts             // branded IDs + strict parse/serialize
 packages/domain/src/entities.ts        // canonical logical records
 packages/domain/src/validators.ts      // cross-field and FK validators
@@ -538,3 +546,7 @@ type IntegrationReceiptRefV1 = { projectId:string; workItemId:string;
 `DesignDecision` is an immutable requirement choice, not a Tool Approval. `DemoAcceptance` is either real authenticated owner decision or a scoped revocable preauthorized acceptance grant (not inferred from AUTO_RECOMMEND); neither authorizes Git push/deployment/purchase. A `logicalWorkItemId` denotes an outcome independently of source commit; equivalence criteria and human rejection history prevent relabeling duplicates for additional progress. Campaign `completedCount` is derived, and `TARGET_REACHED` means active completion criterion holds on the **current** integration HEAD rather than stale branch test receipts. Stop/Quota/Run control change are distinct event and revision boundaries. Evidence and raw Artifacts remain immutable and references must remain tenant/owner checked.
 
 **Domain tests designed:** DEV-DOM-T01 type+ID separation/UUIDv7, DEV-DOM-T02 large int64 wire CAS, DEV-DOM-T03 old integration receipt cannot make current HEAD passed, DEV-DOM-T04 revoked Demo grant cannot be elevated to external Approval, DEV-DOM-T05 semantic duplicate work item cannot be counted twice.
+
+## 2026-11-09 Python-first: 論理型の実装規則（STEP 1、Draft）
+
+本書の`ts`ブロックは言語非依存の論理型記法（[Architecture Rules §E-2](../00-foundation/architecture-rules.md)）。実装はCHAT_01所有のcanonical JSON Schemaを正本とし、Python側はPydantic v2（`strict=True`、`extra="forbid"`、frozen）を生成または機械照合、UI側TS型は同じSchema/OpenAPIから生成する（[ADR-037](../00-foundation/architecture-decisions.md)）。Brand ID（`TaskId`等）はPythonでは`NewType`＋UUIDv7 validator、wireは従来どおりstring。int64系（`recordVersion`、`leaseEpoch`、`goalRevision`等）はwire正規十進文字列・Python `int`・DB BIGINTで、JSON numberを受理しない。Pydantic strict `int`は文字列を受理しないため、int64項目は[Architecture Rules §E-3](../00-foundation/architecture-rules.md)の共通wire parser/serializer専用型を使い、round-trip fixtureを全経路で共有する。Schema変更は版付きで、生成差分が0でなければCI失敗とする（実装段階で追加、未実行）。

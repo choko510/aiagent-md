@@ -60,3 +60,17 @@ Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resol
 ## 2026-11-09 Cloud Coding能力追加（Draft / NOT RUN）
 
 [DEV-11〜19の9能力とDEV-20の受入マトリクス](advanced-development-acceptance.md)を追加。**新しい5つのMarkdownで計10個の設計エントリ**を説明する。既存88基礎正本および2026-11-07の開発拡張11件の歴史的カウントは変更せず、合同owner契約の承認後にインデックス計数を正式移行する。各Proposalは新しいShared Task/Run/Tool/DBの正本ではない。PR #74との対象変更を避け、GitHub/CI/Context性能の横断変更は後続の所有者レビューとする。
+
+## 2026-11-09 Python-first: 自律開発OSSとの統合方針（STEP 1、分類C / NOT RUN）
+
+8AI開発チーム、Expert Advisor、Visual Design Picker、Autonomous Browser Debugger、Endless Runの仕様・Test IDは不変。Python-first（[ADR-036](../00-foundation/architecture-decisions.md)）で考慮するOSS:
+
+| OSS | 想定用途 | 配置・制約 |
+|---|---|---|
+| OpenHands SDK（`openhands-sdk 1.60.2`、MIT、requires-python >=3.12） | Builder/Repair担当のCoder Agent候補 | **Untrusted Execution VMのCell内のみ**。LLM呼出しはscoped broker RPC→Model Gateway、Git push/PR等はTool Gateway Intent。Trusted VMで動かさない |
+| PydanticAI / DeepAgents Python | Coordinatorの推論部（ADR-038の選定に従う） | Trusted Orchestrator内。生成コードの実行はしない |
+| Playwright Python | Autonomous Browser Debugger、E2E | 独立Browser Worker（Preview Broker経由） |
+| pytest / Ruff / mypy・pyright / Semgrep（LGPL-2.1-or-later） | 生成コードの検査・Review gate | Cell内で実行、結果はArtifact/Receipt。Semgrepのライセンスと規則セットの配布条件は実装時確認 |
+| Dagger | 再現可能build（任意） | Cell内daemon/Engine権限の扱いをCHAT_09が審査するまで不採用 |
+
+Agentが生成したコードは、言語がPythonであってもBackend本体と同じプロセス・権限・venv・FSで実行しない（[Architecture Rules §E-4](../00-foundation/architecture-rules.md)）。各OSSの統合方式（Cell内実行の可否、ネットワーク要件、Model Gateway経由化）はSTEP 2で検証する。

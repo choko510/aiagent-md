@@ -11,7 +11,7 @@
 1. **Control plane**: 管理者が検証・許可した静的Manifestから能力、入力Schema、API/API利用資格、利用可能な資格情報種別、コストモデル、出力鮮度条件、制限を取得。未信頼コードのロードや外部HTTPアクセスを **discovery時に行わない**。配置・有効化・公開は別操作。
 2. **Execution plane**: Agent → CHAT_03 Tool Gateway（schema/policy/budget/approval/intent ledger）→ ConnectorDispatcher → approved Adapter → 制限付きTransport / Credential Broker → 外部Provider。結果を証拠候補へ正規化し、CHAT_01の正本契約に従って記録してから返す。
 3. **信頼性**: 送信前の有限quota/費用予約、tenant/credential/providerを横断した分散競合制御、期限付きretry、OAuth single-flight refresh、cancel/restart、結果不確定の明示。価格や空室の時刻・条件を捏造しない。
-4. **実装採用**: TypeScript hostの小さな独立APIとAdapter SDK。PythonのScrapling/Airbyte CDK等は **参考実装**であり、Coreへの直接依存なし。ScraplingによるWeb抽出はCHAT_04のSidecar経由、MCP Tool discoveryはCHAT_03の正本を使う。
+4. **実装採用（2026-11-09改訂、ADR-036）**: Python hostの小さな独立APIとAdapter SDK（Pydantic manifest）。Airbyte CDK等のPython OSSは参考または個別Adapter内依存に留め、Coreへの直接依存なし。（旧記述: TypeScript host。Scrapling/Airbyte CDKは参考実装）ScraplingによるWeb抽出はCHAT_04のSidecar経由、MCP Tool discoveryはCHAT_03の正本を使う。
 
 **非確定**: shared Tool/Evidence/Error/Task schema、DBテーブル、Secret Broker実装、provider別ToS・資格・請求価格、quota coordinatorの物理実装。各所有者へ `[PROVISIONAL: CHAT_XX]` として送る。
 

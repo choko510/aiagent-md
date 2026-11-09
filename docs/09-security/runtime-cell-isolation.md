@@ -106,3 +106,7 @@ VM pool keyed by owner+tenant (never shared across distinct users), immutable im
 ## 7. Cross-owner contract checklist
 
 CHAT_01 adds Execution/Workspace references, statuses/errors, artifact lineage; CHAT_02 implements admission/leases/cancel/subagent budget; CHAT_03 owns Gateway Tool intent/side-effect reconciliation; CHAT_04 Broker; CHAT_06 temp vs installed Skills; CHAT_08 logs/approval UI; CHAT_09 egress/secrets/policy; CHAT_10 physical VM/service deployment; CHAT_11 attack-driven gates. Do not duplicate an Owner's canonical enums or SQL in this file. Existing conflicting "arbitrary code prohibited" statements must be rewritten as "host/protected service code prohibited" and reference this spec. Status is PROVISIONAL until contracts accepted and implementation tested.
+
+## 2026-11-09 Python-first: 同一言語でも境界は統合しない
+
+Trusted Control VMのPython（Agent Runtime/Gateway/API）とRuntime Cell内でAgentが生成・実行するPythonは、interpreter・venv・site-packages・FS・UID・network namespace・kernelを共有しない（[Architecture Rules §E-4](../00-foundation/architecture-rules.md)）。OpenHands SDK等のCoder AgentをCell内で動かす場合も、そのLLM呼出しはscoped broker RPC→Model Gatewayのみで、Provider鍵や直接SocketをCellへ渡さない。Cellでinstallされたpackageを Trusted側でimportしない。

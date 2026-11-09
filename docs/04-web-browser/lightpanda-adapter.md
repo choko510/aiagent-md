@@ -12,7 +12,7 @@ LightpandaはZig製のCDP互換を目指すブラウザで、READMEが速度/メ
 
 ## 1. 目的・Input/Output・Owner / シナリオ
 軽量な公開read-onlyページを対象に実験。Javascriptを実行できる場合でもextensive DOM/iframe/Shadow DOM/スクリーンショット/認証保存/Downloads/Service Workersは別能力としてチェックする。複数CDP接続はCH04 Browser Worker管理下でのみ許す。
-本件はBrowser WorkerまたはPython Sidecar Adapterの動作条件だけを所有。Tool execution/approvalはCHAT_03、公開Task/Run/Evidence/Event/ErrorはCHAT_01、Run lease/goalRevisionはCHAT_02、egress/secret/認可はCHAT_09、物理テーブル/ComposeはCHAT_10、UIはCHAT_08。
+本件はBrowser WorkerまたはPython Sidecar Adapter（2026-11-09以降はPython Browser Worker内Adapter、ADR-036）の動作条件だけを所有。Tool execution/approvalはCHAT_03、公開Task/Run/Evidence/Event/ErrorはCHAT_01、Run lease/goalRevisionはCHAT_02、egress/secret/認可はCHAT_09、物理テーブル/ComposeはCHAT_10、UIはCHAT_08。
 関連: SC-09, SC-06, SC-08, SC-05, SC-07, SC-13。
 
 ## 2. OSS調査（固定commit、コードとテスト）

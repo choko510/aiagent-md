@@ -6,7 +6,7 @@
 
 **承認とログイン介入は異なる安全境界**。承認は「特定の不可逆/外部操作への一回限りの決定」であり、Browser Takeoverは「隔離された正規BrowserSessionで人間がログイン等を行う短命・排他的な操作権」。一方の権限を得ても他方の許可は与えられない。画面のボタンはサーバーが保存したpending recordへ意思表示するだけで、Tool実行やBrowserの直接所有を決定しない。URLに資格情報/Cookie/CDP endpointを載せない。期限切れ、同時承認、GoalRevision変更、権限失効、Worker再起動、Owner切替は必ずfail-closed。
 
-実装候補: Next.js UI / Fastify REST API / Browser Worker。ライブラリの採否とブラウザ接続方式はCHAT_04/09に委譲。HITLは正規ログインをユーザー自身が行う方法であり、CAPTCHAやCloudflareの突破保証はしない。
+実装候補（2026-11-09改訂、ADR-036）: React + TypeScript UI / FastAPI REST API / Playwright Python Browser Worker（旧: Next.js UI / Fastify REST API）。ライブラリの採否とブラウザ接続方式はCHAT_04/09に委譲。HITLは正規ログインをユーザー自身が行う方法であり、CAPTCHAやCloudflareの突破保証はしない。
 
 ## 1. Scope / non-scope / owners
 

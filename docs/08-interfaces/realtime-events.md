@@ -71,7 +71,7 @@ type SafeEventV1 = { // public DTO, NOT canonical CHAT_01 envelope
   aggregateSequence: string; // canonical int64 decimal, per aggregate only
   kind: "state"|"step"|"evidence"|"usage"|"approval"|"watch"|"warning"|"cursor";
   committedAt: string; // UTC RFC3339
-  data: Record<string, unknown>; // approved per-kind Zod strict schema, finite size
+  data: Record<string, unknown>; // approved per-kind strict schema (canonical JSON Schema → Pydantic on server / generated TS on UI; formerly Zod), finite size
   source?: { evidenceId: string; observedAt: string|null };
 };
 type StreamCursor = string; // opaque authenticated cursor: tenant, viewer, taskFilter, lastDeliveryOffset, expiry
@@ -284,3 +284,11 @@ Sandbox Execの起動/終了/中断/ブロック、process resource使用率、s
 ## 2026-11-07: Browser画面をTask SSEへ含めない
 
 [Browser Live Observation](browser-live-observation.md) の映像は認証済みone-way WebRTCかbinary WebSocketの専用relayを使う。`/tasks/{id}/events`は従来どおりdurable Task/Run/Approvalの安全なEvent metadata正本。生frame、ブラウザ画素、Credential/CDP URL/全画面DOMをSSE/Event/Evidenceへ混入させない。観測状態のmetadata通知を追加する場合でも既存ACL/cursor/revoke/rate制約を保つ。BLO-T03/05/08/11、SC-23（未実装）。
+
+## 2026-11-09 Python-first: SSE/WebSocket配信（STEP 1、Draft）
+
+SSE endpointはFastAPI（ASGI）のstreaming responseで実装し、DomainEvent/outboxのcommit済み行とsigned cursorからのみ送る既存契約を維持する（[ADR-036](../00-foundation/architecture-decisions.md)）。PostgreSQL `LISTEN/NOTIFY`等は**起床ヒント**に限り、欠落時もcursorからの再読込で回復する。接続毎のasyncio taskは送信bufferとidle timeoutの上限を持ち、client切断でcancelする（Runには影響しない）。Event payloadの型はcanonical JSON Schemaから生成（Python: Pydantic、UI: TS型）。Browser Takeover入力のWebSocketは短命ticket・排他権限の既存契約に従う。
+
+### 2026-11-09 Python-first（ADR-036）追記: Model streamとStream Privacy Gate
+
+Model応答の増分配信は、Model Gatewayの**Stream Privacy Gate**（[Model Router 2026-11-09節](../02-runtime/model-router.md)）が公開可能な回答テキストと判定したdeltaだけを対象とする。モデルの非公開推論、内部Prompt、未確定Tool引数は§8どおりEvent JSONへ入れず、SSE・永続Event・ログへも流さない。未知のcontent part種別は破棄する（fail closed）。

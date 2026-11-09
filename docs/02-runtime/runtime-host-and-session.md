@@ -14,7 +14,7 @@ Run executionの依存注入、worker start/stopとhealth、独立したcontext/
 |---|---|---|
 | Mastra main ec3ba11 | durable/run-registry.ts::RunRegistry, markRunActive; durable/execution-fence.ts::getExecutionClaim, DurableExecutionFenceError; durable/__tests__/durable-agent-concurrent-runs.test.ts (run isolated) | in-memory registryは永続真実でない |
 | PydanticAI main c2ac8cc | agent/abstract.py::AbstractAgent.run; tests/test_deps.py::test_deps_used/test_deps_override | Python Agent lifetimeをTask正本としない |
-| LangGraph main ffc3336 | pregel/_loop.py::PregelLoop.__aenter__, main.py::Pregel; tests/test_pregel.py::test_pending_writes_resume | Python実装をTS Hostに無条件移植しない |
+| LangGraph main ffc3336 | pregel/_loop.py::PregelLoop.__aenter__, main.py::Pregel; tests/test_pregel.py::test_pending_writes_resume | Framework内部状態をHost正本にしない（旧記述: Python実装をTS Hostに無条件移植しない） |
 **採用案**: 依存Portを明示した独立Worker Host. **却下案**: 単一の長命global mutable AgentContext、Provider SDKを永続Task正本とする案。上流コード・テストは実際にGitHub上で読んだが、テストを実行したわけではない。ここで提示するPortは新規設計であり上流既存APIではない。
 
 ## 3. 依存グラフと所有権
@@ -176,3 +176,7 @@ LICENSE: LangGraph / PydanticAI / pg-boss はMIT、@mastra/coreはpackage.json�
 ## P0-6 runtime process topology correction (2026-11-07)
 
 The term `Runtime Host` is a **logical Orchestrator in Trusted Control VM**, not a generated-code shell process and not the physical Ubuntu host. It owns Task/Run lease, model orchestration, checkpoint and approval references. **Untrusted Execution VM is a separate KVM guest kernel**, whose Supervisor accepts only server-owned signed Admission after Tool Intent commit and returns scoped bounded receipts. Do not give the generated process the Orchestrator's PID/UID namespace, writable rootfs, authenticated Gateway session, model credential or privileged IPC descriptors. Only per-Execution broker RPC may request registered concrete Tools, and each request is fresh owner/Task/Run/Lease/Capability checked. Security tests must prove that generated process cannot read Orchestrator memory/state/socket. SC-18/21.
+
+## 2026-11-09 Python-first: Runtime Hostのプロセス構成（STEP 1、Draft）
+
+Runtime HostはPython asyncioの独立Workerプロセスとして実装する（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。API（FastAPI）プロセスとは分離し、DBのRun claimで仕事を得る。HostはModel Gateway・Tool Gatewayへ認証付きローカルRPCで接続し、Provider credential・Vault・Browser CDP・生成コード実行権限を持たない。1プロセス内の複数Runは`asyncio.TaskGroup`等で並行するが、Run毎のlease/heartbeat/cancel scopeを独立させ、1 Runの例外・Blocking処理が他Runへ波及しないようthread/process poolへ隔離する。Worker単位のCPU/RAM/PID上限はcgroupで強制し、OOM/kill時は既存の再claim手順で復旧する。主Runtime OSS（ADR-038候補A/B）はHost内部のAdapterであり、Hostのlease・Session正本を置換しない。

@@ -5,13 +5,13 @@
 
 ## 0. 結論と採用案
 
-PostgreSQLを業務データの**唯一のトランザクション正本**とし、`agent` schemaにTask/Run/Tool Intent/Approval/Evidence/Watch/Observation/Notification/Outbox等の**物理的な配置、参照整合性、複合一意制約、検索インデックス、移行手順**を持つ。Artifact原本・ブラウザCookie・Secret値はDBへ直書きしない。別Storeの不変オブジェクトへ参照を張る。Queue内部のジョブ管理は同じPostgres上でも`pgboss`等の**別schema**に隔離する。DBスキーマをAgent推論プロンプトやHTMLから動的作成・変更しない。
+PostgreSQLを業務データの**唯一のトランザクション正本**とし、`agent` schemaにTask/Run/Tool Intent/Approval/Evidence/Watch/Observation/Notification/Outbox等の**物理的な配置、参照整合性、複合一意制約、検索インデックス、移行手順**を持つ。Artifact原本・ブラウザCookie・Secret値はDBへ直書きしない。別Storeの不変オブジェクトへ参照を張る。Queueのメタデータ保存先はADR-039で選定するOSSに従う。**PostgreSQLを使う基盤（DBOS、自作SKIP LOCKED等）の場合のみ**、同じPostgres上の`agent`とは別schema・別roleに隔離する（旧案: `pgboss`）。Redis/RabbitMQ等のBrokerを使う基盤（Dramatiq/Celery等）の場合はPostgreSQLにQueue用schemaを作らず、Broker側の認証・永続化設定で隔離する。いずれもQueue行/メッセージは業務の正本ではない。DBスキーマをAgent推論プロンプトやHTMLから動的作成・変更しない。
 
 **権限の線引き:** `docs/01-contracts/` がTask/Run/Event/State/Error/Evidenceの意味と公開型、`docs/02-runtime/` がcheckpoint/復帰、`docs/03-tools/` がTool Intent/Approval/Side-effect、`docs/07-automation/` がWatch/通知、`docs/09-security/` が認証・secret・保持方針の正本。ここでは状態値・権限判断・Delivery semanticsを確定せず、`[PROVISIONAL: CHAT_XX]` として物理列を提案する。現時点で他担当のLocked仕様は確認できなかった。*DraftをLockedにしてはならない。*
 
 **採用判断:**
 1. Postgresの`FK` / `CHECK` / `UNIQUE` / 同一Transactionによる一貫性を最優先。大きなJSONBだけの「万能テーブル」は却下。
-2. 単一Postgresデータベースに`agent` schemaを作り、`pgboss` schemaとは分離。Durable Taskの正本は**queue行ではない**。
+2. 単一Postgresデータベースに`agent` schemaを作る。Queue基盤（`QueuePort`背後でADR-039により選定）がPostgreSQLを使う場合のみ、そのschemaを`agent`と分離する（Broker型の基盤ならPostgreSQL側にQueue schemaは置かない。旧案: `pgboss` schema）。Durable Taskの正本は**queue行ではない**。
 3. Tool Intentと承認の確定状態を**外部実行より前にcommit**。不明な副作用は「未確定」を残し再承認/照会する。DB transactionがHTTPやTelegramとatomicになる保証はない。
 4. 追加カラム→両版読取→バックフィル→切替→制約強化→旧列削除のexpand/contract方式。非transactionalな`CREATE INDEX CONCURRENTLY`は別migration stepに分離。
 5. Phase-1単一Ubuntuサーバー前提。ただし`tenant_id`でデータ分離の物理土台を置く。実際のidentity/tenant認可はCHAT_09が決めるまで`tenant_id`だけを安全境界と**見なさない**。
@@ -39,7 +39,7 @@ Proposed canonical **Execution** (subresource of Task/Run, current leaseEpoch an
 | Temporal `main@3eb5fb80`, PostgreSQL v12 schema, versioned v1.19 [S11] | `schema/postgresql/v12/temporal/schema.sql`: executions/current_executions/history/queue等の複合PK。`versioned/v1.19/current_chasm_executions.sql`と`manifest.json`: `CurrVersion 1.19`, `MinCompatibleVersion 1.0`を確認。[S12][S13] | 現行参照と履歴の分離、manifestに互換floorとversionを持つ運用方針。 | Temporalサーバー・workflow再現エンジンはこの規模の単一ホストには過剰。schema/データ型の直接コピーはしない。MIT [S14]。 |
 | PostgreSQL Official Docs 18 [S15-S18] | FK/一意B-tree、partial/partitioned index、MVCC、`CONCURRENTLY`制約を調査。 | 複合uniqueと索引、行ロック、制約と運用の限界を定義。 | PG18固有機能は導入major決定まで利用前提にしない。PostgreSQL License。 |
 
-**採否比較（最低2案）:** (A) 業務永続化をPostgres + キュー用`pgboss` schema + Object Store（採用候補）。(B) 単一`jobs` JSONBテーブルに会話・Task・Evidence・Watchを全収納（却下、FK・保持・時点/状態検証・再開時の競合が脆い）。(C) 全体をTemporalのワークフローDBに依存（現段階で却下、サーバーの運用とWorkflow semantics依存が大きい。将来Adapter比較可能）。(D) LangGraph Postgres Saverをそのまま流用（却下、Runtimeの正本状態・Event envelopeの対応が未確定）。案Aも可用性/負荷特性は**未実測**であり、pg-boss採用自体はCHAT_10-02との合意待ち。
+**採否比較（最低2案）:** (A) 業務永続化をPostgres + `QueuePort`背後のQueue基盤（ADR-039で選定。PostgreSQL型なら別schema、Broker型ならRedis/RabbitMQ等）+ Object Store（採用候補。旧案ではキューを`pgboss` schemaとしていたが2026-11-09に候補外）。(B) 単一`jobs` JSONBテーブルに会話・Task・Evidence・Watchを全収納（却下、FK・保持・時点/状態検証・再開時の競合が脆い）。(C) 全体をTemporalのワークフローDBに依存（現段階で却下、サーバーの運用とWorkflow semantics依存が大きい。将来Adapter比較可能）。(D) LangGraph Postgres Saverをそのまま流用（却下、Runtimeの正本状態・Event envelopeの対応が未確定）。案Aも可用性/負荷特性は**未実測**であり、Queue基盤の採用はADR-039とCHAT_10-02の合意待ち（旧案: pg-boss採用。Node専用のため2026-11-09に候補外）。
 
 ## 3. 依存関係・正本リンク・所有権
 
@@ -53,7 +53,7 @@ CHAT_01: Core Models, Event Envelope, State, Evidence, Errors
         └── CHAT_09: Workspace identity / Secret refs / Retention
                          ↓ physical projection only
                  CHAT_10: PostgreSQL agent.*
-                        ├── queue adapter → pgboss.* (CHAT_10-02)
+                        ├── QueuePort → ADR-039 selected queue store: separate PG schema only if PG-based, else external broker (CHAT_10-02; 旧案 pgboss.*)
                         ├── artifact keys → opaque Artifact Store
                         └── backup / observability (CHAT_10-04/05)
                  CHAT_11: DB consistency / race / migration tests
@@ -980,7 +980,7 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 | DB-X03 CHAT_03 | **P0** | Tool Intent/Approval/Effect/attemptとUNKNOWN・idempotencyのcanonical schema | side-effect ledger accepted + kill-window E2E |
 | DB-X04 CHAT_02 | **P0** | Checkpoint形式、snapshot schema version、recovery/steer/cancel safe boundary | crash replay fixturesで既存Run可読 |
 | DB-X05 CHAT_07 | **P1** | observation_key、trigger identity、Watch停止/周期/TZ、notification_keyの衝突規則 | reboot/double notification fixture合格 |
-| DB-X06 CHAT_10-02 | **P1** | pg-boss採否、Outbox relay lease/fencing/ack/consumer group、job retention | at-least-once kill/duplicate test |
+| DB-X06 CHAT_10-02 | **P1** | Queue基盤採否（2026-11-09: pg-bossは候補外、ADR-039のPython基盤）、Outbox relay lease/fencing/ack/consumer group、job retention | at-least-once kill/duplicate test |
 | DB-X07 CHAT_10-05 | **P1** | DB+Artifact+Secret snapshot整合、WAL retention、RPO/RTO | restore drill |
 | DB-X08 CHAT_11 | **P1** | PG16/17/18の採用majorとtest matrix、query workload/閾値 | executable DDL+EXPLAIN+load |
 | DB-X09 CHAT_00 | P1 | 個人利用起点で将来multi-user前提を物理モデルへ固定してよいか、Artifact store採用 | Architecture ADR |
@@ -1818,3 +1818,7 @@ The immutable `campaign_count_receipts` row represents **the first successful qu
 
 **DEV-DB-T11**: after ten integrated feature receipts, another merge changes head and invalidates two integration evaluations → current progress falls to eight, no stale target assertion.
 **DEV-DB-T12**: new evaluation PASS for the same logical work item on new head restores eligibility but does not create a second count receipt.
+
+## 2026-11-09 Python-first: DDL正本とPython Driver（STEP 1）
+
+DDL・制約・Transaction境界の正本は本書のSQL（ADR-036でSQLが永続化の正本言語）。Python側はasyncpgまたはpsycopg 3を候補とし、ORM（SQLAlchemy 2.1等）を使う場合もQuery構築/型付けに限り、**ORMのautogenerateでMigrationを生成しない**。Migrationは版付きSQLファイルをchecksum付きで適用するrunner（Alembicのraw SQL運用または自前runner）とし、expand→backfill→switch→contractとimmutable historyの規則を維持する。int64列はPython `int`へ範囲検査付きで変換し、wireでは十進文字列。`audit/round4`の既存DDL試験（Python製）はそのまま有効。

@@ -47,7 +47,7 @@ Only trusted adapter/classifier (not LLM or source HTML or untrusted MCP data) c
 | ERR-017 | SHOULD | messages keyed for localization not provider string passthrough | 05 |
 | ERR-018 | LATER | nested multi-errors and sophisticated operator diagnostic UI | 15 |
 
-## 5. TypeScript logical canonical types
+## 5. Logical canonical types（TypeScript記法。実装はcanonical JSON Schema→Pydantic/生成TS型: ADR-036/037）
 
 ~~~ts
 type ErrorCodeV1 =

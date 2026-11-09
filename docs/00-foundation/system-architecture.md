@@ -106,9 +106,9 @@ Entity resolver never fuzzy-merges distinct SKU variants or storefronts; store/m
 - Actions: irreversible purchase/reservation/post/payment require verified fresh approval bound to frozen parameters and current permissions; cache cannot bypass.
 - Limits: finite Run steps, child Task count, token/currency budget, active browser tabs, file decompression ratio, external events/minute; automatic stop with inspectable error and retained evidence.
 ## 8. Data and transport contracts
-HTTP endpoints and SSE are owned by CHAT_08, physical SQL by CHAT_10, versioned envelopes by CHAT_01. Sequence and event ordering proof require consistent MVCC projection and committed offset. Everything over wire for signed int64 uses canonical decimal strings; internal arithmetic BigInt; external amount in minor units BigInt/decimal.
+HTTP endpoints and SSE are owned by CHAT_08, physical SQL by CHAT_10, versioned envelopes by CHAT_01. Sequence and event ordering proof require consistent MVCC projection and committed offset. Everything over wire for signed int64 uses canonical decimal strings; internal arithmetic uses a lossless integer (Python `int` with explicit int64 range check; `BigInt` in the TypeScript UI); external amount in minor units as integer/decimal, never float (ADR-008 unchanged; see Architecture Rules §E-3).
 ## 9. Deployment and upgrade
-Proposed TS packages: `api, runtime, gateway, browser-worker, connectors, automation, domain, memory, web, qa`; optional separate Python parser process, PostgreSQL. Docker Compose with network-guarded egress (CHAT_09) and non-root workers. No exact images/versions declared locked until license/API/health/sandbox tests pass. DB migrations expand→backfill→switch→contract with immutable history; no destructive overwrite of already applied migrations.
+**Python-first (ADR-036, 2026-11-09):** proposed Python packages in one `uv` workspace: `api` (FastAPI/ASGI), `runtime` (Agent Runtime Port), `model_gateway`, `tool_gateway`, `sentinel`, `mcp_adapter`, `browser_worker`, `extraction_worker`, `connectors`, `automation`, `memory`, `domain` (generated Pydantic models), `qa`; plus `web/` (React + TypeScript UI only) and SQL migrations. Process/VM placement and internal transport are defined in §13.2. *Superseded (history kept):* the earlier proposal was TS packages `api, runtime, gateway, browser-worker, connectors, automation, domain, memory, web, qa` with an optional Python parser process; it is no longer the adopted direction. Docker Compose with network-guarded egress (CHAT_09) and non-root workers. No exact images/versions declared locked until license/API/health/sandbox tests pass. DB migrations expand→backfill→switch→contract with immutable history; no destructive overwrite of already applied migrations.
 ## 10. Failure protocol
 | Fault | Detection / recovery | Mandatory invariant |
 |---|---|---|
@@ -154,3 +154,29 @@ Authenticated UI (Design Picker, Demo Approval, Dev Studio, Endless Run)
 - Tool side effects（Git push/PR、署名、release、deployment）には各Tool Intent、Approval(必要時)、Sentinel transport receiptを要求。Design/Demoのユーザー選択はTool Approvalと別。
 - CampaignはTask/Runではなくその上位。Cycleはfinite budget & checkpointのTask DAG。Campaign Goal/Cycle receiptsをDB正本に保存し、Restart/duplicate outbox/cancel/429時の意味論を [CAM-01](../07-automation/endless-run-campaign.md) に委譲。
 - API/Events/UI: [DEV-09](../16-app-development/development-api-and-ui.md); Runtime/QA: [DEV-10](../16-app-development/acceptance-and-rollout.md)。
+
+### 13.2 Python-first 実行トポロジー（2026-11-09、STEP 1 / Draft）
+
+> ADR-036〜040の物理配置の**正本**。§1のVM信頼境界・§13のSandbox Exec経路を変えない。「同じPythonで書かれている」ことはプロセス・権限・ファイルシステム・ネットワークを共有する理由にならない。表の配置は実装前の提案であり、未実行・未検証。
+
+| 論理コンポーネント | 実装（候補） | 配置 / プロセス | 他コンポーネントとの接続 | 禁止事項 |
+|---|---|---|---|---|
+| API / Auth | FastAPI + Pydantic v2、ASGI（Uvicorn） | Trusted Control VM、独立プロセス群（水平複製可） | DB直接（Command TX＋outbox）、SSE/WebSocketはDB projection/outboxから配信 | Browser CDP・Vault Secret・Provider keyへの直接アクセス、長時間Agent処理をHTTP request内で実行 |
+| Agent Runtime Worker | `AgentRuntimePort`＋候補A/B（ADR-038） | Trusted Control VM、API と**別プロセス**、asyncio | DB（Run claim/checkpoint CAS）、Model Gateway・Tool Gatewayへ**認証付きローカルRPC** | 生成コード実行、Provider credential保持、Tool副作用を直接実行 |
+| Model Gateway / Router | Python（Provider SDK / HTTP client） | Trusted Control VM、独立プロセス | Credential Brokerから鍵注入、Trusted Egress経由送信、`dispatch_admission`/Sealed ModelRequestSnapshot | Agent Runtimeへ鍵・raw responseの権限を渡す |
+| Tool Gateway | Python | Trusted Control VM、独立プロセス（Intent/Approval/Effect Ledgerの正本） | DB、Sentinel、各Trusted Worker | Framework内Tool handlerに自己承認させる |
+| Sentinel / Credential Broker / Trusted Egress | 言語非依存（Python実装可）＋kernel/namespace/nftables等のOS強制 | Trusted Control VM、各々独立identityのプロセス・network namespace | Gateway/Workerからの認可要求、Egressは唯一のInternet経路 | Python moduleとして他プロセスへ同居させる |
+| MCP Adapter | 公式MCP Python SDK（`mcp`） | Trusted Control VM、Server/tenant単位の独立Workerプロセス | Tool Gatewayからのみ呼出し、remote MCPはTrusted Egress経由 | Agent/Cellによるstdio server spawn、SDKをPolicy/Ledger正本にする |
+| Browser Broker controller | Python | Trusted Control VM | Browser Workerへ認証付きRPC、lease/CDP policy正本 | — |
+| Browser Worker | Playwright Python（Chromium baseline）、Jev/Lightpanda adapter（EXPERIMENT） | 隔離Browser Worker domain（VM/sandbox）、Session毎Context | Broker RPCのみ、web通信はTrusted Egress強制 | Agent・Cell・Extraction Workerへの直接CDP公開 |
+| Extraction Worker | Scrapling parser、Crawl4AI（markdown化/抽出、C） | 独立sandboxプロセス、**ネットワーク無し**、入力はArtifactのみ | Gatewayから入力Artifact参照、出力はCandidate claims/Artifact | 自らfetch/browser起動、Credential/Cookie受領 |
+| Automation / Scheduler / Outbox relay | QueuePort（ADR-039）＋Python Worker | Trusted Control VM、独立プロセス | DB outbox/lease、Notification Worker | 第二のQueue/Workflow正本 |
+| Memory / Context Manager | Python module（PostgreSQL＋pgvector、Graphiti/Mem0はC） | Agent Runtime/Trusted serviceのin-process module＋DB | Embedding/summary呼出しはModel Gateway経由 | Memoryへの権限付与、consent/tombstone迂回 |
+| Generated code / 自律開発Coder | Shell/Python/Node等、OpenHands SDK等（C） | **Untrusted Execution VM のRuntime Cellのみ** | scoped broker RPCのみ（§1） | Trusted VMのPythonプロセス・venv・FSの共有、直接Socket |
+| Web UI | React + TypeScript（静的配信を第一候補） | Reverse proxy配下、Node.jsはbuild時のみ必須 | FastAPIのREST/SSE/WebSocket、OpenAPI生成Client | UI Server側での業務判断・認可・Secret保持 |
+
+**接続方式の判定規則**: (1) 同一信頼境界かつ同一障害単位で、Secret/権限を持たない純粋ロジック（domain model、validator、context selection）はPython moduleとして直接import可。(2) 異なる権限・Secret・Network namespaceを持つもの（Model Gateway、Tool Gateway、Sentinel、Credential Broker、Egress、MCP Adapter、Browser Broker）は**独立プロセス＋認証付きRPC**。(3) VMをまたぐもの（Cell、Browser Worker）は§1のscoped endpoint（vsock等）のみ。(4) RPC経由でしか呼んではならない操作: Secret注入、外部送信、CDP操作、Approval/Effect Ledger書込み、Sentinel判定。microserviceの粒度はこれ以上細分化しない。
+
+**非同期・資源制御**: API/Runtime/GatewayはasyncioとしBlocking I/O・CPU重処理は専用thread/process poolまたは別Workerへ。各Worker種別はcgroup（systemd slice/container limit）でCPU/RAM/PID/FDを制限し、プロセス単位で再起動可能とする。Python GIL/性能を理由とする再実装は、実測ボトルネックとADRがある場合のみ（Rustは任意、ADR-036）。
+
+**Streaming**: Python BackendはDomainEvent/outboxを確定後にSSE（再開cursor付き）で送る既存[Realtime Events](../08-interfaces/realtime-events.md)契約を維持。Browser Observation映像は§ADR-029の別Media relay、TakeoverはWebSocket＋短命ticket。Event payload型はADR-037の生成型。

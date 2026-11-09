@@ -4,7 +4,7 @@
 
 ## 0. 採用構成
 
-本番は**Ubuntu物理ホスト→KVM/QEMUの**Trusted Control VM + 別ゲストカーネルのUntrusted Execution VM****を前提とする。Docker Composeは**Trusted Control VM側のみ**の保護サービスの配置/再起動管理候補として使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`scheduler-relay`/`browser-broker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`sentinel-egress`/`credential-broker`/`privsep-connectors`/`telemetry-collector`を**Cell外のProtected Servicesとして別プロセス権限・ネットワーク**へ分ける。**Agent Loop/OrchestratorはTrusted Control VM**、Shell/CLI/Node/Python/生成コードのみUntrusted Execution VM内で実行する。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue `pgboss`は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
+本番は**Ubuntu物理ホスト→KVM/QEMUの**Trusted Control VM + 別ゲストカーネルのUntrusted Execution VM****を前提とする。Docker Composeは**Trusted Control VM側のみ**の保護サービスの配置/再起動管理候補として使用し、LLMへホストShell/SSH/Docker socketを絶対に与えない。外部公開は認証とTLSの入口だけ。`api`/`scheduler-relay`/`browser-broker`/`python-extraction-sidecar`/`postgres`/`artifact-store`/`sentinel-egress`/`credential-broker`/`privsep-connectors`/`telemetry-collector`を**Cell外のProtected Servicesとして別プロセス権限・ネットワーク**へ分ける。**Agent Loop/OrchestratorはTrusted Control VM**、Shell/CLI/Node/Python/生成コードのみUntrusted Execution VM内で実行する。BrowserWorkerだけがChromium context/pageを所有し、CDPをホストにpublishしない。Postgres DB schema `agent`はCHAT_10-01、Job Queue（`QueuePort`、ADR-039で選定するPython基盤。旧案: `pgboss`）は10-02、認可/egress policyはCHAT_09。**ComposeはSSRF防止機構ではない**。DNS/redirect/IP/networkアクセスをアプリTool Gatewayと強制egress層で制御する。
 
 採用候補: rootless Docker (可能なら)、非root UID/GID、`cap_drop: [ALL]`、`security_opt: [no-new-privileges:true]`、`read_only: true`、限定`tmpfs`、`pids_limit`、`mem_limit`、`cpus`、init/restart、immutable digest images、secrets mount、DB volume/Artifact volume。Chromium sandboxは明示有効化し、Playwrightのroot+no-sandbox便法を**採用しない**。Sandboxとの相性はHost kernel/LSM(seccomp/userns/AppArmor)の実機試験で判定。できなければproduction readinessはブロック。`ipc: host`、`network_mode: host`、`privileged`、`cap_add: SYS_ADMIN`を採用しない。
 
@@ -48,16 +48,15 @@ The Compose YAML below is an illustrative **legacy service topology skeleton onl
 ```mermaid
 flowchart LR
   Public["Client"] -->|"HTTPS only"| Proxy["TLS proxy"]
-  Proxy --> API["UI + Fastify API (Auth)"]
+  Proxy --> API["React static UI + FastAPI/ASGI API (Auth) — ADR-036"]
   API -->|"scoped DB"| PG[(Postgres)]
   API -->|"outbox"| PG
   Worker["Trusted Agent Orchestrator (not generated code)"] --> PG
   Scheduler["Scheduler / Relay"] --> PG
   Worker --> Broker["Approved Tool Broker"]
   Broker --> Browser["Browser Worker sandbox"]
-  Broker --> Extract["Python extraction sidecar"]
+  Broker --> Extract["Python Extraction Worker (no network)"]
   Browser --> Egress["Enforcing Egress Proxy"]
-  Extract --> Egress
   Egress --> Internet["Public internet allowed"]
   Browser --> Artifacts["Private artifact store"]
   Worker --> Artifacts
@@ -380,3 +379,7 @@ The YAML is intentionally illustrative; it contains placeholders and is not a co
 ## 2026-11-07 PR #71 P1追加: ICE経路と復旧世代の保証
 
 WebRTC/ICEはRFC 8826 `4.2.4のprivate network disclosureを想定。ViewerとのMVP Mediaは**TURN relay-only**、ServerとClient両方のcandidateは明示allowlistでfilter、host/srflx/private/VM interconnect候補は公開せず、trusted host firewall/Sentinelで候補の偽装宛先への直送を拒否。TURN unavailable時はViewer`DISCONNECTED`としinsecure peer fallback不可。TURN credentialsは期限・対象・byte/FPS上限付き。MediaSession/WorkerのrestoreIncarnationはDB復旧世代とは独立したTrusted store正本に一致させ、PITR旧worker/peerを物理送信Gateで拒否。Media中断はAgent Runの停止を意味しない。録画なし/Crash dumpなし、Reverse proxy・Browser cache・Swapへのraw映像残留0を運用で証明（未実装）。参照: [Browser Live Observation](../08-interfaces/browser-live-observation.md)、[RFC 8826](https://www.rfc-editor.org/rfc/rfc8826.html#section-4.2.4)。
+
+## 2026-11-09 Python-first: Compose構成の変更点（STEP 1、Draft / NOT RUN）
+
+[System Architecture §13.2](../00-foundation/system-architecture.md)に従い、Trusted Control VM内のserviceを`api`（FastAPI/Uvicorn、複数worker）、`runtime-worker`、`model-gateway`、`tool-gateway`、`sentinel`、`credential-broker`、`egress`、`mcp-adapter`、`scheduler-relay`へ分け、Browser domainに`browser-worker`（Playwright Python＋Chromium）、別sandboxに`extraction-worker`（Scrapling等、`network_mode: none`）を置く。Python serviceは共通base image（ADR-040: CPython 3.13推奨、digest固定は実装時）＋`uv sync --locked`で構築し、非root・read-only rootfs・cgroup上限・独立network。UIは`web/`のNode build stageで静的assetを作り、本番imageにNode runtimeを含めない。ADR-039でBroker型Queue（Redis/RabbitMQ等）を選んだ場合のみ、Trusted Control VM内に`queue-broker` serviceを追加し、Agent/Cell/Browser/MCPから到達不可の内部networkと専用credentialに限定する（PostgreSQL型なら追加しない）。§3図の「Extraction → Egress」辺は、Extraction Workerがネットワーク無しになったため削除した（取得はHTTP Fetch/Browser Worker側）。Untrusted Execution VM・Browser VMの境界、Egress強制は変更しない。

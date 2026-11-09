@@ -73,8 +73,10 @@
 ベンチマークの成功率・レイテンシー/コストの**具体目標数値は測定条件を設計してから**確定する。上記は優先順位であって現物の実測保証ではない。
 
 ## 9. 技術方針：合意された方向 / 未確定の候補
-- 【方向】TypeScriptモノレポ＋Python Sidecar。Next.js UI / Fastify API / Worker / Browser Broker / PostgreSQL / Docker ComposeとKVM/QEMU Trusted Control VM＋Untrusted Execution VM＋隔離Cellが候補。本番でCellの権限と保護サービスを分離する。
-- 【候補】Vercel AI SDK（特定メジャー/関数名は最新版と導入時点を検証）、pg-boss等の永続ジョブ、Playwright/Chromium、Scrapling、MCP、Keepa、X検索API。
+- 【方向・確定 2026-11-09 / ADR-036】**Python-first**。Python（FastAPI API / Agent Runtime / Model・Tool Gateway / MCP / Browser Worker / Memory / Automation / 自律開発）＋React + TypeScript Web UI＋PostgreSQL（SQL正本）＋Docker ComposeとKVM/QEMU Trusted Control VM＋Untrusted Execution VM＋隔離Cell。Rustは実測で必要な局所最適化のみの任意言語。本番でCellの権限と保護サービスを分離する方針は不変。配置は[System Architecture §13.2](system-architecture.md)。
+- 【旧方向・履歴】2026-10時点の「TypeScriptモノレポ＋Python Sidecar（Next.js UI / Fastify API / Worker）」案は**ADR-036により置換**。調査記録として残すが採用方針ではない。
+- 【候補】Agent Runtime: PydanticAI＋DBOS / DeepAgents Python＋LangGraph（**STEP 2で選定、ADR-038**）。永続ジョブ: QueuePort＋PostgreSQL Outbox上のPython基盤（DBOS/Dramatiq/Celery/Temporal Python、ADR-039）。Playwright Python/Chromium、Scrapling、Crawl4AI、公式MCP Python SDK、Keepa、X検索API。
+- 【旧候補・履歴】Vercel AI SDK、pg-bossはNode/TS前提のため採用候補から外し、上流設計の参考としてのみ保持。
 - 【実験】Jev連携（既存Playwright Pageの利用と隔離）、Lightpanda（CDPと対象サイトの互換性）。公式APIは資格・費用・規約確認後に採否。
 - 【未確定】User/tenantモデル、ブラウザ保存方式、Key Store実装、監視周期上限、事前承認の厳密分類、導入SDKのバージョン、実際の価格/空室API提供可否。
 - 【絶対条件】ライブラリの導入可否・関数・パフォーマンスは「今の実装」を調べ、決定と検証事実を分けて書く。

@@ -137,7 +137,7 @@ REQの例示されたID体系はCHAT_06ローカル。共有Error CodeやEvent�
 
 `evidence` はこのunionの `kind` に **存在しない**。Evidence/Observationへのread-only pointerは `sourceRefs` で保持する。
 
-### 5.2 TypeScript提案（**module-private**。共有IDは `[PROVISIONAL: CHAT_01/09]`）
+### 5.2 論理型提案（TypeScript記法、実装はPydantic: ADR-036/037。**module-private**。共有IDは `[PROVISIONAL: CHAT_01/09]`）
 
 ```ts
 type MemoryKind = "profile" | "episodic" | "procedural_hint" | "task_note";

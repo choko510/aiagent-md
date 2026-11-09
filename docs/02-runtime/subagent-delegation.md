@@ -187,7 +187,7 @@ async function collect(parentClaim:RunClaim) {
 - 承認の子への伝播を既定で禁止。明示的なTool Approvalを特定actor/child Run/GoalRevision/tool/argument hashに結びつける。親が承認した別操作で予約確定を許さない。
 - BrowserContext/Page/credentialはCHAT_04 Browser Workerだけが所有。子が同時に親Browserを直接操作することはない。Browser Session lock取得できなければ安全に待機。
 - 親からの委任はPolicy/Egressが許可したToolのみ。Web/SNS内容の「子Agentを増やせ」命令は非信頼であり、実行権限を変更できない。
-- Host Shell/SSH/Docker socket、無断購入/送金/予約/投稿、無制限の兄弟対話、Python Sidecarのprivileged accessは禁止。
+- Host Shell/SSH/Docker socket、無断購入/送金/予約/投稿、無制限の兄弟対話、Python Worker/Sidecar（ADR-036以降はPython本体を含む）へのprivileged accessは禁止。
 - 子結果のPrompt injection/偽造Evidenceは親へ直接trusted instructionとして入れず、Provenance/ObservedAt付きのuntrusted dataである。
 
 ## 10. Finite Budget, Metrics & Performance

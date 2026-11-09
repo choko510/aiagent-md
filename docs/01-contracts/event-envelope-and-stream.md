@@ -272,3 +272,7 @@ Extend the **existing** `DomainEventEnvelopeV1` rather than creating a separate 
 A Campaign control change must share the DB transaction with its stable command receipt and outbox; stop notification and new Cycle dispatch cannot commit with conflicting controlVersion. `demo.decision_recorded` is a design-consent event only; it does not consume a Tool Approval. `feature.integration_verified` binds the **combined integration SHA**, criterion version and validated triple-review+test receipt. `campaign.quota_wait_recorded` references provider-specific QuotaWaitReceipt but never contains provider tokens. UI SSE is a hint and must resync the authenticated snapshot/cursor after disconnect. Unknown kind/major version is rejected, not silently normalized.
 
 **EVT-DEV-T01** cross-tenant event read/replay denied; **EVT-DEV-T02** Stop+outbox atomic and stale queue dispatch denied; **EVT-DEV-T03** API/sse projection reconstructs 10-feature integrated count after restart; **EVT-DEV-T04** design consent event cannot permit production Tool, **EVT-DEV-T05** old schema/unknown kind yields explicit incompatibility.
+
+## 2026-11-09 Python-first（ADR-036）: Event Schemaの生成と配信（STEP 1）
+
+EventEnvelopeとkind別payloadはcanonical JSON Schemaが正本（ADR-037）。Python Backend（FastAPI）はPydantic生成modelで検証してからDBへappend・SSE配信し、React UIは同じSchemaから生成したTS型でdecodeする。int64 offset/sequenceはwire十進文字列のまま。既存の`ts`ブロックは論理型記法として有効。

@@ -315,3 +315,7 @@ QA: ACM-T24/25/29/30。これらのDB sender integrationは未実装・未試験
 RecallはProtected Gateway経由のread-only ArtifactRef＋locator＋expectedDigest。現行ACL/retention/Memory tombstone/Source freshness/Recipient/Budgetを検査し、Originalが削除された場合は`ARTIFACT_UNAVAILABLE`を返す。要約だけを原本としてVerifiedに昇格しない。
 
 QA: ACM-OSS-T07/T08/T10/T12/T13、Designed/NOT RUN。
+
+## 2026-11-09 Python-first（ADR-036）: Memory OSS候補（STEP 1、分類C）
+
+Memory Writer/RetrieverはPython module（Trusted Control VM）で実装し、正本はPostgreSQL（本書・Memory Data Modelの表、consent/tombstone/epoch）とする。ベクトル検索は**pgvector**を第一候補（同一DB・同一Transaction・同一ACL）。**Graphiti**（`graphiti-core 0.31.2`、Apache-2.0、>=3.10）と**Mem0**（`mem0ai 2.2.1`、Apache-2.0、>=3.10）は、(1) 外部Graph DB/Vector DBやLLM呼出しを要するか、(2) aiagent-mdのMemory consent・削除・失効・tenant分離・read epochを強制できるか、(3) LLM抽出結果を正本にしない運用が可能か、をSTEP 2で評価するまで採用しない。採用時もModel呼出しはModel Gateway経由、抽出結果は`PROPOSED` Memoryとして既存Memory Writerの承認・Undoを通す。LangGraph Store/DeepAgents memory middlewareを使う場合も一時Contextのstoreであり長期Memory正本ではない。

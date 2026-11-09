@@ -295,3 +295,7 @@ Unknown: OTel version installed in future implementation, SDK exporter compatibi
 
 Telemetryが落ちてもPolicy/Goal/Sourceの安全判定をLLM推測へ切り替えず、必要なUsage receiptが取得できなければunknown Costとして保守的Budgetを維持。SLO/価格節約率はFixtureと現物測定前に保証しない。ACM-T01..T20との対応をQAに提出する。
 
+
+## 2026-11-09 Python-first: OpenTelemetry Python（STEP 1）
+
+instrumentationの実装はOpenTelemetry Python SDK（`opentelemetry-sdk 1.45.2`、Apache-2.0）を第一候補とし、§2のOpenTelemetry JS/Langfuse worker調査は概念参照（分類B）。FastAPI/asyncio/DB driver/HTTP clientの自動計装は、Secret・Cookie・prompt本文を属性に入れないredaction processorを通す。Cost/usage台帳の正本はDB（不変）で、Traceは派生物。

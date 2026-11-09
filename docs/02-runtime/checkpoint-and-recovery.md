@@ -45,7 +45,7 @@ Task.recordVersion初期1案、Run.leaseEpoch number安全整数/DB bigint、Tas
 | CPR-90 | SHOULD | 同条件benchmarkでCPU/時間/IO/再開コストを計測 | SC-09 |
 | CPR-91 | EXPERIMENT | 複数replica性能改善を安全性テスト後にのみ採用 | SC-09 |
 
-## 5. 内部Port / TypeScript pseudo contracts
+## 5. 内部Port / 論理型（TypeScript記法、実装はPython: ADR-036/037）
 ~~~ts
 interface LocalCheckpoint {
  runId:string;
@@ -251,3 +251,7 @@ ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/proces
 **Non-blocking OM**: Buffer chunk生成≠activation確定。Part-range coverageとGenerationを持つ連続prefixのみCASで既読化し、Reflection rolloverで未採用Chunkが消えないようcarry-forwardまたはRawから再構築。Timestamp/message IDだけで完全coverageを推定しない。プロセス内ロックは分散Workerの根拠でない。
 
 **Fault tests**: ACM-OSS-T01/T02/T07/T08/T09/T10/T11/T13、既存ACM-T18/T23/T25/T32/T36。設計のみ、NOT RUN。
+
+## 2026-11-09 Python-first: Framework checkpointとの関係（STEP 1）
+
+aiagent-mdのimmutable checkpoint/HEAD CASが唯一の再開正本。候補AのDBOS workflow/step記録、候補BのLangGraph checkpointer（`langgraph-checkpoint-postgres`等）は、同じPostgreSQLに置く場合でも**別schema・別権限の派生記録**とし、Run HEAD・Effect Ledger・Approvalを代替しない（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[Architecture Rules §E](../00-foundation/architecture-rules.md) E-6/E-7）。Framework側の再実行（step replay）で外部副作用を再送しないことをSTEP 2適合試験PYRT-T01/T04で確認する（未実行）。
