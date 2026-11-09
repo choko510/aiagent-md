@@ -105,17 +105,17 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 
 ## ADR-036〜040: Python-first アーキテクチャ移行（2026-11-09、STEP 1）
 
-> **状態の意味**: ADR-036はユーザーが確定した開発言語方針（`PRODUCT_FIXED`）。ADR-037/039/040は`PROPOSED`、ADR-038は**STEP 2で選定する`OPEN`**。どれも実装・実行・Owner署名を伴わず、`LOCKED`/`VERIFIED`ではない。ADR-002/017〜021（VM分離・Sentinel・Credential Broker・Runtime Cell）とADR-023〜035の契約は**一切緩和しない**。物理トポロジーの正本は[System Architecture §13.2](system-architecture.md)、拘束規則は[Architecture Rules §E](architecture-rules.md)。
+> **状態の意味**: ADR-036はユーザーが確定した開発言語方針（`PRODUCT_FIXED`）。ADR-037/040は`PROPOSED`。ADR-038/039は**STEP 2の実測で選定済み（`SELECTED`、NOT LOCKED）**、根拠は下記「ADR-038/039 STEP 2判定結果」。どれも実装・実行・Owner署名を伴わず、`LOCKED`/`VERIFIED`ではない。ADR-002/017〜021（VM分離・Sentinel・Credential Broker・Runtime Cell）とADR-023〜035の契約は**一切緩和しない**。物理トポロジーの正本は[System Architecture §13.2](system-architecture.md)、拘束規則は[Architecture Rules §E](architecture-rules.md)。
 
 | ADR | State | Decision and rationale | Alternative rejected/held | Owner / verification |
 |---|---|---|---|---|
 | **ADR-036** | PRODUCT_FIXED（2026-11-09 ユーザー決定） | **Python-first**。Python＝Backend/API/Agent Runtime/MCP/Browser Worker/Memory/Automation/自律開発の主言語。TypeScript＝React Web UI・ブラウザ側Clientの主言語。SQL＝PostgreSQL DDL/Transaction/Migrationの正本。Rust＝実測で必要と判断された局所最適化に限る任意言語。理由: PydanticAI/DBOS/LangGraph/DeepAgents/Playwright/Scrapling/Crawl4AI/MCP/OpenHands等のPython OSSを**同一プロセス言語で直接利用**し、Python Sidecarという言語ブリッジと二重Schemaを無くす。 | TypeScriptモノレポ＋Python Sidecar（旧project-brief §9の方向。**履歴として保持し現行方針ではない**）、全面Rust/Go化、根拠のない性能理由による再実装 | CHAT_00。静的: `audit/cross-contract/check_python_first.py`。実装時: §E-9のCI |
 | **ADR-037** | PROPOSED | **共有契約の正本は言語非依存のまま**。CHAT_01の論理契約→版付きcanonical JSON Schema（`contracts/`配下、CHAT_01所有）を唯一の正本とし、Python Pydantic v2 modelと、FastAPIが出すOpenAPI、UI用TypeScript型はそこから**生成または機械照合**する。仕様中の`~~~ts`/`typescript`ブロックは**論理型記法**であり実装言語の指定ではない。Pydanticを採用してもSchema所有権はCHAT_01からPythonコードへ移らない。 | Python/TSで別々に手書き、Pydantic modelを暗黙の正本化、OpenAPIだけを正本にして非HTTP契約（Event/Checkpoint/Tool I/O）を失う | CHAT_01/08/10/11。生成差分0のCI gate、wire互換fixture |
-| **ADR-038** | **OPEN（STEP 2で選定）** | 主Agent Runtimeは**候補A: PydanticAI＋DBOS** と **候補B: DeepAgents Python＋LangGraph** を並記保持。どちらもaiagent-mdの`AgentRuntimePort`（[Agent Loop「2026-11-09 Python-first: Agent Runtime Port」節](../02-runtime/agent-loop.md)）の**内側**に置き、Task/Run/Checkpoint HEAD/Tool Intent/Effect Ledger/Approvalの正本はPostgreSQL上のaiagent-md契約に残す。Framework側のcheckpoint/stateは再構築可能な派生物。 | STEP 1での片方の採用確定、Framework runner/checkpointをTask/Run正本にする（agent-loop不採用Bと同旨） | CHAT_02/03/10/11。§ADR-038判定基準 |
-| **ADR-039** | PROPOSED（製品選定はADR-038に従属） | Durable Job/Scheduleは`QueuePort`＋PostgreSQL Transactional Outboxを正本とし、**Queue/Workflow基盤は1系統のみ**。pg-bossはNode専用のため採用候補から外し、設計参考（attempt fence/scheduler挙動）として保持。候補: DBOS（ADR-038でA採用時に統合）、Dramatiq/Celery（Broker追加が必要）、Temporal Python SDK（別クラスタ）、APScheduler（時刻計算の補助のみ、Queueの正本にしない）。 | 複数Queue/Workflowの併用、Queue製品のexactly-onceを外部副作用exactly-onceと同一視 | CHAT_07/10/11。JQ/SCHのkill・ACK-loss試験 |
+| **ADR-038** | **SELECTED（STEP 2実測、NOT LOCKED。STEP 1では`OPEN（STEP 2で選定）`）** | 主Agent Runtimeは**候補B: DeepAgents Python＋LangGraph**（`deepagents 0.7.34`、`langgraph 1.2.20`、`langgraph-checkpoint-postgres 3.2.0`）。`AgentRuntimePort`（[Agent Loop「Python-first: Agent Runtime Port」節](../02-runtime/agent-loop.md)）の**内側**に置き、Task/Run/Checkpoint HEAD/Tool Intent/Effect Ledger/Approvalの正本はPostgreSQL上のaiagent-md契約に残す。LangGraph checkpointは派生キャッシュ。両候補とも必須試験20件に合格した上で、比較試験（下記）でBを選定。 | 候補A: PydanticAI＋DBOS（必須試験は合格。DBOS既定pickle直列化・executor単位の自動回復・非公開回復APIへの依存・RSS約2倍を理由に主Runtimeとして不採用）、Framework runner/checkpointをTask/Run正本にする（agent-loop不採用Bと同旨） | CHAT_02/03/10/11のOwner review待ち。`conformance/agent_runtime`（PYRT-T00〜T12） |
+| **ADR-039** | **SELECTED（STEP 2、NOT LOCKED）** | Durable Job/Scheduleは`QueuePort`＋PostgreSQL Transactional Outboxを正本とし、**Queue/Workflow基盤は1系統のみ**。ADR-038でLangGraphを選定したため、QueuePortは**aiagent-md自作のPostgreSQL Queue（`FOR UPDATE SKIP LOCKED`＋lease＋attempt fence）**とする（[Job Queue](../10-infrastructure/job-queue-and-outbox.md)既存選択肢C）。Run起動・再claim・再配達はQueuePort、step内実行はLangGraph。DBOSは導入しない。pg-bossはNode専用のため設計参考（attempt fence/scheduler挙動）としてのみ保持。 | DBOS（候補A不採用に伴い不採用。Queue dedupe/再配達はPYRT-T10で合格していた）、Dramatiq/Celery（Broker追加）、Temporal Python SDK（別クラスタ）、APScheduler（時刻計算の補助のみ）、複数Queue/Workflowの併用、Queue製品のexactly-onceを外部副作用exactly-onceと同一視 | CHAT_07/10/11。PYRT-T10/T10b合格（PoC）。JQ-T系は未実行 |
 | **ADR-040** | PROPOSED | Python実行基盤: 推奨**CPython 3.13**（下限互換CIは3.12）、`uv`（依存/lock）、`ruff`（lint/format）、`pytest`、型検査は`mypy --strict`（pydantic plugin）を第一候補・`pyright`代替。Backendは単一`uv` workspace、特殊依存（Scrapling/Crawl4AIのBrowser依存、OCR等）は独立Worker imageを許可。lockfile・image digestは実装段階で固定。 | Python 3.12への無条件固定、Python 3.14/3.15を全依存の対応確認前に採用、Worker毎に異なる依存管理ツール | CHAT_10/11。§ADR-040根拠 |
 
-### ADR-038 判定基準（STEP 2で実測・Owner reviewする事項）
+### ADR-038 判定基準（STEP 1で定義。STEP 2の実測結果は次節）
 
 | 評価軸 | 候補A: PydanticAI＋DBOS | 候補B: DeepAgents Python＋LangGraph | 合格条件（両候補共通） |
 |---|---|---|---|
@@ -129,6 +129,61 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | 置換容易性 | — | — | `AgentRuntimePort`適合試験を両候補で同一fixtureで実行 |
 
 **STEP 1時点の確認済み事実（2026-11-09 PyPI/GitHub API取得、コード実行なし）**: `pydantic-ai 2.66.0`(requires-python>=3.11, MIT)、`dbos 3.4.0`(>=3.10, MIT)、`deepagents 0.7.34`(>=3.11,<4.0, MIT)、`langgraph 1.2.20`(>=3.10, MIT)、`langgraph-checkpoint-postgres 3.2.0`(>=3.10, MIT)。DeepAgents Python main `0279f1d036a8a73ea0d99bf04583e9c9a9598ef2` に `middleware/summarization.py`、`middleware/_blob_offload.py`、`middleware/_message_eviction.py`、`backends/store.py` が**存在することのみ確認**（内容監査・テスト実行は未実施）。PydanticAI main `9860083ceabe4159d087673b6ee8372cd9750b99`、DBOS main `236142bd7a99ff77d04becf5f405a60d6f330591`、LangGraph main `e5e37b5d70dbfd93c7006bd90a658c6179a95946`。
+
+### ADR-038/039 STEP 2判定結果（2026-11-10、PoC実測。Owner review前、NOT LOCKED）
+
+**検証物**: `conformance/agent_runtime/`（共通適合試験・Fixture・候補A/B Adapter・計測）、CI `.github/workflows/agent-runtime-conformance.yml`（PostgreSQL 16 service、候補別に固定lockで実行）。同一FakeModel policy、同一Fake Model Gateway／Fake Tool Gateway、同一PostgreSQL、同一Fixture。Workerは実プロセスで、Fault Injectionは指定点での`os._exit(137)`。外部送信・実Provider・実Credentialは不使用。**PoCのFake Gatewayと簡略DDLでの合格であり、本番Runtime・本番DDL・VM/Sentinel下での`Verified`ではない。**
+
+**固定版**（2026-11-09/10 PyPI・GitHub API取得、全てMIT）: 候補A `pydantic-ai-slim 2.66.0`・`pydantic-ai-harness 0.66.0`（現行ソースは`pydantic/pydantic-ai`の`src/pydantic_ai_harness`、main `443417c3493c34efda6e33ed5ff59d56d34fae55`。旧`pydantic/pydantic-ai-harness`はarchived）・`dbos 3.4.0`（main `236142bd7a99ff77d04becf5f405a60d6f330591`）。候補B `deepagents 0.7.34`（main `0279f1d036a8a73ea0d99bf04583e9c9a9598ef2`）・`langgraph 1.2.20`（main `e5e37b5d70dbfd93c7006bd90a658c6179a95946`）・`langgraph-checkpoint 4.3.1`・`langgraph-checkpoint-postgres 3.2.0`・`langchain-core 1.7.6`。共通 `psycopg 3.3.8`（LGPL-3.0-only、動的リンク利用。配布形態の確認はSTEP 3）。推移依存は`requirements-{a,b}.lock.txt`。
+
+**必須試験（安全性・整合性・再開性）**: 候補A 20/20、候補B 20/20合格（Windows 11/CPython 3.13.14/PostgreSQL 16.2でローカル実行。Linux CIの結果はPRに記録）。
+
+| Test | 内容 | A | B |
+|---|---|---|---|
+| PYRT-T00 | 承認付き正常系、外部送信1回 | PASS | PASS |
+| PYRT-T01/T01b | Model応答直後・read Tool ACK直後のWorker kill→再claim→継続 | PASS | PASS |
+| PYRT-T06 | 外部送信直後のACK喪失→再実行で送信1回のまま | PASS | PASS |
+| PYRT-T07 | Gateway内の送信後・確定前crash→UNKNOWN保持、再開2回でも再送0 | PASS | PASS |
+| PYRT-T12（陰性対照） | Ledgerを外すとFramework durabilityだけでは送信2回になる | 再現 | 再現 |
+| PYRT-T02a/b/c | 拒否・失効・判断なしresume（Framework側を承認扱いで再開）で送信0 | PASS | PASS |
+| PYRT-T03a/b/c | 承認待ち中のGoal変更で旧Intent拒否、旧Goal workerのModel dispatch 0（Gateway admission）、旧fenceのHEAD書込拒否 | PASS | PASS |
+| PYRT-T04 garbage/swap | Framework永続状態の破損（復号不能／整形式だが改竄）を検出しHEADから再構築、改竄引数での実行0 | PASS | PASS |
+| PYRT-T08 | Modelに見えるToolがGateway stubのみ、Framework状態にCredential文字列0 | PASS | PASS（`read_file`のみ残る。下記） |
+| PYRT-T09 | Subagent＋Context圧縮。子Toolも同一Gateway、Summaryは別stream、HEADのRaw履歴保持 | PASS | PASS |
+| PYRT-T10/T10b | Queue経由起動、kill後の再配達、重複投入の拒否 | PASS（DBOS Queue dedupe） | PASS（aiagent-md SKIP LOCKED Queue） |
+| PYRT-T11 | 同一応答内の書込Tool 2件。Framework既定は並列（同時2件を観測）、Gateway側で直列化し送信は各1回。`sequential`設定で同時1件 | PASS | PASS |
+
+**比較（必須試験合格後。数値は同一マシン・同一実行内の実測、N=10中央値。`results/bench-*-win.json`）**
+
+| 項目 | 候補A PydanticAI＋DBOS | 候補B DeepAgents＋LangGraph |
+|---|---|---|
+| Worker peak RSS（1 run） | 184.2 MB | 95.0 MB |
+| CPU秒（Worker 2プロセス合計、起動含む） | 6.54 s | 5.16 s |
+| Worker起動〜Framework準備 | 2.78 s＋launch 0.33 s | 2.11 s |
+| Segment実行時間（2 segment合計） | 0.37 s | 0.42 s |
+| 1 runあたりWAL | 19.0 KB | 37.7 KB |
+| 1 runあたりFramework表のtuple書込 | 15 | 29 |
+| 1 runあたりaiagent-md表のtuple書込 | 28 | 27 |
+| 推移依存（共通の試験用依存を除く） | 28 | 57（`anthropic`・`google-genai`等の未使用Provider SDKを含む） |
+| Adapter行数（空行・コメント除く） | 約225 | 約205 |
+| Queue | DBOS Queue（dedupe有） | 別途QueuePort（fixtureで約30行） |
+| Framework状態の直列化 | 既定**pickle**（`py_pickle`）。`DBOSPortableJSONSerializer`ではPydanticAIの`ModelResponse`が直列化できず失敗（実測） | msgpack（`pickle_fallback=False`既定）。ext型allowlistは既定で緩く、`LANGGRAPH_STRICT_MSGPACK`で制限（STEP 3で検証） |
+| 回復の主導権 | `DBOS.launch()`がexecutor単位でPENDING workflowを自動回復しaiagent-md leaseを見ない→Worker毎の`executor_id`と非公開`DBOS._recover_pending_workflows`が必要 | 呼出し時のみ実行（背景回復なし）。再claimしたWorkerが`thread_id`で再開 |
+
+**STEP 2で判明した故障・制約（PoCで対処し試験化済み）**
+
+1. **共通**: Framework durability（DBOS step／LangGraph checkpoint）だけでは外部副作用のexactly-onceにならない（PYRT-T12で両候補とも重複を再現）。HEADへのProposal記録＋Gatewayの`intent_key`冪等＋Effect Ledgerが必須。
+2. **共通**: 両Frameworkとも同一応答内のTool呼出しを既定で並列実行する（PYRT-T11）。書込直列化はGatewayのrun単位lockで強制し、Framework設定は補助。
+3. **共通**: Framework内Toolの再実行で、HEADに無い／引数が異なるProposalをGatewayへ渡さない検査（LOOP-004）を、キャッシュ済み結果を返す前に行う必要がある（順序を誤ると改竄を見逃す。PYRT-T04 swapで検出）。
+4. **A**: Workflow内でaiagent-md状態を素の読込みで参照すると非決定的になり、回復時にDBOSが記録済みModel出力をずれたstep位置で再生した（改竄したstep出力が無検出で使われた）。HEAD読込みをDBOS step化して解消。
+5. **A**: DBOS既定のpickle直列化はDB書込権限→Trusted Control VMでのコード実行経路になりうる。JSON直列化はPydanticAI統合と非互換（実測）。
+6. **B**: `create_deep_agent`は既定でFS Tool群・`execute`・汎用subagent（親の全Toolを継承）を追加する。`FilesystemMiddleware(tools=["read_file"])`で置換（`read_file`は必須でStateBackend＝Graph state内のみ）、汎用subagentはModel provider名（クラス名）に紐づくHarnessProfileで無効化した。Profile解決がProvider名に依存する点は脆い。
+7. **B**: HEADから再構築する際、未回答のTool呼出しを`PatchToolCallsMiddleware`が黙って「cancelled」にする。再構築前にGateway経由で未決Intentを確定させる（`settle_pending`）。
+8. **B**: 複数の同時interruptは`Command(resume={interrupt_id: …})`でid指定が必要。承認待ちの再判定はinterrupt()の再発行で表現する。
+
+**判定**: 必須試験は両候補合格。比較では、(a) Trusted Control VM内のFramework状態直列化の安全性（Aは既定pickleでJSON化不可を実測、Bはpickle無効が既定）、(b) 回復の主導権がaiagent-md claim側にあること（Aは非公開APIとexecutor設計が必要）、(c) RSS約1/2・CPU約0.8倍、(d) Context Manager §20が第一調査対象とするsummarization/offload/skills/subagentの流用率、を重視してBを選定。Bの欠点（WAL約2倍、依存数約2倍で未使用Provider SDKを含む、Queueを自作、組込みToolの抑止設定が必要）はSTEP 3の条件として扱う。PydanticAI/Pydantic AI Harness/DBOSはAgent Runtime・Queueとして採用しない（Pydantic v2自体はADR-037どおり共有型の実装に使う）。Bが採用条件を満たせない場合の代替はA（必須試験合格済み）とし、適合試験はAのAdapterを残して継続実行できる。
+
+**STEP 3の採用条件（未達ならADR-038を再審）**: CIで`agent-runtime-conformance`を必須化し、PYRT-T00〜T12を常時合格。`LANGGRAPH_STRICT_MSGPACK`相当のallowlistを有効化して試験追加。HarnessProfile無効化が効かないModelを使ったら失敗する試験（Tool表面のsnapshot）。checkpoint表を専用schema・専用DB roleへ分離し、Retention/GCを実装。依存監査（Provider SDKを読み込まないことのimport監査）。本番Gateway/Sentinel/VM配置での再実行。
 
 ### ADR-040 根拠（Python version）
 

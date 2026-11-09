@@ -179,4 +179,11 @@ The term `Runtime Host` is a **logical Orchestrator in Trusted Control VM**, not
 
 ## 2026-11-09 Python-first: Runtime Hostのプロセス構成（STEP 1、Draft）
 
-Runtime HostはPython asyncioの独立Workerプロセスとして実装する（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。API（FastAPI）プロセスとは分離し、DBのRun claimで仕事を得る。HostはModel Gateway・Tool Gatewayへ認証付きローカルRPCで接続し、Provider credential・Vault・Browser CDP・生成コード実行権限を持たない。1プロセス内の複数Runは`asyncio.TaskGroup`等で並行するが、Run毎のlease/heartbeat/cancel scopeを独立させ、1 Runの例外・Blocking処理が他Runへ波及しないようthread/process poolへ隔離する。Worker単位のCPU/RAM/PID上限はcgroupで強制し、OOM/kill時は既存の再claim手順で復旧する。主Runtime OSS（ADR-038候補A/B）はHost内部のAdapterであり、Hostのlease・Session正本を置換しない。
+Runtime HostはPython asyncioの独立Workerプロセスとして実装する（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。API（FastAPI）プロセスとは分離し、DBのRun claimで仕事を得る。HostはModel Gateway・Tool Gatewayへ認証付きローカルRPCで接続し、Provider credential・Vault・Browser CDP・生成コード実行権限を持たない。1プロセス内の複数Runは`asyncio.TaskGroup`等で並行するが、Run毎のlease/heartbeat/cancel scopeを独立させ、1 Runの例外・Blocking処理が他Runへ波及しないようthread/process poolへ隔離する。Worker単位のCPU/RAM/PID上限はcgroupで強制し、OOM/kill時は既存の再claim手順で復旧する。主Runtime OSS（ADR-038、STEP 2でDeepAgents Python＋LangGraphを選定）はHost内部のAdapterであり、Hostのlease・Session正本を置換しない。
+
+## 2026-11-10 STEP 2: Worker起動・回復の規則（ADR-038選定、PoC試験済み・NOT LOCKED）
+
+- Worker起動時にFrameworkが**背景でRunを回復・実行してはならない**。回復は、QueuePortで仕事を得てRunをclaim（fence+1）したWorkerが`run_segment`を呼んだときだけ行う。LangGraphは呼出し時のみ実行されるためこの規則を満たす（候補AのDBOSは`launch()`がexecutor単位でPENDING workflowを自動回復するため、Worker毎の`executor_id`と非公開回復APIが必要だった。不採用理由の一つ）。
+- Worker 1プロセスは`AsyncPostgresSaver`用のDB接続を1本持ち、checkpointerはaiagent-md正本とは別schema/別roleへ置く（STEP 3）。Windowsでの開発時はpsycopg asyncのためSelector event loopが必要（本番Linuxでは不要）。
+- Worker peak RSSは同一fixtureで約95 MB（候補Aは約184 MB）、Worker起動〜準備約2.1 s（N=10中央値、Windows 11/CPython 3.13.14、`conformance/agent_runtime/results/`）。cgroup上限の初期値算定に使うが、本番Model/Toolを含めた値ではない。
+- kill（`os._exit`相当、OOMを模擬）後は既存のlease失効→再claimで再開し、送信重複0・UNKNOWN保持をPYRT-T01/T06/T07で確認した。

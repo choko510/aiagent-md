@@ -446,4 +446,17 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 
 ## 2026-11-09 Python-first移行に伴うRelease Gateの扱い
 
-既存のHard/Quality gate・Test IDは変更しない。追加の静的Gateは`audit/cross-contract/check_python_first.py`（TS前提記述の分類漏れ・ADR-036〜040の必須条件）で、**これは仕様整合の静的検査であり、Python Agent Runtimeの動作検証PASSではない**。実装開始後は、ADR-038の`AgentRuntimePort`適合試験（PYRT-T01〜T05）、MCP-PY-T01〜T04、QueuePort（JQ-T系）を候補ごとに同一fixtureで実行し、選定基盤以外のRelease判定を行わない。
+既存のHard/Quality gate・Test IDは変更しない。追加の静的Gateは`audit/cross-contract/check_python_first.py`（TS前提記述の分類漏れ・ADR-036〜040の必須条件）で、**これは仕様整合の静的検査であり、Python Agent Runtimeの動作検証PASSではない**。実装開始後は、ADR-038の`AgentRuntimePort`適合試験（PYRT-T00〜T12、STEP 2で拡張）、MCP-PY-T01〜T04、QueuePort（JQ-T系）を同一fixtureで実行し、選定基盤以外のRelease判定を行わない。
+
+### 2026-11-10 STEP 2: Agent Runtime Gate（ADR-038/039 SELECTED、NOT LOCKED）
+
+| Gate | 種別 | 条件 | 現状 |
+|---|---|---|---|
+| RT-G1 | Hard | `agent-runtime-conformance` CIでPYRT-T00〜T12が全件合格（選定基盤B。代替Aも同じ試験を維持） | PoCで合格（Fake Gateway）。本番構成は未実施 |
+| RT-G2 | Hard | PYRT-T12陰性対照が「Ledgerなしでは重複する」ことを再現し続ける（試験の検出力の確認） | 合格 |
+| RT-G3 | Hard | Modelに見えるTool一覧がGateway stub＋許可済みFramework Toolのsnapshotと一致（`execute`・書込FS・汎用subagent 0） | 合格（`read_file`のみ許可） |
+| RT-G4 | Hard | Framework状態にCredential・Provider key文字列0 | 合格（PoC走査） |
+| RT-G5 | Hard | checkpoint直列化でpickle無効、msgpack ext allowlist制限下で全試験合格 | **未実施（STEP 3）** |
+| RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 初回記録: RSS 95.0 MB、CPU 5.16 s、WAL 37.7 KB、Framework tuple 29（N=10中央値、Windows/PG16.2） |
+
+性能の数値は合否基準ではなく回帰検知の基準線であり、本番Model/Tool/Network込みの性能保証ではない。

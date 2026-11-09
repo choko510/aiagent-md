@@ -254,4 +254,19 @@ ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/proces
 
 ## 2026-11-09 Python-first: Framework checkpointとの関係（STEP 1）
 
-aiagent-mdのimmutable checkpoint/HEAD CASが唯一の再開正本。候補AのDBOS workflow/step記録、候補BのLangGraph checkpointer（`langgraph-checkpoint-postgres`等）は、同じPostgreSQLに置く場合でも**別schema・別権限の派生記録**とし、Run HEAD・Effect Ledger・Approvalを代替しない（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[Architecture Rules §E](../00-foundation/architecture-rules.md) E-6/E-7）。Framework側の再実行（step replay）で外部副作用を再送しないことをSTEP 2適合試験PYRT-T01/T04で確認する（未実行）。
+aiagent-mdのimmutable checkpoint/HEAD CASが唯一の再開正本。候補AのDBOS workflow/step記録、候補BのLangGraph checkpointer（`langgraph-checkpoint-postgres`等）は、同じPostgreSQLに置く場合でも**別schema・別権限の派生記録**とし、Run HEAD・Effect Ledger・Approvalを代替しない（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[Architecture Rules §E](../00-foundation/architecture-rules.md) E-6/E-7）。Framework側の再実行（step replay）で外部副作用を再送しないことをSTEP 2適合試験PYRT-T01/T04で確認する（STEP 2でPoC実行済み、下記）。
+
+## 2026-11-10 STEP 2: LangGraph checkpointを派生キャッシュとして扱う規則（ADR-038選定、PoC試験済み・NOT LOCKED）
+
+ADR-038でDeepAgents Python＋LangGraphを選定した。`langgraph-checkpoint-postgres`の`checkpoints`/`checkpoint_blobs`/`checkpoint_writes`は**派生キャッシュ**であり、Run HEADを置換しない。PoC（`conformance/agent_runtime/`）で次を試験済み。
+
+| 規則 | 内容 | 試験 |
+|---|---|---|
+| HEAD先行 | Model応答はHEADへCAS追記してからFrameworkへ返す。同じ要求（stream＋最後の非assistant message）の再要求はModelを呼ばずHEADから再生 | PYRT-T01/T01b |
+| Proposal照合 | checkpoint由来のTool呼出しは、HEADのProposalと名前・引数・`tool_call_id`が一致しなければ実行せず`REBUILD` | PYRT-T04 swap |
+| 復号不能 | checkpoint blobが復号できない場合は`framework_ref`を捨て、新しい`thread_id`でHEADから再構築 | PYRT-T04 garbage |
+| 未決Intentの確定 | 再構築前に未回答のTool呼出しをGateway経由で確定（同じintent key、冪等）。DeepAgentsの`PatchToolCallsMiddleware`による黙ったcancelを防ぐ | PYRT-T02c/T04 |
+| 書込方式 | `durability="sync"`で各super-step後にcheckpoint。killで失われた分はHEAD再生とGateway冪等で吸収 | PYRT-T01/T06 |
+| Framework状態の直列化 | msgpack（pickle fallback無効が既定）。ext型allowlistは`LANGGRAPH_STRICT_MSGPACK`等で制限（**STEP 3で試験追加、未実施**） | — |
+
+計測（同一fixture、N=10中央値、環境依存）: Framework表への書込は1 runあたりtuple 29件・WAL合計37.7 KB（aiagent-md表27件）。checkpoint表は専用schema・専用DB role・Retention/GCをSTEP 3で設計する（未実施）。Run完了後のcheckpointは再開に不要で、HEADから再構築可能なため、GCで削除してよい。

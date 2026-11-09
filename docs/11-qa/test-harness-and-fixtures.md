@@ -529,3 +529,19 @@ Source of truth: `Context 18.22`。Fixtureは`testId, fixedClock, tenant, princi
 ## 2026-11-09 Python-first（ADR-036）: Test Harnessの実装基盤（STEP 1、Designed / NOT RUN）
 
 Backend試験は**pytest**（async: anyio/pytest-asyncio）を基盤とし、HTTP境界MockはPython側（respx/pytest-httpserver等、採用は実装時確認）、Browserは**Playwright Python**の隔離Context＋route/HAR、PostgreSQLは実コンテナ（Testcontainers Python等）でテストごとにリセットする。MSW（Node）はWeb UI（`web/`）の試験に限定し、Backend Harnessの前提から外す（分類B: UI用途として保持）。既存のTest ID・Fixture・Acceptance Criteriaは変更しない。CIは`uv sync --locked`→`ruff check`→`ruff format --check`→`mypy --strict`（または`pyright`）→`pytest`→Playwright Python E2E、UIは`web/`でTS typecheck/lint/testを別jobとする（[Architecture Rules §E-9](../00-foundation/architecture-rules.md)）。report項目のNode version欄はUI jobのみ必須、Backend jobはPython version・lockfile hash・image digestを記録する。
+
+## 2026-11-10 STEP 2: AgentRuntimePort共通適合試験とFixture（PYRT-T00〜T12、PoC実行済み）
+
+`conformance/agent_runtime/`をRuntime適合試験の共通Harnessとして維持する（ADR-038）。Framework交換・版上げ時は同じFixtureで再実行する。
+
+| 要素 | 実体 | 規則 |
+|---|---|---|
+| FakeModel | `fixtures.py`のpolicy（状態ベース）、Fake Model Gateway | 呼出し回数でなく会話状態から次の提案を決める。`tool_call_id`は毎回新規発行（実Providerと同じく、再推論では別idになる） |
+| Fake Model Gateway | `gateways.ModelGateway` | fence・Goal revisionでadmission、拒否も`model_calls`へ記録。疑似credentialを保持し、Framework状態への漏出を走査 |
+| Fake Tool Gateway | `gateways.ToolGateway` | schema→goal/fence→approval→Effect Ledger→executor。`external_sends`の1行が不可逆な外部副作用1回 |
+| Real PostgreSQL | CIはPostgreSQL 16 service、ローカルは任意 | 候補ごとに別DB。aiagent-md表は`aiagent` schema、Framework表は別schema |
+| Fault Injection | `AIAGENT_FAULT`（`after_model_response`、`after_tool_ack:<tool>`、`gateway_after_send`） | `os._exit(137)`でfinally/shutdown hookなしに停止。再起動はlease失効後の別プロセス |
+| 破損注入 | `candidates/corruption.py` | SQLのみでFramework状態を復号不能化／整形式のまま改竄 |
+| 計測 | `bench.py` | RSS・CPU秒・時間・WAL・schema別tuple書込。環境依存で同一実行内のみ比較 |
+
+PYRT-T00〜T12の一覧と結果は[ADR-038/039 STEP 2判定結果](../00-foundation/architecture-decisions.md)。**Fake Gatewayと簡略DDL上の合格であり、本番Gateway・Sentinel・VM分離下での`Verified`ではない。**既存のTest ID・Fixture・Acceptance Criteriaは変更しない。

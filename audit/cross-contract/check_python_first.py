@@ -90,7 +90,7 @@ for sample, expected in _SELF_TEST.items():
 REQUIRED = {
     "docs/00-foundation/architecture-decisions.md": (
         "ADR-036", "ADR-037", "ADR-038", "ADR-039", "ADR-040", "PRODUCT_FIXED",
-        "OPEN（STEP 2で選定）", "PydanticAI＋DBOS", "DeepAgents Python＋LangGraph",
+        "STEP 2判定結果", "PydanticAI＋DBOS", "DeepAgents Python＋LangGraph", "PYRT-T12", "NOT LOCKED",
         "Python-first 移行監査台帳",
     ),
     "docs/00-foundation/system-architecture.md": (
@@ -123,10 +123,15 @@ for path, words in REQUIRED.items():
         if w not in body:
             errors.append(f"{path}: missing marker {w!r}")
 
-# ADR-038 must stay undecided in STEP 1.
-row038 = next((ln for ln in adr.splitlines() if ln.startswith("| **ADR-038**")), "")
-if "OPEN" not in row038 or re.search(r"PRODUCT_FIXED|LOCKED|ACCEPTED", row038):
-    errors.append("ADR-038 must remain OPEN until STEP 2")
+# STEP 2 selected ADR-038/039 from measured conformance results; they must not be presented as
+# LOCKED/VERIFIED before Owner review, and the evidence suite must exist.
+for adr_id in ("ADR-038", "ADR-039"):
+    row = next((ln for ln in adr.splitlines() if ln.startswith(f"| **{adr_id}**")), "")
+    if "SELECTED" not in row or "NOT LOCKED" not in row or re.search(r"PRODUCT_FIXED|VERIFIED|ACCEPTED", row):
+        errors.append(f"{adr_id} must be SELECTED (STEP 2) and NOT LOCKED")
+for rel in ("conformance/agent_runtime/tests/test_conformance.py", ".github/workflows/agent-runtime-conformance.yml"):
+    if not (ROOT / rel).is_file():
+        errors.append(f"STEP 2 evidence missing: {rel}")
 
 triggered: list[str] = []
 for md in sorted((ROOT / "docs").rglob("*.md")):
