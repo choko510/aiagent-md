@@ -32,7 +32,6 @@ GRANT SELECT, INSERT ON agent.domain_events TO aiagent_api, aiagent_runtime, aia
 GRANT SELECT, INSERT ON agent.outbox_messages TO aiagent_api, aiagent_runtime, aiagent_tool_gateway, aiagent_relay;
 
 -- API: user commands. Tenant isolation by RLS (below) + owner checks in SQL.
-GRANT SELECT ON agent.api_credentials TO aiagent_api;
 GRANT SELECT, INSERT, UPDATE ON agent.tasks, agent.runs, agent.api_idempotency, agent.schedules TO aiagent_api;
 GRANT SELECT, INSERT ON agent.task_goal_revisions, agent.run_checkpoints, agent.audit_records TO aiagent_api;
 GRANT SELECT, UPDATE ON agent.approval_records TO aiagent_api;
@@ -65,8 +64,8 @@ GRANT SELECT ON agent.tasks, agent.task_goal_revisions, agent.runs, agent.run_ch
 GRANT UPDATE (head_revision, current_checkpoint_id, updated_at) ON agent.runs TO aiagent_tool_gateway;
 GRANT INSERT ON agent.run_checkpoints TO aiagent_tool_gateway;
 GRANT SELECT, INSERT, UPDATE ON agent.tool_intents, agent.approval_records, agent.tool_attempts,
-  agent.side_effect_records, agent.egress_permits TO aiagent_tool_gateway;
-GRANT SELECT ON agent.egress_receipts TO aiagent_tool_gateway;
+  agent.side_effect_records TO aiagent_tool_gateway;
+GRANT SELECT ON agent.egress_permits, agent.egress_receipts TO aiagent_tool_gateway;
 
 -- Relay + Scheduler: outbox dispatch, queue publish/maintenance, schedule occurrences -> Task/Run creation.
 GRANT SELECT, UPDATE ON agent.outbox_messages TO aiagent_relay;
@@ -79,8 +78,9 @@ GRANT UPDATE (active_run_id, record_version, updated_at) ON agent.tasks TO aiage
 GRANT UPDATE (head_revision, current_checkpoint_id, updated_at) ON agent.runs TO aiagent_relay;
 
 -- Sentinel: permit verification at send time + receipts. Read-only on the ledger.
-GRANT SELECT ON agent.egress_permits, agent.tool_intents, agent.approval_records, agent.runs TO aiagent_sentinel;
-GRANT UPDATE (uses) ON agent.egress_permits TO aiagent_sentinel;
+GRANT SELECT ON agent.tool_intents, agent.approval_records, agent.runs, agent.tasks TO aiagent_sentinel;
+GRANT SELECT, INSERT ON agent.egress_permits TO aiagent_sentinel;
+GRANT UPDATE (uses, revoked_at) ON agent.egress_permits TO aiagent_sentinel;
 GRANT INSERT ON agent.egress_receipts TO aiagent_sentinel;
 
 -- Ops: read everything, restore incarnation / dispatch pause, DLQ decisions, retention GC.
@@ -105,6 +105,21 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION agent.gc_terminal_runs(interval) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION agent.gc_terminal_runs(interval) TO aiagent_ops;
+
+-- Bearer token -> (tenant, user, workspace) before any tenant is known. Narrow SECURITY DEFINER function: the API
+-- role cannot list credentials or memberships, it can only resolve a token hash it already holds.
+CREATE FUNCTION agent.resolve_api_token(p_token_sha256 text)
+RETURNS TABLE(tenant_id uuid, user_id uuid, workspace_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+  SELECT c.tenant_id, c.user_id, c.workspace_id FROM agent.api_credentials c
+  JOIN agent.tenant_memberships m ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id
+  JOIN agent.tenants t ON t.id = c.tenant_id
+  JOIN agent.workspaces w ON w.tenant_id = c.tenant_id AND w.id = c.workspace_id
+  WHERE c.token_sha256 = p_token_sha256 AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > now())
+    AND m.disabled_at IS NULL AND t.disabled_at IS NULL AND w.disabled_at IS NULL
+$$;
+REVOKE ALL ON FUNCTION agent.resolve_api_token(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.resolve_api_token(text) TO aiagent_api;
 
 -- ------------------------------------------------------------------ Row Level Security
 -- API connections run `SELECT set_config('aiagent.tenant_id', <authenticated tenant>, true)` inside each

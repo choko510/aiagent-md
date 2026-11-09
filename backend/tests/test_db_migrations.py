@@ -122,6 +122,7 @@ def test_least_privilege(pg: PgEnv, tenant: dict[str, str]) -> None:
     _deny(d["api"], "UPDATE agent.tool_intents SET status_code='DONE'")
     _deny(d["api"], "SELECT * FROM queue.jobs")
     _deny(d["tool_gateway"], "SELECT * FROM agent.api_credentials")
+    _deny(d["api"], "SELECT * FROM agent.api_credentials")                   # only via resolve_api_token()
 
 
 def test_rls_api_without_tenant_sees_nothing(pg: PgEnv, tenant: dict[str, str]) -> None:

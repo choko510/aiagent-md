@@ -1,5 +1,6 @@
 -- Roles are cluster-wide and may be shared by other databases: they are not dropped, only their grants here.
 DROP FUNCTION agent.gc_terminal_runs(interval);
+DROP FUNCTION agent.resolve_api_token(text);
 DO $$
 DECLARE t text;
 BEGIN

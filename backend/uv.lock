@@ -104,11 +104,15 @@ name = "aiagent-domain"
 version = "0.3.0"
 source = { editable = "packages/domain" }
 dependencies = [
+    { name = "jsonschema" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = "==2.14.3" }]
+requires-dist = [
+    { name = "jsonschema", specifier = ">=4.25.0" },
+    { name = "pydantic", specifier = "==2.14.3" },
+]
 
 [[package]]
 name = "aiagent-gateways"
@@ -117,12 +121,14 @@ source = { editable = "packages/gateways" }
 dependencies = [
     { name = "aiagent-core" },
     { name = "httpx" },
+    { name = "jsonschema" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiagent-core", editable = "packages/core" },
     { name = "httpx", specifier = "==0.28.1" },
+    { name = "jsonschema", specifier = ">=4.25.0" },
 ]
 
 [[package]]
