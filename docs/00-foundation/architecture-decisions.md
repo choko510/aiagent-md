@@ -164,11 +164,11 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 
 | 項目（Runtime単体、Windows / Linux） | 候補A PydanticAI＋DBOS | 候補B DeepAgents＋LangGraph |
 |---|---|---|
-| Worker peak RSS | 184.4 MB / （CI） | 95.0 MB / （CI） |
-| CPU秒（Worker 2プロセス合計、起動含む） | 6.81 s / （CI） | 4.98 s / （CI） |
-| Worker起動〜Framework準備 | 2.90 s / （CI） | 2.06 s / （CI） |
-| Segment実行時間（2 segment合計） | 0.44 s / （CI） | 0.49 s / （CI） |
-| 1 runあたりWAL | 20.0 KB / （CI） | 36.3 KB / （CI） |
+| Worker peak RSS | 184.4 MB / 117.4 MB | 95.0 MB / 96.4 MB |
+| CPU秒（Worker 2プロセス合計、起動含む） | 6.81 s / 2.56 s | 4.98 s / 1.94 s |
+| Worker起動〜Framework準備 | 2.90 s / 1.37 s | 2.06 s / 1.24 s |
+| Segment実行時間（2 segment合計） | 0.44 s / 0.30 s | 0.49 s / 0.36 s |
+| 1 runあたりWAL | 20.0 KB / 20.0 KB | 36.3 KB / 36.3 KB |
 | 1 runあたりFramework表のtuple書込 | 15 | 29 |
 | 1 runあたりaiagent-md表のtuple書込 | 28 | 27 |
 | 推移依存（共通の試験用依存を除く） | 28 | 57（`anthropic`・`google-genai`等の未使用Provider SDKを含む） |
@@ -181,12 +181,12 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 
 | 項目（Queue込み、Windows / Linux） | 候補A（DBOS Queue） | 候補B（aiagent-md QueuePort） |
 |---|---|---|
-| Worker peak RSS | 184.4 MB / （CI） | 95.1 MB / （CI） |
-| CPU秒（Worker 2プロセス合計、起動含む） | 6.62 s / （CI） | 4.96 s / （CI） |
-| Segment実行時間（2 segment合計、Queue待ちを含む） | 2.12 s / （CI） | 0.52 s / （CI） |
-| 1 runあたりWAL | 23.3 KB / （CI） | 38.0 KB / （CI） |
-| 1 runあたりFramework表のtuple書込 | 19 / （CI） | 29 / （CI） |
-| 1 runあたりaiagent-md表のtuple書込（QueuePortを含む） | 28 / （CI） | 33 / （CI） |
+| Worker peak RSS | 184.4 MB / 117.8 MB | 95.1 MB / 96.4 MB |
+| CPU秒（Worker 2プロセス合計、起動含む） | 6.62 s / 2.67 s | 4.96 s / 1.94 s |
+| Segment実行時間（2 segment合計、Queue待ちを含む） | 2.12 s / 2.05 s | 0.52 s / 0.37 s |
+| 1 runあたりWAL | 23.3 KB / 23.2 KB | 38.0 KB / 40.4 KB |
+| 1 runあたりFramework表のtuple書込 | 19 / 19 | 29 / 29 |
+| 1 runあたりaiagent-md表のtuple書込（QueuePortを含む） | 28 / 28 | 33 / 33 |
 
 **STEP 2で判明した故障・制約（PoCで対処し試験化済み）**
 
@@ -207,7 +207,7 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 12. **共通（P1-04）**: Adapterがモジュール共有の「現在のRun」を使い、1プロセス複数Runで混線しうる状態だった。BはRunnableConfig、AはTask単位のContextVar＋インスタンス単位のclaim表へ移し、DB接続もthread毎に分離（1接続を複数Runが共有するとTxが混ざる）（PYRT-T15）。
 13. **A**: pydantic-ai-harnessの`SummarizingCompaction`はrunのmessage history自体を書き換えるため、圧縮後はFramework transcriptを生HEADと照合できない（照合不能としてHEADへフォールバック）。BのDeepAgents summarizationは`state["messages"]`を書き換えず、全比較が成立する（PYRT-T09）。
 
-**判定**: 必須試験は両候補合格。比較では、(a) Trusted Control VM内のFramework状態直列化の安全性（Aは既定pickleでJSON化不可を実測、Bはpickle無効が既定）、(b) 回復の主導権がaiagent-md claim側にあること（Aは非公開APIとexecutor設計が必要）、(c) Runtime単体のWorker RSS・CPU秒が少ない（Linux: RSS 96.4 vs 117.5 MB、CPU 1.43 vs 2.69 s。Queue込みの比較は別掲）、(e) 圧縮後もFramework状態をHEADと全比較できること、(d) Context Manager §20が第一調査対象とするsummarization/offload/skills/subagentの流用率、を重視してBを選定。Bの欠点（WAL約2倍、依存数約2倍で未使用Provider SDKを含む、Queueを自作しその本番化が未了＝ADR-039はPROVISIONAL、組込みToolの抑止設定が必要）はSTEP 3の条件として扱う。PydanticAI/Pydantic AI Harness/DBOSはAgent Runtime・Queueとして採用しない（Pydantic v2自体はADR-037どおり共有型の実装に使う）。Bが採用条件を満たせない場合の代替はA（必須試験合格済み）とし、適合試験はAのAdapterを残して継続実行できる。
+**判定**: 必須試験は両候補合格。比較では、(a) Trusted Control VM内のFramework状態直列化の安全性（Aは既定pickleでJSON化不可を実測、Bはpickle無効が既定）、(b) 回復の主導権がaiagent-md claim側にあること（Aは非公開APIとexecutor設計が必要）、(c) Runtime単体のWorker RSS・CPU秒が少ない（Linux: RSS 96.4 vs 117.4 MB、CPU 1.94 vs 2.56 s）。Queue込みでも同傾向で、Bのsegment時間はQueue経由でもほぼ増えない（Linux 0.37 vs 2.05 s。AはDBOS Queueのpolling既定値のまま）、(e) 圧縮後もFramework状態をHEADと全比較できること、(d) Context Manager §20が第一調査対象とするsummarization/offload/skills/subagentの流用率、を重視してBを選定。Bの欠点（WAL約2倍、依存数約2倍で未使用Provider SDKを含む、Queueを自作しその本番化が未了＝ADR-039はPROVISIONAL、組込みToolの抑止設定が必要）はSTEP 3の条件として扱う。PydanticAI/Pydantic AI Harness/DBOSはAgent Runtime・Queueとして採用しない（Pydantic v2自体はADR-037どおり共有型の実装に使う）。Bが採用条件を満たせない場合の代替はA（必須試験合格済み）とし、適合試験はAのAdapterを残して継続実行できる。
 
 **STEP 3の採用条件（未達ならADR-038を再審）**: CIで`agent-runtime-conformance`を必須化し、PYRT-T00〜T17を常時合格（Runtime・Checkpoint・Tool・Queue・QAの正本仕様の変更でも起動する）。ADR-039確定のため、QueuePortのheartbeat延長・dead-letter・Outbox relay同一Tx・JQ-T系を実装し試験する。`LANGGRAPH_STRICT_MSGPACK`相当のallowlistを有効化して試験追加。HarnessProfile無効化が効かないModelを使ったら失敗する試験（Tool表面のsnapshot）。checkpoint表を専用schema・専用DB roleへ分離し、Retention/GCを実装。依存監査（Provider SDKを読み込まないことのimport監査）。本番Gateway/Sentinel/VM配置での再実行。
 

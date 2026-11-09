@@ -459,6 +459,6 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 | RT-G5 | Hard | checkpoint直列化でpickle無効、msgpack ext allowlist制限下で全試験合格 | **未実施（STEP 3）** |
 | RT-G7 | Hard | 最終admissionと競合するSteer/Cancel/Revokeで送信0（PYRT-T14）、1プロセス複数Run・tenantで混入0（PYRT-T15） | 合格（PoC） |
 | RT-G8 | Hard（ADR-039確定の条件） | QueuePortのattempt fence・ACK喪失・承認後再投入・複数Worker競合（PYRT-T16）に加え、heartbeat・dead-letter・Outbox同一Tx・JQ-T系 | 前4項目のみ合格。残りは未実施 |
-| RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 初回記録（N=10中央値）: Linux CI RSS 96.4 MB・CPU 1.43 s・WAL 35.4 KB、Windows RSS 95.0 MB・CPU 5.16 s・WAL 37.7 KB、Framework tuple 29（両環境） |
+| RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 記録（N=10中央値、Runtime単体）: Linux CI RSS 96.4 MB・CPU 1.94 s・WAL 36.3 KB、Windows RSS 95.0 MB・CPU 4.98 s・WAL 36.3 KB、Framework tuple 29（両環境）。Queue込みはADR-038/039 STEP 2判定結果を参照 |
 
 性能の数値は合否基準ではなく回帰検知の基準線であり、本番Model/Tool/Network込みの性能保証ではない。計測は**Runtime単体**（`bench --mode runtime`）と**Queue込み**（`--mode queue`: AはDBOS Queue、Bはaiagent-mdのQueuePort）を分けて記録し、Runtime単体の差をシステム全体の優劣として扱わない。
