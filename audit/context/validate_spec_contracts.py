@@ -77,6 +77,36 @@ snap = set(ex["snapshotRequiredFields"])
 if not {"messages", "toolSchemas", "promptTemplateDigest",
         "providerPayloadDigest", "dispatchAdmissionRef"}.issubset(snap):
     errors.append("snapshot example lacks final payload replay fields")
+
+# 2026-11-09 OPT-T01..T20 are documentation oracles, not executable Agent tests.
+# Existing ACM IDs remain unchanged; verify that any future authoring keeps
+# the cross-owner evidence, trust, and recovery constraints visible.
+optimizer_files = {
+ "docs/02-runtime/context-manager-and-compaction.md": ("18.23 External Context Optimization Adapter", "ContextOptimizationReceiptV1", "Headroom", "Caveman", "RTK"),
+ "docs/02-runtime/middleware-lifecycle.md": ("2026-11-09: Context Optimization Adapter", "Budget", "Policy"),
+ "docs/02-runtime/model-router.md": ("Compressed Context / Prompt Cache", "ModelRequestSnapshot"),
+ "docs/02-runtime/sandbox-execution.md": ("RTK型のpost-exec", "Tool"),
+ "docs/04-web-browser/browser-action-engine.md": ("Caveman型 AX focus", "Browser Worker"),
+ "docs/01-contracts/evidence-artifact-contracts.md": ("Optimization Original / Projection", "CHAT_03"),
+ "docs/09-security/privacy-audit-and-retention.md": ("外部Context Optimizer", "Tenant"),
+ "docs/02-runtime/subagent-delegation.md": ("複数Agent間の圧縮Context受渡し", "Gateway"),
+ "docs/07-automation/endless-run-campaign.md": ("Endless RunのContext最適化", "Budget"),
+ "docs/00-foundation/architecture-decisions.md": ("ADR-035", "PROPOSED"),
+ "docs/11-qa/benchmark-and-release-gates.md": ("OPT-T01", "OPT-T20", "NOT RUN"),
+}
+for spec, markers in optimizer_files.items():
+    for marker in markers:
+        if marker not in read(spec):
+            errors.append(f"optimizer cross-spec contract missing {marker!r} in {spec}")
+optimizer_qa = read("docs/11-qa/benchmark-and-release-gates.md")
+optimizer_ids = re.findall(r"^\| OPT-T(\d\d) \|", optimizer_qa, re.M)
+optimizer_expected = [f"{i:02d}" for i in range(1, 21)]
+if sorted(optimizer_ids) != optimizer_expected:
+    errors.append(f"optimizer test catalog must include exactly OPT-T01..T20 once: {optimizer_ids}")
+if not all("NOT RUN" in line for line in optimizer_qa.splitlines()
+           if re.match(r"^\| OPT-T\d\d \|", line)):
+    errors.append("optimizer test rows must remain explicitly NOT RUN")
+
 print(f"adaptive_context_static: specs={len(REQUIRED)} cases={len(cases)} "
       f"fixture_arithmetic={tokens}; designed_only=True")
 if errors:

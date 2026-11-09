@@ -404,3 +404,13 @@ Acceptance: ACM-T24/25/27/29/30/32。未実装、Owner CHAT_09/10/11 review必�
 ## 2026-11-07 PR #71 P1追加: Privacy Permit失効とCrash dump
 
 安全判定は`(origin/route, pageGeneration, frameTreeGeneration, sensitivityPolicyEpoch, restoreIncarnation)`に結び、Allowlistに入っていないサイト・見分けられないcanvas/iframe/動画/OTP/Payment/SPA mutationは全面`PRIVACY_BLOCKED`。Capture前後でDOM/route再観測と送信直前のPermit検証ができない場合も全面遮断。初期MVPは明示的に安全と確認したデモ/合成コンテンツだけで有効化する。Core dump/Heap dump/Swap/Proxy body logging/Backup/Browser persistent cacheを無効にする運用検査がBLO-T08/T15の一部。敏感な画面の可視化を安易に広げない。詳細: [BLO `10](../08-interfaces/browser-live-observation.md)。
+
+## 2026-11-09: 外部Context OptimizerのPrivacy・削除境界（OPT-A/E、Draft）
+
+RTK/Caveman/Headroomの導入は **Trusted Control VM/Sealed Original/Memory TTL/Recipient consent/Artifact deletion** を弱めない。OSSの独自Proxy/CCRを別のStorage Authorityにすると、Tenant越境、削除漏れ、平文cache、復旧時のMemory resurrectionを作る。Headroom [Security Model](https://docs.headroomlabs.ai/docs/security-model) は単一OSユーザーで動作するLocal Proxyでありmulti-tenant isolation boundaryでないと明記。Caveman [Context Recovery](https://github.com/JuliusBrussee/caveman/blob/main/docs/technical/context-recovery.md) もoriginal availabilityは提供するがACL・暗号化・適法保持を保証しない。
+
+**境界**: 圧縮engineは任意の秘密/authorization header/cookie/Browser CDP/Privsep Brokerを読まず、Credential Brokerと同一process/volumeに配置しない。原文は既存Sealed Artifactに、optimized Projectionは元のscope/retention/recipient/visibilityを継承する別Artifactに格納。External Endpointの変更・kompress remote/model download・Cloud Auto/Proxy relay・plugin telemetry/beaconは明示許可とEgress TransportのGateを要求し、通常運用は外部送信0。Caveman CLI usage telemetryは既定送信のためopt-out設定と接続遮断を、Headroom BeaconはHEADROOM_BEACON=off、RTK telemetryは既定OFFかつ明示同意を検証する（設定名はpinしたversionで再確認）。
+
+**削除/失効**: Original削除・Memory revoke/Consent撤回・Tenant scope移転・Backup復元後は、派生Projection・OptimizationReceiptの使用可能性・recovery handle・fingerprint cache・search index・cross-agent contextを更新。既存Model dispatch admission とmemory_scope_epoch barrierを守り、同時進行圧縮/復元がdelete後の旧内容を送信しないことを試験。外部Provider送信済みのpromptを消せると約束しない。原文を復元できない場合も架空のsourceや成功statusを返さない。
+
+**Failure/Threats**: 圧縮されたTool output内のPrompt Injection/偽role、PIIが含まれたエラーメッセージ、tenantを跨ぐidentical hash、guessable handle、CCR SQLite改ざん/容量上限、remote inferenceへのデータ送信、Hook内Shell/Networkの抜け道、Proxy admin endpoint、XSS/SSRF経由Tool実行。失敗時はauthorized redacted projectionへfallback、予算/ACL/Secret条件を満たさない場合は安全停止。OPT-T02/03/15/16/17/19はprivacy hard gate（Designed, NOT RUN）。

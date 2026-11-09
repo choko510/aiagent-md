@@ -327,3 +327,11 @@ ACM-T31とACM-T11/12の同時Steer/期限切れ/重複Source/未知外部副作�
 ## 2026-11-07 DEV-02: 8AI開発チームの委任契約追加（Draft/PROVISIONAL）
 [DEV-02](../16-app-development/multi-agent-development.md) は既存SUBの `parent-child Task`、Budget reservation、GoalRevision/Run lease/cancel、責務分離を再利用。最初の3子(A1/A2/A3)は同じ要求・制約の固定入力を使用し互いの提案を隠したread-only independent childとする。統合A4は3proposal Artifactを検証し、欠損時Partial。Builder A5は書込権を持つ唯一の開発担当、Reviewer A6/A7/A8は最新のimmutable SHAに固定した独立read-only子Task。初回reviewer間の回答共有は禁止し、join時のみ結果統合、旧SHAや別DesignRevisionのReceiptは合格としない。
 高性能Expert [DEV-04](../16-app-development/expert-advisor.md) も追加の予算予約・権限縮小された子Task。Role名をTool capabilityと解釈しない。Cycle DAGは既存Task/Runを再利用、Session/Workspace共用の権限漏洩は不可。parallelismと深度は有限、Owner cancel/Steerは全子の新dispatchを止める。追加入場試験 DEV-TEAM-T01..06、DEV-REV-T01..06 (SC-24,26,28) は未実行。
+
+## 2026-11-09: 複数Agent間の圧縮Context受渡し（OPT-E、Draft）
+
+Caveman/HeadroomのSharedContext/CCRを複数Agent間の共有メモリ正本として使わない。子Taskへ渡すのは既存の型付きGoal/必要なEvidence・read-only Artifact参照/許可済みProjectionとbudget/recipient scopeに限る。各子はparentより狭い認可と個別GoalRevision・Run/Cell識別を持ち、前の子が残した復元handleを権限として受け取らない。子からの小さな要約が「根拠取得済み」「成功」と主張しても、親はsource hash/locator、current goal、時刻、出典Factを再検証する。
+
+**Handoff最適化**: 親→子に長いログ・Source本文を全コピーせず、ArtifactRef+locator+protection policyにし、必要rangeを現在のTool Gatewayから読む。子のcompressed summaryは原文と別Artifact。Child completionが遅延・キャンセル・revoke・Parent steer後に到着した場合、manifest/goal revision/lease/contextVersionのCASでstale隔離。重複の単純消去が矛盾資料や否定Evidenceまで消さないようclaim lineageを保持する。
+
+**測定**: 3〜8並列subagentのA/BでParent+Childのprovider billed cost、cached prefix、offload/retrieve回数、Evidence coverage、cross-tenant leakage、stale child mergeと同一SHA review誤認を別評価。OPT-T18/T20・既存ACM-T11/12が安全Gate。

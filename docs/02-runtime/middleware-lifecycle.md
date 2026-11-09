@@ -178,3 +178,13 @@ Version/Epoch fields above follow CHAT_01's canonical signed-int64 **decimal str
 ## 2026-11-07: SandboxExec Middlewareの安全なHook
 
 pre-execはRun owner/lease、Tool Intent永続化、schema/budget/approval、Runtime Cell VM/カーネル/ネットワーク強制のattestationを検証。post-execはprocess group終了、Artifact digest、外部effect ledger、Run lease現行性を確認してコミット。AgentやSkillのhookをTrusted Servicesのプロセスで直接実行しない。例外/Timeout時はfail-closed、古いcallbackが新しい外部dispatchを作れない。SC-18/21/22。
+
+## 2026-11-09: Context Optimization AdapterのHook順序（OPT-A〜E、Draft）
+
+任意CodecはSecurity Gateではない。固定手順: Tool Gatewayのvalidated Execution/Receipt → immutable Raw Artifact commit → Secret/PII redaction、recipient/ACL検査 → ContentClass selection → afterTool/beforeContext read-only selective compression → typed Goal/Fact/locator integrity gate → ContextManifest/Sealed RequestSnapshot → mandatory Budget/Model Dispatch Admission。圧縮Hookはpre-exec Hookとしてコマンドを生成/書換しない。Caveman Browserの独立CDP/MCP実行を登録しない。
+
+**CodecManifest proposal (CHAT_02 internal)**: codecId、pinnedDependencyVersion、pipelineDigest、allowlisted ContentClasses、lossinessClass、maxInputBytes、maxOutputBytes、maxDurationMs、maxRssBytes、requiresExistingArtifact、networkAllowed=false、secretAccess=false、mode=disabled|shadow|enabled。User/tool result由来のconfigでCodecを有効化、任意プラグイン/SkillをTrusted VMへインストール、Cloud Proxyへ自動転送することは禁止。
+
+**Retryと故障**: Codec結果はsource/projection sha・redaction version・codec version・scope・Goal/memory epochでキャッシュする。重複実行・Worker restart/Steer/CancelでもToolを再発行しない。同時実行で古いcodec結果が現在のModelRequestへ上書きされないようCASを通す。エンジンcrash・timeout・不正出力・元データ取得失敗は、許可済みRedacted Projectionにフォールバックするかoffload/partial/blocked。予算超過、secret漏洩、ACL不一致を誤ってfail-openしてはならない。
+
+**Metrics**: codec別save量はestimated only。Provider usage input/output/cache read/write、Tool/LLM追加呼出、recovery成功/失敗、correctness regression、p50/p95 latency、CPU/RSS、Run cost、privacy/tenant violationsを記録し、Traceには原文や秘密を残さない。詳しいOwner/契約はContext 18.23。OPT-T01〜T20が未実行の段階でenabled推奨やVerifiedを表示しない。

@@ -139,3 +139,15 @@ EXEC-T13: Agent provides server-only keys in Proposal => DENY. EXEC-T14: raw cur
 ## 2026-11-07 DEV-05/06: Build/PreviewはCell Shellの権限ではない（Draft）
 
 コード生成・依存インストール・ビルド・Testは本仕様のUntrusted VM sandbox.exec。Git provider/Package Broker/Preview Broker/Deployment等の**外部操作は子プロセスを含め別個のtyped Tool Intent**とし、Sentinel/Transportとeffect ledgerを必ず通す。モデルがrun image/port/runtimeProfile/host bridge/policyを指定して権限を得ることを拒否。初期Web/APIのToolchainはoffline staged; GradleやAndroid/Flutterなどのビルド時の暗黙fetchはBrokerで封じ、対応しない環境はUNAVAILABLEと明示。長時間Previewは独立した有限Execution+WorkspaceRevisionにbindして実行し、Task終了後無許可で生き続けない。Previewの外部からの閲覧は [DEV-05](../16-app-development/build-preview-release.md) の専用認証routeのみ、一般TCP・RAW CONNECT・LAN・CDP直通不可。DEV-BLD-T01..08/SC-29を所有者レビュー待ちの隔離受入試験に加える。
+
+## 2026-11-09: RTK型のpost-exec表示圧縮（OPT-D、Draft）
+
+RTK [develop 08a261a](https://github.com/rtk-ai/rtk/tree/08a261a0d081ffe11a32986e2f4d76f3fdc33abb) はGit/status/test/buildの大量Shell出力を縮小する。rtk-oss はApache-2.0のCLI/filters、rtk fullはBUSL-1.1のengineを含み、rtk-proxyもBUSL-1.1。ライセンス/再配布/第三者サービス条件と依存NOTICEを実装時再確認。RTKのtruncate等はlossyで、bytes/4 token estimatorはProvider請求量ではない。
+
+**Execution不変**: AgentのProposal argv/cwd、Gateway Admission、toolIntent、VM/Cell isolation、networkMode、Process tree、exitCode/signal、stdout/stderr Raw Artifact、Effect Ledger/Receiptは圧縮して書き換えない。RTKのpre-exec Hook/コマンド書換によって、Agentに新しいShell実行経路やPATH変更、host実行を与えない。単に完了したExecutionの**read-only model-visible display projection**を必要に応じて圧縮する。
+
+**圧縮対象/品質**: Git status、git diff、grep/search、build/test log、stdout/stderrテキストなどの許可形式のみ。失敗件数と全失敗assertion、stack trace、path/line number、exitCode/Signal、警告、Unknown結果を保持。stdout/stderr別source SHA、byte offset、順序、UTF-8/ANSI/control char/バイナリの判別を維持する。stdoutとstderrを結合して原因を消したり、grep一致なしを成功に変えたり、長いコマンド出力中の隠れたFailureを要約で消したりしない。
+
+**復元**: 元OutputはTask/Run/ExecutionIdに結びつくCHAT_01 Artifactが正本。rtk bypass相当はHost/Shellで再実行せず、既存Gateway authorized artifact.readで原文の特定offsetだけを読む。大きすぎる原文はoffload/Partialで対応し、Secret/PIIを含む生stdoutをモデルへfail-openしない。
+
+**優先範囲**: 自律アプリ開発・Endless Runの反復テスト/ビルドのみで試験。connectorのJSON/HTTPやBrowser全体はRTKに通さない。OPT-T12〜T14/T18を実施し、実コストと完全性が悪化したformatはdisabled/shadowに戻す。すべて設計・未実装。

@@ -157,3 +157,15 @@ Tests: BACT-R4-T01 click with hidden form POST blocked; T02 input blur auto-save
 ## 2026-11-07 Muse移行: 自由コードとPage/Browser制御は別
 
 Sandbox ExecでAgentがPython/Node/CLIを作れることと、Brokerが所有するブラウザへ任意JS/CDPを注入できることは**別の権限**。従来の「ページ内任意JS禁止」「直接CDP禁止」「ActionはGateway/Owner/DOM/Policy再検査」は維持。Browser actionが送信や予約の副作用に結び付く場合、独立Sentinelが最終外部操作を許可し、不明ならSTOP/ASK。生成コードがBrowser自動化を必要とするときはBrokerの狭いAPIで一操作ずつ検証。SC-18/19/22。
+
+## 2026-11-09: Caveman型 AX focus projection の採用範囲（OPT-C、Draft）
+
+Caveman [Browse source at 3dc497a](https://github.com/JuliusBrussee/caveman/tree/3dc497a7f858c774d6e15b25e8c6120ef3a0eda8/browse) は Chrome Accessibility.getFullAXTree の巨大AX payloadを目的に関連するnode/ancestorに縮約し、originalをCCRから取得できる。しかし同梱browser_snapshot/browser_act/browser_eval/browser_recoverをAgent向けMCPとして登録すると、Browser Workerの唯一のCDP所有・Gateway Intent・Page lease・Sentinel・post-action verifyを迂回する第二の実行経路を作る。
+
+**採用する**: 既存Browser Worker内で認可済み snapshotから読み取り用のfocused AX/ARIA projectionを作成する。Pure read-only transform以外の権限は付与しない。CDP/Chrome processやCredentialを外部コンプレッサーに渡さず、browser_act/evalや自動cookie/profile保存を追加しない。UserまたはWebページ由来のquery文字列はデータであり、Tool Policyやブラウザ操作権限へ昇格しない。
+
+**Locator契約**: 元のSnapshotId、Tab/Frame origin、Browser restoreIncarnation、Page leaseEpoch、DOM/AX generation、observedAt、role/name、原本locator、圧縮時node mappingを持つ。Cavemanの一時的な [uid] は不変Element IDでもクリック権限でもない。モデルが [uid] を選んでもGatewayで現在のlocatorに再解決し、操作直前のCardinality=1・visible/enabled・page generation/fenceを検査。古いsnapshot、別frame、Shadow DOM、canvas、不明origin、同名ボタン2個なら再観測か人間確認。クリックAPI successはTask達成にしない。
+
+**重要情報保全**: AX focusが価格・税・人数・在庫なし・否定・キャンセル条件・submit/POST副作用・検索結果の最安値/最後の候補を省くと判断が歪む。単純なKeyword matchのみでは網羅性を保証しない。必要な全行・列・リスト件数/極値・出典span・矛盾を保持できない場合は原文のRedacted Projectionを使用。AXでは判定できないレイアウト/Canvas/画像は既存screenshot fallbackと別の機密保護Gateへ。Live Observation映像配信の内容を圧縮ツールへ転送しない。
+
+**観測/保持**: AX raw+optimized bytesはCHAT_01のArtifactとしてhash/locator/expiry/owner付き保存。Caveman独立CCRや新Chrome User Data Dirを永続Storeにしない。巨大ページと小フォームの両方で、before/after provider tokens、復元率、誤クリック、p95/CPU、provider cache、total task costを比較する。小フォームでUID/marker分だけ増えるならskip。OPT-T08〜T11とT15〜T17、既存BACT/BLO Gateが実装・実機PASSするまではenableしない（現時点NOT RUN）。

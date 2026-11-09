@@ -309,3 +309,13 @@ ArtifactRef/Digest/Locatorの検証は**その範囲が実在する**ことの�
 3. 原本消去後に派生Projectionを元原本として扱わない。原文照合が不可能になったClaimは`SOURCE_MISSING/UNDETERMINED`とし、保持期間/法的消去/GCを上書きしない。Sourceが歴史的に古くても、許可済み履歴回答では観測日時付きで使用可能だが現在値にはしない。
 
 **Cross-owner acceptance**: 01/09/10/15（Artifact retention/locator/parser）、02（Context Verifier）、11（ACM-T21/27/28/32）。データ分類ごとに保存可能性を決めるので、全てのCredentialを暗号化して残すという設計ではない。
+
+## 2026-11-09: Optimization Original / Projection / Recovery lineage（OPT-A、Draft）
+
+**Artifact正本は変えない**: 外部RTK/Caveman/Headroomの独立CCR/SQLiteをEvidence authorityにせず、既存Sealed Original・Redacted Projectionを原本/LLM可視入力として使用する。変換系統は RawArtifact(original sha) → policy-redacted Projection(sha) → optional Optimized Projection(別sha、codec version、pipeline digest、locator map) → ContextManifest/ModelRequestSnapshot。双方のscope、原本取得時刻/観測時刻/validUntil、tenant/owner、Run/Goal revision、policy/memory epoch、保持期限・削除scope、Model recipientが追えること。
+
+**Internal OptimizationReceipt案**: sourceArtifactRef、rawSha、redactedProjectionRef/sha、optimizedProjectionRef/sha、sourceToolAttemptRef、sourceLocatorRef、codecId、codecVersion、pipelineDigest、qualityPolicyVersion、compressionDecision/Reason、estimatedTokensBefore/After、inputSchemaVersion、provenance statusを持つ。正確なpublic型・DBはCHAT_01/02/09/10合意までPROVISIONAL。元Evidenceの支持/反証関係、型付きFact、単位・通貨・否定・日付・数量・認可/副作用Unknownを圧縮要約から再構成しない。
+
+**復元権限**: 取得対象のopaque refや外部CCR handleを知っているだけでは承認にならない。CHAT_03 Gatewayによるread-only Artifact range Toolで、current owner/tenant/Run/lease/Goal revision、memory deletion epoch、policy、recipient、expiry、digest、locator、token/byte/time limitを毎回検証する。unauthorized/expired/corrupt/missingは情報を推定せず明示エラーにし、verified claimへ昇格させない。Revoke/Delete後に圧縮キャッシュや別のRecovery DBから復活させない。クロステナントでhash一致しても格納参照を共有しない。
+
+**Provenance保存ルール**: 失敗、相反するソース、否定的証拠、価格の税/手数料、Browser generation、CLI stdout/stderr offsetなどはlocatorから再検証できる。圧縮文をObservation/receipt正本へ自動昇格させない。Transform original availabilityはaccuracy保証ではない。特にReference画像やPDFページボックスの情報をテキストだけに置換して精度を保証したと主張しない。関連 QA は OPT-T01〜T20、すべてDesigned/NOT RUN。
