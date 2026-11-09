@@ -208,3 +208,14 @@ Task/Run/親子の予約済み予算へCell ProcessのCPU/Wall/RAM/PID/FD/ディ
 
 ## 2026-11-07 CAM-01: Endless Runの階層予算（Draft）
 [Endless Campaign](../07-automation/endless-run-campaign.md) は**無制限の1 Run/無制限Budgetではない**。Campaign全体のhard envelope（USD/tokens/Model Attempts/API calls/Browser/time/parallelism）からCycleごとに上限を原子的予約し、各子Taskも既存BDGの予約/精算を再利用。Unknown usageを0扱いせず保守的にhold、次Cycleの予算流用禁止。Process crash/Model fallback/429/Provider usage欠損時にも `spent+held+uncertain` がhard capを越えない。利用枠回復予定が検証可能な場合だけquota wait→再検査後にresumeし、unknown hard quotaは待機/通知。Clientが`continuousUntilStopped=true`を指定してもOperator上限は廃止しない。CAM-T02/T06/T07、SC-30。Designed/NOT RUN。
+
+## 2026-11-09 OSS圧縮のBudgetと再試行制限（Draft / NOT RUN）
+
+DeepAgents方式の原本Offload、Mastra方式のObserver/Reflector/Recall、OpenClaw方式のquality correctionは**同じTask/Run/Campaign総Budgetへ予約・精算**する。Shadow Observerも無償扱いしない。各AttemptにProvider ID、Model/Tokenizer、Source snapshot、Input/Output reservation、Recipient policy、実際のusageを紐付け、Provider変更/圧縮戦略変更で累計上限をリセットしない。`Tinput+R+S<=W`は最終serialized Provider Requestで再評価する。
+
+- Quality correctionの初期最大1回、既存18.5のProvider overflow縮小最大1回を維持し、両方発生してもhard Budget/Attempt上限で停止。要約失敗に同じ入力を無限再送しない。
+- Storage offload失敗/Source semantic FAIL/`qualityDegraded`を節約用の安全な代替として採用しない。Hard anchorとToolペアが収まらなければPARTIAL/BLOCKED。
+- 上流のthreshold/Observer retry/Reflection既定値を無検証で採用しない。Model Window・Tokenizer・Tool比率・日本語CJKでVersioned Configを測定・調整。
+- Recallのbyte/token/time、Storage保存bytes/GC、Verifierのread費用も計測する。既存Approval/Effect LedgerとBudgetの独立境界を保持。
+
+QA: ACM-OSS-T02/T05/T10/T11/T12/T14、ACM-T06/T19/T22/T29、NOT RUN。
