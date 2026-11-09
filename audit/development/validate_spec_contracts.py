@@ -98,7 +98,7 @@ for path, words in SEMANTIC_MARKERS:
 for path, section_ids in BUNDLED_SECTIONS.items():
     body = read(path)
     for module_id in section_ids:
-        heading_count = len(re.findall(rf"(?m)^## {re.escape(module_id)}\\s*$", body))
+        heading_count = len(re.findall(rf"(?m)^## {re.escape(module_id)}\s*$", body))
         if heading_count != 1:
             errors.append(f"bundled section {module_id} must occur once in {path}, got {heading_count}")
         anchor = f"{path.rsplit('/', 1)[-1]}#{module_id.lower()}"
