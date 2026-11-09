@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/checkpoint.schema.json",
+  "title": "CheckpointEntryV1",
+  "description": "One immutable entry of the append-only Checkpoint HEAD (canonical transcript). Framework state is a derived cache of it.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "checkpointRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "entryKind": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant",
+        "tool",
+        "summary",
+        "system"
+      ]
+    },
+    "stream": {
+      "type": "string",
+      "pattern": "^(main|summarize|subagent:[a-z0-9_-]{1,64})$"
+    },
+    "writerLeaseEpoch": {
+      "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+    },
+    "appliedGoalRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "snapshotSha256": {
+      "$ref": "common.schema.json#/$defs/Sha256Hex"
+    },
+    "payload": {
+      "$ref": "common.schema.json#/$defs/JsonObject"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "tenantId",
+    "runId",
+    "checkpointRevision",
+    "entryKind",
+    "stream",
+    "writerLeaseEpoch",
+    "appliedGoalRevision",
+    "snapshotSha256",
+    "payload"
+  ]
+}

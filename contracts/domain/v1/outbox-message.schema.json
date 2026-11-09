@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/outbox-message.schema.json",
+  "title": "OutboxPointerV1",
+  "description": "Local physical dispatcher metadata, not a public event.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "outboxId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "topic": {
+      "type": "string",
+      "enum": [
+        "run",
+        "notification",
+        "sse"
+      ]
+    },
+    "dedupeKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "relayFence": {
+      "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+    },
+    "payloadSha256": {
+      "$ref": "common.schema.json#/$defs/Sha256Hex"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "outboxId",
+    "tenantId",
+    "topic",
+    "dedupeKey",
+    "relayFence",
+    "payloadSha256"
+  ]
+}

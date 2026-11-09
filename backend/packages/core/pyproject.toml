@@ -1,0 +1,10 @@
+[project]
+name = "aiagent-core"
+version = "0.3.0"
+description = "Control plane: config, logging, PostgreSQL migrations/repositories, Run state, QueuePort, Outbox relay, Scheduler, RPC"
+requires-python = ">=3.12,<3.14"
+dependencies = ["aiagent-domain", "psycopg[binary]==3.3.8", "psycopg-pool==3.3.3", "apscheduler>=3.11,<4", "tzdata>=2025.2"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
