@@ -390,3 +390,21 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 **GATE-DEV-T02** development enabled + missing Preview SSRF tests → release blocked.
 **GATE-DEV-T03** feature factory enabled + 10 isolated branches / integration head mismatch → completion blocked.
 **GATE-DEV-T04** STOP fence/Quotawait fault injection failure blocks Campaign feature, not unrelated generic agent module.
+
+## 2026-11-09 OSS Hybrid Compaction Release Gate（DESIGNED / NOT RUN）
+
+正本: [Context 19](../02-runtime/context-manager-and-compaction.md)。DeepAgents JS、Mastra Observational Memory、OpenClawの上流テストは本Harnessの成功を示さない。まずdurable original offload、次に構造＋意味監査、最後にObserver/Reflector shadow→opt-inの順で実装。各段階で従来ACM-T01〜T36の回帰と安全ゲートを維持。
+
+**Hard-blocking**: OFFLOAD_FAILEDでHEAD更新0、`qualityDegraded`採用0、custom Provider audit bypass 0、Semantic REFUTEDで採用0、Goal/否定消失0、Tool pair破断0、Part coverage gap0、old generation/lease commit0、Memory DELETE先行の旧Projection送信0、欠損Sourceの偽Recall0、UNKNOWN Effect blind retry0、予算上限超過0。失敗は旧HEADを維持してPARTIAL/BLOCKED。
+
+| Test ID | Release oracle（全てNOT RUN） |
+|---|---|
+| ACM-OSS-T01 / ACM-OSS-T02 | Raw offload/Summary障害で前HEAD維持 |
+| ACM-OSS-T03 / ACM-OSS-T04 | 意味不一致、最新依頼/否定/識別子消失をReject |
+| ACM-OSS-T05 / ACM-OSS-T06 | degraded fallbackとProvider audit迂回を拒否 |
+| ACM-OSS-T07 / ACM-OSS-T08 | 競合するObservation/Reflectionと追記Partもcoverage損失0 |
+| ACM-OSS-T09 / ACM-OSS-T10 | stale CAS/Model fallback/Memory DELETEで不正送信0 |
+| ACM-OSS-T11 / ACM-OSS-T12 | Tool pair・UNKNOWN・100-cycle条件保持 |
+| ACM-OSS-T13 / ACM-OSS-T14 | 期限切れOriginalの偽Recall0、retry budgetはfinite |
+
+**Bench**: small safe-full / safe bounded-tail / offload-only / offload+quality / offload+quality+OMを同じModel/Tokenizer/Source/Tool Schema/総Budgetで比較。Measured: Evidence Recall@FixedBudget、Fact entailment、Source locators、最新User ask、100-cycle Hard anchors、p50/p95 latency、全LLM/Tool/Recall費用、CAS conflict、Artifact GC。安全全PASS後だけ節約率を比較。実測値・保証値はまだない。
