@@ -179,4 +179,12 @@ The term `Runtime Host` is a **logical Orchestrator in Trusted Control VM**, not
 
 ## 2026-11-09 Python-first: Runtime Hostのプロセス構成（STEP 1、Draft）
 
-Runtime HostはPython asyncioの独立Workerプロセスとして実装する（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。API（FastAPI）プロセスとは分離し、DBのRun claimで仕事を得る。HostはModel Gateway・Tool Gatewayへ認証付きローカルRPCで接続し、Provider credential・Vault・Browser CDP・生成コード実行権限を持たない。1プロセス内の複数Runは`asyncio.TaskGroup`等で並行するが、Run毎のlease/heartbeat/cancel scopeを独立させ、1 Runの例外・Blocking処理が他Runへ波及しないようthread/process poolへ隔離する。Worker単位のCPU/RAM/PID上限はcgroupで強制し、OOM/kill時は既存の再claim手順で復旧する。主Runtime OSS（ADR-038候補A/B）はHost内部のAdapterであり、Hostのlease・Session正本を置換しない。
+Runtime HostはPython asyncioの独立Workerプロセスとして実装する（[ADR-036〜040](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。API（FastAPI）プロセスとは分離し、DBのRun claimで仕事を得る。HostはModel Gateway・Tool Gatewayへ認証付きローカルRPCで接続し、Provider credential・Vault・Browser CDP・生成コード実行権限を持たない。1プロセス内の複数Runは`asyncio.TaskGroup`等で並行するが、Run毎のlease/heartbeat/cancel scopeを独立させ、1 Runの例外・Blocking処理が他Runへ波及しないようthread/process poolへ隔離する。Worker単位のCPU/RAM/PID上限はcgroupで強制し、OOM/kill時は既存の再claim手順で復旧する。主Runtime OSS（ADR-038、STEP 2でDeepAgents Python＋LangGraphを選定）はHost内部のAdapterであり、Hostのlease・Session正本を置換しない。
+
+## 2026-11-10 STEP 2: Worker起動・回復の規則（ADR-038選定、PoC試験済み・NOT LOCKED）
+
+- Worker起動時にFrameworkが**背景でRunを回復・実行してはならない**。回復は、QueuePortで仕事を得てRunをclaim（fence+1）したWorkerが`run_segment`を呼んだときだけ行う。LangGraphは呼出し時のみ実行されるためこの規則を満たす（候補AのDBOSは`launch()`がexecutor単位でPENDING workflowを自動回復するため、Worker毎の`executor_id`と非公開回復APIが必要だった。不採用理由の一つ）。
+- Worker 1プロセスは`AsyncPostgresSaver`用のDB接続を1本持ち、checkpointerはaiagent-md正本とは別schema/別roleへ置く（STEP 3）。Windowsでの開発時はpsycopg asyncのためSelector event loopが必要（本番Linuxでは不要）。
+- Worker peak RSSは同一fixtureで約96 MB（Linux CI、`ru_maxrss`。候補Aは約117 MB）、起動〜準備約1.2 s（N=10中央値、Runtime単体。Queue込み・Windows値は[ADR-038/039 STEP 2判定結果](../00-foundation/architecture-decisions.md)と`conformance/agent_runtime/results/`）。cgroup上限の初期値算定に使うが、本番Model/Toolを含めた値ではない。
+- kill（`os._exit`相当、OOMを模擬）後は既存のlease失効→再claimで再開し、送信重複0・UNKNOWN保持をPYRT-T01/T06/T07で確認した。
+- **1プロセス複数Run（PR #80レビュー後）**: 1 Workerプロセスで複数Runを`asyncio`並行実行してよい。条件は、Run固有のclaim・サービス参照を呼出し毎の注入（LangGraph `RunnableConfig`）で渡しモジュール共有変数を使わないこと、DB接続をthread毎に分離すること（1接続を複数Runで共有するとTx境界が混ざる）。3 Run・2 tenantの並行実行で混入0を確認（PYRT-T15）。1プロセス＝1 Runに固定する方式は採らない。

@@ -162,7 +162,7 @@ Authenticated UI (Design Picker, Demo Approval, Dev Studio, Endless Run)
 | 論理コンポーネント | 実装（候補） | 配置 / プロセス | 他コンポーネントとの接続 | 禁止事項 |
 |---|---|---|---|---|
 | API / Auth | FastAPI + Pydantic v2、ASGI（Uvicorn） | Trusted Control VM、独立プロセス群（水平複製可） | DB直接（Command TX＋outbox）、SSE/WebSocketはDB projection/outboxから配信 | Browser CDP・Vault Secret・Provider keyへの直接アクセス、長時間Agent処理をHTTP request内で実行 |
-| Agent Runtime Worker | `AgentRuntimePort`＋候補A/B（ADR-038） | Trusted Control VM、API と**別プロセス**、asyncio | DB（Run claim/checkpoint CAS）、Model Gateway・Tool Gatewayへ**認証付きローカルRPC** | 生成コード実行、Provider credential保持、Tool副作用を直接実行 |
+| Agent Runtime Worker | `AgentRuntimePort`＋DeepAgents Python／LangGraph（ADR-038、STEP 2選定） | Trusted Control VM、API と**別プロセス**、asyncio | DB（Run claim/checkpoint CAS）、Model Gateway・Tool Gatewayへ**認証付きローカルRPC** | 生成コード実行、Provider credential保持、Tool副作用を直接実行 |
 | Model Gateway / Router | Python（Provider SDK / HTTP client） | Trusted Control VM、独立プロセス | Credential Brokerから鍵注入、Trusted Egress経由送信、`dispatch_admission`/Sealed ModelRequestSnapshot | Agent Runtimeへ鍵・raw responseの権限を渡す |
 | Tool Gateway | Python | Trusted Control VM、独立プロセス（Intent/Approval/Effect Ledgerの正本） | DB、Sentinel、各Trusted Worker | Framework内Tool handlerに自己承認させる |
 | Sentinel / Credential Broker / Trusted Egress | 言語非依存（Python実装可）＋kernel/namespace/nftables等のOS強制 | Trusted Control VM、各々独立identityのプロセス・network namespace | Gateway/Workerからの認可要求、Egressは唯一のInternet経路 | Python moduleとして他プロセスへ同居させる |
@@ -170,7 +170,7 @@ Authenticated UI (Design Picker, Demo Approval, Dev Studio, Endless Run)
 | Browser Broker controller | Python | Trusted Control VM | Browser Workerへ認証付きRPC、lease/CDP policy正本 | — |
 | Browser Worker | Playwright Python（Chromium baseline）、Jev/Lightpanda adapter（EXPERIMENT） | 隔離Browser Worker domain（VM/sandbox）、Session毎Context | Broker RPCのみ、web通信はTrusted Egress強制 | Agent・Cell・Extraction Workerへの直接CDP公開 |
 | Extraction Worker | Scrapling parser、Crawl4AI（markdown化/抽出、C） | 独立sandboxプロセス、**ネットワーク無し**、入力はArtifactのみ | Gatewayから入力Artifact参照、出力はCandidate claims/Artifact | 自らfetch/browser起動、Credential/Cookie受領 |
-| Automation / Scheduler / Outbox relay | QueuePort（ADR-039）＋Python Worker | Trusted Control VM、独立プロセス | DB outbox/lease、Notification Worker | 第二のQueue/Workflow正本 |
+| Automation / Scheduler / Outbox relay | QueuePort（ADR-039 PROVISIONAL: 自作PostgreSQL Queueが優先候補）＋Python Worker | Trusted Control VM、独立プロセス | DB outbox/lease、Notification Worker | 第二のQueue/Workflow正本 |
 | Memory / Context Manager | Python module（PostgreSQL＋pgvector、Graphiti/Mem0はC） | Agent Runtime/Trusted serviceのin-process module＋DB | Embedding/summary呼出しはModel Gateway経由 | Memoryへの権限付与、consent/tombstone迂回 |
 | Generated code / 自律開発Coder | Shell/Python/Node等、OpenHands SDK等（C） | **Untrusted Execution VM のRuntime Cellのみ** | scoped broker RPCのみ（§1） | Trusted VMのPythonプロセス・venv・FSの共有、直接Socket |
 | Web UI | React + TypeScript（静的配信を第一候補） | Reverse proxy配下、Node.jsはbuild時のみ必須 | FastAPIのREST/SSE/WebSocket、OpenAPI生成Client | UI Server側での業務判断・認可・Secret保持 |

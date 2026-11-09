@@ -335,3 +335,9 @@ Caveman/HeadroomのSharedContext/CCRを複数Agent間の共有メモリ正本と
 **Handoff最適化**: 親→子に長いログ・Source本文を全コピーせず、ArtifactRef+locator+protection policyにし、必要rangeを現在のTool Gatewayから読む。子のcompressed summaryは原文と別Artifact。Child completionが遅延・キャンセル・revoke・Parent steer後に到着した場合、manifest/goal revision/lease/contextVersionのCASでstale隔離。重複の単純消去が矛盾資料や否定Evidenceまで消さないようclaim lineageを保持する。
 
 **測定**: 3〜8並列subagentのA/BでParent+Childのprovider billed cost、cached prefix、offload/retrieve回数、Evidence coverage、cross-tenant leakage、stale child mergeと同一SHA review誤認を別評価。OPT-T18/T20・既存ACM-T11/12が安全Gate。
+
+## 2026-11-10 STEP 2: DeepAgents subagentの統合規則（ADR-038選定、PoC試験済み・NOT LOCKED）
+
+- DeepAgentsは`subagents`未指定でも親の全Toolを継承する**汎用subagent（`general-purpose`）を自動追加**する。HarnessProfile（`general_purpose_subagent.enabled=False`）で無効化し、Modelに見えるTool一覧をsnapshot試験する（PYRT-T08で`task`の混入を検出→無効化後に合格）。
+- 宣言的subagentは`tools`にGateway stub（read-only等の縮小集合）、`model`にModel Gateway Adapter（stream `subagent:<name>`）、`middleware`に`FilesystemMiddleware(tools=["read_file"])`を明示する。PoCで子のTool呼出しが親と同じGateway・同じRoot Runの台帳に記録されることを確認（PYRT-T09）。
+- 制約（STEP 3）: DeepAgentsの`task` Tool結果はFramework内部Toolであり、現PoCではRun HEADへChildResultとして記録していない。§「Child Result受入Admission契約」に従い、AdapterでChildResultをHEADへ記録・検証してから親へ返す実装と、HEADからの再構築時の扱いを追加する。子をaiagent-mdのChild Task/Runとして起動する方式（lease/Goal revision独立）との比較も未実施。

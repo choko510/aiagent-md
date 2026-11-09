@@ -331,10 +331,19 @@ pg-boss（Node.js専用）は採用候補から外し、§2のattempt fence/stal
 
 | 候補 | 適合しうる点 | 懸念・確認事項 | 状態 |
 |---|---|---|---|
-| DBOS（`dbos 3.4.0`、MIT） | PostgreSQLのみで durable workflow/queue/scheduling | ADR-038候補Aと一体判断。workflow状態をTask/Run正本にしない、step replayと外部副作用の分離 | STEP 2 |
+| DBOS（`dbos 3.4.0`、MIT） | PostgreSQLのみで durable workflow/queue/scheduling | ADR-038候補Aと一体判断。workflow状態をTask/Run正本にしない、step replayと外部副作用の分離 | **STEP 2で不採用**（候補A不採用に従属。dedupe/再配達試験自体は合格） |
 | Dramatiq（`2.2.1`） / Celery（`5.7.0`、BSD-3-Clause） | 成熟したPython worker | Redis/RabbitMQ等のBroker追加、Broker ACKとDB outboxの二重状態、visibility timeout | 候補 |
 | Temporal Python SDK（`temporalio 1.35.0`、MIT） | 強力なdurable execution | 別クラスタ運用、Task/Run正本との二重状態（既存選択肢Dで初期却下） | 初期却下を維持 |
 | APScheduler（`3.11.3`、MIT） | 時刻trigger計算 | job storeは正本にしない。Queueではない | 補助のみ |
-| 自作PostgreSQL Queue（`FOR UPDATE SKIP LOCKED`） | 依存最小・既存DDLと同一Tx | claim/heartbeat/cleanupの保守（既存選択肢C） | DBOS/候補が不適合時の代替 |
+| 自作PostgreSQL Queue（`FOR UPDATE SKIP LOCKED`） | 依存最小・既存DDLと同一Tx | claim/heartbeat/cleanupの保守（既存選択肢C） | **優先候補（ADR-039 PROVISIONAL、NOT LOCKED）** |
 
 **単一系統の規則**: 上表から1つだけを採用し、Agent Runtime候補（ADR-038）のworkflow機構と別Queueを重複導入しない。候補Bを選ぶ場合は、LangGraphの実行と本QueuePortの責務境界（Run起動・再claimはQueuePort、step内実行はLangGraph）を明記する。DB driverはasyncpg（Apache-2.0）またはpsycopg 3（LGPL-3.0、利用形態のライセンス確認要）を実装時に選ぶ。JQ-T系試験は選定基盤で実行する（未実行）。
+
+## 2026-11-10 STEP 2: QueuePortの優先候補（ADR-039 PROVISIONAL、NOT LOCKED）
+
+ADR-038でLangGraphを選定したため、**Queue/Workflow基盤はaiagent-md自作のPostgreSQL Queue 1系統を優先候補**とする。下記の未実施項目を試験するまで製品選定として確定しない。責務境界: Run起動・再claim・再配達・dedupeはQueuePort、step内実行とinterruptはLangGraph、外部副作用の冪等はTool Gateway＋Effect Ledger。LangGraph側にQueueやschedulerを追加しない。
+
+- PoC（`conformance/agent_runtime/aiagent_conformance/control.py`の`enqueue/dequeue/ack`）: `dedupe_key`一意制約で重複投入を拒否（PYRT-T10b）、`FOR UPDATE SKIP LOCKED`＋`locked_until`でclaim、Worker kill後はlease失効で再配達し`attempts=2`、Runはfence付き再claimで再開して外部送信1回（PYRT-T10）。
+- PR #80レビュー後に追加で試験したこと（PoC）: **attempt fence**（dequeue毎に`attempt_id`を発行し、ACKは`attempt_id`一致時のみ。lease失効後に旧attemptがACKしても無効、PYRT-T16a）、**ACK喪失**（segment完了・run状態commit後、ACK前にWorker kill→再配達でattempts=2、承認待ちへ再推論なしで戻る、PYRT-T16b）、**承認後の再投入**（承認決定と`resume` jobの投入を同一Txで行い、重複決定では再投入しない、PYRT-T16b）、**複数Worker競合**（3 Worker×8 Runで各jobを1回だけ処理、承認後の再開も各1回、PYRT-T16c）。承認待ち・UNKNOWNのjobは`WAITING`で完了させ、再開は新しい`resume` jobで行う。**ACKとlease期限**: lease期限切れはjobを再配達可能にするだけで、ACKを拒否する理由にはしない。まだ誰も再claimしていなければ`attempt_id`は変わらず、そのattemptの結果が唯一の結果なのでACKを受理する。再claimとACKは同じ行を更新するため直列化され、先にcommitした方が勝つ（再claimが先なら旧ACKは無効、PYRT-T16a／ACKが先なら再配達されない、PYRT-T16d）。終端RunのjobはRunを再開せず完了する。
+- 確定前に必要なこと（STEP 3、未実施）: heartbeat延長（長いsegmentでleaseが切れない）、dead-letter（再配達上限）、Outbox relayとの同一Tx、scheduler（APSchedulerは時刻計算の補助のみ）、JQ-T系試験。
+- 比較対象だったDBOS Queueもdedupe（`deduplication_id`）と再配達はPYRT-T10/T10bで合格したが、DBOSを導入しない決定（ADR-038）により不採用。Queue製品の配達保証を外部副作用のexactly-onceと同一視しない規則は不変（PYRT-T12の陰性対照）。

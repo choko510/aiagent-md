@@ -347,3 +347,11 @@ GW-017 MUST: sandbox.exec is bound versioned Execution; GW-018 MUST: all spawned
 ## 2026-11-09 Python-first（ADR-036）: Gatewayの独立プロセス（STEP 1）
 
 Tool GatewayはTrusted Control VM内の独立Pythonプロセスとし、Agent Runtime（ADR-038候補A/Bいずれでも）からは認証付きローカルRPCでのみ呼ぶ。PydanticAIのtool関数やLangGraph/DeepAgentsのtool nodeは`ToolIntentProposal`を返すstubに限り、Gateway・Sentinel・Effect Ledgerを迂回して副作用を実行しない（[Architecture Rules §E-5](../00-foundation/architecture-rules.md)）。Framework/Queueのretryとは別に、Tool retryはGatewayのLedger判断のみで行う。
+
+## 2026-11-10 STEP 2: 最終admissionと送信の線形化（PR #80レビューP1-03、PoC試験済み・NOT LOCKED）
+
+承認済み書込Toolの送信直前に、**run（status・fence・Goal revision）、approval（status・期限・args hash・Goal revision）、ledger行を行lock（`FOR SHARE`／`FOR UPDATE`）した1 Transaction**で最終admissionを行い、同じTxで`SENDING`へ遷移する。Steer（Goal revision更新）・Cancel（run status更新）・Revoke（approval status更新）は同じ行を更新するため、このTxと直列化される。
+
+- 最終admissionより前にcommitされた変更 → 送信しない（`STALE_GOAL`／`CANCELLED`／`REVOKED`）。PYRT-T14で、別接続（他プロセス相当）が最終admission直前にcommitする故障注入を行い、送信0を確認。
+- `SENDING` commit後の変更 → その送信はadmission済み。取り消したことにせず、結果は`CONFIRMED`または`UNKNOWN`（MAY_HAVE_SENT）として記録する（PYRT-T14b）。
+- 事前の非lock確認（承認待ちの判定等）は最適化であり、権限判断は最終admissionのみで行う。run単位の書込直列化（advisory lock）は最終admissionの外側に置く。

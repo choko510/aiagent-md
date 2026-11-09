@@ -844,5 +844,14 @@ Observation/ReflectionはCHAT_06のLong-term Memoryへ勝手に書込まない�
 
 - CTX-OSS-A（Offload＋Tool pair保護）はDeepAgents Pythonの対応middlewareで再監査し、§19.3の「Offload失敗でもSummaryを続行する既定動作は採用禁止」をPython版でも同じ故障注入（ACM-OSS-T01）で確認する。JS版で確認した挙動をPython版の事実として扱わない。
 - CTX-OSS-B（OpenClaw式品質監査）とCTX-OSS-C（Mastra Observational Memory）はTypeScript実装にのみ存在するため**直接移植しない**。必要な機構（5セクション構造監査、Part cursor連続性、Buffer/Activation分離、Reflection世代切替）は§19の仕様どおり**aiagent-md独自のPython Port**（`CompactionAuditor`、`ObservationBuffer`）として実装し、上流コードは設計参照に留める（分類C）。
-- 候補B（DeepAgents Python＋LangGraph）を採用しない場合も、DeepAgents Pythonのsummarization/offloadはContext Manager内部の交換可能Adapterとして評価できる。いずれもRaw履歴の耐久保存、Source-backed Summary、A0〜A2固定、ContextManifest、Sealed ModelRequestSnapshot、Memory consent/削除、Quality Audit、Failed Compaction Recoveryの既存契約に従い、Framework側Summaryを正本にしない。
+- 候補B（DeepAgents Python＋LangGraph）はSTEP 2でADR-038に選定された（下記§20.1）。採用しなかった場合の規定として、DeepAgents Pythonのsummarization/offloadはContext Manager内部の交換可能Adapterとして評価できる。いずれもRaw履歴の耐久保存、Source-backed Summary、A0〜A2固定、ContextManifest、Sealed ModelRequestSnapshot、Memory consent/削除、Quality Audit、Failed Compaction Recoveryの既存契約に従い、Framework側Summaryを正本にしない。
 - Long-term Memory候補（PostgreSQL＋pgvector、Graphiti、Mem0）は[Memory Retrieval](../06-memory-skills/memory-retrieval-and-update.md)の2026-11-09節に従う。
+
+### 20.1 STEP 2: DeepAgents Python圧縮の統合規則（2026-11-10、PoC試験済み・NOT LOCKED）
+
+ADR-038の選定に伴い、圧縮候補の生成はDeepAgentsの`SummarizationMiddleware`（`create_summarization_middleware`、`deepagents 0.7.34`）に委譲できる。PoC（PYRT-T09）で確認した事実と規則:
+
+- DeepAgentsのsummarizationは`state["messages"]`を書換えず、private fieldと`wrap_model_call`で要約後のModel入力を作る（ソースのdocstringで確認）。Summary生成のModel呼出しは通常のModel Gateway Adapterを通り、aiagent-mdでは**別stream（`summarize`）**として記録し、main transcript（Run HEAD）にSummaryを混入させない。PoCでHEADのRaw履歴12件が保持されることを確認。
+- 発火閾値はModel profileの`max_input_tokens`から自動計算される。Model Gateway Adapterはprofileを明示し（PoCでは8,000 token）、閾値・保持数を設定値として記録する。
+- 退避履歴は`/conversation_history/…`としてbackendへ書かれ、`read_file`で再読込みされうる。backendは`StateBackend`（Graph state内）に限り、ホストFSを使わない。Raw Artifactの耐久保存・ContextManifest・Source-backed Summary・Quality Audit（§19）はaiagent-md側の責務のまま。
+- **未検証（STEP 3）**: §19.3「Offload失敗でもSummaryを続行する既定動作は採用禁止」のPython版での故障注入（ACM-OSS-T01）、summary品質監査、A0〜A2固定との統合。

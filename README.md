@@ -25,7 +25,7 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 | SQL | データ永続化 | PostgreSQL DDL・Transaction・Migration（正本） |
 | Rust | 任意 | 実測で必要と判断された局所最適化のみ。必須依存にしない |
 
-Agent Runtime本体のOSS（PydanticAI＋DBOS か DeepAgents Python＋LangGraph）は**STEP 2で選定**（ADR-038）。言語変更でTrusted/Untrusted VM、Sentinel、Tool Gateway、Credential Broker、Browser Worker、Trusted Egressの境界は変わりません。配置は [System Architecture §13.2](docs/00-foundation/system-architecture.md)、拘束規則は [Architecture Rules §E](docs/00-foundation/architecture-rules.md)、判断と移行監査台帳は [ADR-036〜040](docs/00-foundation/architecture-decisions.md)。既存仕様中の `ts` コードブロックは言語非依存の論理型記法です（実装はPydantic / 生成TS型）。
+Agent Runtime本体のOSSは**STEP 2の実測でDeepAgents Python＋LangGraphを選定**（ADR-038、NOT LOCKED）。Queueは自作PostgreSQL QueuePortを優先候補（ADR-039 PROVISIONAL）とし、適合試験は`conformance/agent_runtime/`。言語変更でTrusted/Untrusted VM、Sentinel、Tool Gateway、Credential Broker、Browser Worker、Trusted Egressの境界は変わりません。配置は [System Architecture §13.2](docs/00-foundation/system-architecture.md)、拘束規則は [Architecture Rules §E](docs/00-foundation/architecture-rules.md)、判断と移行監査台帳は [ADR-036〜040](docs/00-foundation/architecture-decisions.md)。既存仕様中の `ts` コードブロックは言語非依存の論理型記法です（実装はPydantic / 生成TS型）。
 
 ## 仕様のまとまり
 
