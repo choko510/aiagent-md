@@ -149,12 +149,12 @@
 |---|---|---|
 | DEV-01 | [Project/Workspace/Git](../16-app-development/development-orchestration.md#dev-01) | CHAT_01/02/03/05/09/10 |
 | DEV-02 | [Multi Agent Development](../16-app-development/development-orchestration.md#dev-02) | CHAT_01/02/03/08/09/10 |
-| DEV-03 | [Visual Design and Demo](../16-app-development/visual-design-and-demo.md) | CHAT_01/02/04/08/09/10 |
+| DEV-03 | [Visual Design and Demo](../16-app-development/feature-lifecycle-and-demo.md#dev-03) | CHAT_01/02/04/08/09/10 |
 | DEV-04 | [Expert Advisor](../16-app-development/development-orchestration.md#dev-04) | CHAT_02/03/08/09/10 |
 | DEV-05 | [Build Preview Release](../16-app-development/build-preview-release.md) | CHAT_02/03/04/05/08/09/10 |
 | DEV-06 | [Autonomous Browser Debugger](../16-app-development/debugging-and-verification.md#dev-06) | CHAT_02/03/04/08/09/10/11 |
 | DEV-07 | [Review Repair Gates](../16-app-development/debugging-and-verification.md#dev-07) | CHAT_01/02/03/08/10/11 |
-| DEV-08 | [Feature Factory](../16-app-development/feature-factory.md) | CHAT_01/02/07/08/09/10/11 |
+| DEV-08 | [Feature Factory](../16-app-development/feature-lifecycle-and-demo.md#dev-08) | CHAT_01/02/07/08/09/10/11 |
 | DEV-09 | [Development API/UI](../16-app-development/development-api-and-ui.md) | CHAT_01/03/04/07/08/09/10 |
 | DEV-10 | [Acceptance & rollout](../16-app-development/acceptance-and-rollout.md) | CHAT_00/01/02/03/04/07/08/09/10/11 |
 | CAM-01 | [Endless Run Campaign](../07-automation/endless-run-campaign.md) | CHAT_01/02/03/07/08/09/10/11 |

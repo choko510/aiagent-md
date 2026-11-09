@@ -39,7 +39,7 @@ type DebugFindingV1 = {
 証拠Artifactのraw screenshot/HAR/bodyは所有権・暗号化・保持期間・最大bytesを持ち、token/cookie/PII/Authorizationなどはredact。分類不能な通信内容はModel/一般UIに送らない。JSスタック/API request IDとserver log、source maps、commitShaを照合し、原因を確定できなければ仮説のまま保持。Trace/動画はopt-in/retention policyに従う。HAR replayがService Worker/時間のすべてを再現するという保証はしない。
 
 ### Visual Regression
-承認済み [Demo Manifest](visual-design-and-demo.md) をbaselineに、同一viewport/theme/font/fixture/browser/runtime/animation状態を揃えたpixel+layout geometry+semantic assertions。差分しきい値/マスクは誤検知fixtureで校正し、意図しないUI変更を「改善」として自動承認しない。デザイン修正時だけ承認済みrevisionを更新。パフォーマンス改善も同一条件の前後実測が必要。
+承認済み [Demo Manifest](feature-lifecycle-and-demo.md#dev-03) をbaselineに、同一viewport/theme/font/fixture/browser/runtime/animation状態を揃えたpixel+layout geometry+semantic assertions。差分しきい値/マスクは誤検知fixtureで校正し、意図しないUI変更を「改善」として自動承認しない。デザイン修正時だけ承認済みrevisionを更新。パフォーマンス改善も同一条件の前後実測が必要。
 
 ### Real-time debugging UX
 ブラウザ映像(可能な場合)、before/after画像、操作タイムライン、Console、Network、trace、DOM/ARIA、source path、再現ボタン、修正コミットへジャンプ。実映像は別PR [Browser Live Observation #71](https://github.com/choko510/aiagent-md/pull/71) の適用/検証後のみ依存。実映像のRuntimeが未実装でも静止画/trace上で成立。Observe-onlyとhuman takeoverを分け、閲覧がbrowser operation権限とならない。

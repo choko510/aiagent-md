@@ -1,16 +1,23 @@
-# DEV-03 — Visual Design Picker & Executable Demo Approval
+# Feature Lifecycle & Demo Approval — DEV-03 / DEV-08
+
+> Draft / PROVISIONAL。Visual Design PickerとFeature Factoryの連続した承認・実装フローを集約。各IDの要件、Test ID、Human ApprovalとTool Approvalの境界を維持する。実装済み・テスト済みの主張ではない。
+
+## DEV-03
+
+**DEV-03 — Visual Design Picker & Executable Demo Approval**
+
 > Draft / PROVISIONAL | 2026-11-07 | Owners CHAT_01/02/04/08/09/10/11。Demoは未実装。
 
-## 1. 意図
+### 1. 意図
 デザイン名称（Fluent Design 2、Material Design 3、Minimal等）**だけ**でなく、AIが同じ要件・同じコンテンツ・同じviewportを用いて生成した複数の外観を**サムネイル/画像/動くデモで直感的に選べる**ようにする。選定パターン数は既定3・有限上限あり。名称はデザインの参考スタイルであり、他社のロゴ/アセット/完全な著作物複製を意味しない。最終採否はユーザーの好みと機能要件を分離して記録。
 
-## 2. UI 操作
+### 2. UI 操作
 比較画面は候補カード（light/dark、desktop/mobile、same fixture content、キーボードアクセス、比較の同期スクロール）、拡大、選択、採用/見送り/部分統合、自由テキスト変更・要素クリックによるフィードバック、再生成を提供。未提供/破損プレビューは画像なしの候補として明示し、存在しないデモを表示しない。候補の座標はsnapshot+viewport+DOM generationへbindし、別revのクリック座標を流用しない。
 - Design reviewの選択肢は `AUTO_RECOMMEND`(A4推奨案を提示)、`DECIDE`(ユーザー比較選択)、`CUSTOMIZE`(特定部品/技術/要件だけ手動選択)。
 - Demo reviewの選択肢は `REQUIRE_USER_APPROVAL`、`PREAUTHORIZED_BOUNDED_AUTO`、`REQUEST_REVISIONS`。Demo採用は既定でユーザー承認必須。事前に限定した委任が存在する場合だけ自動採用を許す。選択しない場合の既定は**DEMO確認後に本実装**。
 - UI previewは画像だけでなく、画面遷移/ボタン/フォームを操作できるプログラム。未接続API・ダミーデータ・未実装操作を視覚的に明示。実決済や外部書き込みをデモで実行しない。
 
-## 3. 凍結する契約
+### 3. 凍結する契約
 ```ts
 type DesignChoiceV1 = { cycleId:string; candidateIds:string[]; comparedFixtureDigest:string;
  viewportProfiles:string[]; selectedCandidateId?:string; selectedParts?:string[];
@@ -23,13 +30,13 @@ type DemoManifestV1 = { projectId:string; cycleId:string; designRevision:string;
 ```
 ProducerのdemoManifestは`proposed`のみ、ユーザーが権限付きUIから受理するとDesign/Demo approval receiptが不可変になる。Tool副作用承認/ログインhandoffとは**別**。Approveはserver-side authenticated principal、CSRF、If-Match、Idempotency-Keyを必須とし、正確なmanifest digest、GoalRevision、対象projectにbindする。古いDemo、失効/別owner/競合で合意しない。変更依頼は新Revisionを発行し、再作成して再確認。
 
-## 4. デモ品質と本実装の一致
+### 4. デモ品質と本実装の一致
 Demoは本実装に近いコンポーネント構成、ルート・操作・主要レスポンシブ設計を実装。モック接続を実装済みAPIと誤認しない。承認済みDemoをscreenshot golden baseline/Interaction contractとして保存し、実装後にviewport別visual regression・アクセシビリティ・ユーザーフローとの一致を確認。微細な差分（font rendering等）と機能破壊差分を区別するthresholdは初期仮値で、false-positive fixtureで校正し、LLMによる「似ている」だけで合格にしない。
 
-## 5. 分離/権限
+### 5. 分離/権限
 開発Previewは固定Project/Worktree/Revision/portのPreview Broker経由。Browser WorkerがPage/CDPを単独保持する。閲覧専用とモック環境限定demo:interactを別Capabilityとして区別し、端末へのraw CDP/secret/localhost bridgeを出さない。機密Browser takeoverは別の既存専有leaseで管理。Preview contentは攻撃者が変更可能な低信頼Webコンテンツとして扱う。Browser Live Observation (#71) の仕様はmainに存在するが、そのRuntime実装の有無にかかわらず通常の静止画プレビューと受入APIは成立する。
 
-## 6. Tests
+### 6. Tests
 DEV-DES-T01: 3案が同一fixture/content/viewport、画像クリックで正しい候補を選択。
 DEV-DES-T02: mobile/light/darkとkeyboard選択・読み上げラベルを検証。
 DEV-DES-T03: stale manifest/old Goal/別tenant/二重承認/同時選択を拒否。
@@ -37,7 +44,7 @@ DEV-DES-T04: mock API動作をproduction接続と虚偽表示せず実側効果�
 DEV-DES-T05: user修正→新Demo生成→旧承認で本実装再開不可。
 DEV-DES-T06: 本実装との差分とfunctional regressionをBrowser検査で判定。
 
-## 2026-11-08 P1-01/P1-02 — Interactive Demo versus Human Takeover
+### 2026-11-08 P1-01/P1-02 — Interactive Demo versus Human Takeover
 
 **Viewer modes are separate capabilities** rather than a single viewer right:
 - `preview:observe`: authenticated view-only snapshot/live observation; does not permit input or Browser Action.
@@ -61,3 +68,68 @@ type DemoDecisionV2 = { projectId:string; cycleId:string; designRevision:string;
 **DEV-DES-T09**: `AUTO_RECOMMEND` never causes implementation; Feature Factory requires a real decision or preauthorized bounded grant.
 **DEV-DES-T10**: default generic development cannot silently interpret demoReady as approved; revoked/expired mandate invalidates future acceptances.
 **DEV-DES-T11**: cross-origin script/cookie/iframe/storage attempt from malicious demo cannot access dashboard or another project.
+
+---
+
+## DEV-08
+
+**DEV-08 — Feature Factory: Up to Ten Approved Features (or Continuous)**
+
+> Draft / PROVISIONAL | 2026-11-07 | Owners CHAT_01/02/07/08/09/10/11 | 実装なし。
+
+### User Goal
+「このアプリへ新機能を10件実装。3AIで考え、1AIで統合、**動く本実装に近いDEMO**を提示。OKしたものだけ本実装→3AIレビュー→P0/P1解決→次へ」。既定目標10件は設定値であり上限例。長期モードは停止指示または利用上限まで繰り返せるが、各Cycleは有限に区切る。
+
+### Feature lifecycle
+`PROPOSED → SYNTHESIZED → DEMO_BUILDING → WAITING_DEMO_DECISION → APPROVED/REJECTED/REVISION_REQUESTED → IMPLEMENTING → TESTING → REVIEWING → VERIFIED → INTEGRATING → INTEGRATED → RELEASED`。Design decision/実Demo決定はGatewayの外部行為approvalと別。Revision requestは既存承認を失効し、更新したDemoの再確認を要する。Rejectは後から明示的にUndo可能だが、同じ提案を直ちに延々再提案しない。
+
+```ts
+type FeatureCandidateV1 = { featureId:string; projectId:string; campaignId?:string;
+ proposalRefs:string[]; synthesisRef:string; dedupeFingerprint:string;
+ dependencies:string[]; designRevision:string; demoRef?:string;
+ userDecision:"PENDING"|"APPROVED"|"REJECTED"|"REVISION_REQUESTED";
+ state:string; implementationSha?:string; verificationReceiptRef?:string;
+ countReceiptRef?:string; recordVersion:string };
+```
+
+### Counting / competition / concurrency
+「10件達成」は既定で**承認済・実装・必須テスト・3レビュー・P0/P1未解決0・現在の統合HEADに反映・統合後検証PASS**のdistinct logicalWorkItemIdごとに原子的に一度だけcount receipt。提案10件、未承認Demo10件、commitだけ10件では未達。Merged/Integrated/Releasedはそれぞれ別のstatusとして必須。
+- `#5 IMPLEMENTING`, `#6 WAITING_APPROVAL`, `#7 SYNTHESIZING`, `#8 DEMO_BUILDING` のように待機中でも他の独立作業を継続する。各Featureのbranch、workspace CAS、subTask予算を分離し、同じschema/ファイルを競合更新する場合は依存DAG/直列化で調停。
+- 候補は価値/重複/ユーザー制約/性能/セキュリティ/実装コスト/保守負荷で比較。3AIの新規提案に既存実装・却下履歴・ユーザーの禁則を与え、理由なき類似提案を重複させない。
+- Backendのみの機能もAPI fixture/CLI observable demoを提示し、モックと実装範囲を区別。UIのScreenshotだけで「動くDEMO」と呼ばない。
+- ユーザーがデモを確認するまで当該Featureの本実装は始めない。preview中の外部API/購入/削除を実行しない。許可されたデザイン変更や手動採用部品はDesignRevisionで固定。
+- 承認待ちだけが残る場合、CampaignはWAITING_INPUTでparkし無駄なLLMを連打しない。他独立タスクがあれば進める。
+
+### Tests
+DEV-FF-T01: DONE4件+pending2+implementing2→progress=4。
+DEV-FF-T02: denied/only demo/duplicated/oldSHA/missing reviewで件数増分0。
+DEV-FF-T03: pending featureが他独立Featureの実装を妨害しない。
+DEV-FF-T04: 共同schema更新はCAS競合時にfail/serial。
+DEV-FF-T05: 最終10件目は原子countで一度だけ達成。
+DEV-FF-T06: Demo revision変更は旧承認無効、実装開始0。
+
+### 2026-11-08 P1-02/P1-03/P1-04/P1-10 — Integration-based completion
+
+**Authoritative feature status has distinct evidence-bound milestones**:
+| Stage | Required receipt | User-facing wording |
+|---|---|---|
+| `IMPLEMENTED` | feature branch commit+build artifact | 作業ブランチで実装済み |
+| `VERIFIED` | current feature SHA with mandatory tests, browser evidence and three independent reviews; P0/P1 open=0 | 単体検証済み |
+| `INTEGRATED` | commit in current project integration head, complete integration tests and integration review bound to **that head** | アプリ本体への統合完了 |
+| `RELEASED` | provider-confirmed delivery/deployment to authorized target, with receipt and rollback plan | 公開・配布完了 |
+
+The default for `"アプリに10機能追加"` is **10 distinct INTEGRATED**. A user asking for **PR creation only** may explicitly select `VERIFIED` + confirmed PR receipt or other selectable criterion, labeled separately. `RELEASED` is never inferred from merging. `FeatureCandidateV1.state=DONE` is **not** a terminal-counting oracle and is superseded by verified stage receipts. Feature Factory's DemoAcceptancePolicy default is `REQUIRE_USER_APPROVAL`; `AUTO_RECOMMEND` only chooses which proposal to show. Any preauthorized auto acceptance must be narrowly scoped and recorded (DEV-03); otherwise implementation remains blocked.
+
+**Identity/dedupe:** use server-generated stable `logicalWorkItemId` per user-visible feature, not a hash of current commit. Distinct logical IDs are linked through semantic equivalence/rejected-history review; identical behavior cannot be counted twice by resubmitting with a new baseline SHA. `baselineSha`, `featureSha`, `integrationHeadSha`, `criterionVersion`, `integrationReceiptId` are separate. Count entries are unique on `(campaignId, logicalWorkItemId, criterionVersion)` (and detect semantic duplicate via feature key / equivalence record); after future criterion revision do not automatically count same feature again toward a new target. The counter is a DB view/sum of immutable eligible receipts, not a model-maintained integer. Reconciliation after crash derives count from rows, not a saved numeric summary.
+
+**Integration race:** Feature A can be VERIFED on branch SHA_A but if Feature B changes the target integration HEAD, QA tests and at least risk-appropriate independent integration reviews must run against final HEAD_AB. For P0/P1-affecting shared changes (auth, schema, core behavior, API, UI flows), all three A6/A7/A8 re-review the combined HEAD; for low-risk changes, three reviewers may provide scoped no-impact receipts tied to the combined SHA, but absence of combined-SHA receipts never implies success. If tests fail, mark `INTEGRATION_BLOCKED`, remove from eligible completed count until recovery; don't delete historical verified feature evidence. Atomic update of integration head, receipt, count ledger and next-Cycle outbox via CAS; conflicting head requires rebase/retest before counting.
+
+**DEV-FF-T07**: ten verified branches not integrated into current head → goal 0/10 by default.
+**DEV-FF-T08**: ten distinct features integrated and independently tested on final head → target reached once.
+**DEV-FF-T09**: two features conflict in API/schema/UX → no merged count until combined-head gate succeeds.
+**DEV-FF-T10**: feature recreated at new SHA/new Cycle/new proposed ID but same logical identity → exactly one count.
+**DEV-FF-T11**: old integration-head review is stale after concurrent merge; reset integration verification and stop target recognition until new gate passes.
+
+#### Current HEAD re-evaluation without recounting
+The first eligible count receipt is immutable. On each new integrated HEAD, a new `campaign_count_evaluations` entry determines current eligibility of that work item using current-head regression, security and triple-review receipts. `effectiveCompletedCount` is derived using **current SHA evaluation**, not the historical first integration SHA. If the count drops after an unrelated merge, show `REVALIDATION_REQUIRED`; do not silently keep TARGET_REACHED. Revalidated identical logical work items reuse the original count identity, avoiding double-counting.
+**DEV-FF-T12**: verified ten on old head, current head revalidation fails two => effective count eight; after retest becomes ten without new work item rows.

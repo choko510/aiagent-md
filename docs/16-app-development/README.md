@@ -9,12 +9,12 @@
 |---|---|---|
 | DEV-01 | [development-orchestration.md#dev-01](development-orchestration.md#dev-01) | Project/Workspace/Git/コミット競合 |
 | DEV-02 | [development-orchestration.md#dev-02](development-orchestration.md#dev-02) | 3案→1統合→1実装→3独立レビュー |
-| DEV-03 | [visual-design-and-demo.md](visual-design-and-demo.md) | UI見た目選択・動くDEMO・ユーザー判断 |
+| DEV-03 | [feature-lifecycle-and-demo.md#dev-03](feature-lifecycle-and-demo.md#dev-03) | UI見た目選択・動くDEMO・ユーザー判断 |
 | DEV-04 | [development-orchestration.md#dev-04](development-orchestration.md#dev-04) | 難所で高性能モデルに相談 |
 | DEV-05 | [build-preview-release.md](build-preview-release.md) | Toolchain/Preview/GitHub/ビルド/公開 |
 | DEV-06 | [debugging-and-verification.md#dev-06](debugging-and-verification.md#dev-06) | Browser Workerによる自律デバッグ |
 | DEV-07 | [debugging-and-verification.md#dev-07](debugging-and-verification.md#dev-07) | P0/P1修正ループ・独立検証 |
-| DEV-08 | [feature-factory.md](feature-factory.md) | デモ承認を伴う機能追加の継続 |
+| DEV-08 | [feature-lifecycle-and-demo.md#dev-08](feature-lifecycle-and-demo.md#dev-08) | デモ承認を伴う機能追加の継続 |
 | DEV-09 | [development-api-and-ui.md](development-api-and-ui.md) | 実行画面、typed read DTO、API/イベント |
 | DEV-10 | [acceptance-and-rollout.md](acceptance-and-rollout.md) | REQ/TEST/SC/失敗時復旧/導入順序 |
 | DEV-11 | [pr-guardian.md](pr-guardian.md) | 既存PRを対象としたCI/レビュー/競合の継続監視・修復 |
@@ -51,8 +51,8 @@ Modelが「成功」と発言しただけで成功にしない。Goalに結び�
 ## PR #73 P0/P1 audit disposition (2026-11-08, Draft)
 Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resolved as **specification proposals** only; they are NOT production verified. Implementation Owner sign-off remains pending. This chapter's ambiguity resolutions:
 - P0-01: [Preview Capability](build-preview-release.md) binds trusted process, tenant/project/execution/port/origin/browser lease and revokes active sockets.
-- P1-01/02: [Demo mode and approvals](visual-design-and-demo.md) distinguish observe, synthetic interact, human takeover, and explicit/bounded user acceptance.
-- P1-03/04/10: [Feature Factory](feature-factory.md) and [Review Gates](debugging-and-verification.md#dev-07) require current integration HEAD and stable logicalWorkItem identity.
+- P1-01/02: [Demo mode and approvals](feature-lifecycle-and-demo.md#dev-03) distinguish observe, synthetic interact, human takeover, and explicit/bounded user acceptance.
+- P1-03/04/10: [Feature Factory](feature-lifecycle-and-demo.md#dev-08) and [Review Gates](debugging-and-verification.md#dev-07) require current integration HEAD and stable logicalWorkItem identity.
 - P1-05: [Campaign](../07-automation/endless-run-campaign.md) specifies Stop/Quota/CAS fences and receipts.
 - P1-06/07/08/09: DB/Auth/Event/QA and separate release gates are extended in their respective owner specifications and CI. The full app requirements are not implied by the initial 88-module static audit.
 - PR #71（Live Observation）と #72（Secure Runtime再監査）はmainへマージ済み。両者の契約を維持して本章を統合し、ProvenanceとCIを更新する。Owner合意・実機検証は依然として未完了。
