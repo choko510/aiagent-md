@@ -1,0 +1,39 @@
+{
+  "candidate": "b",
+  "n": 10,
+  "median": {
+    "rss_mb": 95.0,
+    "boot_s": 2.107,
+    "segment_s": 0.419,
+    "cpu_s": 5.156,
+    "launch_s": 0.0,
+    "wal_bytes": 37748.0,
+    "fw_tuple_writes": 29.0,
+    "aiagent_tuple_writes": 27.0
+  },
+  "min": {
+    "rss_mb": 94.6,
+    "boot_s": 2.0415,
+    "segment_s": 0.40800000000000003,
+    "cpu_s": 4.936999999999999,
+    "launch_s": 0.0,
+    "wal_bytes": 35232,
+    "fw_tuple_writes": 29,
+    "aiagent_tuple_writes": 27
+  },
+  "max": {
+    "rss_mb": 95.8,
+    "boot_s": 2.215,
+    "segment_s": 0.427,
+    "cpu_s": 5.438000000000001,
+    "launch_s": 0.0,
+    "wal_bytes": 111168,
+    "fw_tuple_writes": 29,
+    "aiagent_tuple_writes": 27
+  },
+  "framework_state_bytes_total": 483328,
+  "aiagent_state_bytes_total": 344064,
+  "runs_in_db": 11,
+  "python": "3.13.14",
+  "platform": "win32"
+}

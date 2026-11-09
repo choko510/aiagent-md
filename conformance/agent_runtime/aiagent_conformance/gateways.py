@@ -1,0 +1,318 @@
+"""Fake Model Gateway / Fake Tool Gateway shared by both candidates.
+
+Both gateways are *outside* the framework: the framework only sees neutral messages in and
+neutral messages out. The model "provider credential" lives only here and must never appear
+in framework state (checked by the conformance suite).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+from psycopg.types.json import Jsonb
+
+from .control import Claim, Control, FencedOut, StaleGoal, canonical, fault, sha
+from .fixtures import POLICIES, is_summarization_request
+
+FAKE_PROVIDER_SECRET = "sk-fake-provider-SECRET-7f3a"  # must never leave the gateway
+
+READ_TOOLS = {"search"}
+WRITE_TOOLS = {"send_message"}  # external, irreversible, approval required
+TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "search": {
+        "description": "Read-only web search (fake).",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    "send_message": {
+        "description": "Send an external message. Irreversible; needs user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {"to": {"type": "string"}, "body": {"type": "string"}},
+            "required": ["to", "body"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+@dataclass
+class SealedModelRequest:
+    """PoC shape of SealedModelRequestSnapshot (Model Router 02-09). Built by the adapter."""
+
+    claim: Claim
+    stream: str
+    messages: list[dict[str, Any]]
+    tools: list[str]
+    policy: str
+
+
+class ModelGateway:
+    """Independent model gateway. Owns admission (fence/goal revision), budget counting and credential."""
+
+    def __init__(self, ctl: Control):
+        self.ctl = ctl
+
+    def complete(self, req: SealedModelRequest) -> dict[str, Any]:
+        run = self.ctl.run(req.claim.root_run_id)
+        reason = None
+        if run["fence"] != req.claim.fence:
+            reason = "FENCED"
+        elif run["goal_revision"] != req.claim.goal_revision:
+            reason = "STALE_GOAL"
+        self.ctl.db.execute(
+            "INSERT INTO aiagent.model_calls(run_id, stream, goal_revision, admitted, reason, tools) VALUES (%s,%s,%s,%s,%s,%s)",
+            (req.claim.root_run_id, req.stream, req.claim.goal_revision, reason is None, reason, sorted(req.tools)),
+        )
+        if reason == "FENCED":
+            raise FencedOut(req.claim.run_id)
+        if reason == "STALE_GOAL":
+            raise StaleGoal(req.claim.run_id)
+        _ = sha(FAKE_PROVIDER_SECRET)  # "uses" the credential; it is never returned
+        if is_summarization_request(req.messages):
+            n = len(req.messages)
+            return {"kind": "assistant", "content": f"SUMMARY of {n} earlier messages: user wants widget price.", "tool_calls": []}
+        out = POLICIES[req.policy](req.stream, req.messages, req.tools)
+        # Real providers mint fresh tool_call ids per call: we do too, so only durable replay keeps them stable.
+        for tc in out.get("tool_calls", []):
+            tc["id"] = "call_" + uuid.uuid4().hex[:16]
+        return {"kind": "assistant", "content": out.get("content", ""), "tool_calls": out.get("tool_calls", [])}
+
+
+def request_key(stream: str, messages: list[dict[str, Any]]) -> str:
+    """Identity of a model request = stream + the latest non-assistant message (stable across compaction)."""
+    last = next((m for m in reversed(messages) if m.get("kind") != "assistant"), {})
+    ident = {k: last.get(k) for k in ("kind", "content", "tool_call_id")}
+    return sha([stream, ident])
+
+
+def sealed_model_call(ctl: Control, gw: ModelGateway, req: SealedModelRequest) -> dict[str, Any]:
+    """The only model entry point used by adapters.
+
+    1. If the HEAD already holds the answer to this exact request (crash after commit), replay it.
+    2. Otherwise call the independent Model Gateway, then CAS-append the answer to HEAD.
+    """
+    if is_summarization_request(req.messages):
+        # Compaction output is a derived view: it never lands in the main transcript (HEAD stays raw).
+        req.stream = "summarize"
+    key = request_key(req.stream, req.messages)
+    hit = ctl.find_assistant(req.claim.root_run_id, req.stream, key)
+    if hit is not None:
+        return hit
+    resp = gw.complete(req)  # admission (fence / goal revision) is decided by the gateway, not the adapter
+    fault("after_model_response")  # provider answered, HEAD not yet committed
+    ctl.append_head(req.claim, "assistant", resp, stream=req.stream, request_key=key)
+    stored = ctl.find_assistant(req.claim.root_run_id, req.stream, key)
+    assert stored is not None
+    return stored
+
+
+@dataclass
+class ToolOutcome:
+    status: str  # DONE | CONFIRMED | PENDING_APPROVAL | DENIED | EXPIRED | STALE_GOAL | UNKNOWN
+    result: dict[str, Any] = field(default_factory=dict)
+    approval_id: str | None = None
+
+    @property
+    def terminal(self) -> bool:
+        return self.status in ("DONE", "CONFIRMED", "DENIED", "EXPIRED", "STALE_GOAL")
+
+    def as_tool_content(self) -> str:
+        return canonical({"status": self.status, **self.result})
+
+
+class ToolGateway:
+    """Fake CHAT_03 Tool Execution Gateway: schema → goal/fence → approval → ledger → executor."""
+
+    def __init__(self, ctl: Control, approval_ttl_s: int = 3600):
+        self.ctl = ctl
+        self.ttl = approval_ttl_s
+        self.naive = False  # negative control: framework-only durability, no ledger
+
+    def submit(self, claim: Claim, intent_key: str, tool: str, args: dict[str, Any]) -> ToolOutcome:
+        if tool not in TOOL_SCHEMAS:
+            return ToolOutcome("DENIED", {"error": "unknown tool"})
+        schema = TOOL_SCHEMAS[tool]["parameters"]
+        if set(args) - set(schema["properties"]) or not set(schema["required"]) <= set(args):
+            return ToolOutcome("DENIED", {"error": "schema"})
+        if self.naive:
+            return self._naive(intent_key, tool, args)
+        db = self.ctl.db
+        args_hash = sha([tool, args])
+        run = self.ctl.run(claim.root_run_id)
+        if run["fence"] != claim.fence:
+            raise FencedOut(claim.run_id)
+        row = db.execute("SELECT * FROM aiagent.tool_ledger WHERE intent_key=%s", (intent_key,)).fetchone()
+        if row is not None and row["args_hash"] != args_hash:
+            return ToolOutcome("DENIED", {"error": "intent_key reused with different args"})
+        if row is None:
+            if run["goal_revision"] != claim.goal_revision:
+                return ToolOutcome("STALE_GOAL")
+            if tool in READ_TOOLS:
+                res = {"result": f"widget price is 42 (query={args['query']})"}
+                db.execute(
+                    "INSERT INTO aiagent.tool_ledger VALUES (%s,%s,%s,%s,%s,%s,'DONE',%s) ON CONFLICT DO NOTHING",
+                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision, Jsonb(res)),
+                )
+                return ToolOutcome("DONE", res)
+            approval_id = "apr_" + intent_key
+            with db.transaction():
+                db.execute(
+                    "INSERT INTO aiagent.tool_ledger VALUES (%s,%s,%s,%s,%s,%s,'PENDING_APPROVAL',NULL)",
+                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision),
+                )
+                db.execute(
+                    "INSERT INTO aiagent.approvals VALUES (%s,%s,%s,%s,%s,'PENDING',NULL, now() + make_interval(secs=>%s))",
+                    (approval_id, claim.root_run_id, intent_key, args_hash, claim.goal_revision, self.ttl),
+                )
+            return ToolOutcome("PENDING_APPROVAL", approval_id=approval_id)
+
+        db.execute("UPDATE aiagent.tool_ledger SET attempts = attempts + 1 WHERE intent_key=%s", (intent_key,))
+        st = row["status"]
+        if st in ("DONE", "CONFIRMED", "DENIED", "EXPIRED", "STALE_GOAL", "UNKNOWN"):
+            return ToolOutcome(st, row["result"] or {})
+        if st == "SENDING":  # crashed between external send and confirm: never blind-retry
+            db.execute("UPDATE aiagent.tool_ledger SET status='UNKNOWN' WHERE intent_key=%s", (intent_key,))
+            return ToolOutcome("UNKNOWN", {"note": "MAY_HAVE_SENT; reconcile before retry"})
+        assert st == "PENDING_APPROVAL"
+        apr = db.execute(
+            "SELECT *, expires_at < now() AS expired FROM aiagent.approvals WHERE intent_key=%s", (intent_key,)
+        ).fetchone()
+        if apr["status"] == "PENDING" and not apr["expired"]:
+            return ToolOutcome("PENDING_APPROVAL", approval_id=apr["approval_id"])
+        final = None
+        if apr["status"] == "REJECTED":
+            final = "DENIED"
+        elif apr["expired"]:
+            final = "EXPIRED"
+        elif apr["args_hash"] != args_hash:
+            final = "DENIED"
+        elif run["goal_revision"] != apr["goal_revision"] or run["goal_revision"] != claim.goal_revision:
+            final = "STALE_GOAL"
+        if final:
+            db.execute("UPDATE aiagent.tool_ledger SET status=%s WHERE intent_key=%s", (final, intent_key))
+            return ToolOutcome(final)
+        return self._execute_write(claim, intent_key, tool, args)
+
+    def _execute_write(self, claim: Claim, intent_key: str, tool: str, args: dict[str, Any]) -> ToolOutcome:
+        db = self.ctl.db
+        # Per-root-run write serialization lives in the gateway, not in the framework.
+        db.execute("SELECT pg_advisory_lock(hashtext(%s))", (claim.root_run_id,))
+        try:
+            cur = db.execute(
+                "UPDATE aiagent.tool_ledger SET status='SENDING' WHERE intent_key=%s AND status='PENDING_APPROVAL'",
+                (intent_key,),
+            )
+            if cur.rowcount != 1:
+                row = db.execute("SELECT status, result FROM aiagent.tool_ledger WHERE intent_key=%s", (intent_key,)).fetchone()
+                return ToolOutcome(row["status"], row["result"] or {})
+            db.execute(
+                "INSERT INTO aiagent.external_sends(intent_key, payload) VALUES (%s,%s)", (intent_key, Jsonb(args))
+            )
+            fault("gateway_after_send")  # external effect happened, ledger still SENDING
+            res = {"receipt": "rcpt_" + intent_key[-8:]}
+            db.execute(
+                "UPDATE aiagent.tool_ledger SET status='CONFIRMED', result=%s WHERE intent_key=%s", (Jsonb(res), intent_key)
+            )
+            return ToolOutcome("CONFIRMED", res)
+        finally:
+            db.execute("SELECT pg_advisory_unlock(hashtext(%s))", (claim.root_run_id,))
+
+    def _naive(self, intent_key: str, tool: str, args: dict[str, Any]) -> ToolOutcome:
+        if tool in WRITE_TOOLS:
+            self.ctl.db.execute(
+                "INSERT INTO aiagent.external_sends(intent_key, payload) VALUES (%s,%s)", (intent_key, Jsonb(args))
+            )
+            return ToolOutcome("CONFIRMED", {"receipt": "naive"})
+        return ToolOutcome("DONE", {"result": "widget price is 42"})
+
+
+class AwaitingApproval(Exception):
+    def __init__(self, approval_id: str, tool_call_id: str):
+        super().__init__(approval_id)
+        self.approval_id = approval_id
+        self.tool_call_id = tool_call_id
+
+
+class UnknownEffect(Exception):
+    pass
+
+
+_inflight: dict[str, int] = {}
+
+
+async def gateway_tool_stub(
+    ctl: Control, tgw: ToolGateway, claim: Claim, tool_call_id: str, tool: str, args: dict[str, Any], stream: str = "main"
+) -> str:
+    """Body of every framework tool function. Never executes anything itself.
+
+    Returns the tool content for the model, or raises AwaitingApproval / UnknownEffect so the
+    adapter can pause the framework at its interrupt point.
+    """
+    # LOOP-004: only a proposal already committed to Checkpoint HEAD may reach the gateway, and a
+    # replayed framework call must match it exactly (checked before any cached result is returned).
+    prop = ctl.find_proposal(claim.root_run_id, tool_call_id)
+    if prop is None or prop["name"] != tool or prop["args"] != args:
+        from .port import DerivedStateMismatch
+
+        raise DerivedStateMismatch(f"tool call {tool_call_id} {tool}{args} not in HEAD (head={prop})")
+    hit = ctl.find_tool(claim.root_run_id, tool_call_id)
+    if hit is not None:
+        return hit["content"]
+    is_write = tool in WRITE_TOOLS
+    if is_write:
+        _inflight[claim.root_run_id] = _inflight.get(claim.root_run_id, 0) + 1
+        ctl.db.execute(
+            "INSERT INTO aiagent.tool_concurrency VALUES (%s,%s) ON CONFLICT (run_id) DO UPDATE"
+            " SET max_inflight_writes = GREATEST(aiagent.tool_concurrency.max_inflight_writes, EXCLUDED.max_inflight_writes)",
+            (claim.root_run_id, _inflight[claim.root_run_id]),
+        )
+    try:
+        await asyncio.sleep(0.05)  # widen the window so framework-side parallelism is observable
+        out = await asyncio.to_thread(tgw.submit, claim, tool_call_id, tool, args)
+    finally:
+        if is_write:
+            _inflight[claim.root_run_id] -= 1
+    fault(f"after_tool_ack:{tool}") if out.status in ("CONFIRMED", "DONE") else None
+    if out.status == "PENDING_APPROVAL":
+        assert out.approval_id
+        raise AwaitingApproval(out.approval_id, tool_call_id)
+    if out.status == "UNKNOWN":
+        raise UnknownEffect(tool_call_id)
+    content = out.as_tool_content()
+    ctl.append_head(
+        claim,
+        "tool",
+        {"kind": "tool", "tool_call_id": tool_call_id, "tool_name": tool, "content": content},
+        stream=stream,
+        tool_call_id=tool_call_id,
+    )
+    return content
+
+
+def parse_tool_content(content: str) -> dict[str, Any]:
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError):
+        return {"raw": content}
+
+
+async def settle_pending(ctl: Control, tgw: ToolGateway, claim: Claim) -> None:
+    """Before (re)building framework state from HEAD, resolve every proposed-but-unanswered tool call
+    of the main stream through the gateway (same intent keys -> idempotent). Raises AwaitingApproval /
+    UnknownEffect exactly like the in-framework stub."""
+    answered = {e["payload"]["tool_call_id"] for e in ctl.head(claim.root_run_id) if e["kind"] == "tool"}
+    for e in ctl.head(claim.root_run_id, "main"):
+        if e["kind"] != "assistant":
+            continue
+        for tc in e["payload"].get("tool_calls", []):
+            if tc["id"] not in answered and tc["name"] in TOOL_SCHEMAS:
+                await gateway_tool_stub(ctl, tgw, claim, tc["id"], tc["name"], tc["args"])

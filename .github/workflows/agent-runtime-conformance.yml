@@ -1,0 +1,54 @@
+name: agent-runtime-conformance
+# ADR-038 STEP 2: AgentRuntimePort conformance (PYRT-T00..T12) for candidate A and B with the same
+# FakeModel / Fake Model Gateway / Fake Tool Gateway / PostgreSQL / fixtures. No provider, no network
+# egress from workers, no real credential. Fault injection = real worker process kills.
+on:
+  pull_request:
+    paths:
+      - 'conformance/agent_runtime/**'
+      - '.github/workflows/agent-runtime-conformance.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'conformance/agent_runtime/**'
+      - '.github/workflows/agent-runtime-conformance.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: [a, b]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: conformance
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_PG_URL: postgresql://postgres:conformance@127.0.0.1:5432
+      AIAGENT_CANDIDATES: ${{ matrix.candidate }}
+      PYDANTIC_AI_NO_BANNER: '1'
+    defaults:
+      run:
+        working-directory: conformance/agent_runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Create pinned candidate environment (Python 3.13)
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -q -r requirements-${{ matrix.candidate }}.lock.txt
+          echo "AIAGENT_PY_$(echo ${{ matrix.candidate }} | tr a-z A-Z)=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
+      - name: Conformance suite
+        run: .venv/bin/python -m pytest tests -q -rA -p no:cacheprovider
+      - name: Measurement (PYRT-T05, informational)
+        run: .venv/bin/python -m aiagent_conformance.bench --candidate ${{ matrix.candidate }} --python .venv/bin/python --pg "$AIAGENT_PG_URL" -n 10
