@@ -77,6 +77,39 @@ snap = set(ex["snapshotRequiredFields"])
 if not {"messages", "toolSchemas", "promptTemplateDigest",
         "providerPayloadDigest", "dispatchAdmissionRef"}.issubset(snap):
     errors.append("snapshot example lacks final payload replay fields")
+
+# OSS integration: contract markers and design fixture traceability ONLY, not runtime proof.
+oss = data.get("ossCompaction", {})
+oss_cases = oss.get("cases", [])
+oss_ids = {f"ACM-OSS-T{i:02d}" for i in range(1, 15)}
+if oss.get("kind") != "design-oracles-not-runtime-results" or oss.get("testCount") != 14:
+    errors.append("OSS compaction cases must be explicitly design-only with 14 tests")
+if len(oss_cases) != 14 or {case.get("id") for case in oss_cases} != oss_ids:
+    errors.append("OSS compaction fixture missing or duplicate IDs")
+allowed = {
+    "RETAIN_PREVIOUS_HEAD", "REJECT", "RETRY_FROM_RAW",
+    "REBUILD_AND_READMIT", "PARTIAL_OR_BLOCKED",
+    "REJECT_ON_HARD_ANCHOR_LOSS", "EXPIRED"
+}
+for case in oss_cases:
+    if (case.get("runStatus") != "NOT_RUN"
+        or not case.get("failureMode") or not case.get("expectedOracle")
+        or case.get("expectedDecision") not in allowed):
+        errors.append(f"Invalid OSS compaction fixture: {case.get('id')}")
+qa_oss = (ROOT / "docs/11-qa/benchmark-and-release-gates.md").read_text(encoding="utf-8")
+for tid in oss_ids:
+    if ctx.count("| " + tid + " |") != 1:
+        errors.append(f"OSS context test missing/duplicate: {tid}")
+    if tid not in qa_oss:
+        errors.append(f"OSS QA test missing: {tid}")
+for marker in (
+    "DeepAgents JS", "Mastra Observational Memory", "OpenClaw",
+    "qualityDegraded", "observedMessageIds", "sourcePartRangeRefs",
+    "RAW_DURABLE", "SourceBackedFact", "dispatch_admission"
+):
+    if marker not in ctx:
+        errors.append(f"OSS integration contract missing: {marker}")
+
 print(f"adaptive_context_static: specs={len(REQUIRED)} cases={len(cases)} "
       f"fixture_arithmetic={tokens}; designed_only=True")
 if errors:
