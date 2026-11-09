@@ -9,13 +9,13 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULES = {
-    "DEV-01": "docs/16-app-development/project-workspace-and-git.md",
-    "DEV-02": "docs/16-app-development/multi-agent-development.md",
+    "DEV-01": "docs/16-app-development/development-orchestration.md",
+    "DEV-02": "docs/16-app-development/development-orchestration.md",
     "DEV-03": "docs/16-app-development/visual-design-and-demo.md",
-    "DEV-04": "docs/16-app-development/expert-advisor.md",
+    "DEV-04": "docs/16-app-development/development-orchestration.md",
     "DEV-05": "docs/16-app-development/build-preview-release.md",
-    "DEV-06": "docs/16-app-development/autonomous-browser-debugger.md",
-    "DEV-07": "docs/16-app-development/review-and-repair-gates.md",
+    "DEV-06": "docs/16-app-development/debugging-and-verification.md",
+    "DEV-07": "docs/16-app-development/debugging-and-verification.md",
     "DEV-08": "docs/16-app-development/feature-factory.md",
     "DEV-09": "docs/16-app-development/development-api-and-ui.md",
     "DEV-10": "docs/16-app-development/acceptance-and-rollout.md",

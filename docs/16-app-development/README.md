@@ -7,18 +7,18 @@
 ## 仕様一覧
 | ID | 正本案（新規） | 目的 |
 |---|---|---|
-| DEV-01 | [project-workspace-and-git.md](project-workspace-and-git.md) | Project/Workspace/Git/コミット競合 |
-| DEV-02 | [multi-agent-development.md](multi-agent-development.md) | 3案→1統合→1実装→3独立レビュー |
+| DEV-01 | [development-orchestration.md#dev-01](development-orchestration.md#dev-01) | Project/Workspace/Git/コミット競合 |
+| DEV-02 | [development-orchestration.md#dev-02](development-orchestration.md#dev-02) | 3案→1統合→1実装→3独立レビュー |
 | DEV-03 | [visual-design-and-demo.md](visual-design-and-demo.md) | UI見た目選択・動くDEMO・ユーザー判断 |
-| DEV-04 | [expert-advisor.md](expert-advisor.md) | 難所で高性能モデルに相談 |
+| DEV-04 | [development-orchestration.md#dev-04](development-orchestration.md#dev-04) | 難所で高性能モデルに相談 |
 | DEV-05 | [build-preview-release.md](build-preview-release.md) | Toolchain/Preview/GitHub/ビルド/公開 |
-| DEV-06 | [autonomous-browser-debugger.md](autonomous-browser-debugger.md) | Browser Workerによる自律デバッグ |
-| DEV-07 | [review-and-repair-gates.md](review-and-repair-gates.md) | P0/P1修正ループ・独立検証 |
+| DEV-06 | [debugging-and-verification.md#dev-06](debugging-and-verification.md#dev-06) | Browser Workerによる自律デバッグ |
+| DEV-07 | [debugging-and-verification.md#dev-07](debugging-and-verification.md#dev-07) | P0/P1修正ループ・独立検証 |
 | DEV-08 | [feature-factory.md](feature-factory.md) | デモ承認を伴う機能追加の継続 |
 | DEV-09 | [development-api-and-ui.md](development-api-and-ui.md) | 実行画面、typed read DTO、API/イベント |
 | DEV-10 | [acceptance-and-rollout.md](acceptance-and-rollout.md) | REQ/TEST/SC/失敗時復旧/導入順序 |
 | DEV-11 | [pr-guardian.md](pr-guardian.md) | 既存PRを対象としたCI/レビュー/競合の継続監視・修復 |
-| DEV-12 | [reproduction-lab.md](reproduction-lab.md) | 再現・bisect・flaky分類・修正前後の証明 |
+| DEV-12 | [debugging-and-verification.md#dev-12](debugging-and-verification.md#dev-12) | 再現・bisect・flaky分類・修正前後の証明 |
 | DEV-13 | [code-intelligence-and-adaptive-testing.md](code-intelligence-and-adaptive-testing.md) | symbol index/依存グラフ/文脈選択 |
 | DEV-14 | [code-intelligence-and-adaptive-testing.md](code-intelligence-and-adaptive-testing.md) | 影響テストと必須テストの別Gate |
 | DEV-15 | [advanced-software-factory.md](advanced-software-factory.md) | 複数修正候補の隔離実装・証拠比較 |
@@ -26,7 +26,7 @@
 | DEV-17 | [advanced-software-factory.md](advanced-software-factory.md) | 根拠あるrepo固有のレビュー傾向学習 |
 | DEV-18 | [advanced-software-factory.md](advanced-software-factory.md) | 安全な事前構築環境・immutable template |
 | DEV-19 | [advanced-software-factory.md](advanced-software-factory.md) | 変更前後の統計的性能回帰検出 |
-| DEV-20 | [advanced-development-acceptance.md](advanced-development-acceptance.md) | DEV-11〜19の要求・SC-32〜40・安全Gateと導入順 |
+| DEV-20 | [acceptance-and-rollout.md#dev-20](acceptance-and-rollout.md#dev-20) | DEV-11〜19の要求・SC-32〜40・安全Gateと導入順 |
 | CAM-01 | [../07-automation/endless-run-campaign.md](../07-automation/endless-run-campaign.md) | 開発以外にも使えるEndless Run |
 
 ## 正本所有権（新領域は既存のDomainを再定義しない）
@@ -52,14 +52,14 @@ Modelが「成功」と発言しただけで成功にしない。Goalに結び�
 Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resolved as **specification proposals** only; they are NOT production verified. Implementation Owner sign-off remains pending. This chapter's ambiguity resolutions:
 - P0-01: [Preview Capability](build-preview-release.md) binds trusted process, tenant/project/execution/port/origin/browser lease and revokes active sockets.
 - P1-01/02: [Demo mode and approvals](visual-design-and-demo.md) distinguish observe, synthetic interact, human takeover, and explicit/bounded user acceptance.
-- P1-03/04/10: [Feature Factory](feature-factory.md) and [Review Gates](review-and-repair-gates.md) require current integration HEAD and stable logicalWorkItem identity.
+- P1-03/04/10: [Feature Factory](feature-factory.md) and [Review Gates](debugging-and-verification.md#dev-07) require current integration HEAD and stable logicalWorkItem identity.
 - P1-05: [Campaign](../07-automation/endless-run-campaign.md) specifies Stop/Quota/CAS fences and receipts.
 - P1-06/07/08/09: DB/Auth/Event/QA and separate release gates are extended in their respective owner specifications and CI. The full app requirements are not implied by the initial 88-module static audit.
 - PR #71（Live Observation）と #72（Secure Runtime再監査）はmainへマージ済み。両者の契約を維持して本章を統合し、ProvenanceとCIを更新する。Owner合意・実機検証は依然として未完了。
 
 ## 2026-11-09 Cloud Coding能力追加（Draft / NOT RUN）
 
-[DEV-11〜19の9能力とDEV-20の受入マトリクス](advanced-development-acceptance.md)を追加。**新しい5つのMarkdownで計10個の設計エントリ**を説明する。既存88基礎正本および2026-11-07の開発拡張11件の歴史的カウントは変更せず、合同owner契約の承認後にインデックス計数を正式移行する。各Proposalは新しいShared Task/Run/Tool/DBの正本ではない。PR #74との対象変更を避け、GitHub/CI/Context性能の横断変更は後続の所有者レビューとする。
+[DEV-11〜19の9能力とDEV-20の受入マトリクス](acceptance-and-rollout.md#dev-20)を追加。**当初5つのMarkdownで追加された計10個の設計エントリ**を説明する。既存88基礎正本および2026-11-07の開発拡張11件の歴史的カウントは変更せず、合同owner契約の承認後にインデックス計数を正式移行する。各Proposalは新しいShared Task/Run/Tool/DBの正本ではない。PR #74との対象変更を避け、GitHub/CI/Context性能の横断変更は後続の所有者レビューとする。
 
 ## 2026-11-09 Python-first: 自律開発OSSとの統合方針（STEP 1、分類C / NOT RUN）
 
