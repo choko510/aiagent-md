@@ -268,6 +268,8 @@ ADR-038でDeepAgents Python＋LangGraphを選定した。`langgraph-checkpoint-p
 | Framework内部Tool | `task`等のFramework内部Toolの結果もHEADへ記録（全文照合を成立させるため）。DeepAgentsの`task`は`Command(update={"messages": …})`を返す | PYRT-T09b |
 | 復号不能 | checkpoint blobが復号できない場合は`framework_ref`を捨て、新しい`thread_id`でHEADから再構築 | PYRT-T04 garbage |
 | 未決Intentの確定 | 再構築前に未回答のTool呼出しをGateway経由で確定（同じintent key、冪等）。DeepAgentsの`PatchToolCallsMiddleware`による黙ったcancelを防ぐ | PYRT-T02c/T04 |
+| 参照の破棄 | `framework_ref`の破棄は「まだ自分が使った参照である」かつ「自分のfenceが有効」の条件付きUPDATEのみ。参照の設定もfence不一致なら`FencedOut`。旧Workerが新Workerの参照を消すことはない | PYRT-T18 |
+| 診断情報 | 不一致の記録は位置・種別・digestのみ。本文・Tool引数・Tool結果を例外文やログに含めない。Framework由来の例外は型名とdigestだけを残す | PYRT-T04/T04b |
 | 書込方式 | `durability="sync"`で各super-step後にcheckpoint。killで失われた分はHEAD再生とGateway冪等で吸収 | PYRT-T01/T06 |
 | Framework状態の直列化 | msgpack（pickle fallback無効が既定）。ext型allowlistは`LANGGRAPH_STRICT_MSGPACK`等で制限（**STEP 3で試験追加、未実施**） | — |
 

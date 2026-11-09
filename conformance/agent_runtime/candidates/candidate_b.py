@@ -38,7 +38,7 @@ from langgraph.types import Command, interrupt
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from aiagent_conformance.control import Claim, Control, fault
+from aiagent_conformance.control import Claim, Control, fault, race
 from aiagent_conformance.gateways import (
     TOOL_SCHEMAS,
     AwaitingApproval,
@@ -50,7 +50,7 @@ from aiagent_conformance.gateways import (
     sealed_model_call,
     settle_pending,
 )
-from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, verify_against_head
+from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, safe_detail, verify_against_head
 
 NAME = "B:deepagents+langgraph"
 
@@ -273,8 +273,9 @@ class CandidateB:
         except Exception as e:
             if type(e).__name__ in ("FencedOut", "StaleGoal", "Cancelled"):
                 return SegmentOutcome(type(e).__name__.upper())
-            self.ctl.db.execute("UPDATE aiagent.runs SET framework_ref = NULL WHERE run_id = %s", (claim.run_id,))
-            return SegmentOutcome("REBUILD", detail=f"{type(e).__name__}: {e}"[:300])
+            race("before_discard_framework_ref", self.ctl.url)
+            self.ctl.discard_framework_ref(claim, ref)
+            return SegmentOutcome("REBUILD", detail=safe_detail(e))
 
     def _cfg(self, ref: str, claim: Claim) -> RunnableConfig:
         rc = RunCtx(claim, self.ctl, self.mgw, self.tgw)

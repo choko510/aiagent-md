@@ -39,7 +39,7 @@ from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from pydantic_ai_harness.compaction import SummarizingCompaction
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
-from aiagent_conformance.control import Claim, Control, fault
+from aiagent_conformance.control import Claim, Control, fault, race
 from aiagent_conformance.gateways import (
     TOOL_SCHEMAS,
     AwaitingApproval,
@@ -50,7 +50,7 @@ from aiagent_conformance.gateways import (
     gateway_tool_stub,
     sealed_model_call,
 )
-from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, verify_against_head
+from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, safe_detail, verify_against_head
 
 NAME = "A:pydantic-ai+dbos"
 FRAMEWORK_SCHEMAS = ["dbos"]
@@ -271,13 +271,13 @@ class CandidateA:
         except UnknownEffect:
             return SegmentOutcome("UNKNOWN_EFFECT")
         except DerivedStateMismatch as e:
-            await self._discard(ref)
-            return SegmentOutcome("REBUILD", detail=str(e))
+            await self._discard(claim, ref)
+            return SegmentOutcome("REBUILD", detail=safe_detail(e))
         except Exception as e:  # corrupted/undecodable framework state, DBOS step errors, ...
             if type(e).__name__ in ("FencedOut", "StaleGoal", "Cancelled"):
                 return SegmentOutcome(type(e).__name__.upper())
-            await self._discard(ref)
-            return SegmentOutcome("REBUILD", detail=f"{type(e).__name__}: {e}"[:300])
+            await self._discard(claim, ref)
+            return SegmentOutcome("REBUILD", detail=safe_detail(e))
         return SegmentOutcome(out["status"], text=out.get("text"), approval_ids=out.get("approval_ids", []))
 
     async def enqueue(self, claim: Claim, policy: str) -> dict[str, Any]:
@@ -298,13 +298,14 @@ class CandidateA:
             deduped = 1
         return {"enqueued": True, "deduplicated": deduped}
 
-    async def _discard(self, ref: str | None) -> None:
-        if ref:
+    async def _discard(self, claim: Claim, ref: str | None) -> None:
+        race("before_discard_framework_ref", self.ctl.url)
+        # Only the claim that used `ref` may drop it, and only if no newer worker has replaced it.
+        if self.ctl.discard_framework_ref(claim, ref):
             try:
                 await DBOS.cancel_workflow_async(ref)
             except Exception:
                 pass
-        self.ctl.db.execute("UPDATE aiagent.runs SET framework_ref = NULL WHERE framework_ref = %s", (ref,))
 
     async def close(self) -> None:
         DBOS.destroy(destroy_registry=True)

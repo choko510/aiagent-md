@@ -194,3 +194,74 @@ def test_t17c_cancel_inside_subagent(h: Harness) -> None:
     assert out["status"] == "CANCELLED", out
     assert h.ctl.ledger(rid) == [], "the subagent still executed a tool after cancel"
     assert not any(c["admitted"] for c in h.model_calls(rid) if c["stream"] == "subagent:researcher")
+
+
+# ---------------------------------------------------------------- PR #80 review round 2
+def test_t17d_cancel_committed_just_before_completion_is_not_overwritten(h: Harness) -> None:
+    """Worker finishes (FINAL), the user cancels, then the worker records completion: CANCELLED must win."""
+    rid = h.new_run()
+    assert h.worker(rid)["status"] == "AWAITING_APPROVAL"
+    h.approve_all(rid)
+    out = h.worker(rid, race="before_record_status:cancel")
+    assert out["status"] == "FINAL" and out["recorded"] is False, out
+    assert h.ctl.run(rid)["status"] == "CANCELLED"
+    assert len(h.sends(rid)) == 1  # admitted before the cancel: recorded as sent, not silently dropped
+    again = h.worker(rid)  # a later worker can neither reopen nor overwrite the terminal state
+    assert again["status"] == "CANCELLED" and h.ctl.run(rid)["status"] == "CANCELLED"
+
+
+def test_t17e_terminal_states_are_final(h: Harness) -> None:
+    from aiagent_conformance.control import FencedOut, RunTerminal
+
+    rid = h.new_run()
+    c = h.ctl.claim(rid, "t17e")
+    h.ctl.steer(rid)
+    with pytest.raises(StaleGoal):  # completion computed for an old Goal revision is not recorded
+        h.ctl.set_status(c, "SUCCEEDED")
+    c = h.ctl.claim(rid, "t17e")
+    h.ctl.set_status(c, "SUCCEEDED")
+    assert h.ctl.cancel(rid) is False and h.ctl.run(rid)["status"] == "SUCCEEDED"  # cancel after success: no-op
+    with pytest.raises(RunTerminal):
+        h.ctl.set_status(c, "WAITING_APPROVAL")
+    with pytest.raises(RunTerminal):
+        h.ctl.claim(rid, "t17e-other", force=True)
+    rid2 = h.new_run()
+    c2 = h.ctl.claim(rid2, "t17e")
+    assert h.ctl.cancel(rid2) is True
+    with pytest.raises(Cancelled):
+        h.ctl.set_status(c2, "SUCCEEDED")
+    old = h.ctl.claim(h.new_run(), "w-old")
+    h.ctl.claim(old.run_id, "w-new", force=True)
+    with pytest.raises(FencedOut):
+        h.ctl.set_status(old, "SUCCEEDED")
+
+
+def test_t18_stale_worker_cannot_erase_newer_checkpoint_pointer(h: Harness) -> None:
+    """The old worker hits corrupted framework state and is about to drop framework_ref while a newer worker
+    has just re-claimed the run and written its own pointer: the newer pointer must survive."""
+    from aiagent_conformance.control import RACE_NEW_REF
+
+    from .test_conformance import _adapter
+
+    rid = h.new_run()
+    assert h.worker(rid, fault="after_tool_ack:search")["status"] == "KILLED"
+    assert _adapter(h).corrupt_static(h.ctl, rid, "garbage") > 0
+    fence_before = h.ctl.run(rid)["fence"]
+    out = h.worker(rid, race="before_discard_framework_ref:reclaim")
+    run = h.ctl.run(rid)
+    assert run["framework_ref"] == RACE_NEW_REF, "stale worker erased the newer worker's checkpoint pointer"
+    assert run["fence"] == fence_before + 2  # old worker's claim, then the newer worker's claim
+    assert out["status"] in ("FENCEDOUT", "REBUILD"), out
+    stale_writes = [e for e in h.ctl.head(rid) if e["fence"] == fence_before + 1]
+    assert stale_writes == [], "the fenced-out worker still wrote to HEAD"
+
+
+def test_t16d_ack_after_lease_expiry_without_redelivery_is_accepted(h: Harness) -> None:
+    """Spec: lease expiry only makes a job eligible for redelivery; until someone re-claims it the attempt_id is
+    unchanged and its ACK is accepted. After a re-claim the old ACK is rejected (T16a)."""
+    rid = h.new_run()
+    h.ctl.enqueue(rid, f"{rid}:start")
+    job = h.ctl.dequeue("w1", lease_s=0.2, run_id=rid)
+    time.sleep(0.4)
+    assert h.ctl.ack(job) is True
+    assert h.ctl.dequeue("w2", run_id=rid) is None, "a completed job was redelivered"

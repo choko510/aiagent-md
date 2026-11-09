@@ -316,7 +316,9 @@ async def gateway_tool_stub(
     if prop is None or prop["name"] != tool or prop["args"] != args:
         from .port import DerivedStateMismatch
 
-        raise DerivedStateMismatch(f"tool call {tool_call_id} {tool}{args} not in HEAD (head={prop})")
+        raise DerivedStateMismatch(
+            f"tool call {tool_call_id} ({tool}) not in HEAD or differs: call_digest={sha([tool, args])}"
+            f" head_digest={sha([prop.get('name'), prop.get('args')]) if prop else None}")
     hit = ctl.find_tool(claim.root_run_id, tool_call_id)
     if hit is not None:
         return hit["content"]

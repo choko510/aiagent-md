@@ -11,7 +11,7 @@
 | `aiagent_conformance/bench.py` | PYRT-T05計測（RSS、CPU、時間、WAL、tuple書込） |
 | `candidates/candidate_a.py` / `candidate_b.py` | 候補A（PydanticAI＋DBOS）/ 候補B（DeepAgents＋LangGraph）のAdapter |
 | `candidates/corruption.py` | Framework永続状態の破損注入（SQLのみ） |
-| `tests/` | PYRT-T00〜T17（同一fixture、実プロセスkill、競合注入、QueuePort worker、1プロセス複数Run） |
+| `tests/` | PYRT-T00〜T18（同一fixture、実プロセスkill、競合注入、QueuePort worker、1プロセス複数Run、終端状態） |
 | `requirements-{a,b}.lock.txt` | 検証時の推移依存を固定（Python 3.13） |
 | `results/` | 計測結果（環境依存。同一実行内でのみ比較可） |
 

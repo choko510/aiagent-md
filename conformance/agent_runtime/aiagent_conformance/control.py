@@ -30,8 +30,15 @@ class StaleGoal(Exception):
     """The caller acts on an old Goal revision."""
 
 
-class Cancelled(Exception):
+class RunTerminal(Exception):
+    """The run is in a terminal state (SUCCEEDED / CANCELLED / FAILED); it is never reopened or overwritten."""
+
+
+class Cancelled(RunTerminal):
     """The run was cancelled by the user/control plane."""
+
+
+TERMINAL = ("SUCCEEDED", "CANCELLED", "FAILED")
 
 
 @dataclass(frozen=True)
@@ -98,12 +105,14 @@ class Control:
         row = self.db.execute(
             "UPDATE aiagent.runs SET fence = fence + 1, lease_owner = %(o)s,"
             " lease_until = now() + make_interval(secs => %(s)s), status = 'RUNNING'"
-            " WHERE run_id = %(r)s AND status <> 'CANCELLED'" + cond + " RETURNING fence, goal_revision, tenant_id",
-            {"o": owner, "s": lease_s, "r": run_id},
+            " WHERE run_id = %(r)s AND status <> ALL(%(t)s)" + cond + " RETURNING fence, goal_revision, tenant_id",
+            {"o": owner, "s": lease_s, "r": run_id, "t": list(TERMINAL)},
         ).fetchone()
         if row is None:
             if (r := self.run(run_id)) is not None and r["status"] == "CANCELLED":
                 raise Cancelled(run_id)
+            if r is not None and r["status"] in TERMINAL:
+                raise RunTerminal(f"{run_id} is {r['status']}")
             raise FencedOut(f"run {run_id} is leased by another worker")
         root = run_id.split("/")[0]
         return Claim(run_id, row["fence"], row["goal_revision"], owner, root, row["tenant_id"])
@@ -112,18 +121,41 @@ class Control:
         return self.db.execute("SELECT * FROM aiagent.runs WHERE run_id = %s", (run_id,)).fetchone()
 
     def set_status(self, claim: Claim, status: str) -> None:
+        """Worker-side status transition. One conditional UPDATE: the caller must still own the run (fence),
+        act on the current Goal revision, and the run must not be terminal. A Cancel committed first wins:
+        a finished worker can never turn CANCELLED back into SUCCEEDED (or WAITING_APPROVAL)."""
         cur = self.db.execute(
-            "UPDATE aiagent.runs SET status = %s WHERE run_id = %s AND fence = %s",
-            (status, claim.run_id, claim.fence),
+            "UPDATE aiagent.runs SET status = %s WHERE run_id = %s AND fence = %s AND goal_revision = %s"
+            " AND status <> ALL(%s)",
+            (status, claim.run_id, claim.fence, claim.goal_revision, list(TERMINAL)),
         )
-        if cur.rowcount != 1:
+        if cur.rowcount == 1:
+            return
+        row = self.run(claim.run_id)
+        if row["status"] in TERMINAL:
+            raise (Cancelled if row["status"] == "CANCELLED" else RunTerminal)(f"{claim.run_id} is {row['status']}")
+        if row["fence"] != claim.fence:
             raise FencedOut(claim.run_id)
+        raise StaleGoal(claim.run_id)
+
+    def discard_framework_ref(self, claim: Claim, ref: str | None) -> bool:
+        """Drop a derived-cache pointer only if it is still the one this claim used and the claim still owns
+        the run. A stale worker can never erase the pointer a newer worker has just written."""
+        if ref is None:
+            return False
+        cur = self.db.execute(
+            "UPDATE aiagent.runs SET framework_ref = NULL WHERE run_id = %s AND framework_ref = %s AND fence = %s",
+            (claim.run_id, ref, claim.fence),
+        )
+        return cur.rowcount == 1
 
     def set_framework_ref(self, claim: Claim, ref: str) -> None:
-        self.db.execute(
+        cur = self.db.execute(
             "UPDATE aiagent.runs SET framework_ref = %s WHERE run_id = %s AND fence = %s",
             (ref, claim.run_id, claim.fence),
         )
+        if cur.rowcount != 1:
+            raise FencedOut(claim.run_id)
 
     def steer(self, run_id: str) -> int:
         """User changed the goal: bump Goal revision. Old snapshots/intents become stale."""
@@ -132,9 +164,13 @@ class Control:
             (run_id,),
         ).fetchone()["goal_revision"]
 
-    def cancel(self, run_id: str) -> None:
-        """User cancel: terminal for admission. In-flight sends that already passed final admission stay as they are."""
-        self.db.execute("UPDATE aiagent.runs SET status = 'CANCELLED' WHERE run_id = %s", (run_id,))
+    def cancel(self, run_id: str) -> bool:
+        """User cancel: terminal for admission. In-flight sends that already passed final admission stay as they
+        are. Cancelling an already terminal run is a no-op (a SUCCEEDED run is not rewritten)."""
+        cur = self.db.execute(
+            "UPDATE aiagent.runs SET status = 'CANCELLED' WHERE run_id = %s AND status <> ALL(%s)", (run_id, list(TERMINAL))
+        )
+        return cur.rowcount == 1
 
     def check_current(self, claim: Claim) -> None:
         row = self.run(claim.root_run_id)
@@ -250,7 +286,11 @@ class Control:
         ).fetchone()
 
     def ack(self, job: dict[str, Any], outcome: str = "DONE") -> bool:
-        """Complete only if this attempt still owns the job (attempt fence). A stale attempt's ACK is a no-op."""
+        """Complete only if this attempt still owns the job (attempt fence). A stale attempt's ACK is a no-op.
+
+        Lease expiry alone does not reject an ACK: expiry only makes the job eligible for redelivery. As long as
+        no other worker has re-claimed it, attempt_id is unchanged and this attempt's result is the only one.
+        Re-claim and ACK update the same row, so they serialize: whichever commits first wins."""
         cur = self.db.execute(
             "UPDATE aiagent.jobs SET status=%s, locked_until=NULL WHERE job_id=%s AND attempt_id=%s AND status='CLAIMED'",
             (outcome, job["job_id"], job["attempt_id"]),
@@ -282,9 +322,12 @@ class Control:
         ).fetchall()
 
 
+RACE_NEW_REF = "ref-written-by-newer-worker"
+
+
 def race(point: str, url: str) -> None:
     """Deterministic concurrency injection: at `point`, a *separate* connection (= another process from the
-    database's point of view) commits a Steer / Cancel / Revoke. AIAGENT_RACE="<point>:<action>[,...]"."""
+    database's point of view) commits a Steer / Cancel / Revoke / Reclaim. AIAGENT_RACE="<point>:<action>[,...]"."""
     for spec in os.environ.get("AIAGENT_RACE", "").split(","):
         if not spec or spec.rsplit(":", 1)[0] != point:
             continue
@@ -298,6 +341,9 @@ def race(point: str, url: str) -> None:
         elif action == "revoke":
             for a in other.approvals(run_id):
                 other.revoke(a["approval_id"])
+        elif action == "reclaim":  # another worker takes the run over and writes its own checkpoint pointer
+            c = other.claim(run_id, "race-worker", force=True)
+            other.set_framework_ref(c, RACE_NEW_REF)
         other.db.close()
         os.environ["AIAGENT_RACE"] = ",".join(x for x in os.environ["AIAGENT_RACE"].split(",") if x != spec)  # once
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aiagent_conformance.control import Cancelled, Control, FencedOut, fault  # noqa: E402
+from aiagent_conformance.control import Cancelled, Control, FencedOut, RunTerminal, StaleGoal, fault, race  # noqa: E402
 from aiagent_conformance.gateways import ModelGateway, ToolGateway  # noqa: E402
 
 
@@ -53,13 +53,18 @@ async def drive(adapter, claim, policy: str):
         return out, rebuilds
 
 
-def record_status(ctl: Control, claim, out) -> None:
+def record_status(ctl: Control, claim, out) -> bool:
+    """Returns whether the run status transition was accepted. CANCELLED / FENCEDOUT / STALEGOAL outcomes,
+    a terminal run (e.g. cancelled while this segment finished) or a newer owner all leave the run untouched."""
     status = {"FINAL": "SUCCEEDED", "AWAITING_APPROVAL": "WAITING_APPROVAL", "UNKNOWN_EFFECT": "NEEDS_RECONCILE"}.get(out.status)
-    if status:  # CANCELLED / FENCEDOUT / STALEGOAL: this worker no longer owns the run state
-        try:
-            ctl.set_status(claim, status)
-        except FencedOut:
-            pass
+    if not status:
+        return False
+    race("before_record_status", ctl.url)
+    try:
+        ctl.set_status(claim, status)
+        return True
+    except (FencedOut, StaleGoal, RunTerminal):
+        return False
 
 
 def proc_stats() -> dict[str, float]:
@@ -92,18 +97,18 @@ async def queue_worker(adapter, ctl: Control, args: argparse.Namespace) -> list[
         idle_until = time.time() + args.idle
         try:
             claim = claim_with_wait(ctl, job["run_id"], args.owner, args.lease, wait_s=5)
-        except Cancelled:
+        except RunTerminal as e:  # cancelled, or already finished (e.g. redelivered after a lost ACK)
             ctl.ack(job, "DONE")
-            done.append({"job": job["job_id"], "run": job["run_id"], "status": "CANCELLED"})
+            done.append({"job": job["job_id"], "run": job["run_id"], "status": "CANCELLED" if isinstance(e, Cancelled) else "TERMINAL"})
             continue
         policy = ctl.run(job["run_id"])["policy"]
         out, rebuilds = await drive(adapter, claim, policy)
-        record_status(ctl, claim, out)
+        recorded = record_status(ctl, claim, out)
         fault("before_job_ack")  # segment finished, run state committed, ACK lost
         outcome = "WAITING" if out.status in ("AWAITING_APPROVAL", "UNKNOWN_EFFECT") else "DONE"
         acked = ctl.ack(job, outcome)
         done.append({"job": job["job_id"], "run": job["run_id"], "kind": job["kind"], "attempts": job["attempts"],
-                     "status": out.status, "acked": acked, "rebuilds": len(rebuilds)})
+                     "status": out.status, "acked": acked, "recorded": recorded, "rebuilds": len(rebuilds)})
     return done
 
 
@@ -143,8 +148,9 @@ async def main() -> None:
     policies = policies * len(runs) if len(policies) == 1 else policies
     try:
         claims = [claim_with_wait(ctl, r, args.owner, args.lease) for r in runs]
-    except Cancelled:
-        print(json.dumps({"status": "CANCELLED", "text": None, "approval_ids": [], "detail": "claim refused", "rebuilds": []}), flush=True)
+    except RunTerminal as e:
+        print(json.dumps({"status": "CANCELLED" if isinstance(e, Cancelled) else "TERMINAL", "text": None,
+                          "approval_ids": [], "detail": "claim refused", "rebuilds": []}), flush=True)
         os._exit(0)
     if args.stale_claim:
         ctl.steer(runs[0])  # goal changes after this worker claimed: everything it does is stale
@@ -165,20 +171,20 @@ async def main() -> None:
             queue_info = {"enqueued": first, "deduplicated": int(not dup), "attempts": job and job["attempts"]}
     results = await asyncio.gather(*(drive(adapter, c, p) for c, p in zip(claims, policies)))
     t_end = time.perf_counter()
-    for c, (out, _) in zip(claims, results):
-        record_status(ctl, c, out)
+    recorded = [record_status(ctl, c, out) for c, (out, _) in zip(claims, results)]
     if job is not None:
         queue_info["acked"] = ctl.ack(job, "WAITING" if results[0][0].status == "AWAITING_APPROVAL" else "DONE")
     stats = proc_stats()
     timing = {"t_boot_s": round(t_launch - t0, 3), "t_launch_s": round(t_seg - t_launch, 3), "t_segment_s": round(t_end - t_seg, 3)}
 
-    def one(out, rebuilds) -> dict[str, object]:
-        return {"status": out.status, "text": out.text, "approval_ids": out.approval_ids, "detail": out.detail, "rebuilds": rebuilds}
+    def one(out, rebuilds, rec) -> dict[str, object]:
+        return {"status": out.status, "text": out.text, "approval_ids": out.approval_ids, "detail": out.detail,
+                "rebuilds": rebuilds, "recorded": rec}
 
     if len(runs) == 1:
-        print(json.dumps({**one(*results[0]), "queue": queue_info, **stats, **timing}), flush=True)
+        print(json.dumps({**one(*results[0], recorded[0]), "queue": queue_info, **stats, **timing}), flush=True)
     else:
-        print(json.dumps({"runs": {r: one(*res) for r, res in zip(runs, results)}, **stats, **timing}), flush=True)
+        print(json.dumps({"runs": {r: one(*res, rec) for r, res, rec in zip(runs, results, recorded)}, **stats, **timing}), flush=True)
     await adapter.close()
     os._exit(0)  # do not let framework background threads delay exit
 

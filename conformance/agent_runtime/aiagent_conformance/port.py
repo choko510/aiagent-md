@@ -59,10 +59,20 @@ def verify_against_head(framework: list[dict[str, Any]], head: list[dict[str, An
         raise DerivedStateMismatch(f"framework ahead of HEAD ({len(f)} > {len(h)} messages)")
     for i, (a, b) in enumerate(zip(f, h)):
         if a != b:
-            raise DerivedStateMismatch(f"message {i} differs from HEAD: framework={str(a)[:160]} head={str(b)[:160]}")
+            # Diagnostics carry position, kind and digests only - never message text or tool payloads.
+            raise DerivedStateMismatch(
+                f"message {i} differs from HEAD: kind={a['kind']}/{b['kind']} framework_digest={sha(a)} head_digest={sha(b)}")
     if complete and len(f) != len(h):
         raise DerivedStateMismatch(f"framework final transcript shorter than HEAD ({len(f)} < {len(h)})")
     return sha(h)
+
+
+def safe_detail(e: BaseException) -> str:
+    """REBUILD reason for logs/events: our own mismatch messages are content-free; any other exception (DBOS,
+    LangGraph, decoder errors may quote payload bytes) is reduced to its type and a digest of its text."""
+    if isinstance(e, DerivedStateMismatch):
+        return f"DerivedStateMismatch: {e}"
+    return f"{type(e).__name__}: digest={sha(str(e))}"
 
 
 def final_in_head(head: list[dict[str, Any]]) -> bool:

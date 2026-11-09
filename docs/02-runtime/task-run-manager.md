@@ -203,3 +203,10 @@ LICENSE: LangGraph / PydanticAI / pg-boss はMIT、@mastra/coreはpackage.json�
 ## 2026-11-07: Execution/Workspace子資源の権限・寿命
 
 Task/Runの既存正本は維持。SandboxExecutionはRunに従属し、Cell内のProcess GroupとWorkspace versionを持つ。Cancel/Steer/lease失効/認可変更で新execと新外部dispatchを停止、子プロセスを強制終了しGrantを失効させる。既送外部効果は撤回不可なのでSide-effect LedgerがUNCERTAINなら再送禁止。旧Run/子Taskから成果物やプロセスを新Runへ無断移譲できない。Run終了時に孤児子プロセス0とWorkspace owner/version CASを検証。SC-21。
+
+## 2026-11-10 STEP 2: Run状態遷移の条件と終端状態（PR #80レビュー、PoC試験済み・NOT LOCKED）
+
+- Workerによる状態遷移（`WAITING_APPROVAL`・`NEEDS_RECONCILE`・`SUCCEEDED`等）は、**fence一致・Goal revision一致・現在状態が非終端**を条件とする1文の条件付きUPDATEで行う。条件を満たさなければ記録せず、理由（終端・`FencedOut`・`StaleGoal`）を返す。
+- 終端状態（`SUCCEEDED`・`CANCELLED`・`FAILED`）は上書きしない。終端のRunは再claimできず、終端のRunへのCancelは何もしない（`SUCCEEDED`を`CANCELLED`へ書き換えない）。
+- Cancelと完了記録が競合した場合は、先にcommitした方が勝つ。Cancelが先なら、完了したWorkerの記録は拒否され`CANCELLED`が残る。その間に最終admissionを通過していた外部送信は、取り消さずに送信済みとして記録する（PYRT-T17d、Tool Gatewayの線形化規則）。
+- Queue再配達で終端Runのjobを受け取ったWorkerは、Runを再開せずjobを完了する。

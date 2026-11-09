@@ -164,6 +164,7 @@ def test_t04_corrupted_framework_state_is_rebuilt_from_head(h: Harness, mode: st
     sends = h.sends(rid)
     assert len(sends) == 1 and sends[0]["payload"]["to"] == "alice"
     assert all(row["result"] is None or "wodget" not in str(row["result"]) for row in h.ctl.ledger(rid))
+    assert not _leaks(out["rebuilds"]), out["rebuilds"]
 
 
 @pytest.mark.parametrize("mode", ["text", "toolresult"])
@@ -182,6 +183,13 @@ def test_t04b_altered_checkpoint_content_is_not_trusted(h: Harness, mode: str) -
     assert out["status"] == "FINAL" and out["text"] == "done:CONFIRMED", out
     assert out["rebuilds"], "altered framework content was not detected"
     assert len(h.sends(rid)) == 1
+    assert not _leaks(out["rebuilds"]), out["rebuilds"]
+
+
+def _leaks(details: list[str]) -> bool:
+    """Mismatch diagnostics must carry positions/kinds/digests only, never message text or tool payloads."""
+    text = " ".join(details)
+    return any(w in text for w in ("widget", "wodget", "alice", "CONFIRMED", "FORGED", "price"))
 
 
 def _adapter(h: Harness):
