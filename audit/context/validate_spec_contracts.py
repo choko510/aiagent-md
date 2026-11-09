@@ -98,7 +98,7 @@ for spec, markers in optimizer_files.items():
     for marker in markers:
         if marker not in (ROOT / spec).read_text(encoding="utf-8"):
             errors.append(f"optimizer cross-spec contract missing {marker!r} in {spec}")
-optimizer_qa = read("docs/11-qa/benchmark-and-release-gates.md")
+optimizer_qa = (ROOT / "docs/11-qa/benchmark-and-release-gates.md").read_text(encoding="utf-8")
 optimizer_ids = re.findall(r"^\| OPT-T(\d\d) \|", optimizer_qa, re.M)
 optimizer_expected = [f"{i:02d}" for i in range(1, 21)]
 if sorted(optimizer_ids) != optimizer_expected:
