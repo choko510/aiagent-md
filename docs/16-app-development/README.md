@@ -17,6 +17,16 @@
 | DEV-08 | [feature-factory.md](feature-factory.md) | デモ承認を伴う機能追加の継続 |
 | DEV-09 | [development-api-and-ui.md](development-api-and-ui.md) | 実行画面、typed read DTO、API/イベント |
 | DEV-10 | [acceptance-and-rollout.md](acceptance-and-rollout.md) | REQ/TEST/SC/失敗時復旧/導入順序 |
+| DEV-11 | [pr-guardian.md](pr-guardian.md) | 既存PRを対象としたCI/レビュー/競合の継続監視・修復 |
+| DEV-12 | [reproduction-lab.md](reproduction-lab.md) | 再現・bisect・flaky分類・修正前後の証明 |
+| DEV-13 | [code-intelligence-and-adaptive-testing.md](code-intelligence-and-adaptive-testing.md) | symbol index/依存グラフ/文脈選択 |
+| DEV-14 | [code-intelligence-and-adaptive-testing.md](code-intelligence-and-adaptive-testing.md) | 影響テストと必須テストの別Gate |
+| DEV-15 | [advanced-software-factory.md](advanced-software-factory.md) | 複数修正候補の隔離実装・証拠比較 |
+| DEV-16 | [advanced-software-factory.md](advanced-software-factory.md) | 複数repo間の互換性検証・部分配達 |
+| DEV-17 | [advanced-software-factory.md](advanced-software-factory.md) | 根拠あるrepo固有のレビュー傾向学習 |
+| DEV-18 | [advanced-software-factory.md](advanced-software-factory.md) | 安全な事前構築環境・immutable template |
+| DEV-19 | [advanced-software-factory.md](advanced-software-factory.md) | 変更前後の統計的性能回帰検出 |
+| DEV-20 | [advanced-development-acceptance.md](advanced-development-acceptance.md) | DEV-11〜19の要求・SC-32〜40・安全Gateと導入順 |
 | CAM-01 | [../07-automation/endless-run-campaign.md](../07-automation/endless-run-campaign.md) | 開発以外にも使えるEndless Run |
 
 ## 正本所有権（新領域は既存のDomainを再定義しない）
@@ -46,3 +56,7 @@ Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resol
 - P1-05: [Campaign](../07-automation/endless-run-campaign.md) specifies Stop/Quota/CAS fences and receipts.
 - P1-06/07/08/09: DB/Auth/Event/QA and separate release gates are extended in their respective owner specifications and CI. The full app requirements are not implied by the initial 88-module static audit.
 - PR #71（Live Observation）と #72（Secure Runtime再監査）はmainへマージ済み。両者の契約を維持して本章を統合し、ProvenanceとCIを更新する。Owner合意・実機検証は依然として未完了。
+
+## 2026-11-09 Cloud Coding能力追加（Draft / NOT RUN）
+
+[DEV-11〜19の9能力とDEV-20の受入マトリクス](advanced-development-acceptance.md)を追加。**新しい5つのMarkdownで計10個の設計エントリ**を説明する。既存88基礎正本および2026-11-07の開発拡張11件の歴史的カウントは変更せず、合同owner契約の承認後にインデックス計数を正式移行する。各Proposalは新しいShared Task/Run/Tool/DBの正本ではない。PR #74との対象変更を避け、GitHub/CI/Context性能の横断変更は後続の所有者レビューとする。

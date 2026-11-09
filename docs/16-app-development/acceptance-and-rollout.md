@@ -94,3 +94,7 @@ Goalに対する独立8AI設計→デモ/ユーザー決定→実装→実Browse
 **Verification label:** Static contract checks can be PASS while all VM, Browser, DB, concurrent execution and real feature tests remain **NOT RUN**. This addendum is an implementation plan and testable interface proposal, not a claim of Owner consensus or runtime correctness.
 
 **Regression acceptance extension:** [DEV-DB-T11/T12](../10-infrastructure/database-schema-and-migrations.md), DEV-FF-T12, CAM-T19 require old/current integration HEAD comparison and immutable first-count identity. A previously reached Campaign must not advertise stale completion when current-head eligibility falls. Static schema checks cannot assert runtime transaction correctness.
+
+## 2026-11-09 Advanced Cloud Coding proposal（DEV-11〜20 / NOT RUN）
+
+追加された**9能力**（DEV-11 PR Guardian、DEV-12 Reproduction Lab、DEV-13 Code Intelligence、DEV-14 Adaptive Testing、DEV-15 Parallel Patch Tournament、DEV-16 Cross-Repo、DEV-17 Review Preference、DEV-18 Environment Templates、DEV-19 Performance Guard）の要求DEV-REQ-19..27、SC-32..40、設計テスト、P/N/F、導入順序は [DEV-20](advanced-development-acceptance.md) の提案を参照する。既存DEV-REQ-01..18、SC-24..31、必須3AI Review、Preview/Broker/Gateway/Sentinel、Endless Runの安全Gateを変更しない。新シナリオはCHAT_11統合前の提案であり本実装E2E fixtureおよびQA Release Gateでの検証は**すべてNOT RUN**。
