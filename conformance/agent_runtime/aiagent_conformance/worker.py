@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aiagent_conformance.control import Control, FencedOut  # noqa: E402
+from aiagent_conformance.control import Cancelled, Control, FencedOut, fault  # noqa: E402
 from aiagent_conformance.gateways import ModelGateway, ToolGateway  # noqa: E402
 
 
@@ -32,17 +32,94 @@ def load(candidate: str, ctl: Control, mgw: ModelGateway, tgw: ToolGateway, db: 
     return CandidateB(ctl, mgw, tgw, db, parallel=args.parallel_mode != "sequential", compaction=args.compaction)
 
 
+def claim_with_wait(ctl: Control, run_id: str, owner: str, lease: float, wait_s: float = 15.0):
+    deadline = time.time() + wait_s
+    while True:
+        try:
+            return ctl.claim(run_id, owner, lease_s=lease)
+        except FencedOut:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.25)
+
+
+async def drive(adapter, claim, policy: str):
+    rebuilds: list[str] = []
+    while True:
+        out = await adapter.run_segment(claim, policy)
+        if out.status == "REBUILD" and len(rebuilds) < 2:
+            rebuilds.append(out.detail or "")
+            continue
+        return out, rebuilds
+
+
+def record_status(ctl: Control, claim, out) -> None:
+    status = {"FINAL": "SUCCEEDED", "AWAITING_APPROVAL": "WAITING_APPROVAL", "UNKNOWN_EFFECT": "NEEDS_RECONCILE"}.get(out.status)
+    if status:  # CANCELLED / FENCEDOUT / STALEGOAL: this worker no longer owns the run state
+        try:
+            ctl.set_status(claim, status)
+        except FencedOut:
+            pass
+
+
+def proc_stats() -> dict[str, float]:
+    cpu, rss = -1.0, -1.0
+    try:
+        import psutil
+
+        ct = psutil.Process().cpu_times()
+        cpu = ct.user + ct.system
+        if os.name == "nt":
+            rss = psutil.Process().memory_info().peak_wset / 2**20
+        else:
+            import resource
+
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:  # pragma: no cover
+        pass
+    return {"peak_rss_mb": round(rss, 1), "cpu_s": round(cpu, 3)}
+
+
+async def queue_worker(adapter, ctl: Control, args: argparse.Namespace) -> list[dict[str, object]]:
+    """Generic QueuePort consumer: claim job (attempt fence) -> claim run (lease fence) -> segment -> ACK."""
+    done: list[dict[str, object]] = []
+    idle_until = time.time() + args.idle
+    while time.time() < idle_until:
+        job = ctl.dequeue(args.owner, lease_s=args.lease)
+        if job is None:
+            await asyncio.sleep(0.1)
+            continue
+        idle_until = time.time() + args.idle
+        try:
+            claim = claim_with_wait(ctl, job["run_id"], args.owner, args.lease, wait_s=5)
+        except Cancelled:
+            ctl.ack(job, "DONE")
+            done.append({"job": job["job_id"], "run": job["run_id"], "status": "CANCELLED"})
+            continue
+        policy = ctl.run(job["run_id"])["policy"]
+        out, rebuilds = await drive(adapter, claim, policy)
+        record_status(ctl, claim, out)
+        fault("before_job_ack")  # segment finished, run state committed, ACK lost
+        outcome = "WAITING" if out.status in ("AWAITING_APPROVAL", "UNKNOWN_EFFECT") else "DONE"
+        acked = ctl.ack(job, outcome)
+        done.append({"job": job["job_id"], "run": job["run_id"], "kind": job["kind"], "attempts": job["attempts"],
+                     "status": out.status, "acked": acked, "rebuilds": len(rebuilds)})
+    return done
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidate", required=True)
     ap.add_argument("--db", required=True)
-    ap.add_argument("--run", required=True)
-    ap.add_argument("--policy", default="notify")
+    ap.add_argument("--run", default="", help="one run id, or a comma list executed concurrently in this process")
+    ap.add_argument("--policy", default="notify", help="policy, or a comma list matching --run")
     ap.add_argument("--parallel-mode", default="sequential")
     ap.add_argument("--compaction", action="store_true")
     ap.add_argument("--naive", action="store_true")
     ap.add_argument("--lease", type=float, default=2.0)
     ap.add_argument("--via-queue", action="store_true")
+    ap.add_argument("--queue-worker", action="store_true", help="consume aiagent-md QueuePort jobs until idle")
+    ap.add_argument("--idle", type=float, default=1.5)
     ap.add_argument("--stale-claim", action="store_true", help="keep using the claim taken before a Steer")
     args = ap.parse_args()
     args.owner = f"worker-{os.getpid()}"
@@ -52,17 +129,25 @@ async def main() -> None:
     ctl = Control(args.db)
     mgw, tgw = ModelGateway(ctl), ToolGateway(ctl)
     tgw.naive = args.naive
-    claim = None
-    deadline = time.time() + 15
-    while claim is None:
-        try:
-            claim = ctl.claim(args.run, args.owner, lease_s=args.lease)
-        except FencedOut:
-            if time.time() > deadline:
-                raise
-            time.sleep(0.25)
+
+    if args.queue_worker:
+        adapter = load(args.candidate, ctl, mgw, tgw, args.db, args)
+        await adapter.launch()
+        jobs = await queue_worker(adapter, ctl, args)
+        print(json.dumps({"jobs": jobs, **proc_stats()}), flush=True)
+        await adapter.close()
+        os._exit(0)
+
+    runs = args.run.split(",")
+    policies = args.policy.split(",")
+    policies = policies * len(runs) if len(policies) == 1 else policies
+    try:
+        claims = [claim_with_wait(ctl, r, args.owner, args.lease) for r in runs]
+    except Cancelled:
+        print(json.dumps({"status": "CANCELLED", "text": None, "approval_ids": [], "detail": "claim refused", "rebuilds": []}), flush=True)
+        os._exit(0)
     if args.stale_claim:
-        ctl.steer(args.run)  # goal changes after this worker claimed: everything it does is stale
+        ctl.steer(runs[0])  # goal changes after this worker claimed: everything it does is stale
     adapter = load(args.candidate, ctl, mgw, tgw, args.db, args)
     t_launch = time.perf_counter()
     await adapter.launch()
@@ -71,47 +156,29 @@ async def main() -> None:
     job = None
     if args.via_queue:
         if hasattr(adapter, "enqueue"):  # candidate brings its own durable queue (DBOS)
-            queue_info = await adapter.enqueue(claim, args.policy)
+            queue_info = await adapter.enqueue(claims[0], policies[0])
         else:  # aiagent-md QueuePort fixture: Postgres FOR UPDATE SKIP LOCKED
-            first = ctl.enqueue(args.run, dedupe_key=args.run)
-            dup = ctl.enqueue(args.run, dedupe_key=args.run)
-            job = ctl.dequeue(args.owner, lease_s=args.lease)
+            seg_key = f"{runs[0]}:seg{ctl.run(runs[0])['head_seq']}"  # one job per segment of the run
+            first = ctl.enqueue(runs[0], dedupe_key=seg_key)
+            dup = ctl.enqueue(runs[0], dedupe_key=seg_key)
+            job = ctl.dequeue(args.owner, lease_s=args.lease, run_id=runs[0])
             queue_info = {"enqueued": first, "deduplicated": int(not dup), "attempts": job and job["attempts"]}
-    rebuilds: list[str] = []
-    while True:
-        out = await adapter.run_segment(claim, args.policy)
-        if out.status == "REBUILD" and len(rebuilds) < 2:
-            rebuilds.append(out.detail or "")
-            continue
-        break
+    results = await asyncio.gather(*(drive(adapter, c, p) for c, p in zip(claims, policies)))
     t_end = time.perf_counter()
+    for c, (out, _) in zip(claims, results):
+        record_status(ctl, c, out)
     if job is not None:
-        queue_info["acked"] = ctl.ack(job["job_id"], args.owner)
-    cpu = -1.0
-    try:
-        import psutil
+        queue_info["acked"] = ctl.ack(job, "WAITING" if results[0][0].status == "AWAITING_APPROVAL" else "DONE")
+    stats = proc_stats()
+    timing = {"t_boot_s": round(t_launch - t0, 3), "t_launch_s": round(t_seg - t_launch, 3), "t_segment_s": round(t_end - t_seg, 3)}
 
-        ct = psutil.Process().cpu_times()
-        cpu = ct.user + ct.system
+    def one(out, rebuilds) -> dict[str, object]:
+        return {"status": out.status, "text": out.text, "approval_ids": out.approval_ids, "detail": out.detail, "rebuilds": rebuilds}
 
-        rss = psutil.Process().memory_info().peak_wset / 2**20 if os.name == "nt" else 0.0
-        if os.name != "nt":
-            import resource
-
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    except Exception:  # pragma: no cover
-        rss = -1.0
-    if out.status == "FINAL":
-        ctl.set_status(claim, "SUCCEEDED")
-    elif out.status == "AWAITING_APPROVAL":
-        ctl.set_status(claim, "WAITING_APPROVAL")
-    elif out.status == "UNKNOWN_EFFECT":
-        ctl.set_status(claim, "NEEDS_RECONCILE")
-    print(json.dumps({
-        "status": out.status, "text": out.text, "approval_ids": out.approval_ids, "detail": out.detail,
-        "rebuilds": rebuilds, "queue": queue_info, "peak_rss_mb": round(rss, 1), "cpu_s": round(cpu, 3),
-        "t_boot_s": round(t_launch - t0, 3), "t_launch_s": round(t_seg - t_launch, 3), "t_segment_s": round(t_end - t_seg, 3),
-    }), flush=True)
+    if len(runs) == 1:
+        print(json.dumps({**one(*results[0]), "queue": queue_info, **stats, **timing}), flush=True)
+    else:
+        print(json.dumps({"runs": {r: one(*res) for r, res in zip(runs, results)}, **stats, **timing}), flush=True)
     await adapter.close()
     os._exit(0)  # do not let framework background threads delay exit
 

@@ -263,7 +263,9 @@ ADR-038でDeepAgents Python＋LangGraphを選定した。`langgraph-checkpoint-p
 | 規則 | 内容 | 試験 |
 |---|---|---|
 | HEAD先行 | Model応答はHEADへCAS追記してからFrameworkへ返す。同じ要求（stream＋最後の非assistant message）の再要求はModelを呼ばずHEADから再生 | PYRT-T01/T01b |
-| Proposal照合 | checkpoint由来のTool呼出しは、HEADのProposalと名前・引数・`tool_call_id`が一致しなければ実行せず`REBUILD` | PYRT-T04 swap |
+| Proposal照合 | checkpoint由来のTool呼出しは、HEADのProposalと名前・引数・`tool_call_id`が一致しなければ実行せず`REBUILD`。照合はキャッシュ済み結果を返す前に行う | PYRT-T04 swap |
+| 全文照合 | checkpointを再利用する前に、Framework transcript（User本文・Assistant本文・Tool呼出し・Tool結果）をHEADと順序・内容で比較。Framework側の遅れは許容、差異・先行は`REBUILD`。完了状態のcheckpointでも最終回答はHEADから返す | PYRT-T04b |
+| Framework内部Tool | `task`等のFramework内部Toolの結果もHEADへ記録（全文照合を成立させるため）。DeepAgentsの`task`は`Command(update={"messages": …})`を返す | PYRT-T09b |
 | 復号不能 | checkpoint blobが復号できない場合は`framework_ref`を捨て、新しい`thread_id`でHEADから再構築 | PYRT-T04 garbage |
 | 未決Intentの確定 | 再構築前に未回答のTool呼出しをGateway経由で確定（同じintent key、冪等）。DeepAgentsの`PatchToolCallsMiddleware`による黙ったcancelを防ぐ | PYRT-T02c/T04 |
 | 書込方式 | `durability="sync"`で各super-step後にcheckpoint。killで失われた分はHEAD再生とGateway冪等で吸収 | PYRT-T01/T06 |

@@ -6,6 +6,9 @@ CREATE SCHEMA IF NOT EXISTS aiagent;
 CREATE TABLE IF NOT EXISTS aiagent.runs (
   run_id         text PRIMARY KEY,
   parent_run_id  text,
+  tenant_id      text   NOT NULL DEFAULT 't1',
+  policy         text   NOT NULL DEFAULT 'notify',  -- FakeModel fixture policy (test-only)
+  allowed_models text[] NOT NULL DEFAULT '{fake-gateway}',  -- Model Router policy for this run (PoC)
   goal_revision  int    NOT NULL DEFAULT 1,
   fence          bigint NOT NULL DEFAULT 0,
   lease_owner    text,
@@ -37,7 +40,7 @@ CREATE TABLE IF NOT EXISTS aiagent.approvals (
   intent_key    text NOT NULL UNIQUE,
   args_hash     text NOT NULL,
   goal_revision int  NOT NULL,
-  status        text NOT NULL DEFAULT 'PENDING',  -- PENDING | APPROVED | REJECTED
+  status        text NOT NULL DEFAULT 'PENDING',  -- PENDING | APPROVED | REJECTED | REVOKED
   decided_by    text,
   expires_at    timestamptz NOT NULL
 );
@@ -49,7 +52,8 @@ CREATE TABLE IF NOT EXISTS aiagent.tool_ledger (
   tool          text NOT NULL,
   args_hash     text NOT NULL,
   goal_revision int  NOT NULL,
-  status        text NOT NULL,   -- DONE | PENDING_APPROVAL | SENDING | CONFIRMED | DENIED | EXPIRED | UNKNOWN
+  tenant_id     text NOT NULL,
+  status        text NOT NULL,   -- DONE | PENDING_APPROVAL | SENDING | CONFIRMED | DENIED | EXPIRED | STALE_GOAL | REVOKED | CANCELLED | UNKNOWN
   result        jsonb,
   attempts      int  NOT NULL DEFAULT 1
 );
@@ -67,7 +71,10 @@ CREATE TABLE IF NOT EXISTS aiagent.model_calls (
   run_id        text NOT NULL,
   stream        text NOT NULL,
   goal_revision int  NOT NULL,
+  tenant_id     text,
+  model_id      text,
   admitted      boolean NOT NULL,
+  cached        boolean NOT NULL DEFAULT false,      -- answer replayed from HEAD after a fresh admission
   reason        text,
   tools         text[],
   at            timestamptz NOT NULL DEFAULT now()
@@ -78,8 +85,10 @@ CREATE TABLE IF NOT EXISTS aiagent.jobs (
   job_id       bigserial PRIMARY KEY,
   dedupe_key   text NOT NULL UNIQUE,
   run_id       text NOT NULL,
-  status       text NOT NULL DEFAULT 'READY',  -- READY | CLAIMED | DONE
+  status       text NOT NULL DEFAULT 'READY',  -- READY | CLAIMED | DONE | WAITING | DEAD
   attempts     int  NOT NULL DEFAULT 0,
+  attempt_id   text,                            -- fence: only the current attempt may complete the job
+  kind         text NOT NULL DEFAULT 'start',   -- start | resume (re-enqueued after an approval decision)
   locked_by    text,
   locked_until timestamptz
 );

@@ -1,7 +1,8 @@
 """Fault injection on persisted framework state (PYRT-T04). Pure SQL: imports neither framework.
 
 garbage: undecodable bytes. swap: well-formed state whose recorded tool call differs from HEAD
-("widget" -> "wodget", same length so pickle / msgpack framing stays valid).
+("widget" -> "wodget"). text: the recorded final assistant answer is altered. toolresult: a recorded
+tool result is altered. Replacements keep the byte length so pickle / msgpack framing stays valid.
 """
 
 from __future__ import annotations
@@ -9,6 +10,12 @@ from __future__ import annotations
 import base64
 
 from aiagent_conformance.control import Control
+
+REPLACEMENTS = {
+    "swap": (b"widget", b"wodget"),
+    "text": (b"done:CONFIRMED", b"done:FORGEDXXX"),
+    "toolresult": (b"widget price is 42", b"widget price is 99"),
+}
 
 
 class CorruptA:
@@ -25,8 +32,8 @@ class CorruptA:
             raw = base64.b64decode(r["output"])
             if mode == "garbage":
                 new = "Z2FyYmFnZQ=="  # b"garbage"
-            elif b"widget" in raw:
-                new = base64.b64encode(raw.replace(b"widget", b"wodget")).decode()
+            elif REPLACEMENTS[mode][0] in raw:
+                new = base64.b64encode(raw.replace(*REPLACEMENTS[mode])).decode()
             else:
                 continue
             ctl.db.execute("UPDATE dbos.operation_outputs SET output=%s WHERE workflow_uuid=%s AND function_id=%s",
@@ -51,8 +58,8 @@ class CorruptB:
                     continue
                 if mode == "garbage":
                     new = b"\xc1\xde\xad\xbe\xef"  # 0xc1 is never valid msgpack
-                elif b"widget" in blob:
-                    new = blob.replace(b"widget", b"wodget")
+                elif REPLACEMENTS[mode][0] in blob:
+                    new = blob.replace(*REPLACEMENTS[mode])
                 else:
                     continue
                 where = " AND ".join(f"{k} = %s" for k in keys)

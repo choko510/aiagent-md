@@ -170,7 +170,7 @@ Authenticated UI (Design Picker, Demo Approval, Dev Studio, Endless Run)
 | Browser Broker controller | Python | Trusted Control VM | Browser Workerへ認証付きRPC、lease/CDP policy正本 | — |
 | Browser Worker | Playwright Python（Chromium baseline）、Jev/Lightpanda adapter（EXPERIMENT） | 隔離Browser Worker domain（VM/sandbox）、Session毎Context | Broker RPCのみ、web通信はTrusted Egress強制 | Agent・Cell・Extraction Workerへの直接CDP公開 |
 | Extraction Worker | Scrapling parser、Crawl4AI（markdown化/抽出、C） | 独立sandboxプロセス、**ネットワーク無し**、入力はArtifactのみ | Gatewayから入力Artifact参照、出力はCandidate claims/Artifact | 自らfetch/browser起動、Credential/Cookie受領 |
-| Automation / Scheduler / Outbox relay | QueuePort（ADR-039: 自作PostgreSQL Queue）＋Python Worker | Trusted Control VM、独立プロセス | DB outbox/lease、Notification Worker | 第二のQueue/Workflow正本 |
+| Automation / Scheduler / Outbox relay | QueuePort（ADR-039 PROVISIONAL: 自作PostgreSQL Queueが優先候補）＋Python Worker | Trusted Control VM、独立プロセス | DB outbox/lease、Notification Worker | 第二のQueue/Workflow正本 |
 | Memory / Context Manager | Python module（PostgreSQL＋pgvector、Graphiti/Mem0はC） | Agent Runtime/Trusted serviceのin-process module＋DB | Embedding/summary呼出しはModel Gateway経由 | Memoryへの権限付与、consent/tombstone迂回 |
 | Generated code / 自律開発Coder | Shell/Python/Node等、OpenHands SDK等（C） | **Untrusted Execution VM のRuntime Cellのみ** | scoped broker RPCのみ（§1） | Trusted VMのPythonプロセス・venv・FSの共有、直接Socket |
 | Web UI | React + TypeScript（静的配信を第一候補） | Reverse proxy配下、Node.jsはbuild時のみ必須 | FastAPIのREST/SSE/WebSocket、OpenAPI生成Client | UI Server側での業務判断・認可・Secret保持 |

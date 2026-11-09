@@ -13,11 +13,14 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
 from dbos._error import DBOSQueueDeduplicatedError
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities.abstract import AbstractCapability
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import (
@@ -36,8 +39,9 @@ from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from pydantic_ai_harness.compaction import SummarizingCompaction
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
-from aiagent_conformance.control import Claim, Control
+from aiagent_conformance.control import Claim, Control, fault
 from aiagent_conformance.gateways import (
+    TOOL_SCHEMAS,
     AwaitingApproval,
     ModelGateway,
     SealedModelRequest,
@@ -46,15 +50,24 @@ from aiagent_conformance.gateways import (
     gateway_tool_stub,
     sealed_model_call,
 )
-from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome
+from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, verify_against_head
 
 NAME = "A:pydantic-ai+dbos"
 FRAMEWORK_SCHEMAS = ["dbos"]
 
-# Per-process registry: the claim is NOT a workflow input, so a recovered workflow uses the
-# fence of the worker that recovered it (not the dead worker's fence recorded in DBOS).
-CLAIMS: dict[str, Claim] = {}
-_ctx: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class Services:
+    ctl: Control
+    mgw: ModelGateway
+    tgw: ToolGateway
+
+
+# The *current run* is a per-task ContextVar set at the top of each segment workflow execution, so
+# concurrent runs in one worker process (each its own asyncio task) never share it. The claim is NOT a
+# workflow input: a recovered workflow uses the fence of the worker that recovered it.
+CURRENT_CLAIM: ContextVar[Claim] = ContextVar("aiagent_current_claim")
 
 
 def to_neutral(messages: list[ModelMessage]) -> list[dict[str, Any]]:
@@ -97,57 +110,75 @@ def from_neutral(entries: list[dict[str, Any]]) -> list[ModelMessage]:
     return msgs
 
 
-def _model(stream: str, policy: str) -> FunctionModel:
+def _model(svc: Services, stream: str, policy: str) -> FunctionModel:
     async def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        run_id = _ctx["run_id"]
-        claim = CLAIMS[run_id]
+        claim = CURRENT_CLAIM.get()
         neutral = [m for m in to_neutral(messages) if m["kind"] != "system"]
         tools = [t.name for t in info.function_tools]
-        resp = sealed_model_call(_ctx["ctl"], _ctx["mgw"], SealedModelRequest(claim, stream, neutral, tools, policy))
+        req = SealedModelRequest(claim, stream, neutral, tools, policy)
+        resp = await asyncio.to_thread(sealed_model_call, svc.ctl, svc.mgw, req)
         return from_neutral([resp])[0]  # type: ignore[return-value]
 
     return FunctionModel(fn, model_name=f"fake-gateway-{stream}")
 
 
-def _tools(stream: str) -> list[Any]:
-    async def call(ctx: RunContext[str], tool: str, args: dict[str, Any]) -> str:
-        claim = CLAIMS[ctx.deps]
+def _tools(svc: Services, stream: str) -> list[Any]:
+    async def call(ctx: RunContext[Claim], tool: str, args: dict[str, Any]) -> str:
         try:
-            return await gateway_tool_stub(_ctx["ctl"], _ctx["tgw"], claim, ctx.tool_call_id or "", tool, args, stream)
+            return await gateway_tool_stub(svc.ctl, svc.tgw, ctx.deps, ctx.tool_call_id or "", tool, args, stream)
         except AwaitingApproval as e:
             raise ApprovalRequired(metadata={"approval_id": e.approval_id}) from None
 
-    async def search(ctx: RunContext[str], query: str) -> str:
+    async def search(ctx: RunContext[Claim], query: str) -> str:
         """Read-only web search."""
         return await call(ctx, "search", {"query": query})
 
-    async def send_message(ctx: RunContext[str], to: str, body: str) -> str:
+    async def send_message(ctx: RunContext[Claim], to: str, body: str) -> str:
         """Send an external message (irreversible, needs approval)."""
         return await call(ctx, "send_message", {"to": to, "body": body})
 
     return [search, send_message]
 
 
-def build_agent(policy: str, *, parallel_mode: str = "sequential", compaction: bool = False) -> Agent[str, Any]:
-    caps: list[Any] = []
+@dataclass
+class HeadRecorder(AbstractCapability[Claim]):
+    """Records results of framework-internal tools (`delegate_task`) in Checkpoint HEAD so the framework
+    transcript can be compared with HEAD in full. Gateway tools record their own results."""
+
+    svc: Services
+    stream: str = "main"
+
+    async def wrap_tool_execute(self, ctx: RunContext[Claim], *, call: ToolCallPart, tool_def: Any, args: Any, handler: Any) -> Any:
+        result = await handler(args)
+        if call.tool_name not in TOOL_SCHEMAS:
+            content = ToolReturnPart(call.tool_name, result, call.tool_call_id).model_response_str()
+            await asyncio.to_thread(
+                self.svc.ctl.append_head, ctx.deps, "tool",
+                {"kind": "tool", "tool_call_id": call.tool_call_id, "tool_name": call.tool_name, "content": content},
+                stream=self.stream, tool_call_id=call.tool_call_id)
+        return result
+
+
+def build_agent(svc: Services, policy: str, *, parallel_mode: str = "sequential", compaction: bool = False) -> Agent[Claim, Any]:
+    caps: list[Any] = [HeadRecorder(svc)]
     if policy == "delegate":
         child = Agent(
-            _model("subagent:researcher", policy),
+            _model(svc, "subagent:researcher", policy),
             name="researcher",
             description="Researches prices",
-            deps_type=str,
-            tools=_tools("subagent:researcher")[:1],  # read-only tool only
+            deps_type=Claim,
+            tools=_tools(svc, "subagent:researcher")[:1],  # read-only tool only
         )
         caps.append(SubAgents(agents=[SubAgent(child)]))
     if compaction:
-        caps.append(SummarizingCompaction(model=_model("summarize", policy), max_messages=6, keep_messages=4))
+        caps.append(SummarizingCompaction(model=_model(svc, "summarize", policy), max_messages=6, keep_messages=4))
     caps.append(DBOSDurability(name=f"aiagent_a_{policy}_{int(compaction)}", parallel_execution_mode=parallel_mode))  # type: ignore[arg-type]
     return Agent(
-        _model("main", policy),
+        _model(svc, "main", policy),
         name=f"aiagent_a_{policy}_{int(compaction)}",
-        deps_type=str,
+        deps_type=Claim,
         output_type=[str, DeferredToolRequests],
-        tools=_tools("main"),
+        tools=_tools(svc, "main"),
         capabilities=caps,
     )
 
@@ -159,9 +190,11 @@ class CandidateA:
     def __init__(self, ctl: Control, mgw: ModelGateway, tgw: ToolGateway, db_url: str, *, parallel_mode: str = "sequential",
                  compaction: bool = False, executor_id: str = "local"):
         self.ctl, self.mgw, self.tgw, self.executor_id = ctl, mgw, tgw, executor_id
-        _ctx.update(ctl=ctl, mgw=mgw, tgw=tgw)
-        self.agents = {p: build_agent(p, parallel_mode=parallel_mode, compaction=compaction) for p in ("notify", "parallel_writes", "delegate")}
+        svc = Services(ctl, mgw, tgw)
+        self.agents = {p: build_agent(svc, p, parallel_mode=parallel_mode, compaction=compaction) for p in ("notify", "parallel_writes", "delegate")}
         agents = self.agents
+        self.claims: dict[str, Claim] = {}  # keyed by run: concurrent runs never read each other's claim
+        claims = self.claims
 
         @DBOS.step(name="aiagent_a.read_head")
         async def read_head(run_id: str) -> list[dict[str, Any]]:
@@ -172,8 +205,12 @@ class CandidateA:
             # Inputs carry no fence/claim and no history. The HEAD snapshot MUST be read inside a step:
             # a plain read makes the workflow non-deterministic, and on recovery DBOS then replays recorded
             # model outputs at shifted step positions (observed in STEP 2, PYRT-T04 swap).
-            _ctx["run_id"] = run_id
-            history = from_neutral(await read_head(run_id))
+            claim = claims[run_id]
+            CURRENT_CLAIM.set(claim)
+            head = await read_head(run_id)
+            if final_in_head(head):
+                return {"status": "FINAL", "text": head[-1]["content"], "messages": head}
+            history = from_neutral(head)
             prompt = None
             last = history[-1]
             pending = []
@@ -183,10 +220,12 @@ class CandidateA:
                 prompt = last.parts[-1].content
                 history = history[:-1]
             deferred = DeferredToolResults(approvals={i: True for i in pending}) if pending else None
-            res = await agents[policy].run(prompt, message_history=history, deferred_tool_results=deferred, deps=run_id)
+            res = await agents[policy].run(prompt, message_history=history, deferred_tool_results=deferred, deps=claim)
             if isinstance(res.output, DeferredToolRequests):
                 return {"status": "AWAITING_APPROVAL", "approval_ids": [res.output.metadata.get(c.tool_call_id, {}).get("approval_id") for c in res.output.approvals]}
-            return {"status": "FINAL", "text": res.output}
+            fault("before_segment_return")  # every model step is recorded; the workflow has not completed
+            return {"status": "FINAL", "text": res.output,
+                    "messages": [m for m in to_neutral(res.all_messages()) if m["kind"] != "system"]}
 
         self.segment_wf = segment_wf
         # One executor_id per worker process: DBOS.launch() then auto-recovers nothing that belongs to
@@ -204,8 +243,8 @@ class CandidateA:
         self.queue = await DBOS.register_queue_async("aiagent_runs", worker_concurrency=4, polling_interval_sec=0.1)
 
     async def run_segment(self, claim: Claim, policy: str) -> SegmentOutcome:
-        CLAIMS[claim.run_id] = claim
-        _ctx["run_id"] = claim.run_id
+        self.claims[claim.run_id] = claim
+        CURRENT_CLAIM.set(claim)
         ref = self.ctl.run(claim.run_id)["framework_ref"]
         try:
             st = await DBOS.get_workflow_status_async(ref) if ref else None
@@ -222,6 +261,11 @@ class CandidateA:
                 with SetWorkflowID(ref):
                     handle = await DBOS.start_workflow_async(self.segment_wf, claim.run_id, policy)
             out = await handle.get_result()
+            if out["status"] == "FINAL":
+                # The workflow result is derived (DBOS may have replayed recorded steps): it must equal HEAD.
+                head = self.ctl.transcript(claim.run_id)
+                verify_against_head(out["messages"], head, complete=True)
+                out["text"] = head[-1]["content"]
         except AwaitingApproval as e:
             return SegmentOutcome("AWAITING_APPROVAL", approval_ids=[e.approval_id])
         except UnknownEffect:
@@ -230,7 +274,7 @@ class CandidateA:
             await self._discard(ref)
             return SegmentOutcome("REBUILD", detail=str(e))
         except Exception as e:  # corrupted/undecodable framework state, DBOS step errors, ...
-            if type(e).__name__ in ("FencedOut", "StaleGoal"):
+            if type(e).__name__ in ("FencedOut", "StaleGoal", "Cancelled"):
                 return SegmentOutcome(type(e).__name__.upper())
             await self._discard(ref)
             return SegmentOutcome("REBUILD", detail=f"{type(e).__name__}: {e}"[:300])

@@ -15,7 +15,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from .control import Claim, Control, FencedOut, StaleGoal, canonical, fault, sha
+from .control import Cancelled, Claim, Control, FencedOut, StaleGoal, canonical, fault, race, sha
 from .fixtures import POLICIES, is_summarization_request
 
 FAKE_PROVIDER_SECRET = "sk-fake-provider-SECRET-7f3a"  # must never leave the gateway
@@ -53,29 +53,67 @@ class SealedModelRequest:
     messages: list[dict[str, Any]]
     tools: list[str]
     policy: str
+    model_id: str = "fake-gateway"
+
+    def identity(self) -> str:
+        """Snapshot identity used to reuse a committed answer. Everything that can change the answer or its
+        admissibility is part of it: tenant, Goal revision, policy, model, tool surface and the *whole* context
+        (order and content). The fence is deliberately excluded so a re-claimed worker can replay."""
+        ctx = [
+            {"k": m.get("kind"), "c": m.get("content"), "t": m.get("tool_call_id"),
+             "tc": [[tc.get("id"), tc.get("name"), tc.get("args")] for tc in m.get("tool_calls") or []]}
+            for m in self.messages
+        ]
+        return sha({
+            "tenant": self.claim.tenant_id, "run": self.claim.root_run_id, "goal": self.claim.goal_revision,
+            "stream": self.stream, "policy": self.policy, "model": self.model_id,
+            "tools": sorted(self.tools), "context": sha(ctx),
+        })
+
+
+class PolicyDenied(Exception):
+    pass
 
 
 class ModelGateway:
-    """Independent model gateway. Owns admission (fence/goal revision), budget counting and credential."""
+    """Independent model gateway. Owns admission (tenant/cancel/fence/goal revision/model policy), budget
+    counting and the provider credential. Admission runs for every request, including answers replayed
+    from HEAD."""
 
     def __init__(self, ctl: Control):
         self.ctl = ctl
 
-    def complete(self, req: SealedModelRequest) -> dict[str, Any]:
+    def admit(self, req: SealedModelRequest, *, cached: bool) -> None:
+        race(f"model_before_admission@{req.stream}", self.ctl.url)
         run = self.ctl.run(req.claim.root_run_id)
         reason = None
-        if run["fence"] != req.claim.fence:
+        if run is None or run["tenant_id"] != req.claim.tenant_id:
+            reason = "TENANT"
+        elif run["status"] == "CANCELLED":
+            reason = "CANCELLED"
+        elif run["fence"] != req.claim.fence:
             reason = "FENCED"
         elif run["goal_revision"] != req.claim.goal_revision:
             reason = "STALE_GOAL"
+        elif req.model_id not in run["allowed_models"]:
+            reason = "MODEL_POLICY"
         self.ctl.db.execute(
-            "INSERT INTO aiagent.model_calls(run_id, stream, goal_revision, admitted, reason, tools) VALUES (%s,%s,%s,%s,%s,%s)",
-            (req.claim.root_run_id, req.stream, req.claim.goal_revision, reason is None, reason, sorted(req.tools)),
+            "INSERT INTO aiagent.model_calls(run_id, stream, goal_revision, tenant_id, model_id, admitted, cached, reason, tools)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (req.claim.root_run_id, req.stream, req.claim.goal_revision, req.claim.tenant_id, req.model_id,
+             reason is None, cached, reason, sorted(req.tools)),
         )
         if reason == "FENCED":
             raise FencedOut(req.claim.run_id)
         if reason == "STALE_GOAL":
             raise StaleGoal(req.claim.run_id)
+        if reason == "CANCELLED":
+            raise Cancelled(req.claim.run_id)
+        if reason is not None:
+            raise PolicyDenied(reason)
+
+    def complete(self, req: SealedModelRequest) -> dict[str, Any]:
+        self.admit(req, cached=False)
         _ = sha(FAKE_PROVIDER_SECRET)  # "uses" the credential; it is never returned
         if is_summarization_request(req.messages):
             n = len(req.messages)
@@ -87,27 +125,22 @@ class ModelGateway:
         return {"kind": "assistant", "content": out.get("content", ""), "tool_calls": out.get("tool_calls", [])}
 
 
-def request_key(stream: str, messages: list[dict[str, Any]]) -> str:
-    """Identity of a model request = stream + the latest non-assistant message (stable across compaction)."""
-    last = next((m for m in reversed(messages) if m.get("kind") != "assistant"), {})
-    ident = {k: last.get(k) for k in ("kind", "content", "tool_call_id")}
-    return sha([stream, ident])
-
-
 def sealed_model_call(ctl: Control, gw: ModelGateway, req: SealedModelRequest) -> dict[str, Any]:
     """The only model entry point used by adapters.
 
-    1. If the HEAD already holds the answer to this exact request (crash after commit), replay it.
+    1. If HEAD already holds the answer to this exact snapshot (crash after commit), replay it - but only
+       after a fresh admission with the *current* Goal / fence / tenant / cancel / model policy.
     2. Otherwise call the independent Model Gateway, then CAS-append the answer to HEAD.
     """
     if is_summarization_request(req.messages):
         # Compaction output is a derived view: it never lands in the main transcript (HEAD stays raw).
         req.stream = "summarize"
-    key = request_key(req.stream, req.messages)
+    key = req.identity()
     hit = ctl.find_assistant(req.claim.root_run_id, req.stream, key)
     if hit is not None:
+        gw.admit(req, cached=True)
         return hit
-    resp = gw.complete(req)  # admission (fence / goal revision) is decided by the gateway, not the adapter
+    resp = gw.complete(req)
     fault("after_model_response")  # provider answered, HEAD not yet committed
     ctl.append_head(req.claim, "assistant", resp, stream=req.stream, request_key=key)
     stored = ctl.find_assistant(req.claim.root_run_id, req.stream, key)
@@ -117,13 +150,13 @@ def sealed_model_call(ctl: Control, gw: ModelGateway, req: SealedModelRequest) -
 
 @dataclass
 class ToolOutcome:
-    status: str  # DONE | CONFIRMED | PENDING_APPROVAL | DENIED | EXPIRED | STALE_GOAL | UNKNOWN
+    status: str  # DONE | CONFIRMED | PENDING_APPROVAL | DENIED | EXPIRED | STALE_GOAL | REVOKED | CANCELLED | UNKNOWN
     result: dict[str, Any] = field(default_factory=dict)
     approval_id: str | None = None
 
     @property
     def terminal(self) -> bool:
-        return self.status in ("DONE", "CONFIRMED", "DENIED", "EXPIRED", "STALE_GOAL")
+        return self.status in ("DONE", "CONFIRMED", "DENIED", "EXPIRED", "STALE_GOAL", "REVOKED", "CANCELLED")
 
     def as_tool_content(self) -> str:
         return canonical({"status": self.status, **self.result})
@@ -150,24 +183,30 @@ class ToolGateway:
         run = self.ctl.run(claim.root_run_id)
         if run["fence"] != claim.fence:
             raise FencedOut(claim.run_id)
+        if run["tenant_id"] != claim.tenant_id:
+            return ToolOutcome("DENIED", {"error": "tenant"})
         row = db.execute("SELECT * FROM aiagent.tool_ledger WHERE intent_key=%s", (intent_key,)).fetchone()
-        if row is not None and row["args_hash"] != args_hash:
-            return ToolOutcome("DENIED", {"error": "intent_key reused with different args"})
+        if row is not None and (row["args_hash"] != args_hash or row["root_run_id"] != claim.root_run_id):
+            return ToolOutcome("DENIED", {"error": "intent_key reused with different args or run"})
         if row is None:
+            if run["status"] == "CANCELLED":
+                return ToolOutcome("CANCELLED")
             if run["goal_revision"] != claim.goal_revision:
                 return ToolOutcome("STALE_GOAL")
             if tool in READ_TOOLS:
                 res = {"result": f"widget price is 42 (query={args['query']})"}
                 db.execute(
-                    "INSERT INTO aiagent.tool_ledger VALUES (%s,%s,%s,%s,%s,%s,'DONE',%s) ON CONFLICT DO NOTHING",
-                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision, Jsonb(res)),
+                    "INSERT INTO aiagent.tool_ledger(intent_key, run_id, root_run_id, tool, args_hash, goal_revision, tenant_id, status, result)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,'DONE',%s) ON CONFLICT DO NOTHING",
+                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision, claim.tenant_id, Jsonb(res)),
                 )
                 return ToolOutcome("DONE", res)
             approval_id = "apr_" + intent_key
             with db.transaction():
                 db.execute(
-                    "INSERT INTO aiagent.tool_ledger VALUES (%s,%s,%s,%s,%s,%s,'PENDING_APPROVAL',NULL)",
-                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision),
+                    "INSERT INTO aiagent.tool_ledger(intent_key, run_id, root_run_id, tool, args_hash, goal_revision, tenant_id, status)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING_APPROVAL')",
+                    (intent_key, claim.run_id, claim.root_run_id, tool, args_hash, claim.goal_revision, claim.tenant_id),
                 )
                 db.execute(
                     "INSERT INTO aiagent.approvals VALUES (%s,%s,%s,%s,%s,'PENDING',NULL, now() + make_interval(secs=>%s))",
@@ -177,51 +216,65 @@ class ToolGateway:
 
         db.execute("UPDATE aiagent.tool_ledger SET attempts = attempts + 1 WHERE intent_key=%s", (intent_key,))
         st = row["status"]
-        if st in ("DONE", "CONFIRMED", "DENIED", "EXPIRED", "STALE_GOAL", "UNKNOWN"):
-            return ToolOutcome(st, row["result"] or {})
         if st == "SENDING":  # crashed between external send and confirm: never blind-retry
-            db.execute("UPDATE aiagent.tool_ledger SET status='UNKNOWN' WHERE intent_key=%s", (intent_key,))
+            db.execute("UPDATE aiagent.tool_ledger SET status='UNKNOWN' WHERE intent_key=%s AND status='SENDING'", (intent_key,))
             return ToolOutcome("UNKNOWN", {"note": "MAY_HAVE_SENT; reconcile before retry"})
-        assert st == "PENDING_APPROVAL"
-        apr = db.execute(
-            "SELECT *, expires_at < now() AS expired FROM aiagent.approvals WHERE intent_key=%s", (intent_key,)
-        ).fetchone()
-        if apr["status"] == "PENDING" and not apr["expired"]:
-            return ToolOutcome("PENDING_APPROVAL", approval_id=apr["approval_id"])
-        final = None
-        if apr["status"] == "REJECTED":
-            final = "DENIED"
-        elif apr["expired"]:
-            final = "EXPIRED"
-        elif apr["args_hash"] != args_hash:
-            final = "DENIED"
-        elif run["goal_revision"] != apr["goal_revision"] or run["goal_revision"] != claim.goal_revision:
-            final = "STALE_GOAL"
-        if final:
-            db.execute("UPDATE aiagent.tool_ledger SET status=%s WHERE intent_key=%s", (final, intent_key))
-            return ToolOutcome(final)
-        return self._execute_write(claim, intent_key, tool, args)
+        if st != "PENDING_APPROVAL":
+            return ToolOutcome(st, row["result"] or {})
+        return self._admit_and_execute(claim, intent_key, args, args_hash)
 
-    def _execute_write(self, claim: Claim, intent_key: str, tool: str, args: dict[str, Any]) -> ToolOutcome:
+    def _admit_and_execute(self, claim: Claim, intent_key: str, args: dict[str, Any], args_hash: str) -> ToolOutcome:
+        """Final admission and the transition to SENDING are ONE transaction holding row locks on the run,
+        the approval and the ledger row. Steer / Cancel / Revoke update those rows, so they serialize with it:
+        committed before -> the send is refused; committed after -> the send was already admitted (the
+        SENDING commit is the linearization point) and stays MAY_HAVE_SENT/CONFIRMED."""
         db = self.ctl.db
-        # Per-root-run write serialization lives in the gateway, not in the framework.
-        db.execute("SELECT pg_advisory_lock(hashtext(%s))", (claim.root_run_id,))
+        db.execute("SELECT pg_advisory_lock(hashtext(%s))", (claim.root_run_id,))  # per-run write serialization
         try:
-            cur = db.execute(
-                "UPDATE aiagent.tool_ledger SET status='SENDING' WHERE intent_key=%s AND status='PENDING_APPROVAL'",
-                (intent_key,),
-            )
-            if cur.rowcount != 1:
-                row = db.execute("SELECT status, result FROM aiagent.tool_ledger WHERE intent_key=%s", (intent_key,)).fetchone()
-                return ToolOutcome(row["status"], row["result"] or {})
-            db.execute(
-                "INSERT INTO aiagent.external_sends(intent_key, payload) VALUES (%s,%s)", (intent_key, Jsonb(args))
-            )
+            race("gateway_before_final_admission", self.ctl.url)
+            fenced = False
+            with db.transaction():
+                run = db.execute(
+                    "SELECT status, fence, goal_revision FROM aiagent.runs WHERE run_id=%s FOR SHARE", (claim.root_run_id,)
+                ).fetchone()
+                apr = db.execute(
+                    "SELECT status, args_hash, goal_revision, approval_id, expires_at < now() AS expired"
+                    " FROM aiagent.approvals WHERE intent_key=%s FOR SHARE", (intent_key,)
+                ).fetchone()
+                led = db.execute(
+                    "SELECT status, result FROM aiagent.tool_ledger WHERE intent_key=%s FOR UPDATE", (intent_key,)
+                ).fetchone()
+                if led["status"] != "PENDING_APPROVAL":
+                    return ToolOutcome(led["status"], led["result"] or {})
+                final = None
+                if run["fence"] != claim.fence:
+                    fenced = True
+                elif run["status"] == "CANCELLED":
+                    final = "CANCELLED"
+                elif apr["status"] == "REVOKED":
+                    final = "REVOKED"
+                elif apr["status"] == "REJECTED":
+                    final = "DENIED"
+                elif apr["expired"]:
+                    final = "EXPIRED"
+                elif apr["status"] == "PENDING":
+                    return ToolOutcome("PENDING_APPROVAL", approval_id=apr["approval_id"])
+                elif apr["args_hash"] != args_hash:
+                    final = "DENIED"
+                elif not (run["goal_revision"] == apr["goal_revision"] == claim.goal_revision):
+                    final = "STALE_GOAL"
+                if final:
+                    db.execute("UPDATE aiagent.tool_ledger SET status=%s WHERE intent_key=%s", (final, intent_key))
+                    return ToolOutcome(final)
+                if not fenced:
+                    db.execute("UPDATE aiagent.tool_ledger SET status='SENDING' WHERE intent_key=%s", (intent_key,))
+            if fenced:
+                raise FencedOut(claim.run_id)
+            race("gateway_after_final_admission", self.ctl.url)
+            db.execute("INSERT INTO aiagent.external_sends(intent_key, payload) VALUES (%s,%s)", (intent_key, Jsonb(args)))
             fault("gateway_after_send")  # external effect happened, ledger still SENDING
             res = {"receipt": "rcpt_" + intent_key[-8:]}
-            db.execute(
-                "UPDATE aiagent.tool_ledger SET status='CONFIRMED', result=%s WHERE intent_key=%s", (Jsonb(res), intent_key)
-            )
+            db.execute("UPDATE aiagent.tool_ledger SET status='CONFIRMED', result=%s WHERE intent_key=%s", (Jsonb(res), intent_key))
             return ToolOutcome("CONFIRMED", res)
         finally:
             db.execute("SELECT pg_advisory_unlock(hashtext(%s))", (claim.root_run_id,))
@@ -287,6 +340,8 @@ async def gateway_tool_stub(
         raise AwaitingApproval(out.approval_id, tool_call_id)
     if out.status == "UNKNOWN":
         raise UnknownEffect(tool_call_id)
+    if out.status == "CANCELLED":
+        raise Cancelled(claim.run_id)
     content = out.as_tool_content()
     ctl.append_head(
         claim,

@@ -452,11 +452,13 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 
 | Gate | 種別 | 条件 | 現状 |
 |---|---|---|---|
-| RT-G1 | Hard | `agent-runtime-conformance` CIでPYRT-T00〜T12が全件合格（選定基盤B。代替Aも同じ試験を維持） | PoCで合格（Fake Gateway）。本番構成は未実施 |
+| RT-G1 | Hard | `agent-runtime-conformance` CIでPYRT-T00〜T17が全件合格（選定基盤B。代替Aも同じ試験を維持）。Runtime・Checkpoint・Tool・Queue・QAの正本仕様の変更でもCIを起動 | PoCで合格（Fake Gateway）。本番構成は未実施 |
 | RT-G2 | Hard | PYRT-T12陰性対照が「Ledgerなしでは重複する」ことを再現し続ける（試験の検出力の確認） | 合格 |
 | RT-G3 | Hard | Modelに見えるTool一覧がGateway stub＋許可済みFramework Toolのsnapshotと一致（`execute`・書込FS・汎用subagent 0） | 合格（`read_file`のみ許可） |
 | RT-G4 | Hard | Framework状態にCredential・Provider key文字列0 | 合格（PoC走査） |
 | RT-G5 | Hard | checkpoint直列化でpickle無効、msgpack ext allowlist制限下で全試験合格 | **未実施（STEP 3）** |
+| RT-G7 | Hard | 最終admissionと競合するSteer/Cancel/Revokeで送信0（PYRT-T14）、1プロセス複数Run・tenantで混入0（PYRT-T15） | 合格（PoC） |
+| RT-G8 | Hard（ADR-039確定の条件） | QueuePortのattempt fence・ACK喪失・承認後再投入・複数Worker競合（PYRT-T16）に加え、heartbeat・dead-letter・Outbox同一Tx・JQ-T系 | 前4項目のみ合格。残りは未実施 |
 | RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 初回記録（N=10中央値）: Linux CI RSS 96.4 MB・CPU 1.43 s・WAL 35.4 KB、Windows RSS 95.0 MB・CPU 5.16 s・WAL 37.7 KB、Framework tuple 29（両環境） |
 
-性能の数値は合否基準ではなく回帰検知の基準線であり、本番Model/Tool/Network込みの性能保証ではない。
+性能の数値は合否基準ではなく回帰検知の基準線であり、本番Model/Tool/Network込みの性能保証ではない。計測は**Runtime単体**（`bench --mode runtime`）と**Queue込み**（`--mode queue`: AはDBOS Queue、Bはaiagent-mdのQueuePort）を分けて記録し、Runtime単体の差をシステム全体の優劣として扱わない。

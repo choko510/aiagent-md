@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,10 @@ class StaleGoal(Exception):
     """The caller acts on an old Goal revision."""
 
 
+class Cancelled(Exception):
+    """The run was cancelled by the user/control plane."""
+
+
 @dataclass(frozen=True)
 class Claim:
     run_id: str
@@ -35,6 +41,7 @@ class Claim:
     goal_revision: int
     owner: str
     root_run_id: str
+    tenant_id: str = "t1"
 
 
 def canonical(obj: Any) -> str:
@@ -50,9 +57,19 @@ def connect(url: str) -> psycopg.Connection:
 
 
 class Control:
+    """One autocommit connection *per thread*: concurrent runs (asyncio tasks + to_thread workers) must never
+    share a connection, or one run's statements could execute inside another run's transaction."""
+
     def __init__(self, url: str):
         self.url = url
-        self.db = connect(url)
+        self._local = threading.local()
+
+    @property
+    def db(self) -> psycopg.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None or conn.closed:
+            conn = self._local.conn = connect(self.url)
+        return conn
 
     # ---------- setup ----------
     def install(self) -> None:
@@ -63,10 +80,11 @@ class Control:
         self.install()
 
     # ---------- runs ----------
-    def create_run(self, run_id: str, user_text: str, history: list[dict[str, Any]] = ()) -> None:  # type: ignore[assignment]
+    def create_run(self, run_id: str, user_text: str, history: list[dict[str, Any]] = (), tenant_id: str = "t1",  # type: ignore[assignment]
+                   policy: str = "notify") -> None:
         entries = [*history, {"kind": "user", "content": user_text}]
         with self.db.transaction():
-            self.db.execute("INSERT INTO aiagent.runs(run_id) VALUES (%s)", (run_id,))
+            self.db.execute("INSERT INTO aiagent.runs(run_id, tenant_id, policy) VALUES (%s,%s,%s)", (run_id, tenant_id, policy))
             for i, e in enumerate(entries, start=1):
                 self.db.execute(
                     "INSERT INTO aiagent.head_entries(run_id, seq, kind, request_key, payload, goal_revision, fence)"
@@ -80,13 +98,15 @@ class Control:
         row = self.db.execute(
             "UPDATE aiagent.runs SET fence = fence + 1, lease_owner = %(o)s,"
             " lease_until = now() + make_interval(secs => %(s)s), status = 'RUNNING'"
-            " WHERE run_id = %(r)s" + cond + " RETURNING fence, goal_revision, parent_run_id",
+            " WHERE run_id = %(r)s AND status <> 'CANCELLED'" + cond + " RETURNING fence, goal_revision, tenant_id",
             {"o": owner, "s": lease_s, "r": run_id},
         ).fetchone()
         if row is None:
+            if (r := self.run(run_id)) is not None and r["status"] == "CANCELLED":
+                raise Cancelled(run_id)
             raise FencedOut(f"run {run_id} is leased by another worker")
         root = run_id.split("/")[0]
-        return Claim(run_id, row["fence"], row["goal_revision"], owner, root)
+        return Claim(run_id, row["fence"], row["goal_revision"], owner, root, row["tenant_id"])
 
     def run(self, run_id: str) -> dict[str, Any]:
         return self.db.execute("SELECT * FROM aiagent.runs WHERE run_id = %s", (run_id,)).fetchone()
@@ -111,6 +131,10 @@ class Control:
             "UPDATE aiagent.runs SET goal_revision = goal_revision + 1 WHERE run_id = %s RETURNING goal_revision",
             (run_id,),
         ).fetchone()["goal_revision"]
+
+    def cancel(self, run_id: str) -> None:
+        """User cancel: terminal for admission. In-flight sends that already passed final admission stay as they are."""
+        self.db.execute("UPDATE aiagent.runs SET status = 'CANCELLED' WHERE run_id = %s", (run_id,))
 
     def check_current(self, claim: Claim) -> None:
         row = self.run(claim.root_run_id)
@@ -197,35 +221,56 @@ class Control:
             (status, actor, approval_id),
         )
 
+    def revoke(self, approval_id: str) -> None:
+        self.db.execute("UPDATE aiagent.approvals SET status='REVOKED' WHERE approval_id=%s", (approval_id,))
+
     def expire(self, approval_id: str) -> None:
         self.db.execute(
             "UPDATE aiagent.approvals SET expires_at = now() - interval '1 second' WHERE approval_id = %s",
             (approval_id,),
         )
 
-    # ---------- QueuePort fixture (FOR UPDATE SKIP LOCKED) ----------
-    def enqueue(self, run_id: str, dedupe_key: str) -> bool:
+    # ---------- QueuePort fixture (FOR UPDATE SKIP LOCKED + attempt fence) ----------
+    def enqueue(self, run_id: str, dedupe_key: str, kind: str = "start") -> bool:
         cur = self.db.execute(
-            "INSERT INTO aiagent.jobs(dedupe_key, run_id) VALUES (%s,%s) ON CONFLICT (dedupe_key) DO NOTHING",
-            (dedupe_key, run_id),
+            "INSERT INTO aiagent.jobs(dedupe_key, run_id, kind) VALUES (%s,%s,%s) ON CONFLICT (dedupe_key) DO NOTHING",
+            (dedupe_key, run_id, kind),
         )
         return cur.rowcount == 1
 
-    def dequeue(self, worker: str, lease_s: float = 30.0) -> dict[str, Any] | None:
+    def dequeue(self, worker: str, lease_s: float = 30.0, run_id: str | None = None) -> dict[str, Any] | None:
+        """Claim one job. Every claim mints a new attempt_id; an expired lease is re-delivered with attempts+1."""
+        only = " AND run_id = %(r)s" if run_id else ""
         return self.db.execute(
-            "UPDATE aiagent.jobs SET status='CLAIMED', attempts=attempts+1, locked_by=%(w)s,"
+            "UPDATE aiagent.jobs SET status='CLAIMED', attempts=attempts+1, attempt_id=%(a)s, locked_by=%(w)s,"
             " locked_until=now()+make_interval(secs=>%(s)s) WHERE job_id = ("
-            "  SELECT job_id FROM aiagent.jobs WHERE status='READY' OR (status='CLAIMED' AND locked_until < now())"
+            "  SELECT job_id FROM aiagent.jobs WHERE (status='READY' OR (status='CLAIMED' AND locked_until < now()))" + only +
             "  ORDER BY job_id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *",
-            {"w": worker, "s": lease_s},
+            {"w": worker, "s": lease_s, "a": uuid.uuid4().hex, "r": run_id},
         ).fetchone()
 
-    def ack(self, job_id: int, worker: str) -> bool:
+    def ack(self, job: dict[str, Any], outcome: str = "DONE") -> bool:
+        """Complete only if this attempt still owns the job (attempt fence). A stale attempt's ACK is a no-op."""
         cur = self.db.execute(
-            "UPDATE aiagent.jobs SET status='DONE' WHERE job_id=%s AND locked_by=%s AND status='CLAIMED'",
-            (job_id, worker),
+            "UPDATE aiagent.jobs SET status=%s, locked_until=NULL WHERE job_id=%s AND attempt_id=%s AND status='CLAIMED'",
+            (outcome, job["job_id"], job["attempt_id"]),
         )
         return cur.rowcount == 1
+
+    def decide_and_enqueue(self, approval_id: str, status: str, actor: str = "user:owner") -> bool:
+        """Approval decision and the resume job are committed atomically (outbox-style)."""
+        with self.db.transaction():
+            row = self.db.execute(
+                "UPDATE aiagent.approvals SET status=%s, decided_by=%s WHERE approval_id=%s AND status='PENDING' RETURNING run_id",
+                (status, actor, approval_id),
+            ).fetchone()
+            if row is None:
+                return False
+            self.db.execute(
+                "INSERT INTO aiagent.jobs(dedupe_key, run_id, kind) VALUES (%s,%s,'resume') ON CONFLICT (dedupe_key) DO NOTHING",
+                (f"{row['run_id']}:resume:{approval_id}", row["run_id"]),
+            )
+        return True
 
     # ---------- observation ----------
     def count(self, table: str, where: str = "TRUE", args: tuple[Any, ...] = ()) -> int:
@@ -235,6 +280,26 @@ class Control:
         return self.db.execute(
             "SELECT * FROM aiagent.tool_ledger WHERE root_run_id = %s ORDER BY intent_key", (run_id,)
         ).fetchall()
+
+
+def race(point: str, url: str) -> None:
+    """Deterministic concurrency injection: at `point`, a *separate* connection (= another process from the
+    database's point of view) commits a Steer / Cancel / Revoke. AIAGENT_RACE="<point>:<action>[,...]"."""
+    for spec in os.environ.get("AIAGENT_RACE", "").split(","):
+        if not spec or spec.rsplit(":", 1)[0] != point:
+            continue
+        action = spec.rsplit(":", 1)[1]
+        other = Control(url)
+        run_id = os.environ["AIAGENT_RACE_RUN"]
+        if action == "steer":
+            other.steer(run_id)
+        elif action == "cancel":
+            other.cancel(run_id)
+        elif action == "revoke":
+            for a in other.approvals(run_id):
+                other.revoke(a["approval_id"])
+        other.db.close()
+        os.environ["AIAGENT_RACE"] = ",".join(x for x in os.environ["AIAGENT_RACE"].split(",") if x != spec)  # once
 
 
 def fault(point: str) -> None:

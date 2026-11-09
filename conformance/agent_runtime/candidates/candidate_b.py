@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from deepagents import create_deep_agent
@@ -21,6 +23,7 @@ from deepagents.profiles.harness.harness_profiles import (
     HarnessProfile,
     register_harness_profile,
 )
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -29,13 +32,15 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolCallId, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.config import get_config
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command, interrupt
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from aiagent_conformance.control import Claim, Control
+from aiagent_conformance.control import Claim, Control, fault
 from aiagent_conformance.gateways import (
+    TOOL_SCHEMAS,
     AwaitingApproval,
     ModelGateway,
     SealedModelRequest,
@@ -45,7 +50,7 @@ from aiagent_conformance.gateways import (
     sealed_model_call,
     settle_pending,
 )
-from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome
+from aiagent_conformance.port import DerivedStateMismatch, SegmentOutcome, final_in_head, verify_against_head
 
 NAME = "B:deepagents+langgraph"
 
@@ -56,8 +61,22 @@ register_harness_profile(
 )
 FRAMEWORK_SCHEMAS = ["public"]  # checkpoints, checkpoint_blobs, checkpoint_writes, checkpoint_migrations
 
-CLAIMS: dict[str, Claim] = {}
-_ctx: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class RunCtx:
+    """Per-run services and claim, passed through RunnableConfig (never a module global), so several runs
+    can execute concurrently in one worker process without sharing a "current run"."""
+
+    claim: Claim
+    ctl: Control
+    mgw: ModelGateway
+    tgw: ToolGateway
+
+
+def run_ctx(config: RunnableConfig | None = None) -> RunCtx:
+    cfg = config if config is not None else get_config()
+    return cfg["configurable"]["__aiagent"]
 
 
 def to_neutral(messages: list[BaseMessage]) -> list[dict[str, Any]]:
@@ -105,22 +124,19 @@ class GatewayChatModel(BaseChatModel):
 
     async def _agenerate(self, messages: list[BaseMessage], stop: Any = None,
                          run_manager: AsyncCallbackManagerForLLMRun | None = None, **kwargs: Any) -> ChatResult:
-        run_id = _ctx["run_id"]
+        rc = run_ctx()
         names = [t["function"]["name"] for t in kwargs.get("tools", [])]
-        _ctx.setdefault("seen_tools", {}).setdefault(self.gw_stream, set()).update(names)
-        req = SealedModelRequest(CLAIMS[run_id], self.gw_stream, to_neutral(messages), names, self.policy)
-        import asyncio
-
-        resp = await asyncio.to_thread(sealed_model_call, _ctx["ctl"], _ctx["mgw"], req)
+        req = SealedModelRequest(rc.claim, self.gw_stream, to_neutral(messages), names, self.policy)
+        resp = await asyncio.to_thread(sealed_model_call, rc.ctl, rc.mgw, req)
         return ChatResult(generations=[ChatGeneration(message=from_neutral([resp])[0])])
 
 
 def _tools(stream: str) -> list[Any]:
     async def call(config: RunnableConfig, tool_call_id: str, name: str, args: dict[str, Any]) -> str:
-        claim = CLAIMS[config["configurable"]["run_id"]]
+        rc = run_ctx(config)
         while True:
             try:
-                return await gateway_tool_stub(_ctx["ctl"], _ctx["tgw"], claim, tool_call_id, name, args, stream)
+                return await gateway_tool_stub(rc.ctl, rc.tgw, rc.claim, tool_call_id, name, args, stream)
             except AwaitingApproval as e:
                 # Pause the graph. The resume value is ignored: only the gateway's approval row counts.
                 # If the gateway still says PENDING after a resume, the next interrupt() pauses again.
@@ -139,6 +155,33 @@ def _tools(stream: str) -> list[Any]:
     return [search, send_message]
 
 
+class HeadRecorder(AgentMiddleware):
+    """Records results of framework-internal tools (`task`, `read_file`) in Checkpoint HEAD, so the HEAD holds
+    every message the framework state holds and the checkpoint can be compared with it in full."""
+
+    def __init__(self, stream: str):
+        super().__init__()
+        self.stream = stream
+
+    @property
+    def name(self) -> str:
+        return f"HeadRecorder[{self.stream}]"
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        result = await handler(request)
+        if request.tool_call["name"] in TOOL_SCHEMAS:
+            return result  # gateway tools record their own result
+        # DeepAgents' `task` returns a Command(update={"messages": [ToolMessage, ...]}), not a ToolMessage.
+        msgs = [result] if isinstance(result, ToolMessage) else [
+            m for m in (getattr(result, "update", None) or {}).get("messages", []) if isinstance(m, ToolMessage)]
+        rc = run_ctx(request.runtime.config)
+        for m in msgs:
+            rc.ctl.append_head(rc.claim, "tool", {"kind": "tool", "tool_call_id": m.tool_call_id,
+                                                  "tool_name": request.tool_call["name"], "content": m.text},
+                               stream=self.stream, tool_call_id=m.tool_call_id)
+        return result
+
+
 def build_graph(policy: str, checkpointer: Any, *, compaction: bool) -> Any:
     profile = {"max_input_tokens": 8000} if compaction else {"max_input_tokens": 1_000_000}
     model = GatewayChatModel(gw_stream="main", policy=policy, profile=profile)
@@ -151,13 +194,13 @@ def build_graph(policy: str, checkpointer: Any, *, compaction: bool) -> Any:
             "system_prompt": "You research prices.",
             "tools": _tools("subagent:researcher")[:1],
             "model": GatewayChatModel(gw_stream="subagent:researcher", policy=policy, profile=profile),
-            "middleware": [FilesystemMiddleware(backend=StateBackend(), tools=["read_file"])],
+            "middleware": [FilesystemMiddleware(backend=StateBackend(), tools=["read_file"]), HeadRecorder("subagent:researcher")],
         })
     return create_deep_agent(
         model=model,
         tools=_tools("main"),
         system_prompt="You are the aiagent-md conformance agent.",
-        middleware=[no_fs],
+        middleware=[no_fs, HeadRecorder("main")],
         subagents=subagents,
         backend=StateBackend(),
         checkpointer=checkpointer,
@@ -171,7 +214,6 @@ class CandidateB:
     def __init__(self, ctl: Control, mgw: ModelGateway, tgw: ToolGateway, db_url: str, *, parallel: bool = False, compaction: bool = False):
         self.ctl, self.mgw, self.tgw, self.db_url = ctl, mgw, tgw, db_url
         self.parallel, self.compaction = parallel, compaction
-        _ctx.update(ctl=ctl, mgw=mgw, tgw=tgw)
         self.graphs: dict[str, Any] = {}
 
     async def launch(self) -> None:
@@ -187,14 +229,26 @@ class CandidateB:
         return self.graphs[policy]
 
     async def run_segment(self, claim: Claim, policy: str) -> SegmentOutcome:
-        CLAIMS[claim.run_id] = claim
-        _ctx["run_id"] = claim.run_id
         graph = await self._graph(policy)
         ref = self.ctl.run(claim.run_id)["framework_ref"]
         head = self.ctl.transcript(claim.run_id)
         try:
             inp: Any
-            if ref is None:
+            if ref is not None:
+                cfg = self._cfg(ref, claim)
+                state = await graph.aget_state(cfg)
+                verify_against_head(to_neutral(state.values.get("messages", [])), head)
+                if final_in_head(head):
+                    return SegmentOutcome("FINAL", text=head[-1]["content"])  # HEAD is the answer; checkpoint only verified
+                if state.interrupts:
+                    inp = Command(resume={i.id: {"ask_gateway": True} for i in state.interrupts})
+                elif state.next:
+                    inp = None  # killed mid-superstep: LangGraph replays the pending node(s)
+                else:
+                    raise DerivedStateMismatch("checkpoint is complete but HEAD has no final answer")
+            else:
+                if final_in_head(head):
+                    return SegmentOutcome("FINAL", text=head[-1]["content"])
                 # Rebuild from HEAD. Dangling tool calls must be settled through the gateway first:
                 # DeepAgents' PatchToolCallsMiddleware would otherwise mark them "cancelled" silently.
                 await settle_pending(self.ctl, self.tgw, claim)
@@ -203,20 +257,13 @@ class CandidateB:
                 self.ctl.set_framework_ref(claim, ref)
                 inp = {"messages": from_neutral(head)}
                 cfg = self._cfg(ref, claim)
-            else:
-                cfg = self._cfg(ref, claim)
-                state = await graph.aget_state(cfg)
-                self._verify(state.values.get("messages", []), head)
-                if state.interrupts:
-                    inp = Command(resume={i.id: {"ask_gateway": True} for i in state.interrupts})
-                elif state.next:
-                    inp = None  # killed mid-superstep: LangGraph replays the pending node(s)
-                else:
-                    return self._final(state.values)
             result = await graph.ainvoke(inp, cfg, durability="sync" if not self.parallel else "async")
             if result.get("__interrupt__"):
                 return SegmentOutcome("AWAITING_APPROVAL", approval_ids=[i.value.get("approval_id") for i in result["__interrupt__"]])
-            return self._final(result)
+            fault("before_segment_return")  # framework finished and checkpointed; adapter has not returned yet
+            head = self.ctl.transcript(claim.run_id)
+            verify_against_head(to_neutral(result.get("messages", [])), head, complete=True)
+            return SegmentOutcome("FINAL", text=head[-1]["content"])
         except UnknownEffect:
             return SegmentOutcome("UNKNOWN_EFFECT")
         except AwaitingApproval as e:
@@ -224,30 +271,15 @@ class CandidateB:
         except GraphInterrupt:  # pragma: no cover - surfaced via __interrupt__ normally
             return SegmentOutcome("AWAITING_APPROVAL")
         except Exception as e:
-            if type(e).__name__ in ("FencedOut", "StaleGoal"):
+            if type(e).__name__ in ("FencedOut", "StaleGoal", "Cancelled"):
                 return SegmentOutcome(type(e).__name__.upper())
             self.ctl.db.execute("UPDATE aiagent.runs SET framework_ref = NULL WHERE run_id = %s", (claim.run_id,))
             return SegmentOutcome("REBUILD", detail=f"{type(e).__name__}: {e}"[:300])
 
     def _cfg(self, ref: str, claim: Claim) -> RunnableConfig:
-        return {"configurable": {"thread_id": ref, "run_id": claim.run_id}, "recursion_limit": 50,
+        rc = RunCtx(claim, self.ctl, self.mgw, self.tgw)
+        return {"configurable": {"thread_id": ref, "__aiagent": rc}, "recursion_limit": 50,
                 "max_concurrency": None if self.parallel else 1}
-
-    @staticmethod
-    def _verify(state_messages: list[BaseMessage], head: list[dict[str, Any]]) -> None:
-        """Framework state must agree with HEAD on every tool call it carries (derived-cache check)."""
-        head_calls = {tc["id"]: tc for e in head if e["kind"] == "assistant" for tc in e.get("tool_calls", [])}
-        for m in to_neutral(state_messages):
-            for tc in m.get("tool_calls", []) if m["kind"] == "assistant" else []:
-                h = head_calls.get(tc["id"])
-                if h is None or h["name"] != tc["name"] or h["args"] != tc["args"]:
-                    raise DerivedStateMismatch(f"checkpoint tool call {tc} not in HEAD")
-
-    @staticmethod
-    def _final(values: dict[str, Any]) -> SegmentOutcome:
-        msgs = values.get("messages", [])
-        last = msgs[-1] if msgs else None
-        return SegmentOutcome("FINAL", text=last.text if isinstance(last, AIMessage) else None)
 
     async def close(self) -> None:
         if hasattr(self, "conn"):

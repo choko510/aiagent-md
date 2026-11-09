@@ -53,9 +53,12 @@ def main() -> None:
     ap.add_argument("--python", required=True)
     ap.add_argument("--pg", required=True)
     ap.add_argument("-n", type=int, default=10)
+    ap.add_argument("--mode", choices=["runtime", "queue"], default="runtime",
+                    help="runtime: segments started directly; queue: every segment goes through the candidate's queue"
+                         " (A: DBOS Queue, B: aiagent-md QueuePort) so queue costs are included")
     ap.add_argument("--out")
     a = ap.parse_args()
-    db = f"bench_{a.candidate}"
+    db = f"bench_{a.candidate}_{a.mode}"
     with psycopg.connect(f"{a.pg}/postgres", autocommit=True) as c:
         c.execute(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
         c.execute(f"CREATE DATABASE {db}")
@@ -67,8 +70,9 @@ def main() -> None:
 
     def worker(rid: str) -> dict:
         env = {**os.environ, "PYDANTIC_AI_NO_BANNER": "1"}
+        extra = ["--via-queue"] if a.mode == "queue" else []
         p = subprocess.run([a.python, "-m", "aiagent_conformance.worker", "--candidate", a.candidate, "--db", url,
-                            "--run", rid, "--policy", "notify"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+                            "--run", rid, "--policy", "notify", *extra], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
         line = [ln for ln in p.stdout.splitlines() if ln.startswith("{")]
         assert p.returncode == 0 and line, p.stderr[-2000:]
         return json.loads(line[-1])
@@ -106,7 +110,7 @@ def main() -> None:
         })
     med = {k: round(statistics.median(s[k] for s in samples), 3) for k in samples[0]}
     result = {
-        "candidate": a.candidate, "n": a.n, "median": med,
+        "candidate": a.candidate, "mode": a.mode, "n": a.n, "median": med,
         "min": {k: min(s[k] for s in samples) for k in samples[0]},
         "max": {k: max(s[k] for s in samples) for k in samples[0]},
         "framework_state_bytes_total": rel_bytes(stat, fw),

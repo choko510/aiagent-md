@@ -545,3 +545,5 @@ Backend試験は**pytest**（async: anyio/pytest-asyncio）を基盤とし、HTT
 | 計測 | `bench.py` | RSS・CPU秒・時間・WAL・schema別tuple書込。環境依存で同一実行内のみ比較 |
 
 PYRT-T00〜T12の一覧と結果は[ADR-038/039 STEP 2判定結果](../00-foundation/architecture-decisions.md)。**Fake Gatewayと簡略DDL上の合格であり、本番Gateway・Sentinel・VM分離下での`Verified`ではない。**既存のTest ID・Fixture・Acceptance Criteriaは変更しない。
+
+**PR #80レビュー後の追加Fixture**: (1) `AIAGENT_RACE="<point>:<steer|cancel|revoke>"`で、指定点（`gateway_before_final_admission`、`gateway_after_final_admission`、`model_before_admission@<stream>`）において**別DB接続**から状態変更をcommitする決定的な競合注入。(2) `--queue-worker`による汎用QueuePort consumer（attempt fence付きACK、`before_job_ack`での停止）と、複数プロセス同時起動。(3) `--run r1,r2,…`による1プロセス内の複数Run・複数tenant並行実行。(4) `text`／`toolresult`のcheckpoint改変。対応試験はPYRT-T04b、T09b、T13〜T17。

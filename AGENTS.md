@@ -8,7 +8,7 @@
 - `docs/00-foundation/spec-index.md` で対象機能の正本と依存MDを特定する。
 - 共通の型/イベント/状態は `docs/01-contracts/`、Toolと副作用は `docs/03-tools/`、Securityは `docs/09-security/`、DB/運用は `docs/10-infrastructure/`、受入テストは `docs/11-qa/` を参照する。
 - `docs/02-runtime/sandbox-execution.md`、`docs/09-security/runtime-cell-isolation.md`、`docs/09-security/sentinel-authority.md` を新しい信頼境界の正本案として読む。
-- **Python-first（ADR-036〜040）**: Backend/Agent Runtime/MCP/Browser Worker/Memory/AutomationはPython、Web UIはReact + TypeScript、DBはSQL正本、Rustは任意。`system-architecture.md` §13.2 と `architecture-rules.md` §E を先に読む。仕様中の`ts`ブロックは論理型記法であり、共有型はcanonical JSON Schema→Pydantic/生成TS型で実装し手書きで二重定義しない。Agent Runtime OSSはSTEP 2の実測でDeepAgents Python＋LangGraph（ADR-038）、QueueはPostgreSQL自作QueuePort（ADR-039）を選定済みだがNOT LOCKED。Runtimeを触る変更は`conformance/agent_runtime/`の適合試験（PYRT-T00〜T12）を通し、STEP 2判定結果のAdapter規則とSTEP 3採用条件を守る。
+- **Python-first（ADR-036〜040）**: Backend/Agent Runtime/MCP/Browser Worker/Memory/AutomationはPython、Web UIはReact + TypeScript、DBはSQL正本、Rustは任意。`system-architecture.md` §13.2 と `architecture-rules.md` §E を先に読む。仕様中の`ts`ブロックは論理型記法であり、共有型はcanonical JSON Schema→Pydantic/生成TS型で実装し手書きで二重定義しない。Agent Runtime OSSはSTEP 2の実測でDeepAgents Python＋LangGraph（ADR-038）、Queueは自作PostgreSQL QueuePortを優先候補（ADR-039 PROVISIONAL）とする。いずれもNOT LOCKED。Runtimeを触る変更は`conformance/agent_runtime/`の適合試験（PYRT-T00〜T17）を通し、STEP 2判定結果のAdapter規則とSTEP 3採用条件を守る。
 - `governance/round6/contract-lock-candidate.md` の CL-01〜12 は承認待ち。Draft仕様はLockedでなく、CIの静的検証も実動作の証拠ではない。
 
 ## Implementation rules

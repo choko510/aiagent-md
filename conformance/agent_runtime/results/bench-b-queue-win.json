@@ -1,0 +1,40 @@
+{
+  "candidate": "b",
+  "mode": "queue",
+  "n": 10,
+  "median": {
+    "rss_mb": 95.1,
+    "boot_s": 1.98,
+    "segment_s": 0.518,
+    "cpu_s": 4.961,
+    "launch_s": 0.0,
+    "wal_bytes": 38016.0,
+    "fw_tuple_writes": 29.0,
+    "aiagent_tuple_writes": 33.0
+  },
+  "min": {
+    "rss_mb": 94.8,
+    "boot_s": 1.955,
+    "segment_s": 0.47400000000000003,
+    "cpu_s": 4.813,
+    "launch_s": 0.0,
+    "wal_bytes": 37696,
+    "fw_tuple_writes": 29,
+    "aiagent_tuple_writes": 33
+  },
+  "max": {
+    "rss_mb": 95.6,
+    "boot_s": 2.0885,
+    "segment_s": 0.543,
+    "cpu_s": 5.172,
+    "launch_s": 0.0,
+    "wal_bytes": 218432,
+    "fw_tuple_writes": 29,
+    "aiagent_tuple_writes": 33
+  },
+  "framework_state_bytes_total": 483328,
+  "aiagent_state_bytes_total": 376832,
+  "runs_in_db": 11,
+  "python": "3.13.14",
+  "platform": "win32"
+}

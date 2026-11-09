@@ -187,3 +187,4 @@ Runtime HostはPython asyncioの独立Workerプロセスとして実装する（
 - Worker 1プロセスは`AsyncPostgresSaver`用のDB接続を1本持ち、checkpointerはaiagent-md正本とは別schema/別roleへ置く（STEP 3）。Windowsでの開発時はpsycopg asyncのためSelector event loopが必要（本番Linuxでは不要）。
 - Worker peak RSSは同一fixtureで約96 MB（Linux CI、`ru_maxrss`。候補Aは約117 MB）、起動〜準備約1.2 s（N=10中央値。Windows値は`conformance/agent_runtime/results/`）。cgroup上限の初期値算定に使うが、本番Model/Toolを含めた値ではない。
 - kill（`os._exit`相当、OOMを模擬）後は既存のlease失効→再claimで再開し、送信重複0・UNKNOWN保持をPYRT-T01/T06/T07で確認した。
+- **1プロセス複数Run（PR #80レビュー後）**: 1 Workerプロセスで複数Runを`asyncio`並行実行してよい。条件は、Run固有のclaim・サービス参照を呼出し毎の注入（LangGraph `RunnableConfig`）で渡しモジュール共有変数を使わないこと、DB接続をthread毎に分離すること（1接続を複数Runで共有するとTx境界が混ざる）。3 Run・2 tenantの並行実行で混入0を確認（PYRT-T15）。1プロセス＝1 Runに固定する方式は採らない。

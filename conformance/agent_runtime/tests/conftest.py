@@ -56,30 +56,59 @@ class Harness:
         self.ctl = Control(self.url)
         self.py = os.environ.get(f"AIAGENT_PY_{cand.upper()}", sys.executable)
 
-    def new_run(self, policy: str = "notify", history: list[dict[str, Any]] | None = None) -> str:
+    def new_run(self, policy: str = "notify", history: list[dict[str, Any]] | None = None, tenant: str = "t1") -> str:
         rid = f"{self.cand}-{policy}-{uuid.uuid4().hex[:8]}"
-        self.ctl.create_run(rid, USER_TEXT[policy], history or [])
+        self.ctl.create_run(rid, USER_TEXT[policy], history or [], tenant_id=tenant, policy=policy)
         return rid
 
-    def worker(self, run_id: str, policy: str = "notify", *, fault: str | None = None, args: list[str] | None = None,
-               timeout: float = 120) -> dict[str, Any]:
+    def _env(self, fault: str | None, race: str | None, race_run: str | None) -> dict[str, str]:
         env = {**os.environ, "PYDANTIC_AI_NO_BANNER": "1", "PYTHONIOENCODING": "utf-8"}
-        env.pop("AIAGENT_FAULT", None)
+        for k in ("AIAGENT_FAULT", "AIAGENT_RACE", "AIAGENT_RACE_RUN"):
+            env.pop(k, None)
         for k in list(env):  # no provider credential is ever given to a worker
             if k.endswith("_API_KEY"):
                 env.pop(k)
         if fault:
             env["AIAGENT_FAULT"] = fault
-        cmd = [self.py, "-m", "aiagent_conformance.worker", "--candidate", self.cand, "--db", self.url,
-               "--run", run_id, "--policy", policy, "--lease", str(LEASE), *(args or [])]
-        p = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, timeout=timeout, encoding="utf-8")
-        if p.returncode == 137:
-            time.sleep(LEASE + 0.3)  # the dead worker's lease must expire before anyone else may claim
+        if race:
+            env["AIAGENT_RACE"], env["AIAGENT_RACE_RUN"] = race, race_run or ""
+        return env
+
+    def _cmd(self, args: list[str]) -> list[str]:
+        return [self.py, "-m", "aiagent_conformance.worker", "--candidate", self.cand, "--db", self.url,
+                "--lease", str(LEASE), *args]
+
+    @staticmethod
+    def _parse(rc: int, out: str, err: str) -> dict[str, Any]:
+        if rc == 137:
             return {"status": "KILLED"}
-        line = next((ln for ln in reversed(p.stdout.splitlines()) if ln.startswith("{")), None)
-        if p.returncode != 0 or line is None:
-            raise AssertionError(f"worker failed rc={p.returncode}\nSTDOUT:{p.stdout[-3000:]}\nSTDERR:{p.stderr[-6000:]}")
+        line = next((ln for ln in reversed(out.splitlines()) if ln.startswith("{")), None)
+        if rc != 0 or line is None:
+            raise AssertionError(f"worker failed rc={rc}\nSTDOUT:{out[-3000:]}\nSTDERR:{err[-6000:]}")
         return json.loads(line)
+
+    def worker(self, run_id: str, policy: str = "notify", *, fault: str | None = None, args: list[str] | None = None,
+               race: str | None = None, timeout: float = 120) -> dict[str, Any]:
+        p = subprocess.run(self._cmd(["--run", run_id, "--policy", policy, *(args or [])]), cwd=ROOT,
+                           env=self._env(fault, race, run_id.split(",")[0]), capture_output=True, text=True,
+                           timeout=timeout, encoding="utf-8")
+        out = self._parse(p.returncode, p.stdout, p.stderr)
+        if out.get("status") == "KILLED":
+            time.sleep(LEASE + 0.3)  # the dead worker's lease must expire before anyone else may claim
+        return out
+
+    def queue_workers(self, n: int = 1, *, fault: str | None = None, timeout: float = 180) -> list[dict[str, Any]]:
+        """Start n QueuePort consumer processes concurrently; each runs until the queue stays idle."""
+        procs = [subprocess.Popen(self._cmd(["--queue-worker"]), cwd=ROOT, env=self._env(fault, None, None),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                 for _ in range(n)]
+        outs = []
+        for p in procs:
+            o, e = p.communicate(timeout=timeout)
+            outs.append(self._parse(p.returncode, o, e))
+        if any(o.get("status") == "KILLED" for o in outs):
+            time.sleep(LEASE + 0.3)
+        return outs
 
     def approve_all(self, run_id: str, status: str = "APPROVED") -> list[str]:
         ids = [a["approval_id"] for a in self.ctl.approvals(run_id) if a["status"] == "PENDING"]
@@ -99,8 +128,10 @@ class Harness:
             " AND s.intent_key IN (SELECT tc->>'id' FROM aiagent.head_entries, jsonb_array_elements(payload->'tool_calls') tc WHERE run_id=%s)",
             (run_id,)).fetchone()["n"]
 
-    def model_calls(self, run_id: str) -> list[dict[str, Any]]:
-        return self.ctl.db.execute("SELECT * FROM aiagent.model_calls WHERE run_id=%s ORDER BY id", (run_id,)).fetchall()
+    def model_calls(self, run_id: str, *, include_cached: bool = False) -> list[dict[str, Any]]:
+        """Provider calls (default) or every admission including answers replayed from HEAD."""
+        q = "SELECT * FROM aiagent.model_calls WHERE run_id=%s" + ("" if include_cached else " AND NOT cached")
+        return self.ctl.db.execute(q + " ORDER BY id", (run_id,)).fetchall()
 
 
 @pytest.fixture(params=CANDIDATES)

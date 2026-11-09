@@ -166,6 +166,24 @@ def test_t04_corrupted_framework_state_is_rebuilt_from_head(h: Harness, mode: st
     assert all(row["result"] is None or "wodget" not in str(row["result"]) for row in h.ctl.ledger(rid))
 
 
+@pytest.mark.parametrize("mode", ["text", "toolresult"])
+def test_t04b_altered_checkpoint_content_is_not_trusted(h: Harness, mode: str) -> None:
+    """P1-02: assistant text / tool result / final answer in the framework state are compared with HEAD in
+    order and content before reuse; the final answer always comes from HEAD."""
+    if h.cand == "a" and mode == "toolresult":
+        pytest.skip("DBOS persists only model-request steps; function-tool results are not stored, so not corruptible")
+    rid = h.new_run()
+    assert h.worker(rid)["status"] == "AWAITING_APPROVAL"
+    h.approve_all(rid)
+    assert h.worker(rid, fault="before_segment_return")["status"] == "KILLED"
+    n = _adapter(h).corrupt_static(h.ctl, rid, mode)
+    assert n > 0, "nothing was corrupted"
+    out = h.worker(rid)
+    assert out["status"] == "FINAL" and out["text"] == "done:CONFIRMED", out
+    assert out["rebuilds"], "altered framework content was not detected"
+    assert len(h.sends(rid)) == 1
+
+
 def _adapter(h: Harness):
     if h.cand == "a":
         from candidates.corruption import CorruptA
@@ -200,10 +218,26 @@ def _framework_dump(h: Harness) -> str:
 
 
 # ---------------------------------------------------------------- PYRT-T09 subagent + context compaction
+def test_t09b_framework_internal_tool_results_are_in_head(h: Harness) -> None:
+    """Delegation results (`task` / `delegate_task`) are recorded in HEAD, so the full transcript check passes."""
+    rid = h.new_run("delegate")
+    out = h.worker(rid, "delegate")
+    assert out["status"] == "FINAL" and out["text"] == "done:delegated" and out["rebuilds"] == [], out
+    tools = [e["payload"]["tool_name"] for e in h.ctl.head(rid, "main") if e["kind"] == "tool"]
+    assert tools in (["task"], ["delegate_task"]), tools
+
+
 def test_t09_subagent_and_compaction(h: Harness) -> None:
     rid = h.new_run("delegate", history=LONG_HISTORY)
     out = h.worker(rid, "delegate", args=["--compaction"])
     assert out["status"] == "FINAL" and out["text"] == "done:delegated", out
+    if h.cand == "b":
+        # DeepAgents summarization is non-mutating: the checkpoint still equals the raw HEAD transcript.
+        assert out["rebuilds"] == [], out
+    else:
+        # Finding: pydantic-ai-harness SummarizingCompaction rewrites the run's message history, so the
+        # framework transcript cannot be verified against raw HEAD; the adapter falls back to HEAD.
+        assert out["rebuilds"] and "differs from HEAD" in out["rebuilds"][0], out
     calls = h.model_calls(rid)
     streams = {c["stream"] for c in calls}
     assert "subagent:researcher" in streams, streams

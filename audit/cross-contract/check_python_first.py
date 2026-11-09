@@ -125,11 +125,13 @@ for path, words in REQUIRED.items():
 
 # STEP 2 selected ADR-038/039 from measured conformance results; they must not be presented as
 # LOCKED/VERIFIED before Owner review, and the evidence suite must exist.
-for adr_id in ("ADR-038", "ADR-039"):
+# ADR-039 stays PROVISIONAL until the QueuePort's heartbeat / dead-letter / outbox tests exist.
+for adr_id, state in (("ADR-038", "SELECTED"), ("ADR-039", "PROVISIONAL")):
     row = next((ln for ln in adr.splitlines() if ln.startswith(f"| **{adr_id}**")), "")
-    if "SELECTED" not in row or "NOT LOCKED" not in row or re.search(r"PRODUCT_FIXED|VERIFIED|ACCEPTED", row):
-        errors.append(f"{adr_id} must be SELECTED (STEP 2) and NOT LOCKED")
-for rel in ("conformance/agent_runtime/tests/test_conformance.py", ".github/workflows/agent-runtime-conformance.yml"):
+    if state not in row or "NOT LOCKED" not in row or re.search(r"PRODUCT_FIXED|VERIFIED|ACCEPTED", row):
+        errors.append(f"{adr_id} must be {state} (STEP 2) and NOT LOCKED")
+for rel in ("conformance/agent_runtime/tests/test_conformance.py", "conformance/agent_runtime/tests/test_admission_and_queue.py",
+            ".github/workflows/agent-runtime-conformance.yml"):
     if not (ROOT / rel).is_file():
         errors.append(f"STEP 2 evidence missing: {rel}")
 
