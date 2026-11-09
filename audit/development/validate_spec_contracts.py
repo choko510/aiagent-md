@@ -33,22 +33,31 @@ TEST_OWNERS = {
     "DEV-UI": ("DEV-09", 10),
     "CAM": ("CAM-01", 19),
 }
-SEMANTIC_MARKERS = {
-    MODULES["DEV-03"]: ("demo:interact", "REQUIRE_USER_APPROVAL", "AUTO_RECOMMEND", "PREAUTHORIZED_BOUNDED_AUTO"),
-    MODULES["DEV-05"]: ("PreviewCapabilityV2", "originGeneration", "runLeaseEpoch", "DEV-BLD-T14"),
-    MODULES["DEV-07"]: ("integration verification", "DEV-REV-T08"),
-    MODULES["DEV-08"]: ("logicalWorkItemId", "INTEGRATED", "DEV-FF-T11"),
-    MODULES["DEV-09"]: ("campaign:control", "designPolicy", "demoAcceptancePolicy"),
-    MODULES["CAM-01"]: ("QuotaWaitReceiptV1", "CampaignChildAdmissionV1", "controlVersion", "CAM-T18"),
-    "docs/10-infrastructure/database-schema-and-migrations.md": (
+# Each module retains its own markers even when several IDs share one file.
+# A dictionary keyed by file path would silently discard duplicate-path checks.
+SEMANTIC_MARKERS = [
+    (MODULES["DEV-03"], ("demo:interact", "REQUIRE_USER_APPROVAL", "AUTO_RECOMMEND", "PREAUTHORIZED_BOUNDED_AUTO")),
+    (MODULES["DEV-05"], ("PreviewCapabilityV2", "originGeneration", "runLeaseEpoch", "DEV-BLD-T14")),
+    (MODULES["DEV-07"], ("integration verification", "DEV-REV-T08")),
+    (MODULES["DEV-08"], ("logicalWorkItemId", "INTEGRATED", "DEV-FF-T11")),
+    (MODULES["DEV-09"], ("campaign:control", "designPolicy", "demoAcceptancePolicy")),
+    (MODULES["CAM-01"], ("QuotaWaitReceiptV1", "CampaignChildAdmissionV1", "controlVersion", "CAM-T18")),
+    ("docs/10-infrastructure/database-schema-and-migrations.md", (
         "campaign_count_receipts", "campaign_quota_wait_receipts", "development_integration_receipts",
         "development_demo_decisions", "preview_sessions", "DEV-DB-T08",
-    ),
-    "docs/09-security/authentication-and-user-isolation.md": ("DevelopmentActionV1", "demo:interact", "AUTH-DEV-T06"),
-    "docs/01-contracts/event-envelope-and-stream.md": ("campaign.control_changed", "EVT-DEV-T05"),
-    "docs/11-qa/benchmark-and-release-gates.md": ("GATE-DEV-T01", "development disabled", "Feature Factory enabled"),
-    "docs/11-qa/end-to-end-acceptance.md": ("DevelopmentQaFixtureV1", "SC-24", "SC-31", "QA-E2E-T31F"),
+    )),
+    ("docs/09-security/authentication-and-user-isolation.md", ("DevelopmentActionV1", "demo:interact", "AUTH-DEV-T06")),
+    ("docs/01-contracts/event-envelope-and-stream.md", ("campaign.control_changed", "EVT-DEV-T05")),
+    ("docs/11-qa/benchmark-and-release-gates.md", ("GATE-DEV-T01", "development disabled", "Feature Factory enabled")),
+    ("docs/11-qa/end-to-end-acceptance.md", ("DevelopmentQaFixtureV1", "SC-24", "SC-31", "QA-E2E-T31F")),
+]
+BUNDLED_SECTIONS = {
+    "docs/16-app-development/development-orchestration.md": ("DEV-01", "DEV-02", "DEV-04"),
+    "docs/16-app-development/feature-lifecycle-and-demo.md": ("DEV-03", "DEV-08"),
+    "docs/16-app-development/debugging-and-verification.md": ("DEV-06", "DEV-07", "DEV-12"),
+    "docs/16-app-development/acceptance-and-rollout.md": ("DEV-20",),
 }
+
 errors: list[str] = []
 
 def read(path: str) -> str:
@@ -79,11 +88,22 @@ for prefix, (module, maximum) in TEST_OWNERS.items():
     if sorted(numbered) != list(range(1, maximum + 1)):
         errors.append(f"{prefix} definitions expected 01..{maximum:02d}, got {numbered}")
 
-for path, words in SEMANTIC_MARKERS.items():
+for path, words in SEMANTIC_MARKERS:
     body = read(path)
     for marker in words:
         if marker not in body:
             errors.append(f"{path}: missing contract marker {marker}")
+
+# Guard the merged-section anchors and catch accidental spec loss or broken ID routes.
+for path, section_ids in BUNDLED_SECTIONS.items():
+    body = read(path)
+    for module_id in section_ids:
+        heading_count = len(re.findall(rf"(?m)^## {re.escape(module_id)}\\s*$", body))
+        if heading_count != 1:
+            errors.append(f"bundled section {module_id} must occur once in {path}, got {heading_count}")
+        anchor = f"{path.rsplit('/', 1)[-1]}#{module_id.lower()}"
+        if anchor not in index:
+            errors.append(f"missing canonical spec-index link: {anchor}")
 
 qa = read("docs/11-qa/end-to-end-acceptance.md")
 scenarios = read("docs/00-foundation/acceptance-scenarios.md")
