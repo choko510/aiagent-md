@@ -90,3 +90,15 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | **ADR-034** | 永続Campaignはbounded Cycleを成果物で連鎖。10件等のprogressはVerified distinct receipt。停止/Quota/費用上限はハードゲート | 無制限1 Run、空tickごとにModel呼出し、Unknown課金をゼロ、承認待ちで全タスクを停止 | CHAT_01/02/07/08/09/10/11 pending |
 
 `ADR-029` はマージ済みPR #71のBrowser Live Observation仕様。ADR-030〜034はそのObserver/Takeover権限分離を継承する。Shared schema・外部Provider API・実際のKVM/Preview/Browserテストが揃うまで各ADRは採用候補でありLOCKEDと呼ばない。
+
+## ADR-035: Context Optimizationを共通Adapterで評価し、独立Proxy正本を導入しない（2026-11-09 / PROPOSED、NOT LOCKED）
+
+**Problem**: RTK CLI、Caveman Engine/Browse、Headroom Library/Proxyを全て無条件に重ねると、(a) Lossyによる極値/否定/失敗の欠落、(b) Browser CDP/Tool Gateway二重経路、(c) CCR/共有ProxyのTenant不整合、(d) Memory delete/Consent/Artifact GCの復元漏れ、(e) Prompt Cache prefix破壊、(f) コスト測定の二重計上、(g) RTK BUSL部分の再配布条件、が既存ADR-017〜028/033/034と衝突する。
+
+**採用提案**: Context Managerが認可済みRedacted Projectionごとに0または1つのoptional codecを選択し、Raw Artifact/SourceFact/Tool Receipt/Goal/Approvalを保護する。Headroom in-process libraryをJSON/logの第一候補、Caveman AX-only read projectionをBrowser Worker内の第二候補、RTK OSS CLIのpost-exec filterをSandboxの第三候補として比較する。初期modeはdisabled/shadow、削減がtask品質/Total costで改善したformatのみcanary化する。独立Caveman/Headroom/RTK Proxy・第二CDP agent・独立Memory/CCR authority・Cloud routing・多段lossy・automatic telemetryは既定不採用。すべて既存Gateway/Sentinel/Artifact/Recipient consentとSealed ModelRequestSnapshotに従う。
+
+**比較の根拠**: RTK [develop 08a261a](https://github.com/rtk-ai/rtk/tree/08a261a0d081ffe11a32986e2f4d76f3fdc33abb)、Caveman [main 3dc497a](https://github.com/JuliusBrussee/caveman/tree/3dc497a7f858c774d6e15b25e8c6120ef3a0eda8)、Headroom [main bb8d18a](https://github.com/headroomlabs-ai/headroom/tree/bb8d18a56abb07ca7e811235c86ea6b626eb1f8b)。公開benchmarkは異なるworkload/方式であり、それぞれの比率を単純比較/合算せず、同一fixture・Provider課金・タスク成功・cacheと復元で判断する。RTK OSSのApache-2.0とEngine/ProxyのBUSL-1.1を混同しない。Caveman v3以降のOSSはApache-2.0、Headroom OSSはApache-2.0、全てサードパーティ依存のNOTICE/有効ライセンスを実装時再確認する。
+
+**Authority・移行**: 既存88の共有正本モジュール数、Core types/DDLに変更なし。Adapter/ReceiptはCHAT_02 internal draftで、Artifact/ACL/DB/Tool Registry/Browserの共同契約はCHAT_01/02/03/04/06/09/10/11にOwner reviewを依頼。OPT-T01〜T20は設計のみ、未実行。Source/Artifactを追加で保持することがプライバシー保持期限を延長しない。実装・実測・契約承認なしにLOCKED/VERIFIED・削減率保証と呼ばない。
+
+**Rejection alternatives**: (1) RTK→Caveman→Headroom全段直列、(2) 外部OSS ProxyをTrusted Model Routerの代わりにする、(3) 共有CCR handlerを新しいAuthorizationとして公開、(4) Browserのmodel-selected UIDを直接click、(5) 書き換えたcompressed summaryを原本/effect receiptとする、(6) コスト低減のみでaccuracyとSecurity Gateを免除、はいずれも不採用。

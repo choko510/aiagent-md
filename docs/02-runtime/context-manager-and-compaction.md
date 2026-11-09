@@ -661,3 +661,65 @@ memory delete/correction:
 | ACM-T36 | Sealed snapshot保持不可・Continuation失効 | 再現不能を宣言、無条件再送0 |
 
 **現状は仕様書/静的検証のみで実装Fixtureは未実行。** QA Ownerがgolden source spans、期待TypedFacts、DB行/Attempt、Provider request transcript、Killpoint/CAS競合、Budget/Consent/Artifact GCを含む実行可能fixtureへ落とし込む。
+
+## 18.23 External Context Optimization Adapter: RTK / Caveman / Headroom（2026-11-09、Draft）
+
+**前提**: これはOSSコードと公開ベンチマークの静的調査から導いた実装候補であり、aiagent-md本体の実装・性能測定・Owner承認ではない。18.1〜18.22のTypedGoalAnchor、P0/P1保護、ContextManifest、Sealed ModelRequestSnapshot、Memory deletion dispatch barrier、Evidence entailmentを置き換えず、**LLMへ渡す許可済みの非信頼データ投影**だけを最適化する。元のTool Result、原本、Evidence、認可、支払/投稿等の副作用、Run stateは不変。
+
+### 18.23.1 採用/見送りと一次資料
+
+| OSS（調査commit） | コード/方式 | 選定と注意 |
+|---|---|---|
+| RTK [develop 08a261a](https://github.com/rtk-ai/rtk/tree/08a261a0d081ffe11a32986e2f4d76f3fdc33abb) | CLI output filters; [src/filters](https://github.com/rtk-ai/rtk/tree/develop/src/filters)、[lossy truncate](https://github.com/rtk-ai/rtk/blob/develop/engine/src/methods/truncate.rs)、[editions](https://www.rtk-ai.app/docs/resources/editions/) | SandboxのGit/test/buildの表示出力のみ検証。rtk-ossはApache-2.0、fullのengineとrtk-proxyはBUSL-1.1。pre-exec command rewrite、共有API proxyは見送り |
+| Caveman [main 3dc497a](https://github.com/JuliusBrussee/caveman/tree/3dc497a7f858c774d6e15b25e8c6120ef3a0eda8) | [compressors](https://github.com/JuliusBrussee/caveman/tree/main/engine/compressors)、[Browse AX](https://github.com/JuliusBrussee/caveman/blob/main/browse/README.md)、[CCR](https://github.com/JuliusBrussee/caveman/blob/main/docs/technical/context-recovery.md)、[licensing](https://github.com/JuliusBrussee/caveman/blob/main/LICENSING.md) | AXのfocused snapshot・構造化表示を優先検証。独立browser_act/eval、Chrome CDP接続、外部CCR authority、Cloud Autoは見送り。OSS v3+全体Apache-2.0、旧版は別 |
+| Headroom [main bb8d18a](https://github.com/headroomlabs-ai/headroom/tree/bb8d18a56abb07ca7e811235c86ea6b626eb1f8b) | [Python transforms](https://github.com/headroomlabs-ai/headroom/tree/main/headroom/transforms)、[smart_crusher.py](https://github.com/headroomlabs-ai/headroom/blob/main/headroom/transforms/smart_crusher.py)、[security](https://docs.headroomlabs.ai/docs/security-model) | JSON/ログ/検索結果の**in-process selective**圧縮を第一実験候補。共有Proxy、global SQLite CCR、auto memory、第三者宛送信・管理APIは不採用。Apache-2.0、依存/NOTICEは別監査 |
+
+宣伝される90%や21–57%等は対象コマンド・fixtureでの**局所的な削減**であり、タスク当たりの支払額、精度、aiagent-md実測ではない。RTKのbytes/4やCaveman・Headroomのoffline tokenizer計測値は推定としてラベル付けし、Provider usage/cache read/write/課金は別カウンターとする。Caveman Browseは大ページで有利でも小フォームで負になる場合がある。圧縮率だけでなく原文再取得と誤判断コストを測る。
+
+### 18.23.2 内部Adapter契約案（共有スキーマ/DDLではない）
+
+~~~typescript
+type OptimizeMode = "disabled" | "shadow" | "enabled";
+type SourceClass = "cli_stdout" | "cli_stderr" | "json_data" |
+  "search_hits" | "browser_ax" | "log" | "source_code" | "prose" | "unknown";
+type OptimizeOutcome = "PASSTHROUGH" | "OPTIMIZED" | "OFFLOADED" |
+  "SKIPPED_UNSAFE" | "INCONCLUSIVE" | "BLOCKED";
+interface ContextOptimizationCandidateV1 {
+  rawArtifactRef: string; redactedProjectionRef: string; sourceDigest: string;
+  ownerUserId: string; tenantId: string; runId: string; goalRevision: string;
+  contentClass: SourceClass; trustTier: string; toolAttemptId?: string;
+  observedAt?: string; locatorRef?: string; policyEpoch: string;
+  memoryScopeEpoch?: string; browserGeneration?: string; recipientId?: string;
+}
+interface ContextOptimizationReceiptV1 {
+  outcome: OptimizeOutcome; originalRef: string; inputProjectionHash: string;
+  outputProjectionHash?: string; outputArtifactRef?: string; locatorMapRef?: string;
+  codecId?: string; codecVersion?: string; pipelineDigest: string;
+  protectedFactRefs: string[]; reasonCode: string; qualityPolicyVersion: string;
+  estimatedBeforeTokens?: string; estimatedAfterTokens?: string;
+}
+~~~
+
+内部型は CHAT_02 proposal。Server-supplied IDs、Version、ACL、Current Run/Goal、Tool Intent/Receipt、Original/ProjectionのStorage authorityは01/03/09/10が持つ。LLM出力、外部HTML・JSON、MCP descriptorがcodec/policy/model recipientを変更できない。強い条件(A0 Policy/A1 Goal/A2 control、金額/日時/数量/否定、承認状態、UNKNOWN effect、署名、Tool role/call/result、出典根拠span)は原則非圧縮の保護領域。JSON schemaや正確な編集対象bytesを要求するReadは既定skip。OSSがロスレスを名乗っても同一性/情報保持の試験なしには信頼しない。
+
+### 18.23.3 データフロー・選択・再取得
+
+1. Policy/Gatewayで source/recipient/tenant 認可とretentionを確認し、CHAT_01/10の耐久 Raw Artifactを先に確定。Sealed Originalとモデル用Redacted Projectionは別digestとし、Secret/headers/cookie/token/環境変数を**エンジンに渡す前に**排除する。Redaction不能または機密分類unknownなら最適化/モデル送信を拒否する。
+2. Context Managerがtyped anchors/Tool schema/Raw Evidenceと圧縮可能な投影を切り分ける。source type・Tool attempt・許可済みformat・codec pin・固定Policyにより**最大1つのlossy最適化方式**を選ぶ。RTK=CLI表示、Caveman=AX focused read、Headroom=JSON/log/searchが第一候補。圧縮済み結果へさらに別のlossy compressorを重ねない。
+3. 元のRedacted ProjectionとOutput Projectionのdigest、codec/pipeline revision、locator map、provenance、入力/出力推定tokensをReceiptとして検証・保存。成功/失敗・ゼロ件・極値・列挙範囲・対立するSource・否定・税/手数料・タイムスタンプ・unitと原文の意味の不整合があれば使わない。引用が存在するだけでFact verifiedへ昇格させない。
+4. Parser失敗、lossyで重要値消失、出力増加、compression timeout/crash、recovery原文欠損/容量不足、codec unknown、Host/Provider未対応の場合は許可済みの原文Redacted Projectionへ戻す。ただしBudget/window超過なら無断で大量の原文送信せず既存Artifact Offload、必要rangeのread、PARTIALまたはBLOCKEDとする。失敗したHookをPASS扱いしない。
+5. LLMからの原文取得要求は固有の headroom_retrieve / browser_recover / rtk_retrieve APIを許可せず、既存Gateway認可済み read-only Artifact range Toolに正規化。所有権・tenant・current lease/GoalRevision・memory epoch・policy epoch・recipient・digest/expiry/locator・byte/token/time quotaを**取得時にも**再検証。Handleの知識はアクセス許可ではない。復元後もUntrusted data。
+6. Snapshot/Manifestへ codecId+version、pipelineDigest、Original/Projection SHA、locator、scope/recipient/epoch、cacheVersionをbindする。Providerへ送ったcached prefixは同じConversationで**byte-identical**に再利用。各turnで過去の圧縮結果を再圧縮しない。Goal/Memory revoke/Cancel/Source ACL変更/Model switchではepochと能力を再評価し、旧Projectionを破棄・再構築する。
+7. 最終serialized Provider requestの一意token bucketで再見積し、Tinput+R+S<=W、Budget reserve、Model dispatch admissionを再実施する。Provider input/output/cache使用量とモデル呼び出し/再取得回数を別集計。圧縮のためのLLMやembedding費用もRun Budgetに含める。
+
+### 18.23.4 保存・Privacy・Service境界
+
+Caveman/HeadroomのデフォルトローカルCCRは単一OSユーザーの信頼を前提とし、tenant隔離/個人情報削除/既存Artifact lifetimeに直接適合しない。共有Memory DB、Remote Proxy、Cloud Auto routing、telemetry/beacon、任意Plugin install、再取得Tool独立公開は製品既定にしない。採用するOSSはversion pin・SBOM/NOTICE・transitive dependency・環境変数・network endpoint/analytics・モデルダウンロード/remote inferenceを監査し、隔離されたTransform Workerか制限されたin-process libraryで使用。計測外部送信はopt-inのみ、デフォルトOFF。API資格情報を最適化エンジンに渡さない。
+
+Artifact削除・revoke・TTL時は元データと全Projection、codec cache、locator、recovery handle、Memory index、backup復旧経路まで無効化し、古いcache keyを別Tenantに再利用しない。実際にProvider送信済みのデータを取り戻せるとは主張しない。Caveman CCRがhash-checkを持つことと、認可・暗号化・永久保存があることは別。原文復元の可否は**品質保証ではない**。
+
+### 18.23.5 実装スライスと受入基準
+
+OPT-A: Contract/disabled・shadow mode/原本とreceipt/計測; OPT-B: Headroom JSON/log選択的Library; OPT-C: Browser Worker内AX focused projection; OPT-D: RTK OSS post-exec display filter; OPT-E: stable cache/model switch/revocation/fault/quality comparison。最初の実装ではProxyを直列化せず、各エンジン独立flagとalways-off fallbackを用意する。品質・安全Gate OPT-T01〜T20（CHAT_11）を満たさないエンジンはenabled化しない。実測値に基づき、全て不採用も許容する。
+
+**Owner handoff**: 01 Artifact/Provenance、02 Context/Middleware/Model、03 Retrieval Tool、04 Browser、06 Memory delete、08 UI、09 Tenant/Secrets/Sentinel、10 cache/GC/persistence、11 E2E/fault/benchmark。最新のCommit・ライセンス・APIは実装前再確認し、全員の合意前にLOCKEDとは呼ばない。

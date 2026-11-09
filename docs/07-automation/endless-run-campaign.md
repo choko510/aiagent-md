@@ -120,3 +120,11 @@ On 429/quota result, record `QuotaWaitReceiptV1` with provider, category, observ
 ### Integration head invalidation of previously reached targets
 For Project-linked Feature Factory Campaigns, TargetReached remains **valid only while** the current integration HEAD has PASS eligibility for at least targetCount distinct logical work items. On a later HEAD change, evaluate the immutable first-count receipt plus latest per-head `campaign_count_evaluations` evidence; if below target, display `REVALIDATION_REQUIRED` and block false “10/10” status. This does not silently re-enable a stopped or cost-exhausted Campaign. For generic non-Project research Campaigns, `INTEGRATED` is not a valid completion criterion and no fake integration receipt is required. Re-evaluation uses a separate record_version and controlVersion admission on any new work.
 **CAM-T19**: current integration HEAD changes after TARGET_REACHED; eligibility falls, status REVALIDATION_REQUIRED and no automatic spend; re-evaluation PASS restores target without duplicate count.
+
+## 2026-11-09: Endless RunのContext最適化と費用上限（OPT-E、Draft）
+
+RTKのtest/buildログ圧縮、Caveman Browser AX focus、Headroom JSON/tool-result圧縮はCampaign全体でのtoken蓄積を減らす**候補**だが、無期限Single Runや無制限API実行を正当化しない。各Cycleはbounded finite Run、durable Work Artifact/Goal/Consent/Source locator/Cost usageのcheckpointから復元する。前Cycleの要約を現CycleのVerified outcomeに昇格させない。異なるModelやcodecを採用した場合はContextManifestの固定投影を検証してから新しいSnapshotを作成。
+
+**コスト**: 1Cycleごとの provider input/output/cache write/read・追加recovery Tool calls・圧縮/再検索処理・CPU/RSSとtotal USDを合算し、節約前提でBudgetを解放しない。Provider usage欠損/429/timeoutは未知としてquota wait/partial。大きな圧縮が失敗しても再帰的にLLMを呼び続けない。Goal Steer・Stop・Memory deleteで以前のcontext/cacheの注入を止め、Tool effectsのUNKNOWNを再送しない。
+
+**導入Gate**: Existing CAM stop/quota/fenceとQA OPT-T18〜20、ACM resume testsのすべてがPASSするまでは長期Campaign向けOptimizerをenabledにしない（Designed/NOT RUN）。
