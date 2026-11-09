@@ -160,3 +160,17 @@
 | CAM-01 | [Endless Run Campaign](../07-automation/endless-run-campaign.md) | CHAT_01/02/03/07/08/09/10/11 |
 
 Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-development/acceptance-and-rollout.md) → referenced 01/02/03/04/07/08/09/10/11 canonical specs。将来の実装で定義重複があればこちらの型を勝手に正本化しない。差分で変更した基礎ファイルは本PRのOwner合意待ち。
+
+## 2026-11-09 Cloud Coding capabilities — supplemental Draft proposals
+
+既存**88基礎モジュールとDEV-01〜10/CAM-01の歴史的な件数を維持**したまま、[DEV-11〜20一覧](../16-app-development/README.md)を補足する。**9能力、追加5仕様MD、DEV-11..20の10設計ID**。いずれもOwner承認・実装・テスト未完了で、既存のShared契約の正本へ昇格していない。
+
+| IDs | Companion specification | State |
+|---|---|---|
+| DEV-11 | [PR Guardian](../16-app-development/pr-guardian.md) | Draft / NOT RUN |
+| DEV-12 | [Reproduction Lab](../16-app-development/reproduction-lab.md) | Draft / NOT RUN |
+| DEV-13/14 | [Code Intelligence / Adaptive Testing](../16-app-development/code-intelligence-and-adaptive-testing.md) | Draft / NOT RUN |
+| DEV-15..19 | [Advanced Software Factory](../16-app-development/advanced-software-factory.md) | Draft / NOT RUN |
+| DEV-20 | [Acceptance / rollout](../16-app-development/advanced-development-acceptance.md) | Draft / NOT RUN |
+
+対応REQはDEV-REQ-19..27、対応受入はSC-32..40（提案）。既存DEV-REQ-01..18/SC-24..31を置換しない。PR #74と変更パスを分離し、Context/Tool/Sentinel/BenchmarkのOwner調整を後続の契約審査事項とする。
