@@ -36,12 +36,12 @@ Failure: 全候補FAIL→部分完了/Blocked、選択せず既存A5へ原因を
 
 ### DEV-PAT テスト
 
-- `T01` 同じbase+goal、3隔離worktree→互いの書込み・secret参照0。
-- `T02` 候補Aが高速でもsecurity FAIL→不採用。
-- `T03` テストfixtureを改ざんした候補→不採用とFinding。
-- `T04` Candidate選択後integration HEAD移動→rebase/CAS＋再検証。
-- `T05` 部分合成→新しいsha・新しいtest/review receiptを要求。
-- `T06` 上限不足/同時stop→残候補kill、費用レシートが保存される。
+- `DEV-PAT-T01` 同じbase+goal、3隔離worktree→互いの書込み・secret参照0。
+- `DEV-PAT-T02` 候補Aが高速でもsecurity FAIL→不採用。
+- `DEV-PAT-T03` テストfixtureを改ざんした候補→不採用とFinding。
+- `DEV-PAT-T04` Candidate選択後integration HEAD移動→rebase/CAS＋再検証。
+- `DEV-PAT-T05` 部分合成→新しいsha・新しいtest/review receiptを要求。
+- `DEV-PAT-T06` 上限不足/同時stop→残候補kill、費用レシートが保存される。
 
 ## 2. DEV-16 — Cross-Repo Development
 
@@ -62,12 +62,12 @@ Web/API/料金データ/共有SDKなど、複数repoの仕様・schema互換性�
 
 ### DEV-XRP テスト
 
-- `T01` 2repoでschema+consumer互換→per-repo unit PASS＋pair integration PASS。
-- `T02` RepoAのpush成功、RepoB失敗→PARTIALLY_DELIVERED、Aを成功なしと偽らない。
-- `T03` 他repoのACLなし→その内容読取/書込0、計画Blocked。
-- `T04` BのHEAD差替→旧RepoSet PASS無効。
-- `T05` 二重Webhook/再起動→同じPR作成0重複、unknown pushを再送しない。
-- `T06` 旧データ形式互換失敗→片方のCI成功でもmulti-repo VERIFIED不可。
+- `DEV-XRP-T01` 2repoでschema+consumer互換→per-repo unit PASS＋pair integration PASS。
+- `DEV-XRP-T02` RepoAのpush成功、RepoB失敗→PARTIALLY_DELIVERED、Aを成功なしと偽らない。
+- `DEV-XRP-T03` 他repoのACLなし→その内容読取/書込0、計画Blocked。
+- `DEV-XRP-T04` BのHEAD差替→旧RepoSet PASS無効。
+- `DEV-XRP-T05` 二重Webhook/再起動→同じPR作成0重複、unknown pushを再送しない。
+- `DEV-XRP-T06` 旧データ形式互換失敗→片方のCI成功でもmulti-repo VERIFIED不可。
 
 ## 3. DEV-17 — Review Preference Learning
 
@@ -85,11 +85,11 @@ Web/API/料金データ/共有SDKなど、複数repoの仕様・schema互換性�
 
 ### DEV-RPLR テスト
 
-- `T01` maintainerが承認したStyle ruleを同repoにだけ適用。
-- `T02` PR内の悪意ある命令で秘密送出、無承認rule昇格が0。
-- `T03` 単一botコメント→policy即採用不可。
-- `T04` 過去の好みによりP0 security findingをdismiss不可。
-- `T05` repo移行/permission revoke→学習データ共有不可・期限失効。
+- `DEV-RPLR-T01` maintainerが承認したStyle ruleを同repoにだけ適用。
+- `DEV-RPLR-T02` PR内の悪意ある命令で秘密送出、無承認rule昇格が0。
+- `DEV-RPLR-T03` 単一botコメント→policy即採用不可。
+- `DEV-RPLR-T04` 過去の好みによりP0 security findingをdismiss不可。
+- `DEV-RPLR-T05` repo移行/permission revoke→学習データ共有不可・期限失効。
 
 ## 4. DEV-18 — Cloud Environment Templates
 
@@ -107,12 +107,12 @@ Cursorの事前ビルド環境を参考に、対象RepoSet/Toolchainに対応す
 
 ### DEV-ENV テスト
 
-- `T01` 同一repo+lock+image+policyでtemplate reuse後も同一testsが実行できる。
-- `T02` lock/OS/Arch/policy差違→cache missで鮮度不正採用0。
-- `T03` env内に疑似tokenとCookie→テンプレートArtifact/復元VMからsecret0。
-- `T04` untrusted PRがtemplateを汚染→trusted runで利用不可。
-- `T05` revoke/crash/template partial build→旧VMへfallbackせず安全にBlocked/rebuild。
-- `T06` 共有templateのtenant越境アクセス→DENY。
+- `DEV-ENV-T01` 同一repo+lock+image+policyでtemplate reuse後も同一testsが実行できる。
+- `DEV-ENV-T02` lock/OS/Arch/policy差違→cache missで鮮度不正採用0。
+- `DEV-ENV-T03` env内に疑似tokenとCookie→テンプレートArtifact/復元VMからsecret0。
+- `DEV-ENV-T04` untrusted PRがtemplateを汚染→trusted runで利用不可。
+- `DEV-ENV-T05` revoke/crash/template partial build→旧VMへfallbackせず安全にBlocked/rebuild。
+- `DEV-ENV-T06` 共有templateのtenant越境アクセス→DENY。
 
 ## 5. DEV-19 — Performance Regression Guard
 
@@ -130,12 +130,12 @@ Cursorの事前ビルド環境を参考に、対象RepoSet/Toolchainに対応す
 
 ### DEV-PERF テスト
 
-- `T01` 同一Fixtureでbase/afterの閾値違反を検出、severity Gateへ。
-- `T02` hardware/seed/OS変更→不公平比較でINCONCLUSIVE。
-- `T03` 欠測・極小n・flaky→NO_DETECTED_REGRESSIONを自称不可。
-- `T04` security FAILだが速度改善→Release BLOCK。
-- `T05` 新integration HEADに更新→旧Perf receiptで合格不可。
-- `T06` bounded load / cancel→無制限外向きtrafficと無限課金0。
+- `DEV-PERF-T01` 同一Fixtureでbase/afterの閾値違反を検出、severity Gateへ。
+- `DEV-PERF-T02` hardware/seed/OS変更→不公平比較でINCONCLUSIVE。
+- `DEV-PERF-T03` 欠測・極小n・flaky→NO_DETECTED_REGRESSIONを自称不可。
+- `DEV-PERF-T04` security FAILだが速度改善→Release BLOCK。
+- `DEV-PERF-T05` 新integration HEADに更新→旧Perf receiptで合格不可。
+- `DEV-PERF-T06` bounded load / cancel→無制限外向きtrafficと無限課金0。
 
 ## 6. 所有者と統合ゲート
 
