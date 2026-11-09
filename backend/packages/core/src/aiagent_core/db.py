@@ -10,13 +10,21 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.string import TextLoader
 from psycopg_pool import ConnectionPool
 
 Row = dict[str, Any]
 
 
+def configure(conn: psycopg.Connection[Any]) -> None:
+    """IDs are canonical lowercase UUID strings in every contract: load `uuid` columns as `str`, not uuid.UUID."""
+    conn.adapters.register_loader("uuid", TextLoader)
+
+
 def connect(url: str, *, autocommit: bool = True) -> psycopg.Connection[Row]:
-    return psycopg.connect(url, autocommit=autocommit, row_factory=dict_row, prepare_threshold=None)
+    conn = psycopg.connect(url, autocommit=autocommit, row_factory=dict_row, prepare_threshold=None)
+    configure(conn)
+    return conn
 
 
 class Database:
@@ -38,6 +46,7 @@ class Database:
                     max_size=self.max_size,
                     name=self.name,
                     open=True,
+                    configure=configure,
                     kwargs={"row_factory": dict_row, "autocommit": True, "prepare_threshold": None},
                     timeout=30.0,
                 )

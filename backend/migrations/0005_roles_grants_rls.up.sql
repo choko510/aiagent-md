@@ -47,7 +47,7 @@ GRANT UPDATE (status_code, active_run_id, record_version, updated_at) ON agent.t
 GRANT SELECT, UPDATE ON queue.jobs TO aiagent_runtime;
 GRANT SELECT ON queue.queues TO aiagent_runtime;
 GRANT SELECT, INSERT, UPDATE ON queue.job_attempts TO aiagent_runtime;
-GRANT SELECT, INSERT ON queue.dead_letters TO aiagent_runtime;
+GRANT SELECT, INSERT, UPDATE ON queue.dead_letters TO aiagent_runtime;
 
 -- Framework checkpointer login (LangGraph AsyncPostgresSaver): DML on its own schema only.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lg_checkpoint TO aiagent_checkpointer;
