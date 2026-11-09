@@ -661,3 +661,115 @@ memory delete/correction:
 | ACM-T36 | Sealed snapshot保持不可・Continuation失効 | 再現不能を宣言、無条件再送0 |
 
 **現状は仕様書/静的検証のみで実装Fixtureは未実行。** QA Ownerがgolden source spans、期待TypedFacts、DB行/Attempt、Provider request transcript、Killpoint/CAS競合、Budget/Consent/Artifact GCを含む実行可能fixtureへ落とし込む。
+
+## 19. OSS Hybrid Compaction — DeepAgents JS / Mastra OM / OpenClaw（2026-11-09、Draft）
+
+> **DESIGN ONLY / NOT IMPLEMENTED / NOT RUN**。既存18節のA0/A1/A2、typed Goal、SourceBackedFact、ContextManifest、Sealed ModelRequestSnapshot、dispatch_admission、CHAT_03/09 Sentinel/Tool Gatewayを置換しない。ここは上流コード・テストを静的閲覧した採用案であり、本Harnessのruntime検証や共有DTO/DDLの正式承認ではない。
+
+### 19.1 上流OSSの固定版と採用範囲
+
+| OSS / inspected SHA | 検証したソース・テスト | 借用する機構 | 変更・不採用とする挙動 |
+|---|---|---|---|
+| [DeepAgents JS](https://github.com/langchain-ai/deepagentsjs/tree/ea67c7ec9d3d4fa1fa074220339325cd9a82b1d1) `ea67c7ec`、MIT | [summarization.ts](https://github.com/langchain-ai/deepagentsjs/blob/ea67c7ec9d3d4fa1fa074220339325cd9a82b1d1/libs/deepagents/src/middleware/summarization.ts)、[tests](https://github.com/langchain-ai/deepagentsjs/blob/ea67c7ec9d3d4fa1fa074220339325cd9a82b1d1/libs/deepagents/src/middleware/summarization.test.ts) | trigger/keep、Tool call/result原子境界、原本Offload、overflow時の有界再計画 | Backend offloadが失敗してもSummaryを採用する既定経路、Summary入力truncationで未検証範囲を消す経路 |
+| [Mastra Observational Memory](https://github.com/mastra-ai/mastra/tree/7358ad73a381765572858d520f8170ab59e88514) `7358ad73`、対象OSS memory package Apache-2.0 | [実装](https://github.com/mastra-ai/mastra/tree/7358ad73a381765572858d520f8170ab59e88514/packages/memory/src/processors/observational-memory)、[ARCHITECTURE](https://github.com/mastra-ai/mastra/blob/7358ad73a381765572858d520f8170ab59e88514/packages/memory/src/processors/observational-memory/ARCHITECTURE.md)、[fault tests](https://github.com/mastra-ai/mastra/blob/7358ad73a381765572858d520f8170ab59e88514/packages/memory/src/processors/observational-memory/__tests__/om-error-and-persistence.test.ts) | Observer→Reflectionの階層圧縮、非同期Buffer、原本範囲付きRecall、失敗中の未観察保持 | `observedMessageIds`単位の全Part除外、timestamp cursorだけのcoverage認定、in-process lockだけの分散排他 |
+| [OpenClaw](https://github.com/openclaw/openclaw/tree/bbf0d7380315f660bf79561223da1d34eadd4ac3) `bbf0d738`、MIT | [quality](https://github.com/openclaw/openclaw/blob/bbf0d7380315f660bf79561223da1d34eadd4ac3/src/agents/agent-hooks/compaction-safeguard-quality.ts)、[safeguard](https://github.com/openclaw/openclaw/blob/bbf0d7380315f660bf79561223da1d34eadd4ac3/src/agents/agent-hooks/compaction-safeguard.ts)、[tests](https://github.com/openclaw/openclaw/blob/bbf0d7380315f660bf79561223da1d34eadd4ac3/src/agents/agent-hooks/compaction-safeguard.test.ts) | structured summary、未解決User ask/Exact IDs監査、修正retry、cancel/Tool pair保護 | `qualityDegraded`を自動採用、timeout時の無要約tail破棄、custom Providerの品質監査迂回 |
+
+ライセンス・Copyright/NOTICEと依存先は流用する**具体的ファイル単位**で再確認し、Mastra Enterprise対象物は流用しない。丸ごと依存の導入はVM/Agent Loop/Memory/Storage境界のレビュー後のみ。固定SHAは調査時点の挙動であり上流変更時にはdiffと試験を再評価する。
+
+### 19.2 圧縮Adapterの責務と型（CHAT_02内部提案）
+
+段階: **CTX-OSS-A**＝DeepAgents式Offload＋Tool pair保護、**CTX-OSS-B**＝OpenClaw式構造監査＋aiagent-md独自SemanticVerificationReceipt、**CTX-OSS-C**＝Mastra式Observer/Reflector（最初はshadow mode）、**CTX-OSS-D**＝本実行fault/benchmarkの合格後opt-in。
+
+~~~ts
+// 新しい共有Schema/DDLの強制ではなく内部Portの提案
+type CompactionTier="RAW_TAIL"|"GROUNDED_WORKING"|"OBSERVATION"|"REFLECTION";
+type CompactionStage="PREPARING"|"RAW_DURABLE"|"PROPOSED"|"AUDITED"|"COMMITTED"|"REJECTED";
+type CompactionFailure="OFFLOAD_FAILED"|"MODEL_FAILED"|"QUALITY_FAILED"|
+ "SOURCE_MISMATCH"|"COVERAGE_GAP"|"CONCURRENT_REVISION"|
+ "CANCELLED"|"BUDGET_EXHAUSTED"|"ARTIFACT_UNAVAILABLE";
+interface CompactionCandidate {
+ runId:string; attemptId:string; expectedHeadRef:string; leaseEpoch:string;
+ goalRevision:string; policyVersion:string; memorySourceEpoch:string;
+ sourcePartRangeRefs:string[];
+ rawArtifactRefs:Array<{ref:string;digest:string;locatorRef:string}>;
+ proposedSummaryRef:string; summaryDigest:string; producerId:string;
+ tier:CompactionTier; stage:CompactionStage; auditReceiptRef?:string; failure?:CompactionFailure;
+}
+interface CompactionAuditReceipt {
+ candidateRef:string; structureValid:boolean; toolPairsValid:boolean;
+ latestUserAskValid:boolean; exactIdentifiersValid:boolean;
+ hardAnchorsEqual:boolean; sourceCoverageComplete:boolean;
+ semanticVerificationValid:boolean; checkedSourceSpanRefs:string[];
+ rejectedClaimRefs:string[]; verdict:"PASS"|"RETRYABLE"|"REJECT"; reasons:string[];
+}
+~~~
+
+OSS Adapterは非信頼候補を生成するだけ。Task Goal、Policy、Memory Writer、Tool Approval/Effect Ledger、Result Verifier、Event Store、Run HEAD、Provider Gatewayの正本を書き換えない。組込み/custom Provider、Observer、Reflectorのすべてに共通の`auditCompactionCandidate`を適用し、Providerの自己申告を合格証明にしない。
+
+### 19.3 原本を保護した二相公開
+
+「原本保持」はretention/consent/ACLが許すRaw Message/Event、Tool call/result、Artifactの**耐久正本をSummaryから独立させること**であり、秘密の永久保存やLLMによる100%の意味保存ではない。
+
+1. 圧縮対象のMessage Role/Content Part順序、Tool call/result対応、Raw Event Cursor、Sealed Originalを先にProtected Storeへ保存。Cookie/API key/Private envはCHAT_09に従い不保存・分離し、LLM用Redacted Projectionと別digest/locator mapで管理。Raw Blobのdigest/locators/ACL/retentionと**全source range coverage**のdurability確認までは`RAW_DURABLE`に進まない。
+2. Offload失敗でもSummaryを続行するDeepAgents既定動作は**採用禁止**。`OFFLOAD_FAILED`はHEAD不変、元Contextとエラー記録だけ残し、収まらない場合はPARTIAL/BLOCKED。要約・観察・Reflectionの生成失敗も旧HEADを維持する。
+3. Summarizer/Observer/Reflectorが生成するのは`PROPOSED`候補とsourcePartRangeRefsだけ。原本の参照・出典・未解決条件なしの新しい主張を`VERIFIED_WITH_SOURCE`にしない。
+4. OpenClaw式の5セクション（Decisions、Open TODOs、Constraints/Rules、Pending user asks、Exact identifiers）と直近User依頼/重要IDを確認。上流の一部識別子検査のみでは不十分なので、18.18のSourceBackedFactとSemanticVerificationReceiptを用いて金額、税、別料金、人数、日時、TZ、肯定/否定、条件付きSource spanと矛盾資料を照合。引用だけではMeaning supportを保証できず、UNVERIFIED/REFUTEDのClaimはReject。
+5. Canonical typed Goal/否定/最新Steer、P0/P1、未解決疑義、Tool Effect UNKNOWN、Source coverage、ToolペアをProtected serviceで再検査。Summaryの「成功した」という記述からEffect LedgerやApproval、Task successを更新しない。
+6. `PASS`したCandidate＋Audit receipt＋ContextManifest＋Source Coverage＋Sealed ModelRequestSnapshotをimmutableに保存。新Goal/Policy/Memory sourceEpoch/ACL/Recipient consent/Run leaseで再検証し、`expectedHeadRef`付きRun HEAD CASだけで`COMMITTED`として公開。失敗したCandidateはモデルへ非公開、旧HEADは不変。
+7. 公開後もProtected Gatewayの`dispatch_admission`を別途必要とする。前回Model attemptやTool EffectがMAY_HAVE_SENT/UNKNOWNなら無条件再送禁止。Crash、Steer、Memory DELETE、Cancel、Provider fallback/Token計数変更は新規ModelRequestSnapshotで再評価。
+8. GCはLive HEAD/保存期間/処理中Writer/Legal eraseを区別。原本が消えた場合はEXPIRED/ARTIFACT_UNAVAILABLE、digestしかないSummaryを可逆な原本扱いしない。
+
+**Fail closedは無限再送ではない**。Safe tailだけでWindowに収まらない、P0/P1が完全に保持できない、または予算が尽きた場合はPARTIAL/BLOCKED。Quality警告を表示しても危険な外部操作を継続する権限にはならない。
+
+### 19.4 Mastra型Buffer・Reflection・Recallの整合性
+
+Mastraの監査資料にあるReflection rollover、Buffer遅延、古いHeadへのActivation、観察済みMessageへ追加されたPartの欠落（H7）を故障注入対象とする。`observedMessageIds`やTimestamp cursorだけでは新Partの未観察状態を示せない。
+
+Chunkは不変の`[partCursorFrom,partCursorTo)`、sourcePartRangeRefs、digest、generation、attemptIdに束縛。**Buffer完了とActivation確定は別**であり、連続したprefix coverageとHEAD CASに成功した範囲だけを既観察に移す。後から追加されたPartは同じmessage IDでも未観察。Reflectionは未採用Chunkを世代切替時に原子的にcarry-forwardするかRawから作り直す。異なるWorkerの書込みはDBロック/CASで線形化し、process-local queueだけに依存しない。
+
+Observation/ReflectionはCHAT_06のLong-term Memoryへ勝手に書込まない。RecallはProtected Gatewayのread-only `ArtifactRef+locator+expectedDigest`、ACL/retention/Memory tombstone/source freshness/byte+token budget再認可を経由。原本なしの場合は`ARTIFACT_UNAVAILABLE`、捏造して修復しない。初期はshadow mode（結果を主モデルに投入しない）からcoverageと競合を測定し、有効化はゲート合格後だけ。
+
+### 19.5 OpenClaw式品質監査・失敗リトライの上書き禁止
+
+上流の`auditSummaryQuality`は形式・直近依頼・一部IDの保持を確認するが、出典とSummaryの意味論的同値性を証明しない。上流では`qualityGuardEnabled`がfalseの経路やCustom Provider出力の監査迂回があり得るため、aiagent-mdのAuditorを最終公開Portへ独立して設置する。
+
+- Structural/Pending User Ask/IdentifiersとSource spanに基づくSemanticVerificationを両方PASSさせる。LLM/NLIの主観的PASSだけで安全・根拠を認めない。
+- Quality correctionは初期最大**1回**だけ（別attemptにBudget予約）。Provider Overflow縮小の既存1回契約も維持し、総BudgetとAttempt限度を超える場合は追加モデル呼出0。
+- 修正失敗時の`qualityDegraded` fallback、timeout時の無要約partial history、Custom Providerによる品質監査迂回を**COMMITTEDへ昇格させない**。元HEAD/Artifactを残してPARTIAL/BLOCKEDまたは安全に検証済みの限定回答。
+- Provider切替時はRecipient地域・保持/学習利用設定・User Consent、Token Window、Tool Schema、Template revisionを新規確認。監査のために秘密原文を別Providerへ送信しない。
+- ReceiptにはreasonCode・attempt・source locators・費用・latencyと観測状態だけを残す。秘密、原文全文、Cookie、APIキーはTrace/UI/Cellへ漏らさない。
+
+### 19.6 故障・復旧Matrix
+
+| 障害 | Head/送信 | 期待する挙動 |
+|---|---|---|
+| Raw offload write/digest/locator failure | 変更禁止 | OFFLOAD_FAILED、前HEAD＋原本保持 |
+| Summary empty/timeout / unsupported Fact | 変更禁止 | 有界修正→REJECTED、PARTIAL/BLOCKED |
+| Degraded fallback/custom compactor bypass | 変更禁止 | 共通Auditorで拒否、Warningだけ表示 |
+| Tool pair破断 / Part coverage gap | 変更禁止 | Rawから再計画、旧Tool実行の重複0 |
+| Reflection rollover / stale chunk / CAS race | 変更禁止 | chunk prefix・世代・HEAD再検査 |
+| Goal Steer/Memory revoke/Provider change | stale snapshot送信禁止 | 再構築・Consent/Admission更新 |
+| Original GC/Retention expiry | 偽のsource復元禁止 | EXPIRED、原本取得不可を明示 |
+| 必須文脈過大/総予算枯渇 | unsafe採用禁止 | finite PARTIAL/BLOCKED |
+| UNKNOWN Tool/ACK lost | Tool再実行禁止 | Ledgerで別途照合、MAY_HAVE_SENT |
+
+### 19.7 追加Acceptance Fixture（ACM-OSS-T01〜T14、すべてNOT RUN）
+
+| Test ID | 故障注入 | 期待Oracle |
+|---|---|---|
+| ACM-OSS-T01 | Offload write失敗、Summaryだけ生成成功 | RAW_DURABLE未到達、HEAD不変 |
+| ACM-OSS-T02 | 要約モデルtimeout・空文字 | 原本維持、旧HEAD不変 |
+| ACM-OSS-T03 | 48,000円＋駐車別2,000円を「込み48,000」に変造 | SourceBackedFact REFUTED、採用0 |
+| ACM-OSS-T04 | 最新User ask/禁止条件/必須IDを削除 | Structural/Goal audit拒否 |
+| ACM-OSS-T05 | qualityDegraded fallback | 警告のみ、COMMITTED=0 |
+| ACM-OSS-T06 | Custom Providerがauditを迂回 | 全Providerに共通Auditor適用、Reject |
+| ACM-OSS-T07 | Buffer書込みとReflection世代変更が競合 | chunk連続性保持、重複/欠落0 |
+| ACM-OSS-T08 | 観察済message IDへ別Workerが新Part追記 | 未観察Partを残す |
+| ACM-OSS-T09 | HEAD CASを旧Workerが遅延実行 | stale commit 0、旧Tool再実行0 |
+| ACM-OSS-T10 | Provider fallbackとMemory削除が競合 | 旧Memory送信0、新Recipient consent |
+| ACM-OSS-T11 | Toolペア付きPrompt overflow＋ACK lost | ペア維持、Effect UNKNOWNを再送しない |
+| ACM-OSS-T12 | 100回のObservation/Reflection反復 | Goal/否定/Source coverage欠落0 |
+| ACM-OSS-T13 | 原本Retention終了/GC後にRecall | EXPIRED、引用Verified 0 |
+| ACM-OSS-T14 | Correction retryと総予算枯渇 | 有界回数、旧HEAD維持、PARTIAL/BLOCKED |
+
+**比較ベンチ**: same Model/Tokenizer/Tool schema/Policy/Goal/Source/Total Budgetでsmall safe-full、safe-tail、offload-only、offload+audit、offload+audit+OMを比較。Recall@FixedBudget、Source locator精度、TypedFact support、否定/未解決条件、Tool pair、100-cycle fidelity、p50/p95 Latency、Model+Observer+Reflector+Recall総費用、GC/保存bytesを記録。P0違反が1件でもあれば速度が良くてもRelease不可。改善率は未測定。
