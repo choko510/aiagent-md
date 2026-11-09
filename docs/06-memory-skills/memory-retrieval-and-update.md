@@ -305,3 +305,13 @@ Memory lookup/Model context assembled (no network send)
 - Recipient Policy/個人情報のModel Provider転送同意は対象Providerごとに評価。過去の他Provider承認を流用しない。
 
 QA: ACM-T24/25/29/30。これらのDB sender integrationは未実装・未試験。
+
+## 2026-11-09 Mastra型Observational MemoryとMemory Writerの分離（Draft / NOT RUN）
+
+[Context 19](../02-runtime/context-manager-and-compaction.md)のObserver/Reflectorは**Run内の可逆Context Projection**を作るだけであり、CHAT_06 Long-term Memory Writer/Preference/Consent、Task Goal、Tool Approvalを変更する権限を持たない。Observationをユーザー未承認の永続Preferenceとして記憶しない。Memory削除/Undoのscope epochとProvider recipientをProtected Gatewayのdispatch_admissionで再検証し、古い投影を復活させない。
+
+`observedMessageIds`やtimestamp cursorのみで既読を確定させず、`sourcePartRangeRefs`と不変DigestでPartごとのcoverageを照合。別Workerが既観察Messageへ新Partを追記した場合も未観察として残す。Buffer/Reflection失敗や世代競合ではRaw Eventを保持しHEAD CASで stale updateを拒否。In-process queueだけでは分散Workerの競合を解決できない。
+
+RecallはProtected Gateway経由のread-only ArtifactRef＋locator＋expectedDigest。現行ACL/retention/Memory tombstone/Source freshness/Recipient/Budgetを検査し、Originalが削除された場合は`ARTIFACT_UNAVAILABLE`を返す。要約だけを原本としてVerifiedに昇格しない。
+
+QA: ACM-OSS-T07/T08/T10/T12/T13、Designed/NOT RUN。
