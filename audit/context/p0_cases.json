@@ -168,5 +168,109 @@
       "expectedOracle": "NON_REPLAYABLE; no blind resend",
       "runStatus": "NOT_RUN"
     }
-  ]
+  ],
+  "ossCompaction": {
+    "kind": "design-oracles-not-runtime-results",
+    "testCount": 14,
+    "cases": [
+      {
+        "id": "ACM-OSS-T01",
+        "failureMode": "offload_write_failure",
+        "expectedDecision": "RETAIN_PREVIOUS_HEAD",
+        "expectedOracle": "raw not durable, summary cannot publish",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T02",
+        "failureMode": "summarizer_empty_or_timeout",
+        "expectedDecision": "RETAIN_PREVIOUS_HEAD",
+        "expectedOracle": "original conversation still durable",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T03",
+        "failureMode": "contradicted_parking_fee",
+        "expectedDecision": "REJECT",
+        "expectedOracle": "48000 + separate 2000 not included",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T04",
+        "failureMode": "missing_latest_user_ask_negation_id",
+        "expectedDecision": "REJECT",
+        "expectedOracle": "structural and typed anchor gate rejects",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T05",
+        "failureMode": "quality_degraded_fallback",
+        "expectedDecision": "REJECT",
+        "expectedOracle": "degraded summary not committed",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T06",
+        "failureMode": "custom_provider_bypass",
+        "expectedDecision": "REJECT",
+        "expectedOracle": "common auditor regardless provider",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T07",
+        "failureMode": "async_buffer_reflection_race",
+        "expectedDecision": "RETRY_FROM_RAW",
+        "expectedOracle": "chunk/generation contiguity protected",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T08",
+        "failureMode": "new_part_on_observed_message",
+        "expectedDecision": "RETRY_FROM_RAW",
+        "expectedOracle": "new part not silently marked observed",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T09",
+        "failureMode": "stale_head_cas",
+        "expectedDecision": "REJECT",
+        "expectedOracle": "stale worker cannot publish",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T10",
+        "failureMode": "fallback_memory_revocation",
+        "expectedDecision": "REBUILD_AND_READMIT",
+        "expectedOracle": "recipient and source epoch rechecked",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T11",
+        "failureMode": "overflow_unknown_tool_effect",
+        "expectedDecision": "PARTIAL_OR_BLOCKED",
+        "expectedOracle": "paired tools and no blind retry",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T12",
+        "failureMode": "hundred_compaction_cycles",
+        "expectedDecision": "REJECT_ON_HARD_ANCHOR_LOSS",
+        "expectedOracle": "goal negations and source ranges preserved",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T13",
+        "failureMode": "original_expired_recall",
+        "expectedDecision": "EXPIRED",
+        "expectedOracle": "missing source never verified",
+        "runStatus": "NOT_RUN"
+      },
+      {
+        "id": "ACM-OSS-T14",
+        "failureMode": "correction_retry_budget_exhausted",
+        "expectedDecision": "PARTIAL_OR_BLOCKED",
+        "expectedOracle": "old head retained with finite attempts",
+        "runStatus": "NOT_RUN"
+      }
+    ]
+  }
 }
