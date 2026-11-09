@@ -28,7 +28,7 @@ A sandbox.exec execution is child of canonical Task/Run. Enqueue/dispatch requir
 | **Temporal PostgreSQL schema** `temporalio/temporal@3eb5fb80523443d8583bcec463843275908f1bbc` | `schema/postgresql/v12/temporal/schema.sql`は複数のtask queue/history/timerを分け、durable executionを保持。[S9] | 主体のWorkflow service追加は初期Ubuntu単一hostに過剰。設計観察のみ、MIT。 |
 | pg-boss Issue **#925** | stale workerが再claimされたattemptの結果を上書きできたという再現と修正議論。**Issue report**であり自Harnessの現象ではない。`test/attemptFenceTest.ts`で後続のfence testsをコード確認。[S10] | fencing条件を**必須設計**に採用。修正済みとされるバージョンを将来の統合で再テストする。 |
 
-**選択肢:** A pg-boss専用schema+agent独立outbox（採用候補）/ B Graphile Worker（fallback）/ C すべてAgent DB自作Queue（初期は却下: claim/heartbeat/cleanup保守増）/ D Temporalをagent lifecycleの正本にする（初期は却下: 二重状態モデルとサーバー運用コスト）。いずれもQueueを**認可者と見なす設計は却下**。Job APIバージョン差は実装時に再検証する。
+**選択肢（2026-10-30時点の比較。現行の採用構成は`QueuePort`＋agent独立outbox＋ADR-039で選定するPython基盤）:** A pg-boss専用schema+agent独立outbox（旧案・2026-11-09にNode専用のため候補外）/ B Graphile Worker（fallback）/ C すべてAgent DB自作Queue（初期は却下: claim/heartbeat/cleanup保守増）/ D Temporalをagent lifecycleの正本にする（初期は却下: 二重状態モデルとサーバー運用コスト）。いずれもQueueを**認可者と見なす設計は却下**。Job APIバージョン差は実装時に再検証する。
 
 ## 3. Ownership / Boundary / Dependency
 
@@ -38,7 +38,7 @@ flowchart LR
   TX --> DOMAIN["Task Run Watch Event Effect"]
   TX --> OUTBOX["agent.outbox_messages"]
   OUTBOX --> RELAY["Bounded Outbox Relay"]
-  RELAY --> QUEUE["pgboss schema queue"]
+  RELAY --> QUEUE["QueuePort queue (ADR-039 selected)"]
   QUEUE --> WORKER["Worker accepts pointer"]
   WORKER --> AUTH["Rehydrate tenant owner state and Run lease"]
   AUTH --> GATE["Tool Gateway or Watch evaluation"]
@@ -219,7 +219,7 @@ Eventの唯一の保存正本はCHAT_10 `database-schema-and-migrations.md`の`a
 
 ## 9. Security and trust boundary
 
-- `pgboss` schema credential must not be accessible to Agent tools, MCP, Browser worker or LLM. Dispatcher & consumer least privilege, separate migration role. Raw queue input from Web/X/HTML/PDF is untrusted data, never a SQL fragment.
+- Queue schema / broker credential (formerly `pgboss` schema) must not be accessible to Agent tools, MCP, Browser worker or LLM. Dispatcher & consumer least privilege, separate migration role. Raw queue input from Web/X/HTML/PDF is untrusted data, never a SQL fragment.
 - Pointer UUID is not a bearer authorization token. Worker queries owner/tenant/current authVersion from DB and uses CHAT_09 owner guard at **each irreversible Tool boundary**.
 - Error/audit log contains topic, job ID, trace ID and reason code, not raw body, provider secrets, Cookie, full HTML or destination secret.
 - PostgreSQL relay reads across tenant rows using narrowly scoped internal role only; per-user API never queries global outbox.
@@ -233,7 +233,7 @@ Eventの唯一の保存正本はCHAT_10 `database-schema-and-migrations.md`の`a
 
 ## 11. Persistence / migrations
 
-`agent.outbox_messages` proposal to PR #10: add relay lease/owner/fence and status audit, compare async migration ordering; keep tenantId, ownerUserId and workspaceId distinct; resolve workspace via trusted authorization, never alias resource IDs. `pgboss` library schema version is managed only by the queue migration owner, **not** by arbitrary Agent start. If queue DB schema incompatible, API may accept Task while durable outbox remains; do not pretend workers are running. Worker drain must be done before breaking queue upgrade. Add indices for `(next_attempt_at,id) WHERE dispatched_at IS NULL` and `(tenant_id,topic,dedupe_key) UNIQUE`; heartbeat scheduled jobs never replace Watch state.
+`agent.outbox_messages` proposal to PR #10: add relay lease/owner/fence and status audit, compare async migration ordering; keep tenantId, ownerUserId and workspaceId distinct; resolve workspace via trusted authorization, never alias resource IDs. The selected queue library's schema version (formerly `pgboss`) is managed only by the queue migration owner, **not** by arbitrary Agent start. If queue DB schema incompatible, API may accept Task while durable outbox remains; do not pretend workers are running. Worker drain must be done before breaking queue upgrade. Add indices for `(next_attempt_at,id) WHERE dispatched_at IS NULL` and `(tenant_id,topic,dedupe_key) UNIQUE`; heartbeat scheduled jobs never replace Watch state.
 
 ## 12. API / UI / other modules
 
@@ -312,7 +312,7 @@ Remain Draft while P0 contracts are unresolved. Avoid a second Queue/event sourc
 [S11] `https://www.postgresql.org/docs/18/sql-select.html` FOR UPDATE SKIP LOCKED; `https://www.postgresql.org/docs/18/transaction-iso.html` — **Docs verified** (target major provisional).  
 [S12] `https://github.com/choko510/aiagent-md/pull/2` `/pull/1` `/pull/9` `/pull/10` `/pull/11` — **Draft contract evidence**, not Locked.
 
-**Unsupported until tested:** pg-boss API exact method signatures under pinned package lock, transactional interaction with custom ORM, long worker network partition recovery performance, external notification exactly-once, deployment benchmark. No app code was built.
+**Unsupported until tested:** the ADR-039-selected queue API exact method signatures under pinned lock (formerly pg-boss), transactional interaction with custom ORM, long worker network partition recovery performance, external notification exactly-once, deployment benchmark. No app code was built.
 
 
 ### Round 4 shared Version/Epoch type reconciliation (2026-10-30)

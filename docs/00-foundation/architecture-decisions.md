@@ -186,7 +186,7 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | `docs/04-web-browser/search-router.md` | B | 内部論理型（`.ts`パスは例示、Python module名へ読替え） |
 | `docs/05-connectors/amazon-keepa.md` | B | 論理型、Python keepaライブラリ調査 |
 | `docs/05-connectors/buyback-price-providers.md` | B | module-private論理型 |
-| `docs/05-connectors/connector-framework.md` | A | 旧TypeScript host→Python host |
+| `docs/05-connectors/connector-framework.md` | A | 旧案: TypeScript host→Python host |
 | `docs/05-connectors/hotel-research.md` | B | module-private論理型 |
 | `docs/05-connectors/x-research.md` | C | node-twitter-api-v2→Tweepy等のPython client再検証 |
 | `docs/06-memory-skills/memory-data-model.md` | A | §5.2を論理型提案へ |

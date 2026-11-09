@@ -36,8 +36,56 @@ FORBIDDEN = (
     "pg-boss第一候補",
     "TypeScript host",
     "Zod strict schema",
+    "`pgboss`",
+    "pgboss.*",
+    "pgboss schema",
 )
-HISTORY_MARK = re.compile(r"旧|superseded|historical|履歴|formerly|ADR-036|2026-11-09", re.I)
+# Only explicit history markers exempt a line. Dates and ADR numbers alone do
+# not: "2026-11-09: Fastify APIを正式採用" is a current adoption statement.
+HISTORY_MARK = re.compile(
+    r"旧案|旧記述|旧方向|旧候補|旧TS|旧pg-boss|旧:|旧：|（旧|\(旧|"
+    r"superseded|formerly|historical|調査履歴|履歴として|採用方針ではない",
+    re.I,
+)
+# A heading whose title carries one of these words opens a history section;
+# every line until the next heading of the same or higher level is exempt.
+HISTORY_HEADING = re.compile(r"旧案|履歴|superseded|historical", re.I)
+
+
+def adoption_violations(text: str) -> list[tuple[int, str]]:
+    """Return (line number, phrase) for forbidden phrases outside history."""
+    found: list[tuple[int, str]] = []
+    history_level = 0
+    for no, line in enumerate(text.splitlines(), 1):
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            level = len(m.group(1))
+            if history_level and level <= history_level:
+                history_level = 0
+            if HISTORY_HEADING.search(m.group(2)):
+                history_level = level
+        if history_level:
+            continue
+        for phrase in FORBIDDEN:
+            if phrase in line and not HISTORY_MARK.search(line):
+                found.append((no, phrase))
+    return found
+
+
+# Self-test with negative/positive fixtures so the matcher cannot silently widen.
+_SELF_TEST = {
+    "2026-11-09: Fastify APIを正式採用する": 1,
+    "ADR-036に従いFastify REST APIを採用": 1,
+    "Queueは`pgboss` schemaを使う": 1,
+    "旧案: Fastify APIを使う構成": 0,
+    "Next.js UI（旧: Fastify REST API）": 0,
+    "## 旧案の記録\nFastify APIを使う\n## 現行\nFastify APIを使う": 1,
+}
+for sample, expected in _SELF_TEST.items():
+    got = len(adoption_violations(sample))
+    if got != expected:
+        print(f"FAIL self-test: {sample!r} expected {expected} violation(s), got {got}")
+        sys.exit(1)
 
 REQUIRED = {
     "docs/00-foundation/architecture-decisions.md": (
@@ -49,10 +97,12 @@ REQUIRED = {
         "### 13.2 Python-first", "Untrusted Execution VM のRuntime Cellのみ",
         "独立プロセス＋認証付きRPC",
     ),
-    "docs/00-foundation/architecture-rules.md": ("## E. Python-first", "論理型記法", "Retryの区別"),
-    "docs/02-runtime/agent-loop.md": ("AgentRuntimePort", "PYRT-T01"),
+    "docs/00-foundation/architecture-rules.md": ("## E. Python-first", "論理型記法", "Retryの区別", "round-trip fixture", "strict `int`へwire値を直接流さず"),
+    "docs/02-runtime/agent-loop.md": ("AgentRuntimePort", "PYRT-T01", "責務の分担"),
+    "docs/02-runtime/model-router.md": ("Tool proposalの確定", "予約をUNKNOWNのまま保持"),
+    "docs/09-security/authentication-and-user-isolation.md": ("自作の認証基盤を第一候補に固定しない", "AUTH-T"),
     "docs/03-tools/mcp-adapter.md": ("公式MCP Python SDK", "MCP-PY-T01"),
-    "docs/10-infrastructure/job-queue-and-outbox.md": ("ADR-039", "単一系統"),
+    "docs/10-infrastructure/job-queue-and-outbox.md": ("ADR-039", "単一系統", "現行の採用構成は`QueuePort`"),
     "docs/02-runtime/context-manager-and-compaction.md": ("DeepAgents Python",),
     "README.md": ("Python-first", "STEP 2"),
     "AGENTS.md": ("Python-first", "STEP 2"),
@@ -86,10 +136,9 @@ for md in sorted((ROOT / "docs").rglob("*.md")):
             errors.append(f"unclassified TS/Node reference: {rel} (add to ADR migration ledger)")
         elif "A" in ledger[rel] and "ADR-036" not in text and rel != ADR.relative_to(ROOT).as_posix():
             errors.append(f"class A file lacks ADR-036 disposition: {rel}")
+    for no, phrase in adoption_violations(text):
+        errors.append(f"{rel}:{no}: TS adoption phrase without history mark: {phrase!r}")
     for no, line in enumerate(text.splitlines(), 1):
-        for phrase in FORBIDDEN:
-            if phrase in line and not HISTORY_MARK.search(line):
-                errors.append(f"{rel}:{no}: TS adoption phrase without history mark: {phrase!r}")
         # Rust must never become a mandatory dependency.
         if re.search(r"\bRust\b", line) and re.search(r"MUST|必須(?!にしない|依存にしない|要素にしない)", line):
             if not re.search(r"必須にしない|必須依存にしない|必須要素にしない|任意", line):

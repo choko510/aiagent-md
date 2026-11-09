@@ -573,4 +573,12 @@ These are proposed auth contract tests (not executed).
 
 ## 2026-11-09 Python-first: 認証実装の再検討（STEP 1、分類C）
 
-`AuthProvider`契約（DB-backed session、即時失効、CSRF/Origin、fresh auth、tenant isolation、RLS防御層）は不変。Better Auth（TS）の調査は設計参考として保持するが、Backendが[ADR-036](../00-foundation/architecture-decisions.md)でPythonになったため、第一候補は**FastAPI内の自前`AuthProvider`（opaque session token＋PostgreSQL session表＋Argon2等の検証済みhash実装＋OIDCはAuthlib等の検証済みライブラリ）**とする。具体的ライブラリの採否（Authlib、passlib/argon2-cffi、fastapi-users等）はソース・テスト・保守状況・ライセンスを実装時に確認する（未確認）。Cookie属性・CSRF・Origin検査はFastAPI middleware/dependencyで全routeに強制し、AUTH-T22はFastAPI＋reverse proxy構成で実施する（未実行）。
+`AuthProvider`契約（DB-backed session、即時失効、CSRF/Origin、fresh auth、tenant isolation、RLS防御層）は不変。Better Auth（TS）の調査は設計参考として保持するが、Backendが[ADR-036](../00-foundation/architecture-decisions.md)でPythonになったため、**自作の認証基盤を第一候補に固定しない**。STEP 2で次を先に比較し、aiagent-md独自実装は**Principal/Session（tenant・role・auth epoch）へのAdapterと認可Policy境界**に限定する。
+
+| 候補 | 想定 | 評価観点（共通） |
+|---|---|---|
+| 外部IdP（自己ホストのKeycloak、Authentik、Ory Kratos/Hydra 等、OIDC） | ログイン・MFA・パスワード管理・OIDCをIdPへ委譲し、FastAPIはOIDC RP＋サーバ側Session | 保守状況・ライセンス、Session即時失効（back-channel logout/epoch）、MFA/認証強化、Postgres統合または運用負荷、tenant分離 |
+| Python認証ライブラリ（fastapi-users、Authlib（OIDC client）、argon2-cffi 等） | FastAPI内でSession/OIDC連携を構成 | DB-backed Sessionと失効、CSRF/Origin、Cookie属性、Postgres（async driver）統合、テストの有無 |
+| 自作`AuthProvider` | 上記が要件を満たさない部分のみ | 検証範囲が最大になるため、比較結果とADRがある場合だけ |
+
+いずれを選んでも、opaque session/Cookie属性、CSRF/Origin検査、fresh auth、tenant isolation、RLS防御層、即時失効の既存契約とAUTH-T系試験は変更しない。候補のソース・テスト・保守状況・ライセンスは未確認（STEP 2）。Cookie属性・CSRF・Origin検査はFastAPI middleware/dependencyで全routeに強制し、AUTH-T22はFastAPI＋reverse proxy構成で実施する（未実行）。

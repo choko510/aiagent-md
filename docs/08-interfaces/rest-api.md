@@ -768,7 +768,7 @@ type BrowserObservationCloseAckV1 = {
 本書のHTTP公開契約（`/api/v1`、202/201＋Resource URL、Idempotency-Key台帳、If-Match、cursor、RFC 9457 Problem Details、SSE別経路）は**外部仕様として不変**。実装は**FastAPI＋Pydantic v2（ASGI、Uvicorn等）**を第一候補とする（[ADR-036](../00-foundation/architecture-decisions.md)、PyPI `fastapi 0.162.2`/`uvicorn 0.54.0`を2026-11-09確認、未実行）。
 
 - Request/Response DTOはcanonical JSON Schema（CHAT_01/08）から生成したPydantic model。FastAPIが出力するOpenAPIは**生成物**であり、正本Schemaとの機械照合（差分0）をCI gateにする。UI ClientはそのOpenAPIから型生成（例: openapi-typescript、採用は実装時確認）。
-- Pydanticの既定エラー（422）はRFC 9457 Problem Detailsへ変換し、内部例外・入力値・Secretを露出しない。int64はstring、未知fieldは拒否（`extra="forbid"`）。
+- Pydanticの既定エラー（422）はRFC 9457 Problem Detailsへ変換し、内部例外・入力値・Secretを露出しない。int64はwire十進文字列で、[Architecture Rules §E-3](../00-foundation/architecture-rules.md)の共通parser/serializer専用型を使う（strict `int`へ直接流さない）。未知fieldは拒否（`extra="forbid"`）。
 - APIプロセスはCommandをTransaction内で永続化（Task＋DomainEvent＋outbox）して返すだけで、Agent Runtime・Tool・Browserを直接起動しない。HTTP切断はRun Cancelではない（既存§0）。
 - 認証・tenant解決・CSRF/Origin検査はFastAPI dependency/middlewareで全routeに強制し、route単位の付け忘れを静的テストで検出する（[Authentication 2026-11-09節](../09-security/authentication-and-user-isolation.md)）。
 - APIプロセスにVault Secret、Provider key、Browser CDP endpointを渡さない（[System Architecture §13.2](../00-foundation/system-architecture.md)）。

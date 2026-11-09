@@ -400,7 +400,7 @@ Trace連結キー: scheduleId/revision/occurrenceId/dispatchIntentId、Task/Run 
 | P07-07 / CHAT_11 | P1 | multi-worker/DST/Queue-ack-loss/DB-failover/Tool未知結果のfixtureとfault test、測定系。SCH-T02,T05〜T08,T22 |
 | P07-08 / CHAT_07 07-02 | P1 | Watchのcreate/pause/resume/deleteとSchedule revision、manual trigger、登録確認の整合 |
 | P07-09 / CHAT_07 07-03/04 | P1 | 価格と取得失敗・実測時刻、観測品質、通知event dedupe/送達遅延の別仕様 |
-| P07-10 / CHAT_10/11 | P1 | pg-boss 12.38.0とDB/Node現実環境の互換、Queue Adapter・障害テストを実施して採否判断 |
+| P07-10 / CHAT_10/11 | P1 | ADR-039で選定するPython Queue基盤とDB/Python実環境の互換（旧: pg-boss 12.38.0とNode）、Queue Adapter・障害テストを実施して採否判断 |
 | P07-11 / CHAT_00/07 | P2 | sparse cronの探索上限、bounded replayの許可対象、手動triggerのpolicy |
 
 **Draft維持理由**: P0のShared Contracts/DDL/Quota/Tool Side Effect/Securityが未Locked。CronのDST挙動も本Harnessの実コードでは未検証。レビュー後に契約Ownerが合意するまではCodexによる本番統合実装の確定仕様とは扱わない。
