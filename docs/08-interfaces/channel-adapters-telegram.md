@@ -298,3 +298,7 @@ Issue報告は本Harnessの再現実績ではなく、設計時のadversarial te
 ## 2026-11-07: MessengerからのSandbox Exec依頼は権限制限付き
 
 Telegramの会話からTask/RunやSandbox Execを要求できるとしても、Telegram chatIdはHost shell、VM admin、Vault、CDPの管理者権限ではない。APIが認証済ownerを確認しGateway/Cell Admission/Sentinelが隔離された実行と外部書込みを制御。承認UIで具体的な外部Actionの対象/額/期限/内容を確認し、Chat本文の「許可する」は認可記録の代替にならない。Terminalログは機微情報をredact/サイズ制限、詳細はWebの認証済みViewerから表示。SC-17/19/22。
+
+## 2026-11-09 Python-first: Telegram client library（STEP 1、分類C）
+
+grammY（TypeScript）の調査は、update dedup・webhook secret・callback認可の故障モデルとして保持する。Python-first（ADR-036）ではChannel AdapterをPythonで実装するため、client libraryはpython-telegram-bot・aiogram等のPython候補、またはBot API直接呼出し（Trusted Egress経由）を実装時にソース・テスト・ライセンス確認のうえ選ぶ（未調査）。本書のInbound認可・重複排除・Outbox送信契約は不変。

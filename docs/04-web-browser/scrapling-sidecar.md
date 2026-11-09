@@ -4,7 +4,7 @@
 > Tests executed in this project: **0**. Source tests **read, not run**.
 
 ## 0. 結論と採否
-ScraplingはPythonでStatic HTTPとChromium系のStealthyFetcher、Selector、MCP Serverを提供する。ただし`ScraplingMCPServer`が管理する`_sessions`はプロセス内の辞書で、そこに渡した独自session_idはHarnessのBrowserSession/Run UUIDv7と異なる。既存MCPを直接Agentへ公開せず、**Gateway認可済みの静的抽出用Python Sidecar RPC**を第一候補にする。Browser操作は原則本体BrowserWorkerが所有する。
+ScraplingはPythonでStatic HTTPとChromium系のStealthyFetcher、Selector、MCP Serverを提供する。ただし`ScraplingMCPServer`が管理する`_sessions`はプロセス内の辞書で、そこに渡した独自session_idはHarnessのBrowserSession/Run UUIDv7と異なる。既存MCPを直接Agentへ公開せず、**Gateway認可済みの静的抽出用Python Sidecar RPC**を第一候補にする（2026-11-09以降は言語ブリッジではなく、ネットワーク無しの独立**Extraction Worker**プロセスとしての隔離境界。末尾2026-11-09節）。Browser操作は原則本体BrowserWorkerが所有する。
 
 - **採用案**: 制約済み内部RPC（Unix socketまたは認証済み内部network）＋独立Python環境。CSS/XPath解析・静的HTML抽出を優先。MCP modeは権限・セッション・取消・容量のAdapter完成後の実験のみ。
 - **却下案**: MCPツールをそのままモデルへ全面公開、Scrapling内部Session UUIDを公開BrowserSessionとして利用、StealthyFetcherでCAPTCHA突破を保証、Sidecarへhost file/process権限を渡す。
@@ -161,3 +161,11 @@ Scrapling/Python Sidecarの内容抽出は引き続き非信頼Web入力を扱�
 ## 2026-11-07 再監査: 現行DB契約の参照
 
 冒頭§3に残るUUIDv4 DB default・recordVersion初期0・Run leaseEpoch未永続化の差分はRound1の歴史的記録。現行CHAT_10案は論理上修正済みだが、Owner/Workspaceの認可と実Runtime/Browser/Parser/Transportの負試験は未実施。旧注記を現在のP0と誤認せず、現行Shared Contractと未検証のテスト結果を分離する。
+
+## 2026-11-09 Python-first: SidecarからExtraction Workerへ（STEP 1、Draft）
+
+Python-first（[ADR-036](../00-foundation/architecture-decisions.md)）によりBackend自体がPythonになるため、「TS本体とPythonをつなぐSidecar」という言語上の理由は消える。しかし本書の隔離理由（非信頼HTMLのparse、Scrapling内のprocess-local session、依存の大きさ）は残るため、**Extraction Workerとして独立プロセス・独立venv/image・ネットワーク無し・入力はArtifact参照のみ**を維持する。Scraplingをcontrol plane（API/Runtime/Gateway）へ直接importしない。
+
+- 責務分担: **Playwright Python Browser Worker**＝BrowserContext/Page/CDPの唯一の所有者・操作・取得。**HTTP Fetch**＝静的取得。**Scrapling**＝取得済みHTMLのSelector/静的抽出（Fetcher/StealthyFetcherによる自前取得は無効化）。**Crawl4AI**＝取得済みArtifactのMarkdown化・チャンク化候補（分類C: 内蔵crawler/browser起動を無効化して使えるか、依存とライセンスをSTEP 2で確認）。**Jev**＝Browser Worker内の操作判断Adapter（EXPERIMENT）。同じ責務を二つのOSSに持たせない。
+- ScraplingMCPServer/Crawl4AI server modeは、Gateway・Sentinel・Egress境界の外でBrowserやfetchを起動するため既定不採用。
+- 確認済み（PyPI、2026-11-09、未実行）: `scrapling 0.5.1`（BSD-3-Clause、>=3.10、classifierは3.13まで）、`Crawl4AI 0.9.5`（Apache-2.0、>=3.10、classifierは3.13まで）。

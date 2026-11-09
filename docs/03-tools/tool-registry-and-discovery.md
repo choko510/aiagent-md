@@ -535,3 +535,7 @@ SHOULDの追跡：TRD-018→T15/T26、TRD-019→T24/T26、TRD-020→T10/T18/T24�
 ## 2026-11-07 Muse移行: Exec登録と生成ツール
 
 Tool Registryにsandbox.execを登録済みの一能力として追加する。AIが書いたPython/CLI、MCP/SkillコードはTrusted Tool Descriptorではなく、Untrusted Runtime Cell内のバイナリ/スクリプト。コードや外部Tool manifestは自分自身へNetwork/Policy/Vault/Host権限を付与できない。Tool discoveryから許可への昇格はUser/Owner承認が必須。Execのargv、image digest、workspace revision、profileと版を固定し、package/toolchain dependencyをEvidence/Artifactに残す。SC-17/18/20/22。
+
+## 2026-11-09 Python-first（STEP 1）
+
+Registry/DiscoveryはPython（Trusted Control VM）で実装する（[ADR-036](../00-foundation/architecture-decisions.md)）。OpenClaw・Mastra・MCP TypeScript SDKの引用はアルゴリズム参照（分類B）であり、MCP clientの実装候補は公式MCP Python SDK（[MCP Adapter 2026-11-09節](mcp-adapter.md)）。Manifest/Schemaの正本はcanonical JSON Schema、Python側Pydantic modelは生成物。

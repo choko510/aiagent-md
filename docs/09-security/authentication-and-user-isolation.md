@@ -108,7 +108,7 @@ SSO/OIDC、組織共有、ゲストリンク、公開APIキー発行、外部ユ
 | AUTH-024 | SHOULD | 高危険操作/資格情報・通知先変更で再認証し、可能ならWebAuthn/PasskeyまたはMFAを備える | 08 |
 | AUTH-025 | SHOULD | PostgresでRLSと専用最小権限DB roleを追加し、アプリ認可の防御層を増やす | 06,08 |
 | AUTH-026 | LATER | 招待、他者との共有、Org RoleとResource ACLを独立ADRのもとで実装する | 06 |
-| AUTH-027 | EXPERIMENT | Better Auth adapterを導入しDBセッション失効、CSRF/Origin、proxy/TLS、Fastify/Next.js共存を試験 | 08 |
+| AUTH-027 | EXPERIMENT | （2026-11-09: 分類C）Python-first後のAuthProvider候補でDBセッション失効、CSRF/Origin、proxy/TLS、FastAPI/React共存を試験。Better AuthはNode/TSライブラリのため、Backendに採用する場合は独立Node Sidecarが必要となり既定不採用。旧記述: Better Auth adapterとFastify/Next.js共存 | 08 |
 
 ## 5. 内部契約候補・API・入力検証
 
@@ -570,3 +570,7 @@ The **server** resolves tenant, owner, membership, capability, immutable target 
 **AUTH-DEV-T05**: old Campaign controlVersion is rejected by all child/model/tool/Browser admission.
 **AUTH-DEV-T06**: debug reader cannot access raw tokens/HAR or other Project's screenshots.
 These are proposed auth contract tests (not executed).
+
+## 2026-11-09 Python-first: 認証実装の再検討（STEP 1、分類C）
+
+`AuthProvider`契約（DB-backed session、即時失効、CSRF/Origin、fresh auth、tenant isolation、RLS防御層）は不変。Better Auth（TS）の調査は設計参考として保持するが、Backendが[ADR-036](../00-foundation/architecture-decisions.md)でPythonになったため、第一候補は**FastAPI内の自前`AuthProvider`（opaque session token＋PostgreSQL session表＋Argon2等の検証済みhash実装＋OIDCはAuthlib等の検証済みライブラリ）**とする。具体的ライブラリの採否（Authlib、passlib/argon2-cffi、fastapi-users等）はソース・テスト・保守状況・ライセンスを実装時に確認する（未確認）。Cookie属性・CSRF・Origin検査はFastAPI middleware/dependencyで全routeに強制し、AUTH-T22はFastAPI＋reverse proxy構成で実施する（未実行）。

@@ -6,7 +6,7 @@
 
 ## 0. 結論と採用案
 
-**採用：オフラインを既定とする多層Hermetic Test Harness。** 安定した合成Fixtureを正本とし、Node HTTPはMSWのような境界Mock、Browserは隔離Playwright Context + route/HAR、Python SidecarはHTTP cassette/スタブ、Postgres・Queue・Workerはテストごとにリセット可能な実コンポーネントで検証する。さらに**アプリ側Mockとは独立したネットワーク遮断**をCI側で強制する。テスト対象のAgent自身にホスト操作権限は与えない。
+**採用：オフラインを既定とする多層Hermetic Test Harness。** 安定した合成Fixtureを正本とし、Node HTTPはMSWのような境界Mock、Browserは隔離Playwright Context + route/HAR、Python Extraction Worker（旧称Sidecar）はHTTP cassette/スタブ、Postgres・Queue・Workerはテストごとにリセット可能な実コンポーネントで検証する。さらに**アプリ側Mockとは独立したネットワーク遮断**をCI側で強制する。テスト対象のAgent自身にホスト操作権限は与えない。
 
 検索・HTTP・Browser・API・LLM・Clock・Scheduler・Notifier・Identity/Approvalの各境界を置換可能にし、録画データの再生と**意味論に基づくOracle**（型番一致、価格計算、日時、Evidence、許可なし副作用ゼロ）を組み合わせる。LLMによる自由文評価のみを合否の正本にしない。値の鮮度と不確実性を維持する。実サイト/APIに接続する試験は隔離した明示的live laneだけで実行し、PR必須合否には使わない。
 
@@ -525,3 +525,7 @@ Source of truth: `Context 18.22`。Fixtureは`testId, fixedClock, tenant, princi
 **Race fixtures**: DELETE-TX commit前後の2 Gateway dispatch、Model send ACK lost、Template changed during restart、ToolSchema order changed、Artifact GCとactive HEAD/Retention期限が競合、Parent Steerとchild DONE、Source doc "駐車料金別途"をLLMが「込み」と誤要約。SourceRefだけ正しい場合にもFact supportがREFUTEDでなければ失敗。結果期待値はDB行/attempt状態とProviderへの送信記録で照合。
 
 **Static vs Runtime**: Markdown/JSON構造検証は仕様の整合しか保証せず、Semantic Validator/Memory concurrency/Provider/DB/GC/Sentinelの動作成功を意味しない。Harness本体実装後、FakeModel + Real PG + test-only Gateway + denial egressで実行するまではすべてNOT RUN。
+
+## 2026-11-09 Python-first（ADR-036）: Test Harnessの実装基盤（STEP 1、Designed / NOT RUN）
+
+Backend試験は**pytest**（async: anyio/pytest-asyncio）を基盤とし、HTTP境界MockはPython側（respx/pytest-httpserver等、採用は実装時確認）、Browserは**Playwright Python**の隔離Context＋route/HAR、PostgreSQLは実コンテナ（Testcontainers Python等）でテストごとにリセットする。MSW（Node）はWeb UI（`web/`）の試験に限定し、Backend Harnessの前提から外す（分類B: UI用途として保持）。既存のTest ID・Fixture・Acceptance Criteriaは変更しない。CIは`uv sync --locked`→`ruff check`→`ruff format --check`→`mypy --strict`（または`pyright`）→`pytest`→Playwright Python E2E、UIは`web/`でTS typecheck/lint/testを別jobとする（[Architecture Rules §E-9](../00-foundation/architecture-rules.md)）。report項目のNode version欄はUI jobのみ必須、Backend jobはPython version・lockfile hash・image digestを記録する。

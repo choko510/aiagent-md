@@ -5,7 +5,7 @@
 
 ## 0. 採用案と設計不変条件
 
-**採用:** Agent業務の正本は`agent.tasks/runs/domain_events + event_aggregate_counters + tenant_event_counters/tool_intents/side_effect_records/watches/notification_records/outbox_messages`（10-01、Draft）。実行待ち・再試行のトランスポートはPostgreSQL永続Queue（第一候補pg-boss、独立`pgboss` schema）。**同じPostgres内でも別transactionでQueueへのpublishが発生するため、Outbox relayは重複送信を許容し、受信側をfence/idempotent化する**。Event/User-visible通知のExactly-once外部配達は一般には不可能。ユーザーを誤解させない。
+**採用:** Agent業務の正本は`agent.tasks/runs/domain_events + event_aggregate_counters + tenant_event_counters/tool_intents/side_effect_records/watches/notification_records/outbox_messages`（10-01、Draft）。実行待ち・再試行のトランスポートは`QueuePort`背後の永続Queue（2026-11-09: Python基盤からADR-039に従い1系統選定。旧: 第一候補pg-boss、独立`pgboss` schema）。**同じPostgres内でも別transactionでQueueへのpublishが発生するため、Outbox relayは重複送信を許容し、受信側をfence/idempotent化する**。Event/User-visible通知のExactly-once外部配達は一般には不可能。ユーザーを誤解させない。
 
 **Hard invariants (MUST):** (1) ドメイン変更・Event・Outbox recordを一つのDB commitで保存。(2) Outbox未publishを必ず再列挙可能。(3) Queue job payloadは不透明なPointer+generationでありauthorityではない。(4) Run leaseEpoch、Tool attempt fence、Schedule revisionは**別値**。(5) 既に外部実行したか不明なTool/NotificationはACK喪失だけを理由に盲目再実行しない。(6) pause/cancel/steer後の旧JobをTool Gatewayへ通さない。(7) CAS結果0行は「成功扱い」しない。(8) Queue障害でもTask/Watch正本を削除しない。
 
@@ -241,7 +241,7 @@ CHAT_08: display Queued/PendingDispatch/Blocked/Uncertain independently of Task 
 
 ## 13. Suggested implementation PRs (separate code repo)
 
-1. **JQ-A:** QueuePort interface, pg-boss adapter behind feature flag, migrations + queue conformance tests, limited worker concurrency.
+1. **JQ-A:** QueuePort interface, the ADR-039-selected Python queue adapter (formerly pg-boss) behind feature flag, migrations + queue conformance tests, limited worker concurrency.
 2. **JQ-B:** Outbox lease/fence columns & relay claim/publish/ack loop, crash-window harness. No external providers.
 3. **JQ-C:** Consumer revalidation and Run leaseEpoch fencing, canonical Event/Checkpoint Tx, Cancel/Steer tests.
 4. **JQ-D:** Watch occurrence/notifications with provider mock and uncertain receipt policy, DLQ operator tooling.
@@ -324,3 +324,17 @@ Queueに渡るtenantIdはスコープ参照でありownerUserId/workspaceIdと�
 - Relay `fenceEpoch` / Run `leaseEpoch` は非負int64の正規十進文字列wire・BigInt内部・Postgres BIGINTで処理。2^53+1でも無損失、JS Numberへキャスト禁止。
 - PITR/Failover後に復元されたOutbox行・Queue Jobは旧 `restoreIncarnation` の送信権限を保持しない。独立Storeの新世代とRun/Goal/Identity/Policyを確認してから新Grant発行。既に送信された可能性のある外部操作はUNKNOWNで隔離してProvider照会なし再送禁止。
 - **設計試験**: 同Tenant別Owner/Workspace 0越境、2^53+1 fenceの新旧比較、古い世代Queue jobの送信0、ACK失われた通知の重複0。実行証拠は未取得。
+
+## 2026-11-09 Python-first（ADR-036）: Queue/Workflow基盤の再選定（STEP 1、ADR-039）
+
+pg-boss（Node.js専用）は採用候補から外し、§2のattempt fence/stale completion（Issue #925）調査は**QueuePort適合試験の反例**として保持する。Hard invariants (1)〜(8)、Transactional Outbox、Domain Event、Run Lease、Job Attempt、Idempotency Key、Effect Ledgerは不変。Queue製品のat-least-once/exactly-once表記を外部副作用のexactly-onceと同一視しない。
+
+| 候補 | 適合しうる点 | 懸念・確認事項 | 状態 |
+|---|---|---|---|
+| DBOS（`dbos 3.4.0`、MIT） | PostgreSQLのみで durable workflow/queue/scheduling | ADR-038候補Aと一体判断。workflow状態をTask/Run正本にしない、step replayと外部副作用の分離 | STEP 2 |
+| Dramatiq（`2.2.1`） / Celery（`5.7.0`、BSD-3-Clause） | 成熟したPython worker | Redis/RabbitMQ等のBroker追加、Broker ACKとDB outboxの二重状態、visibility timeout | 候補 |
+| Temporal Python SDK（`temporalio 1.35.0`、MIT） | 強力なdurable execution | 別クラスタ運用、Task/Run正本との二重状態（既存選択肢Dで初期却下） | 初期却下を維持 |
+| APScheduler（`3.11.3`、MIT） | 時刻trigger計算 | job storeは正本にしない。Queueではない | 補助のみ |
+| 自作PostgreSQL Queue（`FOR UPDATE SKIP LOCKED`） | 依存最小・既存DDLと同一Tx | claim/heartbeat/cleanupの保守（既存選択肢C） | DBOS/候補が不適合時の代替 |
+
+**単一系統の規則**: 上表から1つだけを採用し、Agent Runtime候補（ADR-038）のworkflow機構と別Queueを重複導入しない。候補Bを選ぶ場合は、LangGraphの実行と本QueuePortの責務境界（Run起動・再claimはQueuePort、step内実行はLangGraph）を明記する。DB driverはasyncpg（Apache-2.0）またはpsycopg 3（LGPL-3.0、利用形態のライセンス確認要）を実装時に選ぶ。JQ-T系試験は選定基盤で実行する（未実行）。

@@ -23,7 +23,7 @@ SC-05/06：Web researchやログイン済みscope、SC-07：crash/duplicate/sess
 | MCP TypeScript SDK `39ae8e6192cf43273aaaf2de4169dfa9f7216e28` MIT/Apache-2.0移行中 | [`packages/client/src/client/client.ts::Client.listTools`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/src/client/client.ts#L2556-L2584)（ページ集約/cache）、[`_setupListChangedHandlers`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/src/client/client.ts#L777-L789)（list_changed→refresh）、[`callTool`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/src/client/client.ts#L2331-L2493)（outputSchema検証）、[`streamableHttp.ts`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/src/client/streamableHttp.ts) transport。 | **Code verified (read)**。SDK採用候補だがwire/era/versionごとadapterで隔離。 |
 | MCP TS SDK tests, same commit | [`test/e2e/scenarios/dynamic.test.ts`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/dynamic.test.ts#L25-L69) dynamic tool、[`pagination.test.ts`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/pagination.test.ts#L46-L116) opaque cursors、[`test/e2e/scenarios/protocol.test.ts`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/test/e2e/scenarios/protocol.test.ts#L77-L129) Abort/cancellation、[`responseCache.test.ts`](https://github.com/modelcontextprotocol/typescript-sdk/blob/39ae8e6192cf43273aaaf2de4169dfa9f7216e28/packages/client/test/client/responseCache.test.ts#L424-L445) cache。 | **Test inspected, not run**。Notification loss/cache stale/transport crashは追加アプリテストで保証。 |
 | Mastra `a24447357742cc9d0fa072dc6f14357a7c497446` Apache-2.0 non-ee | [`mastracode/sdk/src/mcp/manager.ts::createMcpManager/getTools`](https://github.com/mastra-ai/mastra/blob/a24447357742cc9d0fa072dc6f14357a7c497446/mastracode/sdk/src/mcp/manager.ts#L438-L479)の`listToolsetsWithErrors`/server-by-server statuses、[manager test](https://github.com/mastra-ai/mastra/blob/a24447357742cc9d0fa072dc6f14357a7c497446/mastracode/sdk/src/mcp/__tests__/manager.test.ts#L42-L165)のstdio/HTTP/Auth確認。 | **Code/test read**。Provider単位のstatus/partial failureは採用。`serverName_toolName` flat nameだけを権限識別子にするのは却下。 |
-| PydanticAI `3809c1b861036197de4a06ae3ee38e27e5455100` MIT | [`FilteredToolset`](https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/pydantic_ai_slim/pydantic_ai/toolsets/filtered.py#L14-L33) のcontextual tool filtering、[tests](https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/tests/test_toolsets.py#L2924-L2944) のAsync Filter。 | **Code/test read**。MCP exposed catalogのrun-scope filteringの参考。Pydantic型やApproval wrapperをTS側Policy正本にしない。 |
+| PydanticAI `3809c1b861036197de4a06ae3ee38e27e5455100` MIT | [`FilteredToolset`](https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/pydantic_ai_slim/pydantic_ai/toolsets/filtered.py#L14-L33) のcontextual tool filtering、[tests](https://github.com/pydantic/pydantic-ai/blob/3809c1b861036197de4a06ae3ee38e27e5455100/tests/test_toolsets.py#L2924-L2944) のAsync Filter。 | **Code/test read**。MCP exposed catalogのrun-scope filteringの参考。Pydantic型やApproval wrapperをPolicy正本にしない（旧記述: TS側Policy正本）。 |
 | MCP normative Tools spec | [MCP tools specification 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) / [transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) | **Docs source**。公開protocol revisionの概念を参照するがSDK `39ae8e`内の2026-07-28 era branchは追加/相違があるためversion negotiate後に固定。 |
 | Issues | [SDK #2232](https://github.com/modelcontextprotocol/typescript-sdk/issues/2232): stateless HTTP `list_changed` notification loss、[#3056](https://github.com/modelcontextprotocol/typescript-sdk/issues/3056): 404 session expiry reconnect gap、[PR #2668](https://github.com/modelcontextprotocol/typescript-sdk/pull/2668): cancellation on initialize fix proposal | **Issue/PR report**, 2026-10-30閲覧。外部caseの現行修正有無は独立確認が必要。 |
 
@@ -82,7 +82,7 @@ Server connections:
 | MCP-018 | SHOULD | `outputSchema` strict validation support with fallback to explicit Unknown, not acceptance as arbitrary success | 05,08 |
 | MCP-019 | EXPERIMENT | HTTP transport version and SSE reconnection strategy measured on real auth/provider fixtures | 09 |
 
-## 5. Local TypeScript Ports / strict validation
+## 5. Local Ports / strict validation（TypeScript記法の論理型。実装は公式MCP Python SDK＋Pydantic: 2026-11-09節）
 ~~~ts
 type ProviderId=string;               // admin assigned stable, NOT serverInfo.name
 type ScopedSecretRef=string;          // vaulted, never provided to LLM
@@ -350,3 +350,22 @@ M1 MCP SDK adapter transport/auth handshake/egress under feature flag, integrati
 ## 2026-11-07 Muse移行: MCPサーバーの実行境界
 
 Untrusted MCP server or generated MCP Tool runs within restricted Runtime Cell / independent sandbox, not protected Privsep. Shell/process/network activity remains forced through Sentinel and Tool Gateway; MCP descriptions/annotations cannot grant Host Docker/SSH, Vault secret, Browser CDP, policy mutation or uncontrolled outbound effects. Trusted Connector promotion requires independent review, explicit capability and a protected Worker with scoped credential allowlist. Subagent/MCP calls cannot bypass the parent Run budget and effect ledger. SC-18/19/22。
+
+## 2026-11-09 Python-first: 公式MCP Python SDKへの移行（STEP 1、Draft / NOT RUN）
+
+[ADR-036](../00-foundation/architecture-decisions.md)により、MCP Adapterの第一候補を**公式MCP Python SDK**（`modelcontextprotocol/python-sdk`、PyPI `mcp 2.3.0`、requires-python >=3.10、main `77001c96f9507be0f4d009b83210a384a5e08bda`を2026-11-09に確認）とする。§2のMCP TypeScript SDK `39ae8e6`調査は**Protocol挙動の参考記録として保持**し、Python SDKの同等挙動は実装時に同じ観点で再検証する（下表はいずれも未検証）。
+
+| 観点 | 既存契約（不変） | Python SDKで確認すべき事項 |
+|---|---|---|
+| Protocol互換 | 対応protocol revisionを固定し、negotiation結果をRegistry snapshotへ記録 | SDK版ごとの対応revision、`initialize`結果の取得方法 |
+| Tool Discovery / Pagination | `tools/list`を`nextCursor`終端まで全ページ走査、上限超過はfail closed | cursor処理、ページ上限、`list_changed`通知の扱い |
+| Transport / Session | stdio serverはAgent/Cellがspawnしない。Streamable HTTPはTrusted Egress経由 | HTTP clientの差替え・proxy強制可否、session id喪失時の再initialize |
+| Cancellation / Streaming | Cancel・progressは外部効果の取消しではない、旧write callのblind replay禁止 | `notifications/cancelled`送信、anyio task cancel時のrequest状態 |
+| Authentication | OAuth token/APIキーはCredential Broker注入、LLM/Registryへ非露出 | SDK auth providerへのtoken注入点、token refreshのcallback |
+| Tool I/O Schema | JSON Schemaは非信頼、正規化・サイズ上限後にcanonical化 | `inputSchema`/`outputSchema`/`structuredContent`のPydantic化と未知field |
+| Restart / Retry / Error | Server restartでRegistry世代更新、read-onlyのみ有界retry、write UNKNOWN保持 | JSON-RPC error/transport errorの例外型の区別 |
+| Approval / Multi-tenant | 承認はCHAT_03 Gateway、接続はtenant×server単位の独立Workerプロセス | SDK sessionをプロセス間・tenant間で共有しないこと、資源上限 |
+
+- MCP SDKはTool Policy、Approval、Side-effect Ledger、Sentinel判定の正本にしない。SDK呼出しはTool Gatewayが作成したIntentに対してだけ行う。
+- MCP Adapter WorkerはAgent Runtimeとは別プロセス（[System Architecture §13.2](../00-foundation/system-architecture.md)）。同じPythonであることを理由にRuntimeへin-process同居させない。
+- 既存MCP系テストIDとAcceptance Criteriaは変更しない。Python SDK用の適合試験 MCP-PY-T01（全ページ走査）、T02（session喪失後のwrite不再送）、T03（cancel後のUNKNOWN保持）、T04（tenant分離）を実装時に追加する（未実行）。

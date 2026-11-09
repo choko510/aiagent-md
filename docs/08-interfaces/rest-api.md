@@ -762,3 +762,14 @@ type BrowserObservationCloseAckV1 = {
 ## 2026-11-07 Development/Campaign API Extension proposals（Draft）
 
 [DEV-09](../16-app-development/development-api-and-ui.md) の `/api/v1/development/projects`, `/cycles`, `/design-candidates`, `/design-decision`, `/demo-decision`, `/reviews`, `/debug-evidence` と `/api/v1/campaigns`, `/commands`, `/events`を追加REST候補とする。正式なOpenAPI/DTO/stateはCHAT_01/08/10協議後にLocked。全書込でIdempotency-Key・If-Match/recordVersion・CSRF/Origin/AuthenticatedPrincipalを保持。UserDesign/DemoDecisionは外部Tool Approvalと独立。HTTP202で完了表示しない。GET/SSEから署名cursorとserver stateへ再整合し、pending/waiting/quota/rate/partial/unknown を区別。raw code/secret/CDP/download tokenや任意Tool実行APIを公開しない。DEV-UI-T01..06、CAM-T05、SC-24..31 未実行。
+
+## 2026-11-09 Python-first: FastAPI実装境界（STEP 1、Draft / NOT IMPLEMENTED）
+
+本書のHTTP公開契約（`/api/v1`、202/201＋Resource URL、Idempotency-Key台帳、If-Match、cursor、RFC 9457 Problem Details、SSE別経路）は**外部仕様として不変**。実装は**FastAPI＋Pydantic v2（ASGI、Uvicorn等）**を第一候補とする（[ADR-036](../00-foundation/architecture-decisions.md)、PyPI `fastapi 0.162.2`/`uvicorn 0.54.0`を2026-11-09確認、未実行）。
+
+- Request/Response DTOはcanonical JSON Schema（CHAT_01/08）から生成したPydantic model。FastAPIが出力するOpenAPIは**生成物**であり、正本Schemaとの機械照合（差分0）をCI gateにする。UI ClientはそのOpenAPIから型生成（例: openapi-typescript、採用は実装時確認）。
+- Pydanticの既定エラー（422）はRFC 9457 Problem Detailsへ変換し、内部例外・入力値・Secretを露出しない。int64はstring、未知fieldは拒否（`extra="forbid"`）。
+- APIプロセスはCommandをTransaction内で永続化（Task＋DomainEvent＋outbox）して返すだけで、Agent Runtime・Tool・Browserを直接起動しない。HTTP切断はRun Cancelではない（既存§0）。
+- 認証・tenant解決・CSRF/Origin検査はFastAPI dependency/middlewareで全routeに強制し、route単位の付け忘れを静的テストで検出する（[Authentication 2026-11-09節](../09-security/authentication-and-user-isolation.md)）。
+- APIプロセスにVault Secret、Provider key、Browser CDP endpointを渡さない（[System Architecture §13.2](../00-foundation/system-architecture.md)）。
+- 旧記述中のFastify/Next.js Route Handler/Mastra route-builderは調査・候補の履歴（分類B）。

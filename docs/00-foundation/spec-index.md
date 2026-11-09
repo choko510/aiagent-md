@@ -174,3 +174,7 @@ Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-de
 | DEV-20 | [Acceptance / rollout](../16-app-development/advanced-development-acceptance.md) | Draft / NOT RUN |
 
 対応REQはDEV-REQ-19..27、対応受入はSC-32..40（提案）。既存DEV-REQ-01..18/SC-24..31を置換しない。PR #74と変更パスを分離し、Context/Tool/Sentinel/BenchmarkのOwner調整を後続の契約審査事項とする。
+
+## 2026-11-09 Python-first 移行（STEP 1）
+
+開発言語方針はPython-first（[ADR-036〜040](architecture-decisions.md)、物理配置は[System Architecture §13.2](system-architecture.md)、拘束規則は[Architecture Rules §E](architecture-rules.md)）。**新しい独立仕様MDは追加せず**、88件の正本・COMP-01・DEV-01〜11のモジュール数とIDは変更しない。各正本MDへ「2026-11-09 Python-first」節または該当箇所の改訂を加え、TS/Node前提の記述は移行監査台帳でA（修正）/B（保持）/C（再検討）に分類した。静的検査は`audit/cross-contract/check_python_first.py`。Agent Runtime OSSはSTEP 2で選定（ADR-038）。

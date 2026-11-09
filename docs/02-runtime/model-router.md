@@ -220,3 +220,7 @@ RTK CLIフィルタの出力bytes/4やHeadroom/Cavemanのoffline token estimator
 **禁止**: Caveman Cloud Auto routingやHeadroom Proxyの認証転送、RTK ProxyをModel Routerの代替として自動構成しない。Codec/Model ProviderがNetwork/Secretを取得する経路は独立Gateway/Recipient Consentを通す。外部LLMに対する説明圧縮のために元のSystem/Developer/Goal/Approvalを削らない。
 
 **実装順**: Current modelのProvider serializerを用いた固定baselineとshadow outputの差分を測る→paired QUALITY/Cache gate→形式別enabled。OPT-T05〜T07/T19〜T20がPASSした場合のみ圧縮によるコスト改善と報告できる。設計のみで未実測。
+
+## 2026-11-09 Python-first（ADR-036）: Model Gatewayの実装境界（STEP 1、Draft）
+
+Model RouterはTrusted Control VM内の独立Pythonプロセス（Model Gateway）として実装し、Agent Runtimeとは認証付きローカルRPCで接続する（[System Architecture §13.2](../00-foundation/system-architecture.md)）。Provider SDK/HTTP clientはこのプロセスだけが保持し、Credential Brokerから受信者束縛で鍵を注入、送信はTrusted Egress経由。PydanticAIの`FallbackModel`やLangChain model wrapperなどFramework内蔵のFallback/Retryは**無効化またはModel Gateway内部へ限定**し、§5〜8のFallback順序・Budget予約・Recipient consent・Sealed ModelRequestSnapshot再検証を唯一の経路とする。Provider retryとTool retryは別概念（[Architecture Rules §E](../00-foundation/architecture-rules.md) E-7）。Streaming応答はGateway内で上限付きにbufferし、確定したusage/costをDBへ記録してからRuntimeへ渡す。

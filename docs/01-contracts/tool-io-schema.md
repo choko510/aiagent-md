@@ -8,7 +8,7 @@
 
 ## 1. 目的・範囲・非範囲
 
-汎用Web調査ではSearch/HTTP/Browser/外部API/MCP/Python sidecarの戻り値を同じ形式で扱う必要がある。AmazonやX、ホテルに固有の型を共通へ混ぜない。対象はTool manifest schema、入力検証、Call/Result/Progress/errorの表現、codec/version、cancel/timeoutと不確定性に関わるwire意味論。非責務: registry選択/TTL/Tool実行、外部アダプタ内部、Secret注入、approval ledger（CHAT_03）、LLMループ（CHAT_02）、HTTP routes（CHAT_08）、Evidence一次評価（01-05）。SC-01..09および追加SC-10/11/12/13/15/16。
+汎用Web調査ではSearch/HTTP/Browser/外部API/MCP/Extraction Worker（旧称Python sidecar）の戻り値を同じ形式で扱う必要がある。AmazonやX、ホテルに固有の型を共通へ混ぜない。対象はTool manifest schema、入力検証、Call/Result/Progress/errorの表現、codec/version、cancel/timeoutと不確定性に関わるwire意味論。非責務: registry選択/TTL/Tool実行、外部アダプタ内部、Secret注入、approval ledger（CHAT_03）、LLMループ（CHAT_02）、HTTP routes（CHAT_08）、Evidence一次評価（01-05）。SC-01..09および追加SC-10/11/12/13/15/16。
 
 ## 2. OSS横断調査と採否（実ソース・テストを静的閲覧、未実行）
 
@@ -29,7 +29,7 @@ LLM untrusted proposal
   -> JSON Schema + strict validation (CHAT_01)
   -> CHAT_03 policy / budget / approval / durable intent
   -> leaseEpoch, current GoalRevision, owner (CHAT_02/09/10) fresh check
-  -> approved executor, optional Python sidecar
+  -> approved executor, optional isolated Extraction Worker (Python; formerly "Python sidecar")
   -> sanitize output + artifact persistence
   -> ToolResult persisted via Gateway side-effect ledger
   -> Event 01-02 / Evidence 01-05 / normalized model feedback
@@ -275,3 +275,7 @@ Provisional machine-readable files: [SandboxExecProposalV1](../../contracts/muse
 ## 2026-11-07 再監査: 外部ActionのContractと権限の分離
 
 `SandboxExecutionAdmissionV1.goalRevision` は正整数（初期1）、`leaseEpoch` / `workspaceRevision` は0許可で値域が異なる。Brokerへ渡す `ExternalActionProposalV1` は非空Argsと、`http.read` のHTTPS・GET/HEADなどの**Envelope最小検証**を行う。正式なoperation-specific Tool Schema / Registry revision / args digest / Target / Credential / Identity / Policy / Budgetを必ず別途確認する。Envelopeのみで受信できても実送信は不可。未知operation/未知Schema major/Registry digest mismatch/未認可の宛先はfail closed。
+
+## 2026-11-09 Python-first（ADR-036）: Tool I/O SchemaとPydantic・MCP Python SDK（STEP 1）
+
+Tool input/output Schemaの正本は本書のcanonical JSON Schema（schema SHA付き）。Python実装ではPydantic v2 modelをそこから生成・照合し、`model_json_schema()`の出力を正本へ逆流させない。公式MCP Python SDKの`inputSchema`/`outputSchema`/`structuredContent`は外部Protocol表現として受け取り、本書の正規化・サイズ上限・非信頼扱いを経てからGatewayへ渡す（[MCP Adapter 2026-11-09節](../03-tools/mcp-adapter.md)）。Pydanticの検証成功はTool Policy/Approvalの代替ではない。

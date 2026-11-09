@@ -1,5 +1,5 @@
 # Domain Glossary — Terms That Must Not Be Interchanged
-> CHAT_00 Draft glossary. Definitions describe roles; canonical TypeScript types, enum values and validation live in CHAT_01. No glossary entry overrides a source-of-truth contract.
+> CHAT_00 Draft glossary. Definitions describe roles; canonical logical types (language-neutral JSON Schema; TypeScript notation in specs is logical only — ADR-036/037), enum values and validation live in CHAT_01. No glossary entry overrides a source-of-truth contract.
 | Term | Exact domain meaning | Invariant / does not mean | Owner |
 |---|---|---|---|
 | Tenant | isolation and tenant Event ordering boundary | not a user; tenant offset may contain hidden owner events | CHAT_09 / 01 |

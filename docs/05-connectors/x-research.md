@@ -216,3 +216,7 @@ API outgoing URL (no internal IP), TLS, OAuth bearer scoping, PII/user queries, 
 ## 2026-11-07 Muse移行: XデータとExternal Eventの隔離
 
 X/APIのOAuthや検索CredentialはTrusted Privsep/Brokerで保持する。AgentのScriptからXの投稿・DM・フォロー等のwriteを直接実行しない。Sentinelの外部Action許可とGatewayの明示的Approval/Side-effect Ledgerを必要とし、通常の検索/監視権限を投稿権限へ拡張しない。X投稿本文は生成Skill/Scriptへの悪意ある命令源となり得るのでnon-authoritative untrusted data。SC-19/22。
+
+## 2026-11-09 Python-first: X API client（STEP 1、分類C）
+
+node-twitter-api-v2（TS）の調査はpagination・stream再接続の参考として保持。Python-first（ADR-036）では既に調査済みのTweepy（MIT、[X8]）またはHTTP直接呼出しをPython側候補とし、pinned版のpagination/stream/rate-limit挙動を実装時に再検証する（未実行）。Provider entitlement・quota・規約の契約は不変。

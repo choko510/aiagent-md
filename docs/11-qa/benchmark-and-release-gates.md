@@ -443,3 +443,7 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 **18.23/19 統合Gate（未実施）**: 同一SourceRangeへの2段lossy適用は禁止。OPT-T04/T16/T20とACM-OSS-T03/T10/T11を同一Fixture・最終ModelRequestで合同実行し、元Source spanに基づく否定/金額/Tool pair・削除後再注入・重複Token計算の誤りが1件でもあれば両Optimizerの同時enabledを禁止する。文書のStatic CI PASSは統合E2E PASSを意味しない。
 
 **Bench**: small safe-full / safe bounded-tail / offload-only / offload+quality / offload+quality+OMを同じModel/Tokenizer/Source/Tool Schema/総Budgetで比較。Measured: Evidence Recall@FixedBudget、Fact entailment、Source locators、最新User ask、100-cycle Hard anchors、p50/p95 latency、全LLM/Tool/Recall費用、CAS conflict、Artifact GC。安全全PASS後だけ節約率を比較。実測値・保証値はまだない。
+
+## 2026-11-09 Python-first移行に伴うRelease Gateの扱い
+
+既存のHard/Quality gate・Test IDは変更しない。追加の静的Gateは`audit/cross-contract/check_python_first.py`（TS前提記述の分類漏れ・ADR-036〜040の必須条件）で、**これは仕様整合の静的検査であり、Python Agent Runtimeの動作検証PASSではない**。実装開始後は、ADR-038の`AgentRuntimePort`適合試験（PYRT-T01〜T05）、MCP-PY-T01〜T04、QueuePort（JQ-T系）を候補ごとに同一fixtureで実行し、選定基盤以外のRelease判定を行わない。

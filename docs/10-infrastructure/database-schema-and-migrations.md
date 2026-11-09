@@ -980,7 +980,7 @@ Event、Evidence、Audit、Checkpointは原則append-only（訂正は新しい�
 | DB-X03 CHAT_03 | **P0** | Tool Intent/Approval/Effect/attemptとUNKNOWN・idempotencyのcanonical schema | side-effect ledger accepted + kill-window E2E |
 | DB-X04 CHAT_02 | **P0** | Checkpoint形式、snapshot schema version、recovery/steer/cancel safe boundary | crash replay fixturesで既存Run可読 |
 | DB-X05 CHAT_07 | **P1** | observation_key、trigger identity、Watch停止/周期/TZ、notification_keyの衝突規則 | reboot/double notification fixture合格 |
-| DB-X06 CHAT_10-02 | **P1** | pg-boss採否、Outbox relay lease/fencing/ack/consumer group、job retention | at-least-once kill/duplicate test |
+| DB-X06 CHAT_10-02 | **P1** | Queue基盤採否（2026-11-09: pg-bossは候補外、ADR-039のPython基盤）、Outbox relay lease/fencing/ack/consumer group、job retention | at-least-once kill/duplicate test |
 | DB-X07 CHAT_10-05 | **P1** | DB+Artifact+Secret snapshot整合、WAL retention、RPO/RTO | restore drill |
 | DB-X08 CHAT_11 | **P1** | PG16/17/18の採用majorとtest matrix、query workload/閾値 | executable DDL+EXPLAIN+load |
 | DB-X09 CHAT_00 | P1 | 個人利用起点で将来multi-user前提を物理モデルへ固定してよいか、Artifact store採用 | Architecture ADR |
@@ -1818,3 +1818,7 @@ The immutable `campaign_count_receipts` row represents **the first successful qu
 
 **DEV-DB-T11**: after ten integrated feature receipts, another merge changes head and invalidates two integration evaluations → current progress falls to eight, no stale target assertion.
 **DEV-DB-T12**: new evaluation PASS for the same logical work item on new head restores eligibility but does not create a second count receipt.
+
+## 2026-11-09 Python-first: DDL正本とPython Driver（STEP 1）
+
+DDL・制約・Transaction境界の正本は本書のSQL（ADR-036でSQLが永続化の正本言語）。Python側はasyncpgまたはpsycopg 3を候補とし、ORM（SQLAlchemy 2.1等）を使う場合もQuery構築/型付けに限り、**ORMのautogenerateでMigrationを生成しない**。Migrationは版付きSQLファイルをchecksum付きで適用するrunner（Alembicのraw SQL運用または自前runner）とし、expand→backfill→switch→contractとimmutable historyの規則を維持する。int64列はPython `int`へ範囲検査付きで変換し、wireでは十進文字列。`audit/round4`の既存DDL試験（Python製）はそのまま有効。

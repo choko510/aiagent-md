@@ -154,3 +154,7 @@ Jevの判断候補と理由は提案として表示。ステップ実行/サイ�
 ## 2026-11-07 Muse移行: Jevはブラウザ所有者にならない
 
 Jev/AI Browser判断器はRuntime Cell内の補助ロジックまたは限定されたAdapterとなり得るが、Browser BrokerのCDP/セッション資格/OS権限を取得しない。動作提案を現在のOwner/lease/GoalRevision/Tool Gatewayに紐づけ、具体的Browser ActionとネットワークはBroker/Sentinel経路のみ。Agentの自由なPython/NodeがJev代わりになっても直接CDPは許可しない。SC-18/19/22。
+
+## 2026-11-09 Python-first: Jev Python版の再確認（STEP 1、分類C）
+
+本書の調査対象は`jkudish/jev-browser`（TypeScript、commit `817b09ee`）。2026-11-09時点でPyPIの`jev-browser 0.4.0`（requires-python >=3.11、MIT）は**別リポジトリ `harmanbassi/jev-agent-browser`**（2026-10-21作成）から公開されており、本書の上流と同一プロジェクトである証拠は確認できていない。Python版を採用する前に、作者・由来・ソース・テスト・Browser所有権（既存Page注入、自前Browser起動の無効化）・依存・ライセンスを再監査する（STEP 2）。確認できない場合はJevをBrowser Worker内の任意Adapter（EXPERIMENT）のまま保留し、Playwright Python単体で機能を満たす。PyPI `jev 0.3.0`は無関係なパッケージ。

@@ -228,3 +228,7 @@ BrowserSessionのObserver新規許可条件は`mode=AGENT`・`takeoverPhase=NONE
 ## 2026-11-07 DEV-06: 開発用Browser Debug Sessionの追加提案（Draft）
 
 [Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。マージ済みBrowser Live Observation PR #71のObserve-only権限を継承しつつ、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。
+
+## 2026-11-09 Python-first: Playwright Python Browser Worker（STEP 1、Draft）
+
+Browser Workerは**Playwright Python**（PyPI `playwright 1.64.1`、Apache-2.0、>=3.10）で実装し、Chromium baselineとADR-004のSession所有権を維持する（[ADR-036](../00-foundation/architecture-decisions.md)、[System Architecture §13.2](../00-foundation/system-architecture.md)）。Workerは隔離Browser domainで動き、Trusted Control VMのBrowser Broker controllerから認証付きRPCでのみ操作される。Page/Tab lease、Credential/Cookie隔離、Human Takeover、Live Observation（ADR-029）、Trusted Egress強制、Prompt injection対策、Captured ArtifactのEvidence化、Worker crash後のSession EXPIRED→再取得の各契約は変更しない。Agent Runtime・Extraction Worker・Cell内のPython/PlaywrightへCDP endpointを渡さない。Workerはasync APIに統一し、sync APIを混在させない。

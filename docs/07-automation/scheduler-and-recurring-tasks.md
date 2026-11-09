@@ -10,7 +10,7 @@
 
 **核心の保証**: 同じ(tenantId,scheduleId,revision,scheduledForUtc)の**論理Occurrenceは最大1件**。物理的なqueue配達や外部HTTPは二重に起こり得る。外部副作用のexactly-onceは保証せず、Tool Gatewayの承認/台帳で疑義を管理する。scheduledForは「調べる予定だった時刻」であり、observedAtという「実際に価格を確かめた時刻」ではない。
 
-**採用案**: PostgreSQLをSchedule/Occurrence/Outboxの正本、独立Scheduler Portからqueue adapter（第一候補pg-boss）へ非同期投入。pg-boss内蔵スケジュール機能だけでWatchの業務ID・revision・観測slotを表現する案は採用しない。
+**採用案**: PostgreSQLをSchedule/Occurrence/Outboxの正本、独立Scheduler Portからqueue adapterへ非同期投入（旧: 第一候補pg-boss。2026-11-09以降はPython基盤からADR-039に従い選定）。pg-boss内蔵スケジュール機能だけでWatchの業務ID・revision・観測slotを表現する案は採用しない。
 
 ## 1. 目的・責務・非責務
 
@@ -327,7 +327,7 @@ Trace連結キー: scheduleId/revision/occurrenceId/dispatchIntentId、Task/Run 
 |---|---|---|
 | SCH-PR1 | TimeSpec validator / TZ+cron evaluator / DST gap-fold wrapper / preview。独立pure functions | fake clockと固定DST fixtureが合格 |
 | SCH-PR2 | CHAT_10 DDL、revision CAS、Occurrence unique constraint、cursor/outbox単一Transaction、DB clock | 同時4 schedulersで論理slotが1件。故障注入 |
-| SCH-PR3 | Queue adapter（pg-boss第一候補）、outbox relay、lease+fencing、reconciler | Queue ack loss/crash、stale workerテストが合格 |
+| SCH-PR3 | Queue adapter（ADR-039のPython基盤。旧: pg-boss第一候補）、outbox relay、lease+fencing、reconciler | Queue ack loss/crash、stale workerテストが合格 |
 | SCH-PR4 | CHAT_02/03のBudget、rate、Task/Tool ledger、owner revocation連携 | 予算枯渇/不確定外部副作用/取消で安全 |
 | SCH-PR5 | CHAT_08のREST/UI/Telegram、運用metrics、CHAT_11 E2E/benchmark、canary | SC-02/07/08/09でE2E/負荷結果と移行手順が明示 |
 
@@ -483,3 +483,7 @@ Revision and lease fields use CHAT_01's canonical signed-int64 decimal **string*
 ## 2026-11-07 再監査: Round2履歴と最新Queue/DB契約
 
 §18のC07-01〜06は2026-10-30時点の**歴史的差分表**であり、UUIDv4 DB defaultやRecordVersion0を現在の実装要件として再導入しない。現行CHAT_10案では設計修正済みだが、本番でのmigration/Run CASは未検証。現在必要なのは `tenantId / ownerUserId / workspaceId` の独立認可、Occurrence unique + Outbox同一TX、int64 lossless lease/relay fence、復旧時の `restoreIncarnation`、期限切れ同意の再照合と実DB Fault試験である。旧表が現在の正本を上書きしない。
+
+## 2026-11-09 Python-first（ADR-036）: Scheduler実装候補（STEP 1）
+
+pg-bossはNode.js専用のため採用候補から外し、§2の調査（DB時刻・missed slot・claim gap）は設計参考として保持する（[ADR-039](../00-foundation/architecture-decisions.md)）。Schedule/Occurrence/Outboxの正本はPostgreSQLのまま。時刻計算はPython標準`zoneinfo`＋cron解析ライブラリ、またはAPSchedulerのtrigger計算部分のみを候補とし、**APSchedulerのjob store/実行器をOccurrence正本やQueueにしない**。投入先QueueはADR-039（DBOS/Dramatiq/Celery/Temporal Python）から1系統のみ。P07-10の互換性試験は選定基盤で再実施する。

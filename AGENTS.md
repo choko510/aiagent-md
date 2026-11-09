@@ -8,6 +8,7 @@
 - `docs/00-foundation/spec-index.md` で対象機能の正本と依存MDを特定する。
 - 共通の型/イベント/状態は `docs/01-contracts/`、Toolと副作用は `docs/03-tools/`、Securityは `docs/09-security/`、DB/運用は `docs/10-infrastructure/`、受入テストは `docs/11-qa/` を参照する。
 - `docs/02-runtime/sandbox-execution.md`、`docs/09-security/runtime-cell-isolation.md`、`docs/09-security/sentinel-authority.md` を新しい信頼境界の正本案として読む。
+- **Python-first（ADR-036〜040）**: Backend/Agent Runtime/MCP/Browser Worker/Memory/AutomationはPython、Web UIはReact + TypeScript、DBはSQL正本、Rustは任意。`system-architecture.md` §13.2 と `architecture-rules.md` §E を先に読む。仕様中の`ts`ブロックは論理型記法であり、共有型はcanonical JSON Schema→Pydantic/生成TS型で実装し手書きで二重定義しない。Agent Runtime OSS（候補A: PydanticAI＋DBOS / 候補B: DeepAgents Python＋LangGraph）はSTEP 2まで確定扱いしない。
 - `governance/round6/contract-lock-candidate.md` の CL-01〜12 は承認待ち。Draft仕様はLockedでなく、CIの静的検証も実動作の証拠ではない。
 
 ## Implementation rules
@@ -24,6 +25,7 @@
 - Agent OrchestratorはTrusted Control VMでRunを制御するが、**生成されたShell/Scriptは絶対にOrchestrator内で実行しない**。Hostの任意Shell/SSH/Docker socket/privilege escalationをAgentへ渡さない。**ただしセキュアRuntime Cell内のShell/Python/Node/CLIと生成コード実行はGateway承認済みsandbox.execとして許可する（ホスト実行ではない）。**
 - 全コード/子プロセス/ブラウザ/MCP/Connectorの通信出口はTrusted Control VMのSentinelで評価し、同じEgress Transportを通じて実送信を強制し、Credential Broker/Privsep Worker/Browser Brokerは別の信頼領域に置く。
 - 本番はTrusted Control VMと別ゲストカーネルのUntrusted Execution VM、Browser Workerの分離、Egress TransportとCell隔離を検証、VMなしdevelopment_onlyを安全な本番と表記しない。実行権限があることと外部への書込み承認は別。
+- Python-firstでも、Trusted Control VMのPythonプロセスとUntrusted Execution VMの生成Pythonはinterpreter・venv・FS・UID・networkを共有しない。Agent Framework内のTool関数はTool Intentを作るstubであり、外部副作用・Secret・CDPへ直接触れない。
 - 任意のTool Callはschema検証、policy、budget、approval、side-effect ledgerを通す。LLMが自分の操作を自己承認しない。
 - 購入・予約確定・送金・投稿・対外メッセージ送信は個別承認。UNKNOWN効果を盲目的に再試行しない。
 - APIキー・Cookie・認証トークンをLLMコンテキスト、Evidence、ログに漏らさない。

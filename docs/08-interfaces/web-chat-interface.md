@@ -8,11 +8,11 @@
 
 ## 1. Scope and actors
 
-Target: self-hosted mobile+desktop Web UI (Next.js React candidate, not locked), authenticated user, keyboard/screen reader support. Components: Conversation list, Thread transcript, Message composer, Task/Run cards, phase timeline, evidence drawer, model & budget control, Watch creation summary, paused/uncertain/approval statuses, responsive layouts. Supports arbitrary general research, not dedicated EC/scraper templates. External content is *data*; never interpolate as trusted HTML/JS/system instruction.
+Target: self-hosted mobile+desktop Web UI (React + TypeScript per ADR-036; Next.js optional, not locked), authenticated user, keyboard/screen reader support. Components: Conversation list, Thread transcript, Message composer, Task/Run cards, phase timeline, evidence drawer, model & budget control, Watch creation summary, paused/uncertain/approval statuses, responsive layouts. Supports arbitrary general research, not dedicated EC/scraper templates. External content is *data*; never interpolate as trusted HTML/JS/system instruction.
 
 Non-scope: Agent planner/executor or prompt policy (CHAT_02/03), conversation schema/goal version (CHAT_01), memory writes (CHAT_06), raw browser takeover UI (08-05), notification delivery (CHAT_07), physical DB (CHAT_10).
 
-Boundary: Next.js Server Components and API endpoints both revalidate CHAT_09 session on server; frontend state stores only redacted projections. Web ↔ Telegram share canonical Conversation/Task IDs. Task.conversationId may be null (Watch/event/API origin). Incoming new message may reference an existing Conversation with ownership verified; UI must not synthesize a Conversation for a non-chat Task.
+Boundary: the FastAPI backend revalidates the CHAT_09 session on every request (if Next.js server rendering is used, it is display-only and must not hold business logic, authorization decisions or secrets; ADR-036); frontend state stores only redacted projections. Web ↔ Telegram share canonical Conversation/Task IDs. Task.conversationId may be null (Watch/event/API origin). Incoming new message may reference an existing Conversation with ownership verified; UI must not synthesize a Conversation for a non-chat Task.
 
 ## 2. OSS source & test review (2026-10-30)
 
@@ -278,3 +278,7 @@ CHATUI-P1 generated typed API client + accessible app shell + auth-aware cache; 
 ## 2026-11-07: Muse型Agentの作業コンソール
 
 Webチャットから実行されるTaskは、Agentの計画、Sandbox Execコマンド、進捗、プロセス終了、Shell/生成コード由来Artifact、外部操作のSentinel承認/拒否を同じ正本Task/Runで表示する。ユーザーが指示しただけでホストShell権限が付くわけではない。表示上、Script生成中・ローカルコード実行中・ネットワーク承認待ち・VM隔離失敗・外部Effect UNKNOWNを区別する。生Credential/CDP/Terminal envは表示しない。Pause/Resume/CancelはProcess Group終了/Run fencingの完了を待つ非同期Command。ユーザーの手入力がモデルに権限を追加するのではなく認証済みApproval UI経由で特定Actionだけ許可。SC-17/18/19/21。
+
+## 2026-11-09 Python-first: UIの位置付け（STEP 1）
+
+Web UIはReact + TypeScriptを維持する（TypeScriptの主用途）。API型・Event型はFastAPIのOpenAPI/ canonical JSON Schemaから生成し（`lib/api/generated.ts`）、手書きDTOを作らない。Node.jsはbuild/test用で、本番配信は静的assetを第一候補とする。Vercel AI SDK・Mastra client hooksの調査はUI側streaming実装の参考（分類B）で、Backend依存にはしない。

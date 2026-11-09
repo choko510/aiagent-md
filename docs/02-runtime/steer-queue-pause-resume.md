@@ -45,7 +45,7 @@ Task.recordVersion初期1案、Run.leaseEpoch number安全整数/DB bigint、Tas
 | STR-90 | SHOULD | 同条件benchmarkでCPU/時間/IO/再開コストを計測 | SC-09 |
 | STR-91 | EXPERIMENT | 複数replica性能改善を安全性テスト後にのみ採用 | SC-09 |
 
-## 5. 内部Port / TypeScript pseudo contracts
+## 5. 内部Port / 論理型（TypeScript記法、実装はPython: ADR-036/037）
 ~~~ts
 type Int64DecimalString = string; // validated signed int64 decimal wire; BigInt in trusted service
 type ControlKind="CANCEL"|"PAUSE"|"RESUME"|"STEER";

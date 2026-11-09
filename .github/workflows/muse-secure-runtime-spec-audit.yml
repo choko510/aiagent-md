@@ -38,3 +38,5 @@ jobs:
         run: python3 audit/muse/validate_contract_schemas.py
       - name: Cross-module contract drift and regression audit
         run: python3 audit/cross-contract/check_contract_consistency.py
+      - name: Python-first migration static audit (ADR-036..040; not runtime verification)
+        run: python3 audit/cross-contract/check_python_first.py
