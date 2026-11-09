@@ -27,6 +27,10 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 | 安全・運用・QA | [09-security](docs/09-security/sandbox-and-capabilities.md) / [10-infrastructure](docs/10-infrastructure/database-schema-and-migrations.md) / [11-qa](docs/11-qa/end-to-end-acceptance.md) |
 | 拡張機能 | [12-intelligence](docs/12-intelligence/opportunity-radar.md) / [13-event-ingestion](docs/13-event-ingestion/event-driven-agent.md) / [14-adaptive-experience](docs/14-adaptive-experience/feedback-learning.md) / [15-multimodal](docs/15-multimodal/multimodal-ingestion.md) |
 
+## 機能別ロードマップ
+
+- [DeckCraft MCPスライド生成の調査・統合ロードマップ](docs/03-tools/deckcraft-mcp-roadmap.md) — DeckCraftの実装・ライセンス・既知リスク、隔離Worker/MCP接続、Phase 0〜5の実装順、受入テストをまとめたDraft計画（未実装）。
+
 ## 実装の進め方（提案）
 
 1. **共有契約の整合と判断:** 未承認のCL項目と `PROVISIONAL` な型・イベント・DDLの矛盾を解消し、採用決定をADRへ記録する。

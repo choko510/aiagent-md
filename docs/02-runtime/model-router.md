@@ -208,3 +208,15 @@ Continuationが特定Provider固有ならPinまたはNon-replayableとしてPart
 
 ## 2026-11-07 DEV-04: 高性能Advisorの限定Model routing（Draft）
 [Expert Advisor](../16-app-development/expert-advisor.md) の `expert` role profileは、必要推論・Code能力・コンテキスト・料金capをRouterで照合したModelのみ選ぶ。通常A5モデルと明示区別し、専門相談を再帰無制限にしない。role/profileはPermissionではない。AdviceRequestには再現エラー・固定SHA・最小コード差分/証拠だけを渡し、Cookie/secret/無関係な個人情報は渡さない。Advisorはread-onlyでCode/Git/Tool Policyを変更せず、実修正と採否はA5と独立QAが検査。モデル変更時もGoalRevision/ModelAttempt Receipt/Usage/Budget reservationを維持。DEV-EXP-T01..05/SC-26未実施。
+
+## 2026-11-09: Compressed Context / Prompt Cache / Model Recipient 整合（OPT-B/E、Draft）
+
+RTK CLIフィルタの出力bytes/4やHeadroom/Cavemanのoffline token estimatorは**請求・context windowの正本ではない**。同一の Provider wire serialized ModelRequestSnapshot から現在モデルのTokenizer/Tool schema/cached prefix/output reserve/marginを計測し、未知のモデル容量・変換resultは保守的に評価する。Cache hitは最大windowを増やさず、provider billed cost、cached read/write、output、recovery Toolとextra retriesを別に記録。
+
+**Stability invariant**: プロンプトprefixに入れた圧縮済みchunkは、次turnで同一source/codec/pipeline/digest/recipient/owner/GoalRevision/policy/memory epochなら**同じbyte列**を再利用する。条件が変わったらcacheを明示invalidateし、古い圧縮形式を同じ位置に黙って差し込まない。Headroom [Proxy cache docs](https://github.com/headroomlabs-ai/headroom/blob/main/docs/content/docs/proxy.mdx) はsession情報なしに単発compressした場合にキャッシュprefixの再現性が壊れるリスクを説明しているため、本Harnessでは既存のContextManifest/Sealed ModelRequestSnapshotを固定点とし、外部Proxyの暗黙session stateに依存しない。
+
+**Model Switch/Retry**: 別Provider/Modelに切替時、model能力・入出力tool schema・tokenizer・recipient privacy consent・prefix cache policy・画像/コード/streaming等を再評価。前モデル向けに圧縮した結果が次モデルに適合すると推定しない。Codecが変化する場合は新Snapshot+manifest+budget予約+dispatch admissionを作成し、元のTool Effectを再実行しない。Provider overflowへの再送回数は既存の最大1回制約を継承。未知の課金結果を0 USDにしない。
+
+**禁止**: Caveman Cloud Auto routingやHeadroom Proxyの認証転送、RTK ProxyをModel Routerの代替として自動構成しない。Codec/Model ProviderがNetwork/Secretを取得する経路は独立Gateway/Recipient Consentを通す。外部LLMに対する説明圧縮のために元のSystem/Developer/Goal/Approvalを削らない。
+
+**実装順**: Current modelのProvider serializerを用いた固定baselineとshadow outputの差分を測る→paired QUALITY/Cache gate→形式別enabled。OPT-T05〜T07/T19〜T20がPASSした場合のみ圧縮によるコスト改善と報告できる。設計のみで未実測。

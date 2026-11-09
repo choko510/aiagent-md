@@ -391,6 +391,39 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 **GATE-DEV-T03** feature factory enabled + 10 isolated branches / integration head mismatch → completion blocked.
 **GATE-DEV-T04** STOP fence/Quotawait fault injection failure blocks Campaign feature, not unrelated generic agent module.
 
+## 2026-11-09: External Context Optimization (OPT-T01〜T20、Designed / NOT RUN)
+
+**評価対象**: disabled baseline / existing safe bounded-tail+Artifact offload / Headroom selective library / Caveman AX-focused read / RTK OSS post-exec display / type-aware single-codec router。圧縮はfeature flag単位でdisabled→shadow→canary→enabledとし、security/quality Gateが欠落・失敗・INCONCLUSIVEのまま本番default ONにしない。RTK/Caveman/Headroom外部の宣伝値を合格基準には使用しない。
+
+**Hard gate（1件でも発生すれば対象OptimizerをBLOCK）**: mandatory Policy/Goal/Controlの変更0、秘密/PII漏えい0、tenant/owner/recipient境界違反0、SourceFactの否定・数量・税・時刻の誤検証0、無根拠の完了/購入/予約状態0、UNKNOWN effectの再送0、old Goal/Memory/leaseの再注入0、Browser CDP/action bypass0、Digest/locator誤結合0、sourceを失ったEvidenceをVerifiedに昇格0。人間の手動承認やReportでハードゲートを免除しない。
+
+**測定プロトコル**: fixture SHA/Tool result shape、source timestamp、モデルID/version、Provider serializer/tokenizer、tool schemas、prices+currency snapshot、hardware、cache cold/warm、seed/並列数、feature flags、codec version、source/optimized hashesを固定する。各case baseline/candidateを同条件のpaired repeatsで実行し、サンプル数・欠測/失敗・confidence intervalを明記する。Bytes/4・offline tokenizerの推定とProvider usage input/output/cache-read/cache-write・total billed USD/taskを区別。再取得回数/Provider extra turns・LLM tool retry・p50/p95 latencies・CPU/RSS、source/fact coverageとexact-result oracleを測る。Cache warmが失われたときの課金増と再検索負荷を含め、**圧縮後tokensだけの改善を成功としない**。
+
+| Test ID | 設計した刺激 / Oracle | Status |
+|---|---|---|
+| OPT-T01 | disabled baselineは元の許可済みRedacted ProjectionとResultをbyte-equivalentで返す。shadowはモデルへ圧縮文字列を送らない | NOT RUN |
+| OPT-T02 | Secret-bearing raw/Authorization/Cookie/PII/unknown sensitive sourceはエンジンに渡らず、Token/Traceにも露出0 | NOT RUN |
+| OPT-T03 | 他tenant/ownerと同SHAのArtifact・推測handle・別recipientの復元を拒否し、存在漏えい0 | NOT RUN |
+| OPT-T04 | JSON配列の最小/最大価格・税/手数料・在庫なし・否定・全候補数・失敗を保持、欠落時はoriginal/redactedへ戻す | NOT RUN |
+| OPT-T05 | Provider wire serialized budget+R+Sはwindow以下。未知tokenizerやoutput reserve不整合で安全停止 | NOT RUN |
+| OPT-T06 | warm-cache継続で既送信prefix byte同一。ランダム圧縮・毎turn圧縮・cache書換で増費したものをfail | NOT RUN |
+| OPT-T07 | Model/recipient/codec切替時はSnapshot/同意/Tokenizer/Tool schema再審査、provider overflow再圧縮は既存有界回数 | NOT RUN |
+| OPT-T08 | Caveman型大ページAX query-focusはsource node/ancestor参照を復元可能、同名node2件は一意クリックを禁止 | NOT RUN |
+| OPT-T09 | 小フォーム/Canvas/AX空/Shadow DOMで圧縮が逆効果・不足ならpassthroughまたはScreenshot route | NOT RUN |
+| OPT-T10 | Stale page generation/iframe cross-origin/lease/restoreIncarnationで圧縮UIDを実行権限として使用不可 | NOT RUN |
+| OPT-T11 | AXに含まれる価格・キャンセル不可・submit副作用を欠落させた結果から購入/予約を実行0 | NOT RUN |
+| OPT-T12 | RTK型失敗test、stderr/exitCode、stacktrace、warning、grep no-match、ANSIの意味がrawと整合 | NOT RUN |
+| OPT-T13 | Source code/diff/line numberの省略は復元locator必須。pre-exec rewriteやHost Tool execution追加0 | NOT RUN |
+| OPT-T14 | Binary/巨大行/invalid UTF-8、parser failure/timeout/output grows、recover-store fullで安全にfallback | NOT RUN |
+| OPT-T15 | Optimizer WorkerからのCDP、Host Socket、Secret、ネットワーク、Cloud Auto/MCP直結が不可 | NOT RUN |
+| OPT-T16 | Source/Memory deletionと圧縮処理/復元/Model admissionを競合させ、削除後の旧Projection送信0 | NOT RUN |
+| OPT-T17 | Corrupt original hash/expired locator/recovery missing/partial streamで架空根拠や黙った成功0 | NOT RUN |
+| OPT-T18 | Subagent×8・Endless finite Cyclesで原文権限を共有せず、Stale Child/Unknown EffectとSTOP fence整合 | NOT RUN |
+| OPT-T19 | Tenant隔離とtelemetry/beacon off/remote model offをネットワーク検査し、全SDK/OSS dependency pinsを記録 | NOT RUN |
+| OPT-T20 | 5方式の同条件A/B。Task success/Fact fidelity悪化0を先に判定し、Total provider+tool+compute cost改善が統計的に不確定ならINCONCLUSIVE/disabled | NOT RUN |
+
+**品質Gate**: exact oracle、source-backed fact precision/recall、contradiction coverage、retrieval frequency、end-to-end task success、p50/p95、USD/task の改善を判断する。閾値は実測Baselineを見てから設定し、数字の捏造なし。対象形式が1つでも安全Gateを満たさなければ当該形式のflagをoff、一般Harness全体のReleaseを不必要に止めない。Backend/Browser/Development/Campaignの当該機能が無効なreleaseは対応機能Gateをconditionalに適用し、既存の共有security Gateを緩めない。ソース/コード未実装の現時点では全 OPT-T は試験設計のみ。
+
 ## 2026-11-09 OSS Hybrid Compaction Release Gate（DESIGNED / NOT RUN）
 
 正本: [Context 19](../02-runtime/context-manager-and-compaction.md)。DeepAgents JS、Mastra Observational Memory、OpenClawの上流テストは本Harnessの成功を示さない。まずdurable original offload、次に構造＋意味監査、最後にObserver/Reflector shadow→opt-inの順で実装。各段階で従来ACM-T01〜T36の回帰と安全ゲートを維持。
@@ -406,5 +439,7 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 | ACM-OSS-T09 / ACM-OSS-T10 | stale CAS/Model fallback/Memory DELETEで不正送信0 |
 | ACM-OSS-T11 / ACM-OSS-T12 | Tool pair・UNKNOWN・100-cycle条件保持 |
 | ACM-OSS-T13 / ACM-OSS-T14 | 期限切れOriginalの偽Recall0、retry budgetはfinite |
+
+**18.23/19 統合Gate（未実施）**: 同一SourceRangeへの2段lossy適用は禁止。OPT-T04/T16/T20とACM-OSS-T03/T10/T11を同一Fixture・最終ModelRequestで合同実行し、元Source spanに基づく否定/金額/Tool pair・削除後再注入・重複Token計算の誤りが1件でもあれば両Optimizerの同時enabledを禁止する。文書のStatic CI PASSは統合E2E PASSを意味しない。
 
 **Bench**: small safe-full / safe bounded-tail / offload-only / offload+quality / offload+quality+OMを同じModel/Tokenizer/Source/Tool Schema/総Budgetで比較。Measured: Evidence Recall@FixedBudget、Fact entailment、Source locators、最新User ask、100-cycle Hard anchors、p50/p95 latency、全LLM/Tool/Recall費用、CAS conflict、Artifact GC。安全全PASS後だけ節約率を比較。実測値・保証値はまだない。
