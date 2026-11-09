@@ -34,7 +34,7 @@
 
 ## Adaptive Context implementation handoff (2026-11-07; draft)
 
-Context実装は [docs/02-runtime/context-manager-and-compaction.md](docs/02-runtime/context-manager-and-compaction.md) の18節を先に読む。ADR-023〜028、Memory 06-01/02、Subagent 02-12、Checkpoint 02-06、Budget 02-10、ModelRouter 02-09、Evidence 01-05、CHAT_09 Sentinel/Cell、QA 11-01/04を同時に確認する。Task Goal / Tool Approval / Memory Writer / EvidenceをContext Summaryに統合して正本を書換えてはいけない。Raw Artifactとgrounded Summary、typed anchors、ContextManifest、Run HEADを別境界として実装。ACM-T01〜T20は未実施であり、コード/試験なしにVerifiedと報告しない。PR #68のMuse型隔離が先行依存。
+Context実装は [docs/02-runtime/context-manager-and-compaction.md](docs/02-runtime/context-manager-and-compaction.md) の18節と**19節（OSS圧縮の品質監査・原本保護・復旧・段階導入）**を先に読む。ADR-023〜028、Memory 06-01/02、Subagent 02-12、Checkpoint 02-06、Budget 02-10、ModelRouter 02-09、Evidence 01-05、CHAT_09 Sentinel/Cell、QA 11-01/04を同時に確認する。Task Goal / Tool Approval / Memory Writer / EvidenceをContext Summaryに統合して正本を書換えてはいけない。Raw Artifactとgrounded Summary、typed anchors、ContextManifest、Run HEADを別境界として実装。ACM-T01〜T20は未実施であり、コード/試験なしにVerifiedと報告しない。PR #68のMuse型隔離が先行依存。
 
 ## Autonomous Development / Endless Campaign 実装引継ぎ（2026-11-07、追加Draft）
 

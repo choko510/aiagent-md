@@ -423,3 +423,23 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 | OPT-T20 | 5方式の同条件A/B。Task success/Fact fidelity悪化0を先に判定し、Total provider+tool+compute cost改善が統計的に不確定ならINCONCLUSIVE/disabled | NOT RUN |
 
 **品質Gate**: exact oracle、source-backed fact precision/recall、contradiction coverage、retrieval frequency、end-to-end task success、p50/p95、USD/task の改善を判断する。閾値は実測Baselineを見てから設定し、数字の捏造なし。対象形式が1つでも安全Gateを満たさなければ当該形式のflagをoff、一般Harness全体のReleaseを不必要に止めない。Backend/Browser/Development/Campaignの当該機能が無効なreleaseは対応機能Gateをconditionalに適用し、既存の共有security Gateを緩めない。ソース/コード未実装の現時点では全 OPT-T は試験設計のみ。
+
+## 2026-11-09 OSS Hybrid Compaction Release Gate（DESIGNED / NOT RUN）
+
+正本: [Context 19](../02-runtime/context-manager-and-compaction.md)。DeepAgents JS、Mastra Observational Memory、OpenClawの上流テストは本Harnessの成功を示さない。まずdurable original offload、次に構造＋意味監査、最後にObserver/Reflector shadow→opt-inの順で実装。各段階で従来ACM-T01〜T36の回帰と安全ゲートを維持。
+
+**Hard-blocking**: OFFLOAD_FAILEDでHEAD更新0、`qualityDegraded`採用0、custom Provider audit bypass 0、Semantic REFUTEDで採用0、Goal/否定消失0、Tool pair破断0、Part coverage gap0、old generation/lease commit0、Memory DELETE先行の旧Projection送信0、欠損Sourceの偽Recall0、UNKNOWN Effect blind retry0、予算上限超過0。失敗は旧HEADを維持してPARTIAL/BLOCKED。
+
+| Test ID | Release oracle（全てNOT RUN） |
+|---|---|
+| ACM-OSS-T01 / ACM-OSS-T02 | Raw offload/Summary障害で前HEAD維持 |
+| ACM-OSS-T03 / ACM-OSS-T04 | 意味不一致、最新依頼/否定/識別子消失をReject |
+| ACM-OSS-T05 / ACM-OSS-T06 | degraded fallbackとProvider audit迂回を拒否 |
+| ACM-OSS-T07 / ACM-OSS-T08 | 競合するObservation/Reflectionと追記Partもcoverage損失0 |
+| ACM-OSS-T09 / ACM-OSS-T10 | stale CAS/Model fallback/Memory DELETEで不正送信0 |
+| ACM-OSS-T11 / ACM-OSS-T12 | Tool pair・UNKNOWN・100-cycle条件保持 |
+| ACM-OSS-T13 / ACM-OSS-T14 | 期限切れOriginalの偽Recall0、retry budgetはfinite |
+
+**18.23/19 統合Gate（未実施）**: 同一SourceRangeへの2段lossy適用は禁止。OPT-T04/T16/T20とACM-OSS-T03/T10/T11を同一Fixture・最終ModelRequestで合同実行し、元Source spanに基づく否定/金額/Tool pair・削除後再注入・重複Token計算の誤りが1件でもあれば両Optimizerの同時enabledを禁止する。文書のStatic CI PASSは統合E2E PASSを意味しない。
+
+**Bench**: small safe-full / safe bounded-tail / offload-only / offload+quality / offload+quality+OMを同じModel/Tokenizer/Source/Tool Schema/総Budgetで比較。Measured: Evidence Recall@FixedBudget、Fact entailment、Source locators、最新User ask、100-cycle Hard anchors、p50/p95 latency、全LLM/Tool/Recall費用、CAS conflict、Artifact GC。安全全PASS後だけ節約率を比較。実測値・保証値はまだない。

@@ -241,3 +241,13 @@ ExecutionId/CellId/WorkspaceRevision/image digest/attestation/PolicyEpoch/proces
 **Cache/diff**: Goal/Policy/Source/Memory/Recipient/Template/Tokenizerの各revisionとACLを比べ、同一immutable Source Evidenceだけ再利用。old prompt・Tool approvals・Memory projection・Cost receipt・Child lineageは無条件にコピーしない。古いManifestは監査上残せてもcurrent HEADやcurrent successと混同しない。
 
 **Fault tests**: ACM-T23/24/25/32/34/36。Protected service再起動、snapshot write後HEAD CAS fail、Memory DELETE commit後worker retry、Provider ACK lost、retentionによるOriginal消去を含む。すべて未実装・未実行。
+
+## 2026-11-09 OSS Compaction Candidateの永続化・Crash復旧（Draft / NOT RUN）
+
+[Context 19](context-manager-and-compaction.md)の候補は`PREPARING→RAW_DURABLE→PROPOSED→AUDITED→COMMITTED`、失敗は`REJECTED`。Raw Event/Tool receipt/Sealed Originalが正本、Summary・Observation・Reflectionは派生Projectionであり、**Run HEAD CAS成功前にActor/Modelへ公開してはならない**。Candidate stage、Quality Receipt、Digest、Source Part range、Goal/Policy/Memory epoch/Run lease/Prompt・Provider revisionを監査可能な参照として扱い、独立した承認権限を与えない。
+
+**Commit/Crash**: Raw original durable→Source span/ACL/digest確認→CandidateとAudit Receipt durable→ContextManifest+Sealed ModelRequestSnapshot durable→fresh Goal/Lease/Memory/Policy validation→HEAD CAS→Protected dispatch_admission→Model send。CrashやSummary timeout/Backend write失敗/HEAD CAS競合時は旧HEADを維持し、完了したToolを繰り返さない。ACK lostはMAY_HAVE_SENT。Orphan ArtifactのGCはLive HEAD、retention/Legal erase、in-flight writerを照合。Source消去後はNON_REPLAYABLE/EXPIREDを明示。
+
+**Non-blocking OM**: Buffer chunk生成≠activation確定。Part-range coverageとGenerationを持つ連続prefixのみCASで既読化し、Reflection rolloverで未採用Chunkが消えないようcarry-forwardまたはRawから再構築。Timestamp/message IDだけで完全coverageを推定しない。プロセス内ロックは分散Workerの根拠でない。
+
+**Fault tests**: ACM-OSS-T01/T02/T07/T08/T09/T10/T11/T13、既存ACM-T18/T23/T25/T32/T36。設計のみ、NOT RUN。
