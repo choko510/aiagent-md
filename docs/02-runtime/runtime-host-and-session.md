@@ -185,5 +185,5 @@ Runtime HostはPython asyncioの独立Workerプロセスとして実装する（
 
 - Worker起動時にFrameworkが**背景でRunを回復・実行してはならない**。回復は、QueuePortで仕事を得てRunをclaim（fence+1）したWorkerが`run_segment`を呼んだときだけ行う。LangGraphは呼出し時のみ実行されるためこの規則を満たす（候補AのDBOSは`launch()`がexecutor単位でPENDING workflowを自動回復するため、Worker毎の`executor_id`と非公開回復APIが必要だった。不採用理由の一つ）。
 - Worker 1プロセスは`AsyncPostgresSaver`用のDB接続を1本持ち、checkpointerはaiagent-md正本とは別schema/別roleへ置く（STEP 3）。Windowsでの開発時はpsycopg asyncのためSelector event loopが必要（本番Linuxでは不要）。
-- Worker peak RSSは同一fixtureで約95 MB（候補Aは約184 MB）、Worker起動〜準備約2.1 s（N=10中央値、Windows 11/CPython 3.13.14、`conformance/agent_runtime/results/`）。cgroup上限の初期値算定に使うが、本番Model/Toolを含めた値ではない。
+- Worker peak RSSは同一fixtureで約96 MB（Linux CI、`ru_maxrss`。候補Aは約117 MB）、起動〜準備約1.2 s（N=10中央値。Windows値は`conformance/agent_runtime/results/`）。cgroup上限の初期値算定に使うが、本番Model/Toolを含めた値ではない。
 - kill（`os._exit`相当、OOMを模擬）後は既存のlease失効→再claimで再開し、送信重複0・UNKNOWN保持をPYRT-T01/T06/T07で確認した。

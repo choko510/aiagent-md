@@ -457,6 +457,6 @@ A disabled feature must be **fail-closed**: routes may return 404/403/feature un
 | RT-G3 | Hard | Modelに見えるTool一覧がGateway stub＋許可済みFramework Toolのsnapshotと一致（`execute`・書込FS・汎用subagent 0） | 合格（`read_file`のみ許可） |
 | RT-G4 | Hard | Framework状態にCredential・Provider key文字列0 | 合格（PoC走査） |
 | RT-G5 | Hard | checkpoint直列化でpickle無効、msgpack ext allowlist制限下で全試験合格 | **未実施（STEP 3）** |
-| RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 初回記録: RSS 95.0 MB、CPU 5.16 s、WAL 37.7 KB、Framework tuple 29（N=10中央値、Windows/PG16.2） |
+| RT-G6 | Quality | 同一fixtureのWorker RSS・CPU秒・1 runあたりWAL/tuple書込を記録し、前回比の悪化を説明する | 初回記録（N=10中央値）: Linux CI RSS 96.4 MB・CPU 1.43 s・WAL 35.4 KB、Windows RSS 95.0 MB・CPU 5.16 s・WAL 37.7 KB、Framework tuple 29（両環境） |
 
 性能の数値は合否基準ではなく回帰検知の基準線であり、本番Model/Tool/Network込みの性能保証ではない。

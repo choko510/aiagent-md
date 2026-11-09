@@ -136,7 +136,7 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 
 **固定版**（2026-11-09/10 PyPI・GitHub API取得、全てMIT）: 候補A `pydantic-ai-slim 2.66.0`・`pydantic-ai-harness 0.66.0`（現行ソースは`pydantic/pydantic-ai`の`src/pydantic_ai_harness`、main `443417c3493c34efda6e33ed5ff59d56d34fae55`。旧`pydantic/pydantic-ai-harness`はarchived）・`dbos 3.4.0`（main `236142bd7a99ff77d04becf5f405a60d6f330591`）。候補B `deepagents 0.7.34`（main `0279f1d036a8a73ea0d99bf04583e9c9a9598ef2`）・`langgraph 1.2.20`（main `e5e37b5d70dbfd93c7006bd90a658c6179a95946`）・`langgraph-checkpoint 4.3.1`・`langgraph-checkpoint-postgres 3.2.0`・`langchain-core 1.7.6`。共通 `psycopg 3.3.8`（LGPL-3.0-only、動的リンク利用。配布形態の確認はSTEP 3）。推移依存は`requirements-{a,b}.lock.txt`。
 
-**必須試験（安全性・整合性・再開性）**: 候補A 20/20、候補B 20/20合格（Windows 11/CPython 3.13.14/PostgreSQL 16.2でローカル実行。Linux CIの結果はPRに記録）。
+**必須試験（安全性・整合性・再開性）**: 候補A 20/20、候補B 20/20合格。Windows 11/CPython 3.13.14/PostgreSQL 16.2のローカル実行と、GitHub Actions ubuntu-latest/CPython 3.13/PostgreSQL 16 service（PR #80）の両方で合格。
 
 | Test | 内容 | A | B |
 |---|---|---|---|
@@ -153,15 +153,15 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | PYRT-T10/T10b | Queue経由起動、kill後の再配達、重複投入の拒否 | PASS（DBOS Queue dedupe） | PASS（aiagent-md SKIP LOCKED Queue） |
 | PYRT-T11 | 同一応答内の書込Tool 2件。Framework既定は並列（同時2件を観測）、Gateway側で直列化し送信は各1回。`sequential`設定で同時1件 | PASS | PASS |
 
-**比較（必須試験合格後。数値は同一マシン・同一実行内の実測、N=10中央値。`results/bench-*-win.json`）**
+**比較（必須試験合格後。数値は同一マシン・同一実行内の実測、N=10中央値。Windowsは`results/bench-*-win.json`、LinuxはPR #80のCIログ。RSSはWindowsがpeak working set、Linuxが`ru_maxrss`で定義が異なるため環境間で比較しない）**
 
 | 項目 | 候補A PydanticAI＋DBOS | 候補B DeepAgents＋LangGraph |
 |---|---|---|
-| Worker peak RSS（1 run） | 184.2 MB | 95.0 MB |
-| CPU秒（Worker 2プロセス合計、起動含む） | 6.54 s | 5.16 s |
-| Worker起動〜Framework準備 | 2.78 s＋launch 0.33 s | 2.11 s |
-| Segment実行時間（2 segment合計） | 0.37 s | 0.42 s |
-| 1 runあたりWAL | 19.0 KB | 37.7 KB |
+| Worker peak RSS（Windows / Linux） | 184.2 / 117.5 MB | 95.0 / 96.4 MB |
+| CPU秒（Worker 2プロセス合計、起動含む。Windows / Linux） | 6.54 / 2.69 s | 5.16 / 1.43 s |
+| Worker起動〜Framework準備（Windows / Linux） | 2.78＋launch 0.33 / 1.32 s | 2.11 / 1.17 s |
+| Segment実行時間（2 segment合計、Windows / Linux） | 0.37 / 0.29 s | 0.42 / 0.30 s |
+| 1 runあたりWAL（Windows / Linux） | 19.0 / 19.0 KB | 37.7 / 35.4 KB |
 | 1 runあたりFramework表のtuple書込 | 15 | 29 |
 | 1 runあたりaiagent-md表のtuple書込 | 28 | 27 |
 | 推移依存（共通の試験用依存を除く） | 28 | 57（`anthropic`・`google-genai`等の未使用Provider SDKを含む） |
@@ -181,7 +181,7 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 7. **B**: HEADから再構築する際、未回答のTool呼出しを`PatchToolCallsMiddleware`が黙って「cancelled」にする。再構築前にGateway経由で未決Intentを確定させる（`settle_pending`）。
 8. **B**: 複数の同時interruptは`Command(resume={interrupt_id: …})`でid指定が必要。承認待ちの再判定はinterrupt()の再発行で表現する。
 
-**判定**: 必須試験は両候補合格。比較では、(a) Trusted Control VM内のFramework状態直列化の安全性（Aは既定pickleでJSON化不可を実測、Bはpickle無効が既定）、(b) 回復の主導権がaiagent-md claim側にあること（Aは非公開APIとexecutor設計が必要）、(c) RSS約1/2・CPU約0.8倍、(d) Context Manager §20が第一調査対象とするsummarization/offload/skills/subagentの流用率、を重視してBを選定。Bの欠点（WAL約2倍、依存数約2倍で未使用Provider SDKを含む、Queueを自作、組込みToolの抑止設定が必要）はSTEP 3の条件として扱う。PydanticAI/Pydantic AI Harness/DBOSはAgent Runtime・Queueとして採用しない（Pydantic v2自体はADR-037どおり共有型の実装に使う）。Bが採用条件を満たせない場合の代替はA（必須試験合格済み）とし、適合試験はAのAdapterを残して継続実行できる。
+**判定**: 必須試験は両候補合格。比較では、(a) Trusted Control VM内のFramework状態直列化の安全性（Aは既定pickleでJSON化不可を実測、Bはpickle無効が既定）、(b) 回復の主導権がaiagent-md claim側にあること（Aは非公開APIとexecutor設計が必要）、(c) Worker RSS・CPU秒が少ない（Linux: RSS 96.4 vs 117.5 MB、CPU 1.43 vs 2.69 s）、(d) Context Manager §20が第一調査対象とするsummarization/offload/skills/subagentの流用率、を重視してBを選定。Bの欠点（WAL約2倍、依存数約2倍で未使用Provider SDKを含む、Queueを自作、組込みToolの抑止設定が必要）はSTEP 3の条件として扱う。PydanticAI/Pydantic AI Harness/DBOSはAgent Runtime・Queueとして採用しない（Pydantic v2自体はADR-037どおり共有型の実装に使う）。Bが採用条件を満たせない場合の代替はA（必須試験合格済み）とし、適合試験はAのAdapterを残して継続実行できる。
 
 **STEP 3の採用条件（未達ならADR-038を再審）**: CIで`agent-runtime-conformance`を必須化し、PYRT-T00〜T12を常時合格。`LANGGRAPH_STRICT_MSGPACK`相当のallowlistを有効化して試験追加。HarnessProfile無効化が効かないModelを使ったら失敗する試験（Tool表面のsnapshot）。checkpoint表を専用schema・専用DB roleへ分離し、Retention/GCを実装。依存監査（Provider SDKを読み込まないことのimport監査）。本番Gateway/Sentinel/VM配置での再実行。
 
