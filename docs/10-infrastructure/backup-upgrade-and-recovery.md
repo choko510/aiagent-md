@@ -10,7 +10,7 @@
 **安全上の核心:** DBを過去へPITRしても外部世界の購入・投稿・通知・Web操作が巻き戻るわけではない。Task、Run、Watch、Outbox、Side-effect Ledgerの復元後、**デフォルトは全自動実行停止**。認可、実行世代、外部receipt、effect outcomeの再照合、失われたイベントの検査が済むまでは古いJobを再enqueueしない。Provider side-effectが`UNKNOWN`なら承認・照会なしの再試行を禁止する。失効した認証/secret/ownerも自動で有効化しない。
 
 ### 0.1 Backupの3つの境界
-1. **Database:** committed `agent` business schema、Queue metadata（ADR-036/039で選定するPython基盤のもの。旧: `pgboss` schema）、Auth database（同DBか別DBかはCHAT_09と決定）、migration/version、Outbox/Run lease/Tool ledger、WALとtimeline。
+1. **Database:** committed `agent` business schema、Queue metadata（ADR-036/039で選定するPython基盤のもの。PostgreSQL型なら同DBの別schema、Broker型（Redis/RabbitMQ等）ならBrokerの永続化データ。Queueは正本ではないため、復元時はOutboxからの再publishで再構築可能であることを優先。旧: `pgboss` schema）、Auth database（同DBか別DBかはCHAT_09と決定）、migration/version、Outbox/Run lease/Tool ledger、WALとtimeline。
 2. **Artifacts:** HTML/PDF/スクリーンショット、Evidence raw、Checkpoint外部object、モデル結果に関連するobject metadata。DBの`artifact_id→object_key→sha256`を検証できること。バックアップ先は本番コンテナの普通の読み書きパスと分離。
 3. **Secrets:** DBパスワード、Provider Key、Cookie/ブラウザ保存状態、暗号化鍵、リカバリ用復号キー。Raw secretsはManifestにもログにも載せない。復旧主体はoperator-only、Agent/LLMへ提供しない。
 
