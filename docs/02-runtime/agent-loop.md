@@ -40,7 +40,7 @@ SC-01商品同一性と価格条件、SC-03 SNS出典/注入、SC-04ホテル人
 **Issuesは報告であって検証済みバグ事実ではない。** LangGraph #9240/#8464はDurabilityと外部副作用exactly-onceの区別、OpenAI Agents Python #5413/#5409は承認のスコープや実行後保存前停止という故障モデルを提示する [S9][S10]。現行mainの再現結果とは断言しない。これらの反例を本HarnessのFault Injection Testに採用する。
 
 ### 採否の比較
-1. **採用A（2026-11-09改訂: aiagent-md側の正本責務に限定。末尾「Python-first: Agent Runtime Port」節の責務表が優先）: 自作の小さいdeterministic loop + Gateway** — 永続化/権限境界を全Toolで統一可能。ADR-036以降、自作するのは`AgentRuntimePort`外側の正本責務（Run claim、checkpoint HEAD、Approval、Tool Intent/Effect Ledger、Budget、dispatch admission）だけであり、step内の推論・Tool呼出し計画・interrupt/resume機構はADR-038候補A/Bへ委譲できる。同じ機能を自作ループとFrameworkの両方で実装しない。実装責任とテスト工数は増すが、セルフホストのPython Runtime（ADR-036）内でFramework/Providerを切替可能（旧記述: TS+Python Sidecar互換）。
+1. **採用A（2026-11-09改訂: aiagent-md側の正本責務に限定。末尾「Python-first: Agent Runtime Port」節の責務表が優先）: 自作の小さいdeterministic loop + Gateway** — 永続化/権限境界を全Toolで統一可能。ADR-036以降、自作するのは`AgentRuntimePort`外側の正本責務（Run claim、checkpoint HEAD、Approval、Tool Intent/Effect Ledger、Budget、dispatch admission）だけであり、step内の推論・Tool呼出し計画・interrupt/resume機構はADR-038で選定したDeepAgents Python＋LangGraph（STEP 2）へ委譲できる。同じ機能を自作ループとFrameworkの両方で実装しない。実装責任とテスト工数は増すが、セルフホストのPython Runtime（ADR-036）内でFramework/Providerを切替可能（旧記述: TS+Python Sidecar互換）。
 2. **不採用B: 特定Frameworkのrunnerを唯一のRuntime正本としてそのまま使用** — Python実装への結合、Tool handlerの権限付与やcheckpointと外部効果の差、承認/再開のSchema差異が大きく、共通契約をFramework都合で変更しかねない。Adapter内の推論処理に利用することは可能。
 3. **不採用C: LLMに全Toolを直結して毎回会話履歴だけ保存** — 承認バイパス、Crash後の重複、副作用の結果不明とBudget計測欠落に対処できない。
 4. **不採用D: どのモデル応答も全Toolを最大並列実行** — 注文/予約/投稿など非可換な外部操作と承認待ちToolの混在で不可逆な部分実行が発生しやすい。read-onlyのみ上限付き並列化。
@@ -601,15 +601,17 @@ Working Context reuse時も実Tool/Modelの権限が増えるわけではない�
 [ADR-036〜040](../00-foundation/architecture-decisions.md)・[System Architecture §13.2](../00-foundation/system-architecture.md)・[Architecture Rules §E](../00-foundation/architecture-rules.md)に従い、Agent LoopはPythonで実装する。主Runtime OSSは**候補A: PydanticAI＋DBOS**と**候補B: DeepAgents Python＋LangGraph**を保持し、STEP 2で選定（ADR-038）。本節は両候補が同じ契約に適合するための**言語レベルのPort**だけを定め、どちらにも依存しない。
 
 ```python
-# 論理Port（実装ではない）。型はcanonical JSON Schemaから生成するPydantic model（ADR-037）
+# 論理Port（STEP 2改訂）。型はcanonical JSON Schemaから生成するPydantic model（ADR-037）
 class AgentRuntimePort(Protocol):
-    async def start_step(self, claim: RunClaim, snapshot: CheckpointHeadRef) -> StepHandle: ...
-    async def next_action(self, h: StepHandle, ctx: SealedModelRequestSnapshot) -> ProposedAction: ...
-    async def resume(self, h: StepHandle, decision: ApprovalOrToolOutcome) -> StepHandle: ...
-    async def cancel(self, h: StepHandle, reason: CancelReason) -> None: ...  # 協調的。外部送信の取消しではない
+    async def launch(self) -> None: ...  # 背景で勝手にRunを回復・実行しないこと
+    async def run_segment(self, claim: RunClaim, policy: RunPolicyRef) -> SegmentOutcome: ...
+    async def close(self) -> None: ...
+# SegmentOutcome.status: FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL
 ```
 
-- **責務の分担（ADR-038の候補A/Bどちらでも共通。STEP 2で表の「委譲可」を候補ごとに確定）**
+**STEP 2改訂（2026-11-10）**: STEP 1の`start_step/next_action/resume/cancel`（1 action単位）は、両候補ともModel→Tool→Modelの内側ループをFrameworkが所有するため、Framework機能を捨てずに実装できないことがPoCで判明した。Port境界は**run segment**（FINAL／承認interrupt／UNKNOWN効果／fence・Goal喪失まで）とする。resumeは「同じ`run_segment`を再claim後に再度呼ぶ」ことで表し、Framework内部のinterrupt/resume（LangGraph `Command(resume=…)`）はAdapterの中に閉じる。Cancelは既存§のcancel scope（lease失効・fence更新）で行い、Framework APIの取消しに依存しない。参照実装と適合試験は`conformance/agent_runtime/`。
+
+- **責務の分担（STEP 2確定。ADR-038選定＝候補B: DeepAgents Python＋LangGraph）**
 
 | 責務 | 所有 | 候補A/Bへの委譲 |
 |---|---|---|
@@ -618,13 +620,15 @@ class AgentRuntimePort(Protocol):
 | Approval、Tool Intent、Effect Ledger、UNKNOWN照合 | aiagent-md（CHAT_03 Tool Gateway） | 不可 |
 | Budget予約・精算、Model dispatch admission、Sealed ModelRequestSnapshot | aiagent-md（Budget 02-09、Model Gateway） | 不可 |
 | ContextManifest、A0〜A2固定、Source-backed Summaryの公開 | aiagent-md（Context Manager 02-08） | 不可（圧縮候補の生成だけ委譲可） |
-| step内の推論呼出し順序、構造化出力の検証、Tool呼出し提案の生成 | 候補A/B | **可**（PydanticAI agent run / LangGraph graph node） |
-| step内のinterrupt/resume機構（承認待ちの中断点） | 候補A/B | **可**。ただし再開可否はaiagent-mdのApproval/lease/Goal再検証で決める |
-| Planner/Subagent/Skills/Filesystem backendの実行機構 | 候補A/B（特に候補BのDeepAgents） | **可**。Child Task作成・Handoff・ChildResult検証はSubagent 02-12の正本に従う |
-| Workflow step durability（DBOS step / LangGraph super-step） | 候補A/B | **可**。ただし外部副作用を含まないstepに限る |
+| step内の推論呼出し順序、構造化出力の検証、Tool呼出し提案の生成 | DeepAgents/LangGraph | **可**（graph node）。Model呼出しはModel Gateway経由の`BaseChatModel` Adapterのみ。Provider SDK/credentialをFrameworkへ渡さない |
+| step内のinterrupt/resume機構（承認待ちの中断点） | LangGraph `interrupt()` | **可**。resume値は権限ではなく「Gatewayに再判定を依頼する」合図。Gatewayが依然PENDINGなら再interrupt。複数interruptはid指定でresume |
+| Planner/Subagent/Skills/Filesystem backendの実行機構 | DeepAgents | **可（制限付き）**。Filesystemは`StateBackend`（Graph state内）＋`read_file`のみ。`execute`・書込FS Tool・汎用subagentは無効化（HarnessProfile）。子のToolも同じGateway stub。Child Task作成・Handoff・ChildResult検証はSubagent 02-12の正本に従う |
+| Workflow step durability（LangGraph super-step、`durability="sync"`） | LangGraph checkpointer | **可（派生キャッシュ）**。外部副作用はGateway側でのみ発生。checkpointがHEADと矛盾（Proposal不一致・復号不能）したら破棄してHEADから再構築 |
 
 - `ProposedAction`はModel出力の**提案**（final answer / tool intent proposal / ask user / delegate）。Tool実行・承認・Effect Ledger書込みはTool Gateway（別プロセス）のみ。FrameworkのTool関数は`ToolIntentProposal`を返すstub。
 - Run claim・lease fence・checkpoint HEAD CASは既存§5〜7・Checkpoint 02-06の契約どおりPostgreSQLで行い、DBOS workflow状態・LangGraph checkpointer・DeepAgents stateは**派生キャッシュ**。不一致時はaiagent-md HEADを正とし、Framework状態を再構築する。
 - Model呼出しはModel Gateway（別プロセス）へ`SealedModelRequestSnapshot`を渡す。Framework内蔵のProvider clientへCredentialを渡さない。
 - Durable replay（DBOS step再実行、LangGraph super-step再実行）でTool Intentを再生成しても、Gatewayの`(runId, stepId, intentKey)`冪等キーとEffect Ledgerにより外部送信は再発しない。UNKNOWN/MAY_HAVE_SENTは照合待ち。
-- **STEP 2適合試験（未実行）**: PYRT-T01 Worker kill→同一Run再claimでTool送信0重複、PYRT-T02 Approval取消し後の旧resumeは拒否、PYRT-T03 Goal Steer後の旧snapshot dispatch 0、PYRT-T04 Framework checkpoint破損時にaiagent-md HEADから再構築、PYRT-T05 両候補を同一fixtureで実行し差分を記録。
+- **STEP 2適合試験（PoC実行済み、Fake Gateway・簡略DDL上。本番構成でのVerifiedではない）**: PYRT-T01 Worker kill→同一Run再claimでTool送信0重複、PYRT-T02 拒否・失効・判断なしresumeで送信0、PYRT-T03 Goal Steer後の旧snapshot dispatch 0、PYRT-T04 Framework checkpoint破損時にaiagent-md HEADから再構築、PYRT-T05 両候補を同一fixtureで実行し差分を記録、に加えPYRT-T06 ACK喪失、T07 送信後未確定のUNKNOWN保持、T08 Tool表面・Credential非露出、T09 Subagent＋圧縮、T10 Queue、T11 並列書込、T12 陰性対照。結果は[ADR-038/039 STEP 2判定結果](../00-foundation/architecture-decisions.md)。
+- **Adapter規則（STEP 2で判明、PR #80レビューで改訂）**: (1) Model応答はHEADへ追記してからFrameworkへ返す。同じ**Sealed snapshot**（tenant・Goal revision・policy・model・Tool表面・文脈全体の順序と内容。fenceは含めない）への再要求だけをHEADから再生し、再生時もModel Gatewayのadmission（tenant・cancel・fence・Goal・model policy）を毎回通す（PYRT-T13）。(2) Tool stubは、HEADのProposalと名前・引数が一致することを**キャッシュ結果を返す前に**検査する。(3) HEADからの再構築前に未回答のTool呼出しをGateway経由で確定させる（DeepAgentsの`PatchToolCallsMiddleware`が未回答呼出しを黙ってcancelledにするため）。(4) Framework既定の並列Tool実行は無効化（`max_concurrency=1`）し、書込直列化はGatewayで強制する。(5) Summarization要求は別streamで記録し、main transcriptを置換しない。(6) Framework状態を再利用する前に、Framework transcriptをHEADと順序・内容で全比較し（遅れは許容、差異・先行は`REBUILD`）、最終回答は常にHEADから返す。Framework内部Tool（subagent委譲等）の結果もHEADへ記録する（PYRT-T04b/T09b）。(7) Run固有の情報（claim、サービス参照）はモジュール共有変数に置かず、呼出し毎の注入（LangGraph `RunnableConfig`）で渡す。1 Workerプロセスが複数Runを並行実行してよい（PYRT-T15）。(8) Cancelは制御面（run status）で行い、以後の全Model・Tool admissionが拒否する。Framework固有のcancel APIには依存しない（PYRT-T17）。
+

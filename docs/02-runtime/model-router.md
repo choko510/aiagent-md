@@ -230,3 +230,7 @@ Model RouterはTrusted Control VM内の独立Pythonプロセス（Model Gateway�
    - **未知の種別はfail closed**: allowlistにないcontent part、種別判定できないdelta、Providerの仕様変更で増えたfieldは破棄し、UIへは「処理中」等のサーバー生成の状態表示だけを出す。
 2. **Tool proposalの確定**: tool-call deltaはGateway内でのみ組み立て、UIへ逐次表示しない。**ストリーム終端・引数JSONの完全性・Schema検証が済むまで`ToolIntentProposal`として確定しない**。確定後にUIへ出すのはTool Gateway/Approvalが生成した要約（Tool名・対象・承認要否）だけで、生の引数は出さない。途中で切断・取消し・上限超過した場合、未確定のTool proposalは破棄し、Tool Gatewayへ渡さない。
 3. **Usage/Costの確定**: dispatch前に予算を予約し（Budget 02-09）、Providerの最終usageを受け取ったら`ModelAttempt`と`UsageReceipt`を確定・精算する。最終usageが返らない（切断、Provider非対応、取消し）場合は、tokenizer推定値を`ESTIMATED`として記録し、**予約をUNKNOWNのまま保持**してProviderの請求/usage APIとの照合で確定する。課金が発生した可能性がある中断を0円扱いしない。
+
+## 2026-11-10 STEP 2: 確定済み応答の再利用とadmission（PR #80レビューP1-01、PoC試験済み・NOT LOCKED）
+
+Agent Runtimeは、crash後の再要求に対してCheckpoint HEADに確定済みのModel応答を再生できる。再利用は**Sealed ModelRequestSnapshotの同一性**（tenant、Run、Goal revision、stream、policy、model ID、Tool表面、文脈全体の順序と内容のdigest）が一致する場合だけに限る。fenceは同一性に含めない（再claimしたWorkerが再生できるように）。**再生時もModel Gatewayのadmission**（tenant一致、cancelされていない、fence、Goal revision、許可model）を毎回行い、拒否は`model_calls`へ記録する。Goal変更後に同じ入力を再送すると再利用されず新しい呼出しになること、旧Goal・旧fenceのWorkerはキャッシュヒットでも拒否されることをPYRT-T13/T13bで確認した。
