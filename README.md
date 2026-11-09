@@ -61,7 +61,7 @@ Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格�
 
 LLMへ毎回全履歴を渡さず、Policy/現行Goal/実行状態を型付き固定領域とし、Evidence原本のArtifact offload、関連度・鮮度で選択したWorking/Memory投影、根拠付きSummary、Checkpoint復旧/Model変更時の再構築を組み合わせる。[詳細: Context Manager 18節](docs/02-runtime/context-manager-and-compaction.md) / [ADR-023〜028](docs/00-foundation/architecture-decisions.md) / [QA ACM-T01〜20](docs/11-qa/benchmark-and-release-gates.md)。
 
-Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。
+Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Context圧縮を経てもSentinel/Gateway、認可、秘密情報の境界を緩めない。2026-11-09にはDeepAgents JS・Mastra Observational Memory・OpenClawから採用する圧縮・監査・復旧の契約を[Context 19節](docs/02-runtime/context-manager-and-compaction.md)へ追加した（Draft）。原本保存失敗や品質不合格なら旧HEADを維持する。設計の追加であり、本体コードやRuntime実機テストを完了したことにはならない。既存88仕様MDの件数は維持。
 
 ## サーバーブラウザのライブ閲覧（追加設計、未実装）
 
