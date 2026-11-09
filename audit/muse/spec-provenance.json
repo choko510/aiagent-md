@@ -4,7 +4,7 @@
   "moduleCount": 88,
   "historicalSourceBase": "8b153c238c8a4cc18b6e9d258e55d3265e5249d5",
   "gitRevisionSource": "90482eabe070630fa532f790052ebb45ae3fcee7",
-  "note": "2026-11-09: PR #74 RTK/Caveman/Headroom and PR #76 DeepAgents/Mastra/OpenClaw draft proposals integrated preserving both context validators, benchmark gates, original/summary provenance and existing 88 canonical modules. OPT-T01..20 and ACM-OSS-T01..14 designed/NOT RUN; not runtime, KVM, DB or Owner sign-off.",
+  "note": "2026-11-09: PR #74 RTK/Caveman/Headroom and PR #76 DeepAgents/Mastra/OpenClaw draft proposals integrated preserving both context validators, benchmark gates, original/summary provenance and existing 88 canonical modules. OPT-T01..20 and ACM-OSS-T01..14 designed/NOT RUN; not runtime, KVM, DB or Owner sign-off. 2026-11-10: PR #81 X Research Provider TwiFork read-only/user-login design; provenance hash updated (design only, not runtime validation).",
   "modules": {
     "docs/00-foundation/README.md": "9981b45c8bcae1e2a012e007eb42afdd39bfd032",
     "docs/00-foundation/product-requirements.md": "7fbfe9ca8d43ab2696a04f048d34a7cd32a104a9",
@@ -48,7 +48,7 @@
     "docs/05-connectors/connector-framework.md": "f720998fcfbbe28550c6fe6e33b44aa1b00cf754",
     "docs/05-connectors/amazon-keepa.md": "9413d284a99dc701563d9d90a3c42a8bf8ae89bf",
     "docs/05-connectors/buyback-price-providers.md": "803fa9111580d407f33b064b34be570221327a5b",
-    "docs/05-connectors/x-research.md": "cd90361d6e661d990eb2ea07957283288cf687ea",
+    "docs/05-connectors/x-research.md": "6bac097a6ae2e50607bcdb956ba49c26a9bf6826",
     "docs/05-connectors/hotel-research.md": "f68750084fe792bfa357a75a8d0d133e94498885",
     "docs/06-memory-skills/memory-data-model.md": "f71374159627ea888fe09ee7e920757f23b500ce",
     "docs/06-memory-skills/memory-retrieval-and-update.md": "404ceb81d1db84e8c809db150df42860fdd61e65",
