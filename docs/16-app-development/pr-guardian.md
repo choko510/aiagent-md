@@ -1,6 +1,6 @@
 # DEV-11 — PR Guardian / CI・Review・Conflict継続修復
 
-> **Draft / PROVISIONAL** — 調査 2026-11-09。コード・GitHub App設定・実CI・実セキュリティ検証は未実施。[DEV-01](project-workspace-and-git.md)、[DEV-05](build-preview-release.md)、[DEV-07](review-and-repair-gates.md)の拡張案であり、既存契約を再定義しない。所有提案: CHAT_05（GitHub/CI adapter）、CHAT_02（Task継続）、CHAT_03（外部副作用）、CHAT_09（権限）、CHAT_10（永続化）、CHAT_11（QA）。
+> **Draft / PROVISIONAL** — 調査 2026-11-09。コード・GitHub App設定・実CI・実セキュリティ検証は未実施。[DEV-01](development-orchestration.md#dev-01)、[DEV-05](build-preview-release.md)、[DEV-07](debugging-and-verification.md#dev-07)の拡張案であり、既存契約を再定義しない。所有提案: CHAT_05（GitHub/CI adapter）、CHAT_02（Task継続）、CHAT_03（外部副作用）、CHAT_09（権限）、CHAT_10（永続化）、CHAT_11（QA）。
 
 ## 1. 必要な理由と採用根拠
 
@@ -37,7 +37,7 @@ Outputs: 認可範囲のPR状態Snapshot、CI run/job/logの絞り込みArtifact
 3. `HEAD_CHANGED`、`NEW_ACTIONABLE_REVIEW`、`REQUIRED_CI_FAILED`、`CONFLICT` を同じPRの監視projectionで分類。ログ/差分に秘密があればretention-aware redaction。未完了checksはWAITING。
 4. 条件に合うときだけ、既存Projectにbounded child Taskを追加。Coordinatorが `(repoBinding, PR, headSha, findingFingerprint, policyRev)` の一意work keyで多重実行を防止。修正担当は対象head SHAに対応する作業Snapshotを取得する。
 5. 修正用Branchに先行pushがあればCAS失敗として新headに基づいて再調査。旧SHAで生成したパッチ・レビュー・成功テストを最新SHAへ流用しない。git差分適用/コンフリクト解決は明示worktree内だけ。GitHub pushはCHAT_03 ledgerでintent/attempt/unknownを保全し、結果不明ならremote SHAを照会し盲目的再送しない。
-6. [DEV-07](review-and-repair-gates.md)の独立3レビュー・必須テストを再実施。Github provider上で最新headに対する**required checks**が実際に完了し成功したことを照合。新しいcheckが生成されたら旧receiptを破棄。成功後も既定はPRをReadyとして**通知するだけ**。
+6. [DEV-07](debugging-and-verification.md#dev-07)の独立3レビュー・必須テストを再実施。Github provider上で最新headに対する**required checks**が実際に完了し成功したことを照合。新しいcheckが生成されたら旧receiptを破棄。成功後も既定はPRをReadyとして**通知するだけ**。
 7. 各修正の `findingId, initialHeadSha, finalHeadSha, CI run IDs, testRefs, action receipts` を保存。スレッド返信は認可され、完了証拠を得た場合のみ行い、同一コメントを重複投稿しない。
 
 ## 5. 重要な例外と防御

@@ -9,7 +9,7 @@
 - [Nx affected](https://nx.dev/docs/features/ci-features/affected): 変更ファイルとtask input/output/依存グラフから実行対象を選ぶ。2026年10月のNx 24でtask-based affectedが既定になったが、言語・プロジェクト一般でその精度が保証されるわけではない。
 - [Nx run tasks](https://nx.dev/docs/features/run-tasks): task graph、pipeline、cacheが独立概念。影響テストの「未選択」と「合格」を区別する設計に利用。
 - [GitHub cache security](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching): キャッシュは署名検証済みの証拠ではなく、非信頼PRのcache poisoningを警戒すべき。
-- 既存[DEV-07](review-and-repair-gates.md)の独立Reviewと[DEV-10](acceptance-and-rollout.md)のrequired testsを高速化のために省略しない。
+- 既存[DEV-07](debugging-and-verification.md#dev-07)の独立Reviewと[DEV-10](acceptance-and-rollout.md)のrequired testsを高速化のために省略しない。
 
 ## 2. DEV-13 Code Intelligence
 
@@ -59,7 +59,7 @@ Input: `baselineSha` / `candidateSha` / `repoBoundaries` / `diffPaths` / `CodeIn
 - 影響の根拠が不明、lockfile/build config/global fixture/DB schema/公共API/Auth/Permission/Serialization/Generated code変更はrisk-based policyで関連テストを拡大し、必要なら全テストを選ぶ。
 - Snapshotが古い、Graphが破損、base SHAが未確定、テストcatalogが欠落なら`FALLBACK_FULL`（予算不足ならPartial/Blocked）。`empty selection`を自動合格とはしない。
 - 変更行のcoverage情報は弱い推定。dynamic/runtime reflectionなど静的捕捉不能は不確実性を残す。
-- Flaky/failed testは[DEV-12](reproduction-lab.md)へ、Browser E2EはDEV-06へ。既知の不安定なテストを無言で除外しない。
+- Flaky/failed testは[DEV-12](debugging-and-verification.md#dev-12)へ、Browser E2EはDEV-06へ。既知の不安定なテストを無言で除外しない。
 
 ### 3.3 キャッシュ・費用
 

@@ -70,7 +70,7 @@ Agentに**Ubuntuホストの**任意Shell/SSH/Dockerソケットや権限昇格�
 
 ## 調査資料の整理について
 
-並列仕様執筆時に使った担当別プロンプトや作成テンプレートは整理済みです。旧プロンプトの一部は既存仕様からの相対参照を維持するため、`prompts/ROUND2_AUTHOR_CONTINUE.md` のみ**履歴用資料として残置**しています。実装手順ではありません。削除したファイルもGit履歴から確認できます。元の61件の仕様PRとのSHA対応や未承認事項を確認する `audit/`、`governance/`、`.premerge/pinned-prs.json` は保持しています。
+並列仕様執筆時に使った担当別プロンプトや作成テンプレートは整理済みです。旧Round2の執筆プロンプトは現行ツリーから整理し、必要な参照を[固定コミットの履歴版](https://github.com/choko510/aiagent-md/blob/3789825c21062af3279d54b41790037ffd854eeb/prompts/ROUND2_AUTHOR_CONTINUE.md)へ移しました。これは実装手順ではありません。削除したファイルもGit履歴から確認できます。元の61件の仕様PRとのSHA対応や未承認事項を確認する `audit/`、`governance/`、`.premerge/pinned-prs.json` は保持しています。
 
 ## コンテキスト管理の実装判断（2026-11-07追記）
 

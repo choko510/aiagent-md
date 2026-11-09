@@ -110,7 +110,7 @@ DBのPITRでRun `leaseEpoch` が過去値へ巻き戻っても旧Workerの権限
 
 ## 2026-11-07 DEV-05/06: Project Preview/Git/Toolchainの追加攻撃面（Draft）
 
-[DEV-05](../16-app-development/build-preview-release.md) / [DEV-06](../16-app-development/autonomous-browser-debugger.md) のPreview Brokerはprivate IP/TCP/HTTP CONNECTの一般的な例外ではない。Operatorが実測検証した独立VM間の限定IPCと、tenant+project+execution+workspace revision+boundPort+TTL+policy epochへbindした一時routeのみ許す。Browser Workerは専有CDPのまま、host/other tenant/metadata/Trusted Services直通、redirect/IPv6/WS/ServiceWorker bypass、URLでの認可偽装を拒否する。npm/pip/GradleやGit/CI/Deploy/SigningをAgentのraw networkから起動せず、各brokerが独立Gateway Intent/Sentinel/Enforced Transport receiptで操作する。Toolchain postinstall scriptはCell隔離を維持。デモ/デザインのユーザー選択は外部作用のApprovalに変換されない。SC-29とDEV-BLD-T01..08にはVM実測/SSRF/secret exfil負例を必須化。未検証ならproduction readiness=false。
+[DEV-05](../16-app-development/build-preview-release.md) / [DEV-06](../16-app-development/debugging-and-verification.md#dev-06) のPreview Brokerはprivate IP/TCP/HTTP CONNECTの一般的な例外ではない。Operatorが実測検証した独立VM間の限定IPCと、tenant+project+execution+workspace revision+boundPort+TTL+policy epochへbindした一時routeのみ許す。Browser Workerは専有CDPのまま、host/other tenant/metadata/Trusted Services直通、redirect/IPv6/WS/ServiceWorker bypass、URLでの認可偽装を拒否する。npm/pip/GradleやGit/CI/Deploy/SigningをAgentのraw networkから起動せず、各brokerが独立Gateway Intent/Sentinel/Enforced Transport receiptで操作する。Toolchain postinstall scriptはCell隔離を維持。デモ/デザインのユーザー選択は外部作用のApprovalに変換されない。SC-29とDEV-BLD-T01..08にはVM実測/SSRF/secret exfil負例を必須化。未検証ならproduction readiness=false。
 
 ## 2026-11-09 Python-first（STEP 1）
 

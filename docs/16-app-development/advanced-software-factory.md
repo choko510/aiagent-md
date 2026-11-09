@@ -152,4 +152,4 @@ Cursorの事前ビルド環境を参考に、対象RepoSet/Toolchainに対応す
 | CHAT_10 | RecordVersion CAS、immutable workspace/export、GC/outbox |
 | CHAT_11 | Candidate間公平性、perf stats、Required Gate、SC/Tests |
 
-[DEV-20](advanced-development-acceptance.md)に詳細な受入マトリクスと段階導入を定める。すべて**Designed / NOT RUN**。
+[DEV-20](acceptance-and-rollout.md#dev-20)に詳細な受入マトリクスと段階導入を定める。すべて**Designed / NOT RUN**。

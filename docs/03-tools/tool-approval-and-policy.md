@@ -308,7 +308,7 @@ Use existing [REST PR #8](https://github.com/choko510/aiagent-md/pull/8) `POST /
 - [S3] OpenClaw [`tool-policy-pipeline.ts`](https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/agents/tool-policy-pipeline.ts) and [test](https://github.com/openclaw/openclaw/blob/8b8c33ef334b3754f42afe2a2e212418abfa80f4/src/agents/tool-policy-pipeline.test.ts), MIT, **Code/test verified by reading**.
 - [S4] LangGraph [`interrupt.py`](https://github.com/langchain-ai/langgraph/blob/ffc3336367e8139668d11e5f0b0e6def57e7c762/libs/prebuilt/langgraph/prebuilt/interrupt.py), MIT, **Code verified**.
 - [S5] [PydanticAI issues #6452](https://github.com/pydantic/pydantic-ai/issues/6452) / [#10926](https://github.com/pydantic/pydantic-ai/issues/10926), [Mastra #27485](https://github.com/mastra-ai/mastra/issues/27485), **Issue report, not reproduced**.
-- [S6] [SC](../00-foundation/acceptance-scenarios.md), [Architecture Rules](../00-foundation/architecture-rules.md), [Round 2](../../prompts/ROUND2_AUTHOR_CONTINUE.md), **project requirements**. Our binding/caps are **design hypotheses**. All implementation tests **not executed**.
+- [S6] [SC](../00-foundation/acceptance-scenarios.md), [Architecture Rules](../00-foundation/architecture-rules.md), [Round 2](https://github.com/choko510/aiagent-md/blob/3789825c21062af3279d54b41790037ffd854eeb/prompts/ROUND2_AUTHOR_CONTINUE.md), **project requirements**. Our binding/caps are **design hypotheses**. All implementation tests **not executed**.
 
 
 ### Round 3 — lossless canonical version boundary (2026-10-30)

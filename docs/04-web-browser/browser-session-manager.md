@@ -227,7 +227,7 @@ BrowserSessionのObserver新規許可条件は`mode=AGENT`・`takeoverPhase=NONE
 
 ## 2026-11-07 DEV-06: 開発用Browser Debug Sessionの追加提案（Draft）
 
-[Autonomous Browser Debugger](../16-app-development/autonomous-browser-debugger.md) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。マージ済みBrowser Live Observation PR #71のObserve-only権限を継承しつつ、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。
+[Autonomous Browser Debugger](../16-app-development/debugging-and-verification.md#dev-06) は既存Browser WorkerのContext/Page単独所有、owner/tenant/taskのopaque SessionRef、LeaseEpoch、Tab mutex、takeover exclusivityをそのまま使用する。開発Previewは[DEV-05](../16-app-development/build-preview-release.md)のowner/project/execution/port/TTLで固定された仮想originだけを特例に認可。Browser Workerの一般DNS/SSRF/Host拒否や公共Webの制限を外さない。Console/Network/Trace/Screenshotを取得してもraw Cookie/CDP/SecretをCellや普通のUIに出さず、Artifactは分類/秘匿/retentionされたもののみ。マージ済みBrowser Live Observation PR #71のObserve-only権限を継承しつつ、Observe/Takeoverの所有権を混同しない。SC-27/29、DEV-DBG-T06..09 未実施。
 
 ## 2026-11-09 Python-first: Playwright Python Browser Worker（STEP 1、Draft）
 
