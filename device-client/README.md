@@ -28,7 +28,7 @@ CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd d
 ## Trust boundary / status
 
 - `AuthenticatedChannelPort`, `CuaAdapterPort`, `ChromeAdapterPort`, `BuildAdapterPort`, `AndroidAdapterPort` exist as **interfaces**. Only no-effect mocks exist.
-- Model-controlled argument bytes are SHA-256 hashed, grants and START_PERMIT must agree on scope/epoch/intent/target/digest and be fresh. All JSON epochs use canonical signed-int64 decimal strings.
+- Model-controlled argument bytes are SHA-256 hashed, the full operation/target/fence is bound to the journal fingerprint, grants and START_PERMIT must agree on scope/epoch/intent/target/digest and be fresh. All JSON epochs use canonical signed-int64 decimal strings.
 - LocalJournal writes STARTED + consumed Permit in a single IMMEDIATE SQLite transaction, uses WAL + synchronous FULL; crash recovery marks remaining STARTED UNKNOWN. No blind retry and no claim of exact-once delivery or Cloud success.
 - The metadata-only SQLite mock journal is **not encrypted and not suitable for production**; per-owner OS-protected key storage, secure file permissions on Windows, genuine signed server grants and authenticated live connection are not implemented. Never store sensitive payload bytes in this journal.
 - Local policy uses a positive allowlist for simulated non-browser desktop targets and separate browser Origin grants; Build/ADB are disabled unless explicitly enabled in a **test-only** policy. Unknown target changes must be rejected by future native adapters.
@@ -36,7 +36,7 @@ CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd d
 
 ## Tests / traceability
 
-`guardrails.rs`: LDC-T01 partial owner isolation; T04 stale epoch; T05 crash/unknown and duplicate refusal; T08/T09 desktop-browser boundary; T10/T11 disabled Build/ADB; T15 offline refusal; T30 Stop. Type/permit test cases additionally cover canonical epoch encoding, digest mismatch, permit reuse and local-only completion. These are **unit/mock tests, not implementation or validation of the full LDC-T01..32**.
+`guardrails.rs`: LDC-T01 partial owner isolation; T04 stale epoch; T05 crash/unknown and duplicate refusal; T08/T09 desktop-browser boundary; T10/T11 disabled Build/ADB; T15 offline refusal; T30 Stop. Type/permit test cases additionally cover target identity changes, reconnection generations, canonical epoch encoding, digest mismatch, permit reuse and local-only completion. These are **unit/mock tests, not implementation or validation of the full LDC-T01..32**.
 
 Manual Windows Mock GUI tests: launch -> verify disabled real actions -> Stop -> verify disabled controls and audit -> close -> restart (in-memory UI state resets; real secure persistence is not implemented). Mark each actual run PASS/FAIL/NOT_RUN; never infer PASS from a successful PR or a documentation statement. Host lacking Windows/macOS/USB must record `BLOCKED_HOST_UNAVAILABLE`.
 
