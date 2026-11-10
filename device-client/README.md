@@ -23,7 +23,7 @@ bash ci/verify.sh
 
 Run on Windows in an ordinary interactive user session. Tauri 2 Windows builds require installed Rust MSVC toolchain, WebView2 and applicable Windows SDK/MSVC tools. Do **not** install or run any Cua/BrowserMCP/ADB service for this mock test. On Windows, test app launch, the status UNPAIRED_OFFLINE, disabled Pair/Operate controls, Local Stop, Mock Revocation and local audit rows. No real device effects should occur. If compilation fails, capture first error and OS/toolchain versions; do not switch to admin or disable Windows security.
 
-CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd device-client; cargo test --workspace; cargo check --workspace`. Linux-only core test: `cargo test -p aiagent-device-core`. Tauri Linux build requires native GTK/WebKit packages; a macOS build is not macOS TCC/real-device verification. Lockfile generation/pinning and dependency licence audit also belong to an actual toolchain-enabled job, not claimed here.
+CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd device-client; cargo test --workspace; cargo check --workspace`. Linux-only core test: `cargo test -p aiagent-device-core`. Tauri Linux build requires native GTK/WebKit packages; a macOS build is not macOS TCC/real-device verification. Run `cargo fmt --all` before final review; the script runs tests/compile, not formatting. Lockfile generation/pinning and dependency licence audit also belong to an actual toolchain-enabled job, not claimed here.
 
 ## Trust boundary / status
 
