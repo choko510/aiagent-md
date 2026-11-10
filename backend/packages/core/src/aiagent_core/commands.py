@@ -10,7 +10,7 @@ import psycopg
 from aiagent_domain import sha256_hex, uuid7
 from psycopg.types.json import Jsonb
 
-from .control import TERMINAL
+from .control import TERMINAL, scope_active
 from .db import Database, Row
 from .events import append_event, enqueue_run_job
 
@@ -79,6 +79,8 @@ def create_task_tx(
     occurrence_id: str | None = None,
 ) -> dict[str, str]:
     """Task + goal revision 1 + Run attempt 1 + seed HEAD entry + events + run.start outbox, inside caller's TX."""
+    if not scope_active(c, tenant_id, owner_user_id, workspace_id):
+        raise CommandError("SCOPE_REVOKED", 403)
     task_id, run_id, cp_id = uuid7(), uuid7(), uuid7()
     c.execute(
         "INSERT INTO agent.tasks(tenant_id, id, owner_user_id, workspace_id, profile_code, status_code,"
