@@ -120,7 +120,8 @@ class Supervisor:
             # Parent/cwd validation alone cannot prevent access to another tenant's files.
             try:
                 restrict_to_workspace(workspace)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
             if require_netns:
                 try:
@@ -159,7 +160,7 @@ class Supervisor:
                 os.killpg(proc.pid, signal.SIGKILL)  # no surviving children after the execution ends
         rc = proc.returncode
         if rc == 98:
-            return {"status": "REFUSED", "reason": "FS_ISOLATION_UNAVAILABLE"}
+            return {"status": "REFUSED", "reason": "FS_ISOLATION_UNAVAILABLE", "detail": err[:400].decode("utf-8", "replace")}
         if rc == 97 and self.require_netns:
             return {"status": "REFUSED", "reason": "NETNS_UNAVAILABLE"}
         return {
