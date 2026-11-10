@@ -4,6 +4,7 @@ All guards are separate explicit ports and deny on absent/failed policy, consent
 retention or source verification. No auto-learning, mutation or cross-conversation
 search exists here. Caller-supplied Scope must originate at authenticated server.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -64,16 +65,24 @@ class Retrieval:
 
 
 class MemoryRetriever:
-    def __init__(self, repository: RepositoryPort, *, consent: ConsentPort,
-                 retention: RetentionPort, sources: SourcePort):
+    def __init__(
+        self, repository: RepositoryPort, *, consent: ConsentPort, retention: RetentionPort, sources: SourcePort
+    ):
         self.repository = repository
         self.consent = consent
         self.retention = retention
         self.sources = sources
 
-    def read(self, scope: Scope, *, query: str, recipient: str,
-             now: datetime | None = None, max_items: int = 8,
-             max_bytes: int = 4000) -> Retrieval:
+    def read(
+        self,
+        scope: Scope,
+        *,
+        query: str,
+        recipient: str,
+        now: datetime | None = None,
+        max_items: int = 8,
+        max_bytes: int = 4000,
+    ) -> Retrieval:
         forbid_secrets(query)
         if not query or len(query) > 2000 or not recipient or not 1 <= max_items <= 20 or not 0 < max_bytes <= 20000:
             raise SafeStop("INVALID_MEMORY_QUERY")
@@ -95,20 +104,24 @@ class MemoryRetriever:
             if record.scope_task_id is not None and record.scope_task_id != scope.task_id:
                 continue
             if record.status != "active" or record.consent_basis not in {
-                    "user_explicit", "approved_setting", "reviewed_import"}:
+                "user_explicit",
+                "approved_setting",
+                "reviewed_import",
+            }:
                 continue
             if utc_instant(record.expires_at) <= now:
                 continue
             # Fail closed if one of the independent ports is unavailable/raises.
-            if not (self.consent.permits(scope, record, recipient)
-                    and self.retention.permits(scope, record, now)
-                    and self.sources.permits(scope, record.source_refs)):
+            if not (
+                self.consent.permits(scope, record, recipient)
+                and self.retention.permits(scope, record, now)
+                and self.sources.permits(scope, record.source_refs)
+            ):
                 continue
             encoded_length = len(record.text.encode("utf-8"))
             if used + encoded_length > max_bytes:
                 continue
-            selected.append(MemoryProjection(record.ref, record.text,
-                                             record.source_refs, start_epoch))
+            selected.append(MemoryProjection(record.ref, record.text, record.source_refs, start_epoch))
             used += encoded_length
             if len(selected) >= max_items:
                 break
@@ -120,7 +133,7 @@ class MemoryRetriever:
 class MockMemoryRepository:
     """Fixed fixture store; ID hits can be deliberately poisoned to test reauthorization."""
 
-    def __init__(self, records: tuple[MemoryRecord, ...] = ()): 
+    def __init__(self, records: tuple[MemoryRecord, ...] = ()):
         self.records = {r.ref: r for r in records}
         self.epoch_value = "epoch-1"
         self.index_override: tuple[str, ...] | None = None
@@ -130,8 +143,11 @@ class MockMemoryRepository:
         return self.epoch_value
 
     def search(self, scope: Scope, query: str, limit: int) -> tuple[str, ...]:
-        hits = self.index_override if self.index_override is not None else tuple(
-            r.ref for r in self.records.values() if query.lower() in r.text.lower())
+        hits = (
+            self.index_override
+            if self.index_override is not None
+            else tuple(r.ref for r in self.records.values() if query.lower() in r.text.lower())
+        )
         if self.after_search:
             self.after_search(self)
         return hits[:limit]

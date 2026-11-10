@@ -1,13 +1,14 @@
 """AI-02 private immutable DTOs. Not shared Task/Run/Goal or DB contracts."""
+
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
-import json
-import re
 
 
 class SafeStop(RuntimeError):
@@ -90,6 +91,7 @@ class Anchor:
             utc_instant(self.value)
         if self.kind == AnchorKind.TIMEZONE:
             from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
             try:
                 ZoneInfo(self.value)
             except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -159,8 +161,16 @@ class ContextRequest:
     memory: tuple[MemoryProjection, ...] = ()
 
     def __post_init__(self) -> None:
-        if not all((self.expected_head, self.lease_epoch, self.goal_revision,
-                    self.policy_version, self.memory_source_epoch, self.raw_event_cursor)):
+        if not all(
+            (
+                self.expected_head,
+                self.lease_epoch,
+                self.goal_revision,
+                self.policy_version,
+                self.memory_source_epoch,
+                self.raw_event_cursor,
+            )
+        ):
             raise SafeStop("INVALID_CONTEXT_REQUEST")
         if not self.anchors or not any(a.kind == AnchorKind.GOAL_REF for a in self.anchors):
             raise SafeStop("MISSING_GOAL_ANCHOR")

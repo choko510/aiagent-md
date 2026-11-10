@@ -1,7 +1,7 @@
 """Mock adapters. Production ownership, persistence, HEAD CAS and admission: AI-07."""
+
 from __future__ import annotations
 
-from dataclasses import replace
 from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
@@ -16,11 +16,25 @@ class ArtifactStorePort(Protocol):
 
 
 class HeadPort(Protocol):
-    def assert_current(self, scope: Scope, expected_head: str, goal_revision: str,
-                       lease_epoch: str, policy_version: str, memory_epoch: str) -> None: ...
-    def publish(self, scope: Scope, expected_head: str, goal_revision: str,
-                lease_epoch: str, policy_version: str, memory_epoch: str,
-                plan_digest: str) -> str: ...
+    def assert_current(
+        self,
+        scope: Scope,
+        expected_head: str,
+        goal_revision: str,
+        lease_epoch: str,
+        policy_version: str,
+        memory_epoch: str,
+    ) -> None: ...
+    def publish(
+        self,
+        scope: Scope,
+        expected_head: str,
+        goal_revision: str,
+        lease_epoch: str,
+        policy_version: str,
+        memory_epoch: str,
+        plan_digest: str,
+    ) -> str: ...
     def check_dispatch(self, plan: ContextPlan, lease_epoch: str) -> None: ...
 
 
@@ -40,8 +54,14 @@ class MockArtifactStore:
     def put_raw(self, scope: Scope, source: SourceInput) -> RawArtifact:
         self._write_allowed()
         ref = "mock-artifact:" + str(uuid4())
-        record = RawArtifact(ref, source.source_ref, source.locator_ref, source.observed_at,
-                             sha256(source.body).hexdigest(), len(source.body))
+        record = RawArtifact(
+            ref,
+            source.source_ref,
+            source.locator_ref,
+            source.observed_at,
+            sha256(source.body).hexdigest(),
+            len(source.body),
+        )
         self._raw[ref] = (scope, record, bytes(source.body))
         return record
 
@@ -79,8 +99,9 @@ class MockArtifactStore:
 class MockHeadPort:
     """Simulates protected HEAD CAS and latest goal/policy/memory/lease; not a DB."""
 
-    def __init__(self, scope: Scope, *, head: str, goal_revision: str,
-                 lease_epoch: str, policy_version: str, memory_epoch: str):
+    def __init__(
+        self, scope: Scope, *, head: str, goal_revision: str, lease_epoch: str, policy_version: str, memory_epoch: str
+    ):
         self.scope = scope
         self.head = head
         self.goal_revision = goal_revision
@@ -90,16 +111,35 @@ class MockHeadPort:
         self.fail_before_cas = False
         self.published: list[tuple[str, str]] = []
 
-    def assert_current(self, scope: Scope, expected_head: str, goal_revision: str,
-                       lease_epoch: str, policy_version: str, memory_epoch: str) -> None:
-        if scope != self.scope or self.head != expected_head or self.goal_revision != goal_revision \
-           or self.lease_epoch != lease_epoch or self.policy_version != policy_version \
-           or self.memory_epoch != memory_epoch:
+    def assert_current(
+        self,
+        scope: Scope,
+        expected_head: str,
+        goal_revision: str,
+        lease_epoch: str,
+        policy_version: str,
+        memory_epoch: str,
+    ) -> None:
+        if (
+            scope != self.scope
+            or self.head != expected_head
+            or self.goal_revision != goal_revision
+            or self.lease_epoch != lease_epoch
+            or self.policy_version != policy_version
+            or self.memory_epoch != memory_epoch
+        ):
             raise SafeStop("STALE_CONTEXT")
 
-    def publish(self, scope: Scope, expected_head: str, goal_revision: str,
-                lease_epoch: str, policy_version: str, memory_epoch: str,
-                plan_digest: str) -> str:
+    def publish(
+        self,
+        scope: Scope,
+        expected_head: str,
+        goal_revision: str,
+        lease_epoch: str,
+        policy_version: str,
+        memory_epoch: str,
+        plan_digest: str,
+    ) -> str:
         self.assert_current(scope, expected_head, goal_revision, lease_epoch, policy_version, memory_epoch)
         if self.fail_before_cas:
             raise SafeStop("SIMULATED_KILL_BEFORE_CAS")
@@ -109,5 +149,11 @@ class MockHeadPort:
         return new_head
 
     def check_dispatch(self, plan: ContextPlan, lease_epoch: str) -> None:
-        self.assert_current(plan.scope, plan.committed_head, plan.goal_revision, lease_epoch,
-                            plan.policy_version, plan.memory_source_epoch)
+        self.assert_current(
+            plan.scope,
+            plan.committed_head,
+            plan.goal_revision,
+            lease_epoch,
+            plan.policy_version,
+            plan.memory_source_epoch,
+        )
