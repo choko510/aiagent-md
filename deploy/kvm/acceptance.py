@@ -150,30 +150,51 @@ def topology_report() -> dict[str, object]:
     }
 
 
-def _valid_record(check: object, identity: str, digest: str, fresh_time: dt.datetime) -> bool:
-    if not isinstance(check, dict) or set(check) != {
-        "id", "status", "execution", "evidenceSha256", "hostId", "topologyDigest", "recordedAt"
-    }:
+def _valid_record(
+    check: object, identity: object, digest: object, fresh_time: dt.datetime, evidence_dir: Path | None,
+) -> bool:
+    required = {
+        "id", "status", "execution", "evidenceSha256", "evidenceFile",
+        "hostId", "topologyDigest", "recordedAt",
+    }
+    if not isinstance(check, dict) or set(check) != required or evidence_dir is None:
         return False
     if check["status"] != "PASS" or check["execution"] not in ("CI", "REAL_HOST", "OPERATOR"):
         return False
-    proof = check["evidenceSha256"]
+    proof, name = check["evidenceSha256"], check["evidenceFile"]
+    valid_sha = lambda x: isinstance(x, str) and len(x) == 71 and x.startswith("sha256:") and all(
+        c in "0123456789abcdef" for c in x[7:]
+    )
+    if not valid_sha(check["hostId"]) or not valid_sha(check["topologyDigest"]):
+        return False
     if not isinstance(proof, str) or len(proof) != 64 or any(c not in "0123456789abcdef" for c in proof):
         return False
-    if check["hostId"] != identity or check["topologyDigest"] != digest:
+    if not isinstance(name, str) or len(name) > 120 or name in (".", "..") or Path(name).name != name:
         return False
     try:
+        artifact = evidence_dir / name
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size > MAX_EVIDENCE_BYTES:
+            return False
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != proof:
+            return False
         when = dt.datetime.fromisoformat(check["recordedAt"].replace("Z", "+00:00"))
-        return bool(when.tzinfo) and abs((fresh_time - when).total_seconds()) <= 86400
-    except (AttributeError, TypeError, ValueError):
+        if not when.tzinfo or abs((fresh_time - when).total_seconds()) > 86400:
+            return False
+    except (AttributeError, OSError, TypeError, ValueError):
         return False
+    if check["execution"] in ("REAL_HOST", "OPERATOR"):
+        return check["hostId"] == identity and check["topologyDigest"] == digest
+    # CI artifacts come from a different machine, and may use a digest of the CI runner image.
+    return True
 
 
-def evaluate_evidence(evidence: object, live: dict[str, object] | None = None) -> dict[str, object]:
-    """Evaluate operator-supplied checks. Refuse promotion on mock data / stale, mismatched host evidence.
+def evaluate_evidence(
+    evidence: object, live: dict[str, object] | None = None, evidence_dir: Path | None = None,
+) -> dict[str, object]:
+    """Evaluate checked artifacts; never promote simulated 2VM results to HOST_VERIFIED.
 
-    evidenceSha256 is an artifact identifier, NOT a verified digital signature. Final production
-    cutover remains an independent operator decision, outside this script.
+    sha256 verifies that a referenced artifact was not accidentally changed; it is not a
+    cryptographic signature or a substitute for operator review of the test's real outcome.
     """
     if live is None:
         live = topology_report()
@@ -181,11 +202,19 @@ def evaluate_evidence(evidence: object, live: dict[str, object] | None = None) -
     digest = live.get("topologyDigest", "")
     current = dt.datetime.now(dt.UTC)
     records: dict[str, dict] = {}
+    duplicates: set[str] = set()
     if isinstance(evidence, dict) and isinstance(evidence.get("checks"), list):
         for item in evidence["checks"]:
-            if (isinstance(item, dict) and isinstance(item.get("id"), str)
-                    and item["id"] not in records and _valid_record(item, identity, digest, current)):
-                records[item["id"]] = item
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            key = item["id"]
+            if key in records or key in duplicates:
+                duplicates.add(key)
+                records.pop(key, None)
+                continue
+            if _valid_record(item, identity, digest, current, evidence_dir):
+                records[key] = item
+
     def passed(ids: tuple[str, ...], execution: str | None = None) -> bool:
         return all(k in records and (execution is None or records[k]["execution"] == execution) for k in ids)
 
@@ -230,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(json.dumps({"status": "NOT_RUN", "error": "invalid evidence file"}))
             return 2
-        result = evaluate_evidence(evidence)
+        result = evaluate_evidence(evidence, evidence_dir=a.evidence.parent)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") not in ("NOT_RUN", "BLOCKED_HOST_UNAVAILABLE") else 2
 
