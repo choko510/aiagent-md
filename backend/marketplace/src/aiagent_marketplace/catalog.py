@@ -162,13 +162,16 @@ def _mcp_item(entry: Any) -> dict[str, Any] | None:
     if not isinstance(entry, dict) or not isinstance(entry.get("server"), dict):
         return None
     server = entry["server"]
-    name = _text(server.get("name"), 200)
-    if not name or "/" not in name:
+    name = server.get("name")
+    if (
+        not isinstance(name, str) or not (2 <= len(name) <= 200)
+        or "/" not in name or any(ord(char) < 32 for char in name)
+    ):
         return None
     metadata = entry.get("_meta") if isinstance(entry.get("_meta"), dict) else {}
     info = metadata.get("io.modelcontextprotocol.registry/official", {})
     info = info if isinstance(info, dict) else {}
-    if info.get("status") == "deleted":
+    if info.get("status") == "deleted" or info.get("isLatest") is False:
         return None
     remotes = server.get("remotes") if isinstance(server.get("remotes"), list) else []
     has_remote = any(
@@ -200,9 +203,12 @@ def _clawhub_item(entry: Any, *, detail_owner: str | None = None) -> dict[str, A
     if not isinstance(entry, dict):
         return None
     owner = entry.get("owner") if isinstance(entry.get("owner"), dict) else {}
-    handle = _text(detail_owner or entry.get("ownerHandle") or owner.get("handle"), 128)
-    slug = _text(entry.get("slug"), 128)
-    if not _SLUG.fullmatch(handle) or not _SLUG.fullmatch(slug):
+    handle = detail_owner or entry.get("ownerHandle") or owner.get("handle")
+    slug = entry.get("slug")
+    if (
+        not isinstance(handle, str) or not isinstance(slug, str)
+        or not _SLUG.fullmatch(handle) or not _SLUG.fullmatch(slug)
+    ):
         return None
     version = entry.get("latestVersion")
     version = version.get("version") if isinstance(version, dict) else entry.get("version")
