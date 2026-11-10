@@ -31,7 +31,7 @@ from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 from jsonschema import Draft202012Validator
 from psycopg.types.json import Jsonb
 
-from .executors import Executor, ExecutorFailed, ExecutorUnknown
+from .executors import Executor, ExecutorFailed, ExecutorUnknown, valid_receipt
 
 log = logging.getLogger("aiagent.tool_gateway")
 SERVICE = {"type": "service", "id": "tool_gateway"}
@@ -637,10 +637,17 @@ class ToolGateway:
         if dest is not None and self.sentinel is not None:
             permit = await asyncio.to_thread(self.sentinel.authorize_reconcile, tenant_id, intent_id, dest)
         answer = await executor.query(f"{tenant_id}:{intent_id}", permit) if executor else None
-        if answer is None:
+        # An unproven negative or malformed positive must never clear the
+        # Effect Ledger. Only an authenticated, receipt-backed positive is
+        # supported; strong negative proofs require a separate verified contract.
+        if (
+            not isinstance(answer, dict)
+            or answer.get("sent") is not True
+            or not valid_receipt(answer.get("receipt"))
+        ):
             return {"status": "UNKNOWN"}
-        status, effect = ("CONFIRMED", "RECONCILED_SENT") if answer["sent"] else ("FAILED", "RECONCILED_NOT_SENT")
-        result = {k: v for k, v in answer.items() if k == "receipt"}
+        status, effect = "CONFIRMED", "RECONCILED_SENT"
+        result = {"receipt": answer["receipt"]}
         # Lock order is task -> run -> intent, matching claim/segment settlement.
         # Do not keep these DB locks across the external receipt query.
         with self.db.tx() as c:
