@@ -13,5 +13,15 @@ from .campaign import (
 )
 from .store import SqliteHarnessStore
 
-__all__ = ["CampaignController", "CampaignPlan", "CampaignState", "EffectState", "FakeClock", "Phase",
-           "Rejected", "ResultState", "SqliteHarnessStore", "StopPolicy"]
+__all__ = [
+    "CampaignController",
+    "CampaignPlan",
+    "CampaignState",
+    "EffectState",
+    "FakeClock",
+    "Phase",
+    "Rejected",
+    "ResultState",
+    "SqliteHarnessStore",
+    "StopPolicy",
+]

@@ -29,8 +29,9 @@ class SqliteHarnessStore:
     def create(self, campaign: Campaign) -> None:
         with self._connection() as db:
             try:
-                db.execute("INSERT INTO campaigns VALUES (?, ?)",
-                           (campaign.plan.campaign_id, json.dumps(campaign.wire())))
+                db.execute(
+                    "INSERT INTO campaigns VALUES (?, ?)", (campaign.plan.campaign_id, json.dumps(campaign.wire()))
+                )
             except sqlite3.IntegrityError as exc:
                 raise Rejected("CAMPAIGN_EXISTS") from exc
 
@@ -55,8 +56,7 @@ class SqliteHarnessStore:
             except _CommitRejection as exc:
                 rejection = exc
                 result = None  # type: ignore[assignment]
-            db.execute("UPDATE campaigns SET payload=? WHERE id=?",
-                       (json.dumps(campaign.wire()), campaign_id))
+            db.execute("UPDATE campaigns SET payload=? WHERE id=?", (json.dumps(campaign.wire()), campaign_id))
             db.commit()
             if rejection is not None:
                 raise rejection

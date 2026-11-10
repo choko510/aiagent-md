@@ -46,7 +46,10 @@ def local_slot(day: date, watch: DailyWatch) -> datetime | None:
     utc = candidate.astimezone(UTC)
     restored = utc.astimezone(zone)
     if (restored.date(), restored.hour, restored.minute, restored.fold) != (
-        day, watch.local_hour, watch.local_minute, 0
+        day,
+        watch.local_hour,
+        watch.local_minute,
+        0,
     ):
         return None
     return utc
@@ -56,8 +59,7 @@ def next_daily(watch: DailyWatch, after_utc: datetime) -> datetime | None:
     if after_utc.tzinfo is None:
         raise Rejected("NAIVE_CLOCK")
     zone = ZoneInfo(watch.timezone_id)
-    first_day = max(parse_utc(watch.start_utc).astimezone(zone).date(),
-                    after_utc.astimezone(zone).date())
+    first_day = max(parse_utc(watch.start_utc).astimezone(zone).date(), after_utc.astimezone(zone).date())
     for offset in range(370):
         slot = local_slot(first_day + timedelta(days=offset), watch)
         if slot is not None and slot > after_utc and slot >= parse_utc(watch.start_utc):
@@ -66,8 +68,7 @@ def next_daily(watch: DailyWatch, after_utc: datetime) -> datetime | None:
 
 
 class WatchQueue(Protocol):
-    def request_watch(self, *, tenant_id: str, watch_id: str,
-                      slot_utc: str, dedupe_key: str) -> None: ...
+    def request_watch(self, *, tenant_id: str, watch_id: str, slot_utc: str, dedupe_key: str) -> None: ...
 
 
 class SqliteWatchHarness:
@@ -76,19 +77,25 @@ class SqliteWatchHarness:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         with sqlite3.connect(self.path) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS watch_slots (watch_id TEXT, slot TEXT, tenant_id TEXT,"
-                       " dedupe TEXT UNIQUE, status TEXT, PRIMARY KEY (watch_id,slot))")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS watch_slots (watch_id TEXT, slot TEXT, tenant_id TEXT,"
+                " dedupe TEXT UNIQUE, status TEXT, PRIMARY KEY (watch_id,slot))"
+            )
 
     def claim(self, watch: DailyWatch, slot: datetime) -> bool:
         dedupe = f"watch:{watch.tenant_id}:{watch.watch_id}:r{watch.revision}:{slot.isoformat()}"
         with sqlite3.connect(self.path, timeout=10) as db:
-            cur = db.execute("INSERT OR IGNORE INTO watch_slots VALUES (?,?,?,?, 'PENDING')",
-                             (watch.watch_id, slot.isoformat(), watch.tenant_id, dedupe))
+            cur = db.execute(
+                "INSERT OR IGNORE INTO watch_slots VALUES (?,?,?,?, 'PENDING')",
+                (watch.watch_id, slot.isoformat(), watch.tenant_id, dedupe),
+            )
             return cur.rowcount == 1
 
     def pending(self) -> list[tuple[str, str, str, str]]:
         with sqlite3.connect(self.path) as db:
-            return db.execute("SELECT tenant_id,watch_id,slot,dedupe FROM watch_slots WHERE status='PENDING'").fetchall()
+            return db.execute(
+                "SELECT tenant_id,watch_id,slot,dedupe FROM watch_slots WHERE status='PENDING'"
+            ).fetchall()
 
     def ack(self, dedupe: str) -> None:
         with sqlite3.connect(self.path) as db:
