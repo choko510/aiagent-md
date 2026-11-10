@@ -633,7 +633,18 @@ def finish_segment(
             if revoked:
                 error_code = "SCOPE_REVOKED"
         elif run["pause_requested"]:
-            target = "PAUSED"
+            # Pausing must not hide an uncertain external effect. The reconciliation
+            # state wins until its ledger is resolved (no new tool/model admissions).
+            pending = c.execute(
+                "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
+                " AND status_code IN ('SENDING','UNKNOWN')",
+                (claim.tenant_id, claim.run_id),
+            ).fetchone()
+            target = (
+                "WAITING_RECONCILIATION"
+                if outcome == "WAITING_RECONCILIATION" or (pending and pending["n"])
+                else "PAUSED"
+            )
         elif outcome in ("SUCCEEDED", "PARTIAL") and task["goal_revision"] != claim.goal_revision:
             raise StaleGoal(claim.run_id)
         terminal = target in TERMINAL
