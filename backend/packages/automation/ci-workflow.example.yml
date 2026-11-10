@@ -1,0 +1,22 @@
+# Copy to .github/workflows/step4-automation.yml ONLY by AI-07 after uv.lock integration.
+name: step4-automation
+on:
+  pull_request:
+    paths: ['backend/packages/automation/**', '.github/workflows/step4-automation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest ruff
+      - run: bash backend/packages/automation/scripts/ci.sh
