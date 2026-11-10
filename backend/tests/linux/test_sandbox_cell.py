@@ -113,7 +113,8 @@ def test_cwd_escape_refused(tmp_path: Path) -> None:
 
 def test_timeout_kills_whole_process_group(tmp_path: Path) -> None:
     s = sup(tmp_path)
-    marker = tmp_path / "survivor"
+    ws, _ = s.workspace("t1", "task1", ".")
+    marker = ws / "survivor"
     argv = ["/bin/sh", "-c", f"(sleep 3; touch {marker}) & sleep 30"]
     t0 = time.monotonic()
     out = run(s.execute(grant(argv, wall_ms=500), argv, "."))
@@ -138,7 +139,8 @@ def test_no_network_inside_cell(tmp_path: Path) -> None:
         "import socket\n"
         "try:\n socket.create_connection(('1.1.1.1', 53), timeout=2); print('CONNECTED')\n"
         "except OSError as e:\n print('BLOCKED', e.errno)\n"
-        "print(open('/proc/net/dev').read().count(':'))"
+        "try:\n open('/proc/net/dev').read(); print('PROC_LEAK')\n"
+        "except OSError:\n print('PROC_DENIED')"
     )
     argv = [sys.executable, "-c", code]
     out = run(s.execute(grant(argv), argv, "."))
@@ -146,7 +148,7 @@ def test_no_network_inside_cell(tmp_path: Path) -> None:
         assert out["reason"] == "NETNS_UNAVAILABLE"
         pytest.skip("user+net namespaces unavailable here; fail-closed refusal verified, isolation not exercised")
     assert "CONNECTED" not in out["stdout"] and "BLOCKED" in out["stdout"], out
-    assert out["stdout"].strip().splitlines()[-1] == "1"  # only the loopback interface exists
+    assert "PROC_DENIED" in out["stdout"] and "PROC_LEAK" not in out["stdout"], out
 
 
 def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
