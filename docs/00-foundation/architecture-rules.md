@@ -71,4 +71,4 @@
 
 ## F. ユーザー所有Device Client（ADR-041 / 2026-11-10、設計提案）
 
-Python-firstの``E`はCloud Backend/Agent Runtime/Browser Worker等の配置方針。ユーザーPCへ独立配布するDevice Agentは、OS native API、鍵ストア、interactive desktop権限を所有する**異なる信頼境界**としてRust/Tauriを選択する（[ADR-041](architecture-decisions.md)、[DEV-LDC](../16-app-development/local-device-rust-client.md)）。Backendの言語・Tool Intent/Approval/Sentinel/Effect Ledger正本は変更しない。ユーザーPCをUntrusted Execution VMのRuntime Cellとみなして`sandbox.exec`の権限を再利用してはならない。OS操作・Chrome・Build・ADBはAdapter別にlocal grantを検証。新たな遠隔通信もSentinel/Tool Gatewayで検証するまで本番許可しない。
+Python-firstの`§E`はCloud Backend/Agent Runtime/Browser Worker等の配置方針。ユーザーPCへ独立配布するDevice Agentは、OS native API、鍵ストア、interactive desktop権限を所有する**異なる信頼境界**としてRust/Tauriを選択する（[ADR-041](architecture-decisions.md)、[DEV-LDC](../16-app-development/local-device-rust-client.md)）。Backendの言語・Tool Intent/Approval/Sentinel/Effect Ledger正本は変更しない。ユーザーPCをUntrusted Execution VMのRuntime Cellとみなして`sandbox.exec`の権限を再利用してはならない。OS操作・Chrome・Build・ADBはAdapter別にlocal grantを検証。新たな遠隔通信もSentinel/Tool Gatewayで検証するまで本番許可しない。
