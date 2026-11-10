@@ -93,6 +93,25 @@ for path in companion_paths:
     if not cp.is_file() or len(cp.read_text(encoding="utf-8")) < 600:
         errors.append(f"Missing/thin audited companion: {path}")
 
+# Marketplace stays a companion (not a 89th canonical module): verify safety
+# invariants and exact acceptance-ID coverage independently of provenance hash.
+marketplace_path = "docs/08-interfaces/extension-marketplace.md"
+if marketplace_path in companion_paths:
+    body = (ROOT / marketplace_path).read_text(encoding="utf-8")
+    marker_ids = re.findall(r"^\\|\\s*(MKT-T\\d{2})\\s*\\|", body, re.M)
+    expected_ids = [f"MKT-T{n:02d}" for n in range(1, 20)]
+    if marker_ids != expected_ids:
+        errors.append("Marketplace test table must have unique, ordered MKT-T01..T19")
+    for phrase in (
+        "OWNER_NOT_VERIFIABLE", "ownerHandle", "artifactSha256",
+        "MKT-T19", "Riskを自己申告だけで下げない", "PR #82",
+        "NOT IMPLEMENTED", "GitHubはMKT-2以降",
+    ):
+        if phrase not in body:
+            errors.append(f"Marketplace companion missing invariant: {phrase}")
+else:
+    errors.append("Marketplace Companion COMP-02 not registered in inventory")
+
 # Do not mistake historical Round6/Round7 pinned-85 provenance workflows
 # for the updated 88-module design validation.
 
