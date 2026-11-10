@@ -50,7 +50,9 @@ class EgressConfig:
             allow_private = frozenset(d.get("allow_private", []))
             if allow_private and production:
                 raise ValueError(f"destination {name}: allow_private is forbidden in production")
-            if not bool(d.get("needs_permit", True)) and frozenset(d.get("identities", [])) != frozenset({"model_gateway"}):
+            if not bool(d.get("needs_permit", True)) and frozenset(d.get("identities", [])) != frozenset(
+                {"model_gateway"}
+            ):
                 raise ValueError(f"destination {name}: static egress is reserved for model_gateway")
             out.destinations[name] = DestinationPolicy(
                 name,
