@@ -515,6 +515,9 @@ def test_pause_after_permit_issuance_refuses_actual_send(dbs: dict[str, Database
     s = Sentinel(dbs["sentinel"], cfg, secrets.token_bytes(32))
     claim = sentinel_env["claim"]
     token = s.authorize(claim, sentinel_env["intent"], "http", "receiver.test", 8080, "POST")
+    read_token = s.authorize_reconcile(claim.tenant_id, sentinel_env["intent"], "http", "receiver.test", 8080)
     dbs["owner"].one("UPDATE agent.runs SET pause_requested=true WHERE id=%s RETURNING 1", (claim.run_id,))
     with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
         s.verify_and_consume(token, "http", "receiver.test", 8080, "POST")
+    with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
+        s.verify_and_consume(read_token, "http", "receiver.test", 8080, "GET")
