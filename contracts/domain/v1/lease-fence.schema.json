@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/lease-fence.schema.json",
+  "title": "LeaseFenceV1",
+  "description": "Run leaseEpoch, queue attempt fence, outbox relay fence and tool attempt fence are distinct counters and never substitute for each other.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "run_lease",
+        "queue_attempt",
+        "outbox_relay",
+        "tool_attempt"
+      ]
+    },
+    "epoch": {
+      "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+    },
+    "ownerRef": {
+      "$ref": "common.schema.json#/$defs/OpaqueRef"
+    },
+    "expiresAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "scope",
+    "epoch",
+    "ownerRef",
+    "expiresAt"
+  ]
+}

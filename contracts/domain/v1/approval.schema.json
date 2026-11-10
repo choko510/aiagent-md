@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/approval.schema.json",
+  "title": "ApprovalV1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "toolIntentId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "requestSha256": {
+      "$ref": "common.schema.json#/$defs/Sha256Hex"
+    },
+    "goalRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "APPROVED",
+        "REJECTED",
+        "REVOKED",
+        "EXPIRED"
+      ]
+    },
+    "toolKey": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.]{0,63}$"
+    },
+    "safeSummary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "expiresAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    },
+    "decidedBy": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/ActorRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "recordVersion": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "tenantId",
+    "toolIntentId",
+    "runId",
+    "requestSha256",
+    "goalRevision",
+    "decision",
+    "toolKey",
+    "safeSummary",
+    "expiresAt",
+    "decidedBy",
+    "recordVersion"
+  ]
+}

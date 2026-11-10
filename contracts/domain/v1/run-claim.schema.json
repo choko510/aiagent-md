@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/run-claim.schema.json",
+  "title": "RunClaimV1",
+  "description": "Fenced Run lease held by a runtime worker. Sent with every gateway call and re-checked against the DB there.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "ownerUserId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "taskId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "leaseEpoch": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "goalRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "workerRef": {
+      "$ref": "common.schema.json#/$defs/OpaqueRef"
+    },
+    "restoreIncarnation": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "tenantId",
+    "ownerUserId",
+    "taskId",
+    "runId",
+    "leaseEpoch",
+    "goalRevision",
+    "workerRef",
+    "restoreIncarnation"
+  ]
+}

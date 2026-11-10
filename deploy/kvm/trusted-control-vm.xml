@@ -1,0 +1,31 @@
+<!-- Trusted Control VM: API, runtime, gateways, Sentinel, PostgreSQL (deploy/compose). Own guest kernel.
+     One NIC on the libvirt NAT network (egress default-deny inside, nftables) and a vsock to the execution VM. -->
+<domain type='kvm'>
+  <name>aiagent-control</name>
+  <memory unit='GiB'>8</memory>
+  <vcpu>4</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough'/>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='/var/lib/libvirt/images/aiagent-control.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <source file='/var/lib/libvirt/images/aiagent-control-seed.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <vsock model='virtio'>
+      <cid auto='no' address='2000'/>
+    </vsock>
+    <console type='pty'/>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>

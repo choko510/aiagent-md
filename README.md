@@ -91,3 +91,8 @@ Muse型Runtimeで発生するScript/stdout/外部Web/Memoryは非信頼Data。Co
 - **Endless Run**：[Campaign正本案](docs/07-automation/endless-run-campaign.md)を通じ、改善/全体最適化/UIUX/Feature Factory/任意研究を有限Cycleで繰り返し、停止・目標件数・Quota/費用/安全制約まで継続。新機能の例は承認済み10件の実装。ユーザー判断待ちがあっても独立作業は進む。
 
 [受入試験一覧 SC-24〜31](docs/16-app-development/acceptance-and-rollout.md)と[追加ADR-030〜034](docs/00-foundation/architecture-decisions.md)を参照。**初期88個の既存Draft正本とは別の新規11仕様（DEV-01〜10、CAM-01）**であり、計99件の設計案（別PR #71のBrowser Live Observationは未統合）。本体は未実装、仕様・テスト・脅威モデル・APIはDraft/PROVISIONAL、実行済みのテストはありません。
+
+
+## Rust製ローカルDevice Client（追加設計・未実装）
+
+[Rust製ローカルDevice Client / Cua Driver統合仕様](docs/16-app-development/local-device-rust-client.md) は、クラウドPython-firstを維持し、ユーザーPCのRust/TauriクライアントからCua MCP、Chrome拡張、Build/ADBを安全に利用するためのDevice Gateway設計です。**Draft / NOT RUN**（ADR-041）。

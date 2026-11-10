@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/run.schema.json",
+  "title": "RunV1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "taskId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "attemptNo": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "state": {
+      "$ref": "common.schema.json#/$defs/RunState"
+    },
+    "inputGoalRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "leaseEpoch": {
+      "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+    },
+    "headRevision": {
+      "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+    },
+    "cancelRequested": {
+      "type": "boolean"
+    },
+    "recordVersion": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "resultText": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 100000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "startedAt": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "endedAt": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "tenantId",
+    "taskId",
+    "attemptNo",
+    "state",
+    "inputGoalRevision",
+    "leaseEpoch",
+    "headRevision",
+    "cancelRequested",
+    "recordVersion",
+    "resultText",
+    "startedAt",
+    "endedAt"
+  ]
+}

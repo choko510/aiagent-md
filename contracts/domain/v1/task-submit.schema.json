@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/task-submit.schema.json",
+  "title": "TaskSubmitCommandV1",
+  "description": "Untrusted client command. tenant/owner/workspace come from the authenticated context, never from this body.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000
+    },
+    "profile": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deadlineAt": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "goal"
+  ]
+}

@@ -1,0 +1,6 @@
+# Byte-stable files: migration checksums and generated-code checks depend on exact bytes.
+backend/** text eol=lf
+contracts/** text eol=lf
+web/** text eol=lf
+deploy/** text eol=lf
+*.sql text eol=lf
