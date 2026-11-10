@@ -49,8 +49,11 @@ GRANT SELECT ON agent.tasks, agent.task_goal_revisions, agent.run_checkpoints, a
 GRANT SELECT ON agent.runs TO aiagent_runtime;
 -- Column grants: the worker owns lease/state/derived-cache pointer; it can NOT touch budget, model policy, HEAD
 -- pointers or restore generation (those belong to the gateways / operator).
-GRANT UPDATE (status_code, lease_epoch, lease_owner_ref, lease_expires_at, heartbeat_at, started_at, ended_at,
-  framework_ref, result_text, error_code, record_version, updated_at) ON agent.runs TO aiagent_runtime;
+-- The runtime may revoke a run's authority on membership/workspace disablement.
+-- It MUST NOT gain UPDATE on the owner approval decision or Tool Effect Ledger.
+GRANT UPDATE (status_code, cancel_requested, lease_epoch, lease_owner_ref, lease_expires_at, heartbeat_at,
+  started_at, ended_at, framework_ref, result_text, error_code, record_version, updated_at)
+  ON agent.runs TO aiagent_runtime;
 GRANT UPDATE (status_code, active_run_id, record_version, updated_at) ON agent.tasks TO aiagent_runtime;
 GRANT SELECT, UPDATE ON queue.jobs TO aiagent_runtime;
 GRANT SELECT ON queue.queues TO aiagent_runtime;
