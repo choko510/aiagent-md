@@ -57,6 +57,7 @@ class PlaywrightBrowserWorker:
                     accept_downloads=False,
                     permissions=[],
                 )
+
                 # Nothing in fixture HTML may open a socket (including images, fonts, redirects).
                 async def reject_network(route: Route) -> None:
                     await route.abort("blockedbyclient")
