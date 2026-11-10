@@ -1,0 +1,19 @@
+name: AI-03 development isolated contracts
+on:
+  pull_request:
+    paths:
+      - 'backend/packages/development/**'
+      - '.github/workflows/ai03-development.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run disposable Git fixtures and Project contract tests
+        uses: ./backend/packages/development
+      - name: Verify isolated Python package syntax
+        run: python -m compileall -q backend/packages/development/src backend/packages/development/tests

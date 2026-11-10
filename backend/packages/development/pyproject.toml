@@ -1,0 +1,32 @@
+[project]
+name = "aiagent-development"
+version = "0.1.0"
+description = "Development project, Git CAS and review gate ports (STEP 4 / AI-03)"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aiagent_development"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "RUF", "PL", "SIM", "BLE"]
+ignore = ["E501", "PLR0913", "PLR0917", "PLR2004", "S101", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "B", "SIM"]
+
+# AI-07 registers this package in the shared uv workspace and lockfile at integration.
+# Until then, avoid making unrelated existing backend CI fail under uv sync --locked.
+[tool.uv]
+managed = false
