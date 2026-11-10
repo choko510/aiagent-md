@@ -355,3 +355,20 @@ def test_pause_prevents_failed_segment_outcome(dbs: dict[str, Database], tenant:
     assert (
         dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"] == "PAUSED"
     )
+
+
+def test_pause_keeps_unknown_external_effect_waiting_for_reconciliation(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    ids = submit(dbs, tenant)
+    claim = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker")
+    commands.pause(dbs["api"], scope(tenant), ids["taskId"])
+    outcome = control.finish_segment(
+        dbs["runtime"], claim, "WAITING_RECONCILIATION", error_code="UNKNOWN_EFFECT"
+    )
+    assert outcome == "WAITING_RECONCILIATION"
+    assert run_row(dbs, ids["runId"])["status_code"] == "WAITING_RECONCILIATION"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"]
+        == "WAITING_RECONCILIATION"
+    )
