@@ -367,12 +367,9 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
                 " updated_at=now() WHERE tenant_id=%s AND id=%s",
                 (target, tenant_id, task["id"]),
             )
-        if revoked:
-            c.execute(
-                "UPDATE agent.approval_records SET decision_code='REVOKED', decided_at=now(),"
-                " record_version=record_version+1 WHERE tenant_id=%s AND run_id=%s AND decision_code='PENDING'",
-                (tenant_id, run_id),
-            )
+        # Approval rows remain exclusively writable by the API/Tool Gateway.
+        # Disabled scope and fenced lease reject further admission regardless
+        # of any formerly approved or pending decision.
         append_event(
             c,
             tenant_id=tenant_id,
