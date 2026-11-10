@@ -287,6 +287,75 @@ def test_t07_tool_gateway_killed_between_send_and_confirm_is_unknown(stack: Stac
     res = asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent}))
     assert res["status"] == "CONFIRMED"
     assert len(sends_for(stack, task, pg)) == 1
+    # Reconciliation must make the Run claimable and replay the *stored* receipt
+    # from the immutable HEAD, without issuing a second external POST.
+    restored = state(api, t, task)
+    assert restored["run"]["state"] == "CREATED", restored
+    rid = restored["run"]["id"]
+    tool_entries = q(
+        pg.owner,
+        "SELECT checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s"
+        " AND entry_kind='tool' AND checkpoint_json->>'tool_name'='send_message'",
+        (rid,),
+    )
+    assert len(tool_entries) == 1 and '"status":"CONFIRMED"' in tool_entries[0]["checkpoint_json"]["content"]
+    reply = api.post(f"/v1/tasks/{task}/resume", headers={"Authorization": f"Bearer {t['token']}"})
+    assert reply.status_code == 200, reply.text
+    stack.drive()
+    done = state(api, t, task)
+    assert done["run"]["state"] == "SUCCEEDED", done
+    assert done["run"]["result"] == "done:CONFIRMED", done
+    stack.drive()  # duplicate resume jobs / queue delivery cannot repeat the send
+    assert len(sends_for(stack, task, pg)) == 1
+    tool_entries_after = q(
+        pg.owner,
+        "SELECT id FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'"
+        " AND checkpoint_json->>'tool_name'='send_message'",
+        (rid,),
+    )
+    assert len(tool_entries_after) == 1
+
+
+def test_t07c_cancelled_unknown_effect_converges_after_reconciliation(stack: Stack, api, t, pg: PgEnv) -> None:
+    task = to_approval(stack, api, t)
+    approve(api, t, task)
+    stack.restart("tool", AIAGENT_FAULT="gateway_after_send")
+    stack.worker()
+    stack.restart("tool")
+    wait_lease_expiry(pg.owner, task)
+    reply = api.post(f"/v1/tasks/{task}/resume", headers={"Authorization": f"Bearer {t['token']}"})
+    assert reply.status_code == 200, reply.text
+    stack.drive()
+    pending = state(api, t, task)
+    assert pending["run"]["state"] == "WAITING_RECONCILIATION", pending
+    reply = api.post(f"/v1/tasks/{task}/cancel", headers={"Authorization": f"Bearer {t['token']}"})
+    assert reply.status_code == 200, reply.text
+    assert state(api, t, task)["run"]["state"] == "WAITING_RECONCILIATION"
+    from aiagent_core.rpc import RpcClient
+
+    import asyncio
+
+    intent_id = q(
+        pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,)
+    )[0]["id"]
+    ops = RpcClient(f"tcp:127.0.0.1:{stack.ports['tool']}", "ops", bytes.fromhex(stack.keys["ops_tool"]))
+    res = asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))
+    assert res["status"] == "CONFIRMED"
+    assert state(api, t, task)["run"]["state"] == "CANCELLED"
+    assert state(api, t, task)["state"] == "CANCELLED"
+    assert q(
+        pg.owner,
+        "SELECT count(*) AS n FROM agent.run_checkpoints WHERE run_id=%s"
+        " AND entry_kind='tool' AND tool_call_id=(SELECT invocation_key FROM agent.tool_intents WHERE id=%s)",
+        (pending["run"]["id"], intent_id),
+    )[0]["n"] == 1
+    assert len(sends_for(stack, task, pg)) == 1
+    stack.drive()
+    assert len(sends_for(stack, task, pg)) == 1
+    assert state(api, t, task)["run"]["state"] == "CANCELLED"
+    assert asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))[
+        "status"
+    ] == "CONFIRMED"
 
 
 def test_t07b_remote_ack_lost_timeout_is_unknown(pg: PgEnv, api, t, tmp_path) -> None:
