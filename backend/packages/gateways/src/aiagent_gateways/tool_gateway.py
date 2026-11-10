@@ -640,11 +640,7 @@ class ToolGateway:
         # An unproven negative or malformed positive must never clear the
         # Effect Ledger. Only an authenticated, receipt-backed positive is
         # supported; strong negative proofs require a separate verified contract.
-        if (
-            not isinstance(answer, dict)
-            or answer.get("sent") is not True
-            or not valid_receipt(answer.get("receipt"))
-        ):
+        if not isinstance(answer, dict) or answer.get("sent") is not True or not valid_receipt(answer.get("receipt")):
             return {"status": "UNKNOWN"}
         status, effect = "CONFIRMED", "RECONCILED_SENT"
         result = {"receipt": answer["receipt"]}
