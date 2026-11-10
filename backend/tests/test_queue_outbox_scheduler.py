@@ -401,13 +401,13 @@ def test_cross_tenant_forged_pointer_rejected_by_consumer_check(
     with pytest.raises(psycopg.errors.InsufficientPrivilege):  # and the API role cannot reach queue tables at all
         dbs["api"].one("SELECT * FROM queue.jobs")
 
+
 def test_concurrent_claim_respects_global_and_tenant_limit(
     dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str], pg: PgEnv
 ) -> None:
     """Release eight independent PostgreSQL workers at once: only one slot may be claimed."""
     dbs["owner"].one(
-        "UPDATE queue.queues SET global_active_limit=1, per_tenant_active_limit=1"
-        " WHERE name='run' RETURNING 1"
+        "UPDATE queue.queues SET global_active_limit=1, per_tenant_active_limit=1 WHERE name='run' RETURNING 1"
     )
     rq = QueuePort(dbs["relay"])
     for i in range(24):
@@ -439,14 +439,12 @@ def test_concurrent_claim_respects_global_and_tenant_limit(
         t.join(timeout=20)
     assert not errors and all(not t.is_alive() for t in threads), errors
     assert len(results) == 1, results
-    assert dbs["owner"].one(
-        "SELECT count(*) AS n FROM queue.jobs WHERE status='CLAIMED' AND locked_until>now()"
-    )["n"] == 1
+    assert (
+        dbs["owner"].one("SELECT count(*) AS n FROM queue.jobs WHERE status='CLAIMED' AND locked_until>now()")["n"] == 1
+    )
 
 
-def test_unhandled_outbox_topic_never_marked_dispatched(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+def test_unhandled_outbox_topic_never_marked_dispatched(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     from aiagent_domain import sha256_hex
 
     ids = _submit(dbs, tenant)
@@ -482,8 +480,11 @@ def test_revoked_workspace_disables_scheduler_without_new_task(
     dbs: dict[str, Database], tenant: dict[str, str]
 ) -> None:
     sid = create_schedule(
-        dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-        workspace_id=tenant["workspaceId"], goal="do not run",
+        dbs["api"],
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"],
+        goal="do not run",
         run_at=datetime.now(UTC) - timedelta(seconds=2),
     )
     dbs["owner"].one(
@@ -492,6 +493,4 @@ def test_revoked_workspace_disables_scheduler_without_new_task(
     )
     assert not [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid]
     assert dbs["owner"].one("SELECT enabled FROM agent.schedules WHERE id=%s", (sid,))["enabled"] is False
-    assert dbs["owner"].one(
-        "SELECT count(*) n FROM agent.tasks WHERE created_from_schedule_id=%s", (sid,)
-    )["n"] == 0
+    assert dbs["owner"].one("SELECT count(*) n FROM agent.tasks WHERE created_from_schedule_id=%s", (sid,))["n"] == 0
