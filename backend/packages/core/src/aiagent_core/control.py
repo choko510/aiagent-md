@@ -71,15 +71,18 @@ class Paused(ControlError):
 
 def scope_active(c: psycopg.Connection[Row], tenant_id: str, owner_id: str, workspace_id: str) -> bool:
     """Current authority, not the membership snapshot at task creation."""
-    return c.execute(
-        "SELECT 1 FROM agent.tenants t"
-        " JOIN agent.tenant_memberships m ON m.tenant_id=t.id AND m.user_id=%s"
-        " JOIN agent.users u ON u.id=m.user_id"
-        " JOIN agent.workspaces w ON w.tenant_id=t.id AND w.owner_user_id=m.user_id AND w.id=%s"
-        " WHERE t.id=%s AND t.disabled_at IS NULL AND u.disabled_at IS NULL"
-        " AND m.disabled_at IS NULL AND w.disabled_at IS NULL",
-        (owner_id, workspace_id, tenant_id),
-    ).fetchone() is not None
+    return (
+        c.execute(
+            "SELECT 1 FROM agent.tenants t"
+            " JOIN agent.tenant_memberships m ON m.tenant_id=t.id AND m.user_id=%s"
+            " JOIN agent.users u ON u.id=m.user_id"
+            " JOIN agent.workspaces w ON w.tenant_id=t.id AND w.owner_user_id=m.user_id AND w.id=%s"
+            " WHERE t.id=%s AND t.disabled_at IS NULL AND u.disabled_at IS NULL"
+            " AND m.disabled_at IS NULL AND w.disabled_at IS NULL",
+            (owner_id, workspace_id, tenant_id),
+        ).fetchone()
+        is not None
+    )
 
 
 @dataclass(frozen=True)
