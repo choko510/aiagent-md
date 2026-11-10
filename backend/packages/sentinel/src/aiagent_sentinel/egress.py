@@ -4,8 +4,8 @@ deploy/: internal-only Docker networks / nftables; this proxy is the policy enfo
 Per connection: authenticate the client identity (`Proxy-Authorization: Aiagent <identity>:<token>`), bind the
 request to a configured destination, verify the Sentinel permit at send time (single use, intent still admitted,
 approval not revoked, run not cancelled, same restore generation), resolve DNS *here*, vet every address, then
-connect to the vetted IP (no second resolution -> no DNS rebinding). Only absolute-form HTTP and CONNECT to the
-destination's own port are accepted; everything else (origin-form, tunnels to other ports, chunked uploads,
+connect to the vetted IP (no second resolution -> no DNS rebinding). Only absolute-form HTTP is allowed for Tool permits; opaque HTTPS CONNECT is exclusively for
+the independent model-provider identity. Everything else (origin-form, tunnels to other ports, chunked uploads,
 unknown identities) is refused with 403 `x-aiagent-egress: denied`.
 """
 
@@ -105,10 +105,15 @@ class EgressProxy:
             identity, token = auth[8:].split(":", 1)
             if identity not in dest.identities:
                 raise EgressDenied("IDENTITY_NOT_ALLOWED")
+            if method == "CONNECT":
+                # A TLS tunnel can contain any number of requests with arbitrary methods,
+                # paths and bodies. Tool permits must never authorize an opaque tunnel.
+                # Only the separately authenticated model-provider identity may use one.
+                if dest.needs_permit or identity != "model_gateway":
+                    raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
             if dest.needs_permit:
-                bound_method = method if method != "CONNECT" else next(iter(sorted(dest.methods - {"GET"})), "POST")
                 tenant, pid = await asyncio.to_thread(
-                    self.sentinel.verify_and_consume, token, scheme, host, port, bound_method
+                    self.sentinel.verify_and_consume, token, scheme, host, port, method
                 )
             else:
                 expected = self.config.static_tokens.get(identity, "")
@@ -116,6 +121,8 @@ class EgressProxy:
                     raise EgressDenied("PROXY_AUTH")
             if method != "CONNECT" and method not in dest.methods:
                 raise EgressDenied("METHOD_NOT_ALLOWED")
+            if method == "CONNECT" and (scheme != "https" or not dest.methods):
+                raise EgressDenied("CONNECT_NOT_ALLOWED")
             if hmap.get("transfer-encoding"):
                 raise EgressDenied("CHUNKED_NOT_SUPPORTED")
             addrs = vet_addresses(await self.resolver(host, port), allow_private=dest.allow_private)
