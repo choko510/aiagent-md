@@ -6,6 +6,7 @@ role grants and the production ToolGateway implementation are exercised.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
@@ -13,6 +14,7 @@ from aiagent_core.db import Database
 from aiagent_domain import sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import TOOLS
+from aiagent_gateways.executors import HttpMessageExecutor
 from aiagent_gateways.tool_gateway import ToolGateway
 
 pytestmark = pytest.mark.pg
@@ -196,3 +198,63 @@ async def test_untrusted_receipt_cannot_restore_mismatched_proposal(
         dbs["owner"].one("SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],))["status_code"]
         == "UNKNOWN"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,body,expected",
+    [
+        (404, "{}", None),
+        (200, "{}", None),
+        (200, '{"receipt":""}', None),
+        (200, '{"receipt":"   "}', None),
+        (200, '{"receipt":123}', None),
+        (200, '{"receipt":"rcpt\\ninvalid"}', None),
+        (200, "{not-json", None),
+        (200, '{"receipt":"ok_receipt"}', "ok_receipt"),
+    ],
+)
+async def test_http_receipt_query_never_converts_weak_evidence_into_confirmation(
+    monkeypatch: pytest.MonkeyPatch, code: int, body: str, expected: str | None
+) -> None:
+    executor = HttpMessageExecutor("https://receiver.example/messages", proxy=None)
+    requests = []
+
+    def response(req: httpx.Request) -> httpx.Response:
+        requests.append((req.method, str(req.url)))
+        return httpx.Response(code, text=body)
+
+    transport = httpx.MockTransport(response)
+    monkeypatch.setattr(
+        executor,
+        "_client",
+        lambda permit: httpx.AsyncClient(transport=transport, trust_env=False),
+    )
+    result = await executor.query("tenant:intent")
+    assert requests == [("GET", "https://receiver.example/receipts/tenant:intent")]
+    if expected is None:
+        assert result is None
+    else:
+        assert result == {"sent": True, "receipt": expected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{"sent": False}, {"sent": True}, {"sent": True, "receipt": ""}])
+async def test_gateway_weak_negative_or_receipt_cannot_release_run(
+    dbs: dict[str, Database], tenant: dict[str, str], answer: dict
+) -> None:
+    ids, intents = _prepare(dbs, tenant)
+
+    class WeakEvidence(ReceiptOnly):
+        async def query(self, effect_key: str, permit: str | None = None) -> dict:
+            self.queries += 1
+            return answer
+
+    evidence = WeakEvidence()
+    result = await _gateway(dbs, evidence).reconcile(tenant["tenantId"], intents[0])
+    assert result["status"] == "UNKNOWN"
+    assert _run(dbs, ids["runId"])["status_code"] == "WAITING_RECONCILIATION"
+    assert dbs["owner"].one(
+        "SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],)
+    )["status_code"] == "UNKNOWN"
+    assert _jobs(dbs, ids["runId"]) == 0
