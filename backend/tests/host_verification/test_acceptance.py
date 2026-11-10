@@ -1,4 +1,5 @@
 """AI-05 pure unit/negative tests. No KVM, PostgreSQL, VM creation, networking or host modification."""
+
 from __future__ import annotations
 
 import hashlib
