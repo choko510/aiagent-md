@@ -14,7 +14,8 @@
         "height": 700,
         "minWidth": 700,
         "minHeight": 520,
-        "backgroundColor": "#f5f7fc"
+        "backgroundColor": "#f5f7fc",
+        "label": "main"
       }
     ],
     "security": {
@@ -23,6 +24,7 @@
     "withGlobalTauri": true
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": []
   }
 }
