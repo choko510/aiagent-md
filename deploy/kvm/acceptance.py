@@ -225,7 +225,10 @@ def evaluate_evidence(
     gates = {"CODE_READY": code, "INTEGRATED": integrated,
              "HOST_VERIFIED": host, "PRODUCTION_READY": prod}
     reached = next((g for g in reversed(tuple(gates)) if gates[g]), "NOT_RUN")
-    pending = [k for k in BASE + CI + HOST + PROD if k not in records]
+    required_execution = {**dict.fromkeys(BASE + CI, "CI"), **dict.fromkeys(HOST + PROD[:-1], "REAL_HOST"),
+                          PROD[-1]: "OPERATOR"}
+    pending = [k for k, mode in required_execution.items()
+               if k not in records or records[k]["execution"] != mode]
     return {
         "kind": "acceptance_gate",
         "status": reached,
