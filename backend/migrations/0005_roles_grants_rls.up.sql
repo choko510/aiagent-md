@@ -73,7 +73,11 @@ GRANT SELECT, INSERT, UPDATE ON agent.model_attempts TO aiagent_model_gateway;
 
 -- Tool Gateway: Intent / Approval / Effect Ledger owner, HEAD append for tool results, egress permits.
 GRANT SELECT ON agent.tasks, agent.task_goal_revisions, agent.runs, agent.run_checkpoints TO aiagent_tool_gateway;
-GRANT UPDATE (head_revision, current_checkpoint_id, updated_at) ON agent.runs TO aiagent_tool_gateway;
+-- Only the trusted Tool Gateway can settle a reconciliation-complete run.
+-- It cannot modify cancel/pause flags, model budgets, or the approval decision's owner fields.
+GRANT UPDATE (head_revision, current_checkpoint_id, status_code, lease_epoch, lease_expires_at,
+  framework_ref, error_code, ended_at, record_version, updated_at) ON agent.runs TO aiagent_tool_gateway;
+GRANT UPDATE (status_code, record_version, updated_at) ON agent.tasks TO aiagent_tool_gateway;
 GRANT INSERT ON agent.run_checkpoints TO aiagent_tool_gateway;
 GRANT SELECT, INSERT, UPDATE ON agent.tool_intents, agent.approval_records, agent.tool_attempts,
   agent.side_effect_records TO aiagent_tool_gateway;
