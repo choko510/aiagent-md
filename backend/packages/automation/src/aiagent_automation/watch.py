@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -43,7 +43,7 @@ def local_slot(day: date, watch: DailyWatch) -> datetime | None:
     """Roundtrip detects nonexistent wall times. fold=0 chooses first repeated hour."""
     zone = ZoneInfo(watch.timezone_id)
     candidate = datetime.combine(day, time(watch.local_hour, watch.local_minute), zone).replace(fold=0)
-    utc = candidate.astimezone(timezone.utc)
+    utc = candidate.astimezone(UTC)
     restored = utc.astimezone(zone)
     if (restored.date(), restored.hour, restored.minute, restored.fold) != (
         day, watch.local_hour, watch.local_minute, 0
