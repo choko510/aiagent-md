@@ -279,3 +279,31 @@ def test_pause_resume(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
         control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w2")
     commands.resume(dbs["api"], scope(tenant), ids["taskId"])
     assert control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w2").lease_epoch == 2
+
+def test_revoked_scope_refuses_new_tasks_run_claims_and_gateway_admission(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    ids = submit(dbs, tenant)
+    current = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w")
+    with dbs["runtime"].tx() as c:
+        assert control.check_current(c, current)
+    dbs["owner"].one(
+        "UPDATE agent.tenant_memberships SET disabled_at=now() WHERE tenant_id=%s AND user_id=%s RETURNING 1",
+        (tenant["tenantId"], tenant["userId"]),
+    )
+    with pytest.raises(commands.CommandError, match="FORBIDDEN|SCOPE_REVOKED"):
+        submit(dbs, tenant)
+    with pytest.raises(control.ScopeRevoked):
+        control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "other")
+    with dbs["runtime"].tx() as c, pytest.raises(control.ScopeRevoked):
+        control.check_current(c, current)
+
+
+def test_pause_blocks_new_gateway_admission(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    ids = submit(dbs, tenant)
+    current = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w")
+    commands.pause(dbs["api"], scope(tenant), ids["taskId"])
+    with dbs["runtime"].tx() as c, pytest.raises(control.Paused):
+        control.check_current(c, current)
