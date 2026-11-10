@@ -64,6 +64,17 @@ and must only be run separately after operator authorization.
 ## 3. Bounded Queue JQ-T12
 
 The wrapper imports the existing `backend/tools/bench_queue.py` without changing shared code.
+Before use, the operator must mark **only the disposable test DB** with a custom PostgreSQL
+setting; the guarded subprocess reads this value before any benchmark writes:
+
+```sql
+-- Run ONLY on a verified isolated scratch cluster, not production.
+ALTER DATABASE aiagent_hv_disposable SET aiagent.hv_disposable = 'aiagent-hv-disposable-v1';
+```
+
+The wrapper rejects a missing marker even when the database name and confirmations match.
+Run `cd backend && uv sync --locked` before the benchmark; the subprocess uses the pinned
+`uv run --no-sync --locked python` interpreter. On timeout the process group is killed.
 That existing tool creates and later drops a scratch database; only a specifically prepared
 **disposable** PostgreSQL instance may be used. By default it performs a dry run and no writes.
 
