@@ -626,9 +626,7 @@ class ToolGateway:
 
     # ------------------------------------------------------------------ reconciliation (operator)
     async def reconcile(self, tenant_id: str, intent_id: str) -> dict[str, Any]:
-        initial = self.db.one(
-            "SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant_id, intent_id)
-        )
+        initial = self.db.one("SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant_id, intent_id))
         if initial is None:
             raise RpcError("NOT_FOUND")
         if initial["status_code"] not in ("UNKNOWN", "SENDING"):
@@ -677,8 +675,7 @@ class ToolGateway:
                 proposal is None
                 or proposal[0].get("name") != intent["tool_key"]
                 or proposal[1] != intent["stream"]
-                or sha256_hex({"tool": intent["tool_key"], "args": proposal[0].get("args")})
-                != intent["request_sha256"]
+                or sha256_hex({"tool": intent["tool_key"], "args": proposal[0].get("args")}) != intent["request_sha256"]
             ):
                 raise RpcError("NOT_IN_HEAD", "reconciled intent is not grounded in a frozen tool proposal")
             c.execute(
@@ -741,9 +738,7 @@ class ToolGateway:
             # Only the final resolution may release WAITING_RECONCILIATION.
             # Never make a cancelled/revoked run claimable again.
             if not pending and run["status_code"] in ("WAITING_RECONCILIATION", "CANCELLING"):
-                revoked = not control.scope_active(
-                    c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"])
-                )
+                revoked = not control.scope_active(c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))
                 if run["cancel_requested"] or revoked or run["status_code"] == "CANCELLING":
                     target = "CANCELLED"
                 elif run["pause_requested"]:
