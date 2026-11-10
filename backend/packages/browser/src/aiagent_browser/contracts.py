@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Callable, Protocol
+from typing import Protocol
 from urllib.parse import urlsplit
 
 
