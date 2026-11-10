@@ -11,3 +11,7 @@ test = ["pytest>=9,<10", "pytest-asyncio>=1,<2"]
 [build-system]
 requires = ["uv_build>=0.9,<0.13"]
 build-backend = "uv_build"
+
+# Production workspace registration and pinned uv.lock are AI-07-owned.
+[tool.uv]
+managed = false
