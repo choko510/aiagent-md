@@ -31,7 +31,8 @@ uv run python tools/gen_contracts.py --check
 uv run ruff check . && uv run ruff format --check . && uv run mypy packages/*/src
 ```
 
-Linux カーネル機能（rlimit / namespace / uid drop / **Landlock による Task 単位のファイル隔離**）の Cell 試験と
+Linux カーネル機能（rlimit / namespace / uid drop / **Landlock による Task 単位のファイル隔離** /
+**seccomp による Task 間メモリアクセスの禁止**）の Cell 試験と
 Compose 隔離試験は `tests/linux/test_sandbox_cell.py`、`tests/test_compose_isolation.py` の docstring 参照
 （CI では `cell-and-compose` job）。Landlock が利用できない環境では生成コードは **実行拒否**される。
 Linux Cell の試験は実際の子プロセスによる別 Tenant / 別 Task / symlink / `/proc` アクセス拒否を検証するが、
