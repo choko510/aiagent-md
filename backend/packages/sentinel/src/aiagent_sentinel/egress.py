@@ -105,12 +105,10 @@ class EgressProxy:
             identity, token = auth[8:].split(":", 1)
             if identity not in dest.identities:
                 raise EgressDenied("IDENTITY_NOT_ALLOWED")
-            if method == "CONNECT":
-                # A TLS tunnel can contain any number of requests with arbitrary methods,
-                # paths and bodies. Tool permits must never authorize an opaque tunnel.
-                # Only the separately authenticated model-provider identity may use one.
-                if dest.needs_permit or identity != "model_gateway":
-                    raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
+            # A TLS tunnel can contain unlimited operations; only the separate model
+            # provider identity can open one, never a Tool permit.
+            if method == "CONNECT" and (dest.needs_permit or identity != "model_gateway"):
+                raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
             if dest.needs_permit:
                 tenant, pid = await asyncio.to_thread(
                     self.sentinel.verify_and_consume, token, scheme, host, port, method
