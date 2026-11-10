@@ -105,7 +105,7 @@ jobs:
       - name: Runtime Cell enforcement (rlimits, process group kill, netns, uid drop, single-use grants)
         run: |
           docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined             --security-opt apparmor=unconfined -e AIAGENT_EXPECT_NETNS=1 -v "$PWD:/w" -w /w python:3.13-slim             sh -c "PYTHONPATH=/w/.linuxdeps:packages/domain/src:packages/sandbox/src               python -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux"
-      - name: Generated code runs only in the cell container (cross-kernel RPC with grants)
+      - name: Generated code runs only in Docker cell (same-kernel RPC with grants; not KVM)
         run: uv run pytest -q -rA -p no:cacheprovider tests/test_cell_e2e.py
       - name: Build images
         working-directory: .
