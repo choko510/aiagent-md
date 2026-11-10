@@ -116,7 +116,12 @@ class MockWorker:
 @pytest.fixture
 def ctx():
     auth, fence, gate, fixtures, redactor, worker = (
-        MockAuth(), MockFence(), MockGate(), MockFixtures(), MockRedactor(), MockWorker()
+        MockAuth(),
+        MockFence(),
+        MockGate(),
+        MockFixtures(),
+        MockRedactor(),
+        MockWorker(),
     )
     ids = iter(
         [
