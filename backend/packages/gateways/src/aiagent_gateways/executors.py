@@ -23,6 +23,16 @@ class ExecutorUnknown(Exception):
     pass
 
 
+def valid_receipt(value: Any) -> bool:
+    """Reject empty, truncated or malformed evidence before confirming an irreversible effect."""
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 120
+        and value == value.strip()
+        and all(ord(ch) >= 32 and ord(ch) != 127 for ch in value)
+    )
+
+
 @dataclass(frozen=True)
 class Destination:
     scheme: str
@@ -111,11 +121,18 @@ class HttpMessageExecutor:
         base = self.url.rsplit("/", 1)[0]
         async with self._client(permit) as client:
             r = await client.get(f"{base}/receipts/{effect_key}", headers=self._headers(effect_key))
-        if r.status_code == 404:
-            return {"sent": False}
-        if r.status_code == 200:
-            return {"sent": True, "receipt": str(r.json().get("receipt", ""))[:120]}
-        return None
+        # 404 is not proof of non-delivery: the receiver may have restarted,
+        # forgotten its in-memory idempotency store, or expired its receipts.
+        # No durable, strongly consistent negative-proof protocol is configured.
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or not valid_receipt(data.get("receipt")):
+            return None
+        return {"sent": True, "receipt": data["receipt"]}
 
 
 class SandboxCellExecutor:
