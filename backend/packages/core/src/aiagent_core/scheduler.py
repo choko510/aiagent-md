@@ -20,10 +20,10 @@ from aiagent_domain import uuid7
 from apscheduler.triggers.cron import CronTrigger
 
 from .commands import create_task_tx
+from .control import scope_active
 from .db import Database
 
 GRACE = timedelta(seconds=60)
-MAX_SLOTS_SCAN = 1000
 
 
 def _trigger(expr: str, tz: str) -> CronTrigger:
@@ -36,17 +36,37 @@ def next_after(expr: str, tz: str, after: datetime) -> datetime | None:
     return nxt
 
 
-def due_slots(expr: str, tz: str, last_slot: datetime | None, start: datetime, now: datetime) -> list[datetime]:
-    t = _trigger(expr, tz)
-    cursor = last_slot or start
-    out: list[datetime] = []
-    while len(out) < MAX_SLOTS_SCAN:
-        nxt = t.get_next_fire_time(None, cursor + timedelta(microseconds=1))
-        if nxt is None or nxt > now:
+def due_slots(
+    expr: str, tz: str, last_slot: datetime | None, start: datetime, now: datetime, *, limit: int = 1000
+) -> list[datetime]:
+    """Find the newest due slots without scanning (and silently dropping) old cron occurrences.
+
+    Binary-search the monotone next-fire function. Cost is O(limit * log(time range))
+    even after years of downtime and high-frequency schedules.
+    """
+    trigger = _trigger(expr, tz)
+    lower = last_slot or start
+    upper = now
+    newest_first: list[datetime] = []
+    while len(newest_first) < limit and lower < upper:
+        first = trigger.get_next_fire_time(None, lower + timedelta(microseconds=1))
+        if first is None or first > upper:
             break
-        out.append(nxt)
-        cursor = nxt
-    return out
+        span_us = (upper - lower) // timedelta(microseconds=1)
+        lo, hi = 0, span_us
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            nxt = trigger.get_next_fire_time(None, lower + timedelta(microseconds=mid + 1))
+            if nxt is not None and nxt <= upper:
+                lo = mid
+            else:
+                hi = mid
+        latest = trigger.get_next_fire_time(None, lower + timedelta(microseconds=lo + 1))
+        if latest is None or latest > upper:
+            break
+        newest_first.append(latest)
+        upper = latest - timedelta(microseconds=1)
+    return list(reversed(newest_first))
 
 
 def choose(slots: list[datetime], policy: str, max_catchup: int, now: datetime) -> list[datetime]:
@@ -82,6 +102,8 @@ def create_schedule(
     ZoneInfo(timezone)  # validates the IANA name
     sid = uuid7()
     with db.tx(tenant=tenant_id) as c:
+        if not scope_active(c, tenant_id, owner_user_id, workspace_id):
+            raise ValueError("SCOPE_REVOKED")
         now = c.execute("SELECT now() AS n").fetchone()["n"]  # type: ignore[index]
         nxt = run_at if cron is None else next_after(cron, timezone, now)
         c.execute(
@@ -119,16 +141,25 @@ class Scheduler:
                 (self.batch,),
             ).fetchall()
             for s in rows:
+                # A schedule is NOT durable permission to act after membership/tenant
+                # or workspace revocation. Disable it without minting another Task.
+                if not scope_active(c, str(s["tenant_id"]), str(s["owner_user_id"]), str(s["workspace_id"])):
+                    c.execute(
+                        "UPDATE agent.schedules SET enabled=false, next_fire_at=NULL, record_version=record_version+1,"
+                        " updated_at=now() WHERE tenant_id=%s AND id=%s",
+                        (s["tenant_id"], s["id"]),
+                    )
+                    continue
+                due: list[datetime] = []
                 if s["kind"] == "one_shot":
                     slots = [s["run_at"]] if s["last_slot_at"] is None else []
                     nxt = None
                 else:
-                    slots = choose(
-                        due_slots(s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now),
-                        s["catchup_policy"],
-                        s["max_catchup"],
-                        now,
+                    due = due_slots(
+                        s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now,
+                        limit=s["max_catchup"] if s["catchup_policy"] == "all_bounded" else 1,
                     )
+                    slots = choose(due, s["catchup_policy"], s["max_catchup"], now)
                     nxt = next_after(s["cron_expr"], s["timezone_id"], now)
                 for slot in slots:
                     occ = uuid7()
@@ -165,10 +196,9 @@ class Scheduler:
                     )
                     fired.append(Fired(str(s["id"]), slot, out["taskId"]))
                 last = max([*slots, s["last_slot_at"]] if s["last_slot_at"] else slots, default=None)
-                if s["kind"] == "cron" and not slots:
-                    # nothing chosen (skip policy): still advance past missed slots so they are not re-evaluated
-                    missed = due_slots(s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now)
-                    last = missed[-1] if missed else s["last_slot_at"]
+                if s["kind"] == "cron":
+                    # Always record the newest evaluated slot, including under skip policy.
+                    last = due[-1] if due else s["last_slot_at"]
                 c.execute(
                     "UPDATE agent.schedules SET next_fire_at=%s, last_slot_at=%s, record_version=record_version+1,"
                     " updated_at=now() WHERE tenant_id=%s AND id=%s",
