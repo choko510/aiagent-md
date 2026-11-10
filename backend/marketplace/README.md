@@ -10,19 +10,19 @@ PR #82は未マージなので既存Backendとは未接続です。PR #82の `ba
 Python 3.12 / 3.13、Node.js 22以上。依存をインストールして次を実行:
 
 ```bash
-python -m pip install -e './backend/marketplace[test]'
+uv sync --project backend/marketplace --locked --extra test
 export AIAGENT_MARKETPLACE_DEV_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 AIAGENT_MARKETPLACE_DEV_MODE=1 uvicorn aiagent_marketplace.app:app --host 127.0.0.1 --port 8001
 # 別のターミナルで
 cd web
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 npm run dev
 ```
 
 Windows PowerShell:
 
 ```powershell
-py -m pip install -e "./backend/marketplace[test]"
+uv sync --project backend/marketplace --locked --extra test
 $env:AIAGENT_MARKETPLACE_DEV_MODE="1"
 $env:AIAGENT_MARKETPLACE_DEV_TOKEN=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 py -m uvicorn aiagent_marketplace.app:app --host 127.0.0.1 --port 8001
@@ -52,7 +52,7 @@ Cursorはフィルターと期限を署名で拘束し、プロセス再起動�
 PR #82のTrusted EgressはTool用CONNECT禁止なので、単にこのHTTPクライアントを本番で有効化してはなりません。
 
 ```bash
-python -m pytest backend/marketplace/tests -q
+uv run --project backend/marketplace --locked --extra test python -m pytest backend/marketplace/tests -q
 cd web && npm run build
 ```
 
