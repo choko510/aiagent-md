@@ -80,7 +80,7 @@ def _prepare(
                 },
                 writer="model_gateway",
                 stream="main",
-                request_key=f"recon-{uuid7()}",
+                request_key=sha256_hex({"call": call_id}),
             )
         with dbs["tool_gateway"].tx() as c:
             c.execute(
@@ -134,20 +134,28 @@ async def test_only_final_reconciled_intent_releases_run_and_enqueues_once(
     assert _run(dbs, ids["runId"])["status_code"] == "CREATED"
     assert _task(dbs, ids["taskId"])["status_code"] == "RUNNING"
     assert _jobs(dbs, ids["runId"]) == 1
-    assert len(dbs["owner"].all(
-        "SELECT 1 FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'",
-        (ids["runId"],),
-    )) == 2
+    assert (
+        len(
+            dbs["owner"].all(
+                "SELECT 1 FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'",
+                (ids["runId"],),
+            )
+        )
+        == 2
+    )
     assert (await gw.reconcile(tenant["tenantId"], intents[0]))["status"] == "CONFIRMED"
     assert _jobs(dbs, ids["runId"]) == 1
     assert receipt.queries == 2
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("paused,cancelled,expected", [
-    (True, False, "PAUSED"),
-    (False, True, "CANCELLED"),
-])
+@pytest.mark.parametrize(
+    "paused,cancelled,expected",
+    [
+        (True, False, "PAUSED"),
+        (False, True, "CANCELLED"),
+    ],
+)
 async def test_pause_or_cancel_stays_nonrunnable_after_reconciliation(
     dbs: dict[str, Database], tenant: dict[str, str], paused: bool, cancelled: bool, expected: str
 ) -> None:
@@ -184,6 +192,7 @@ async def test_untrusted_receipt_cannot_restore_mismatched_proposal(
     assert not dbs["owner"].all(
         "SELECT id FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'", (ids["runId"],)
     )
-    assert dbs["owner"].one(
-        "SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],)
-    )["status_code"] == "UNKNOWN"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],))["status_code"]
+        == "UNKNOWN"
+    )
