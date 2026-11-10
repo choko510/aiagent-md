@@ -51,17 +51,28 @@ impl Scope {
     /// Only a namespace digest reaches disk; separate encrypted per-owner files are a later gate.
     pub fn namespace(&self) -> String {
         let mut hasher = Sha256::new();
-        for part in [&self.os_user, &self.tenant_id, &self.owner_user_id,
-                     &self.device_identity_id, &self.device_id] {
+        for part in [
+            &self.os_user,
+            &self.tenant_id,
+            &self.owner_user_id,
+            &self.device_identity_id,
+            &self.device_id,
+        ] {
             hasher.update((part.len() as u64).to_be_bytes());
             hasher.update(part.as_bytes());
         }
         hex_digest(&hasher.finalize())
     }
     pub fn valid(&self) -> bool {
-        [&self.os_user, &self.tenant_id, &self.owner_user_id,
-         &self.device_identity_id, &self.device_id]
-            .iter().all(|s| !s.trim().is_empty() && s.len() <= 256)
+        [
+            &self.os_user,
+            &self.tenant_id,
+            &self.owner_user_id,
+            &self.device_identity_id,
+            &self.device_id,
+        ]
+        .iter()
+        .all(|s| !s.trim().is_empty() && s.len() <= 256)
     }
 }
 
@@ -77,9 +88,16 @@ pub struct Fence {
 }
 impl Fence {
     pub fn valid(&self) -> bool {
-        [self.device_claim_epoch, self.lease_epoch, self.restore_incarnation,
-         self.connection_generation, self.goal_revision, self.policy_revision]
-            .iter().all(|value| value.0 <= i64::MAX as u64)
+        [
+            self.device_claim_epoch,
+            self.lease_epoch,
+            self.restore_incarnation,
+            self.connection_generation,
+            self.goal_revision,
+            self.policy_revision,
+        ]
+        .iter()
+        .all(|value| value.0 <= i64::MAX as u64)
     }
 }
 
@@ -109,8 +127,13 @@ pub enum Target {
         tab_id: String,
         document_generation: String,
     },
-    Build { workspace_id: String },
-    Android { serial: String, package_id: String },
+    Build {
+        workspace_id: String,
+    },
+    Android {
+        serial: String,
+        package_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,11 +150,26 @@ pub struct ActionRequest {
     pub args: Vec<u8>,
 }
 impl ActionRequest {
-    pub fn new(scope: Scope, fence: Fence, tool_intent_id: String, attempt_fence: Epoch,
-               operation: Operation, target: Target, args: Vec<u8>) -> Self {
+    pub fn new(
+        scope: Scope,
+        fence: Fence,
+        tool_intent_id: String,
+        attempt_fence: Epoch,
+        operation: Operation,
+        target: Target,
+        args: Vec<u8>,
+    ) -> Self {
         let args_sha256 = hex_digest(&Sha256::digest(&args));
-        Self { scope, fence, tool_intent_id, attempt_fence, operation,
-               target, args_sha256, args }
+        Self {
+            scope,
+            fence,
+            tool_intent_id,
+            attempt_fence,
+            operation,
+            target,
+            args_sha256,
+            args,
+        }
     }
     /// Internal journal identity: prevents a reused intent changing operation/target/fences.
     /// This is a local digest, not the canonical Cloud Tool Gateway request hash.
@@ -152,7 +190,8 @@ impl ActionRequest {
         hex_digest(&hasher.finalize())
     }
     pub fn has_valid_shape(&self) -> bool {
-        !self.tool_intent_id.trim().is_empty() && self.tool_intent_id.len() <= 256
+        !self.tool_intent_id.trim().is_empty()
+            && self.tool_intent_id.len() <= 256
             && self.args.len() <= 64 * 1024
             && self.scope.valid()
             && self.args_sha256 == hex_digest(&Sha256::digest(&self.args))
@@ -176,11 +215,14 @@ pub struct CloudGrant {
 }
 impl CloudGrant {
     pub fn matches(&self, req: &ActionRequest, now_ms: u64) -> bool {
-        self.scope == req.scope && self.fence == req.fence
+        self.scope == req.scope
+            && self.fence == req.fence
             && self.tool_intent_id == req.tool_intent_id
             && self.attempt_fence == req.attempt_fence
-            && self.args_sha256 == req.args_sha256 && self.operation == req.operation
-            && self.target == req.target && !self.nonce.is_empty()
+            && self.args_sha256 == req.args_sha256
+            && self.operation == req.operation
+            && self.target == req.target
+            && !self.nonce.is_empty()
             && self.expires_at_ms > now_ms
     }
 }

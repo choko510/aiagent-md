@@ -7,4 +7,6 @@ pub mod protocol;
 
 pub use agent::{Agent, ConnectionPhase, Decision, LocalPolicy};
 pub use journal::{BeginResult, EffectState, LocalJournal};
-pub use protocol::{ActionRequest, CloudGrant, Epoch, Fence, Operation, Scope, StartPermit, Target};
+pub use protocol::{
+    ActionRequest, CloudGrant, Epoch, Fence, Operation, Scope, StartPermit, Target,
+};

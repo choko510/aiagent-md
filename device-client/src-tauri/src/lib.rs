@@ -24,7 +24,8 @@ struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            stopped: false, revoked: false,
+            stopped: false,
+            revoked: false,
             audit: vec!["SIMULATOR: 実デバイス未登録 / 外部操作は無効".into()],
         }
     }
@@ -63,7 +64,9 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
     if !state.revoked {
         state.stopped = true;
         state.revoked = true;
-        state.audit.push("LOCAL_REVOKE: Mock端末のみ無効化（Cloud失効ではない）".into());
+        state
+            .audit
+            .push("LOCAL_REVOKE: Mock端末のみ無効化（Cloud失効ではない）".into());
     }
     Ok(state.snapshot())
 }
