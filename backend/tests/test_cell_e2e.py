@@ -3,9 +3,12 @@ scoped, authenticated RPC with a single-use grant - never in the control-plane p
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
+import socket
+import struct
 import subprocess
 import time
 from collections.abc import Iterator
@@ -27,6 +30,23 @@ def _docker_ok() -> bool:
     )
 
 
+def _supervisor_answers(port: int, timeout_s: float) -> bool:
+    end = time.time() + timeout_s
+    while time.time() < end:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+                s.sendall(struct.pack(">I", 2) + b"{}")
+                head = s.recv(4)
+                if len(head) == 4:
+                    reply = json.loads(s.recv(struct.unpack(">I", head)[0]))
+                    if reply.get("code") == "UNAUTHENTICATED":
+                        return True
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
 @pytest.fixture(scope="module")
 def cell(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     if not _docker_ok() or not (BACKEND / ".linuxdeps").exists():
@@ -43,8 +63,7 @@ def cell(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
         [
             "docker",
             "run",
-            "-d",
-            "--rm",
+            "-d",  # no --rm: keep a crashed supervisor's logs readable; the fixture removes it in `finally`
             "--name",
             name,
             "-p",
@@ -89,7 +108,11 @@ def cell(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     )
     try:
         wait_port(port, 60)
-        time.sleep(1)
+        # An open published port proves nothing (docker-proxy accepts even if the supervisor crashed on start):
+        # require the supervisor itself to answer an unauthenticated probe with UNAUTHENTICATED.
+        if not _supervisor_answers(port, 30):
+            logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+            raise AssertionError(f"cell supervisor not answering; container logs:\n{logs.stdout}{logs.stderr}"[-4000:])
         yield {"endpoint": f"tcp:127.0.0.1:{port}", "rpc": rpc, "grant": grant, "name": name}
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
@@ -107,10 +130,10 @@ def test_sandbox_exec_runs_in_cell_not_on_control_host(stack: Stack, api, pg: Pg
         task = submit(api, t, "Use the sandbox to compute 6*7.", profile="sandbox")
         stack.drive()
         st = state(api, t, task)
-        assert st["state"] == "SUCCEEDED" and st["run"]["result"] == "done:sandbox:CONFIRMED", st
         res = q(
             pg.owner, "SELECT result_json FROM agent.tool_intents WHERE task_id=%s AND tool_key='sandbox_exec'", (task,)
         )[0]["result_json"]
+        assert st["state"] == "SUCCEEDED" and st["run"]["result"] == "done:sandbox:CONFIRMED", (st["run"], res)
         assert res["exitCode"] == 0 and res["stdout"].strip() == "42"
         # the command executed in the Linux cell as the unprivileged cell user, inside the per-task workspace
         out = subprocess.run(

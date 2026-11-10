@@ -99,11 +99,12 @@ jobs:
       - run: uv sync --locked
       - name: Allow unprivileged user namespaces for the cell's network namespace (Ubuntu 24.04 AppArmor default)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Cell dependencies built for the cell's own interpreter (python:3.13-slim, not the runner's Python)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w python:3.13-slim             pip install -q --disable-pip-version-check --target /w/.linuxdeps pydantic==2.14.3 'jsonschema>=4.25.0' pytest
       - name: Runtime Cell enforcement (rlimits, process group kill, netns, uid drop, single-use grants)
         run: |
-          python3 -m pip install --target .linuxdeps pydantic==2.14.3 'jsonschema>=4.25.0' pytest
-          sudo -E env PYTHONPATH=.linuxdeps:packages/domain/src:packages/sandbox/src AIAGENT_EXPECT_NETNS=1 \
-            python3 -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux
+          docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined             --security-opt apparmor=unconfined -e AIAGENT_EXPECT_NETNS=1 -v "$PWD:/w" -w /w python:3.13-slim             sh -c "PYTHONPATH=/w/.linuxdeps:packages/domain/src:packages/sandbox/src               python -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux"
       - name: Generated code runs only in the cell container (cross-kernel RPC with grants)
         run: uv run pytest -q -rA -p no:cacheprovider tests/test_cell_e2e.py
       - name: Build images
