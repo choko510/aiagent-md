@@ -2,7 +2,7 @@
 to the Internet). It executes generated commands for admitted `sandbox_exec` intents only:
 
 * authority = a signed, single-use, short-lived grant bound to argv/cwd/run/lease/intent (grant.py);
-* per-task workspace; cwd must resolve inside it (symlink escapes refused); scrubbed environment (no inherited vars);
+* per-task workspace confined by mandatory Landlock (system runtime read-only, no other task's files); scrubbed environment;
 * Linux kernel enforcement per execution: new session/process group, RLIMIT_CPU/AS/NPROC/NOFILE/FSIZE/CORE, optional
   new user+network namespace (`require_netns`: fail closed if the kernel refuses), wall-clock timeout, kill of the whole
   process group afterwards (no surviving children), output caps;
@@ -35,6 +35,7 @@ from aiagent_domain.rpcwire import (
 )
 
 from .grant import GrantError, verify
+from .landlock import restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
 CLONE_NEWUSER = 0x10000000
@@ -95,7 +96,7 @@ class Supervisor:
                 os.chown(p, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
         return ws, cwd
 
-    def _preexec(self, wall_ms: int, memory_bytes: int) -> Any:
+    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path) -> Any:
         import resource
 
         lim = self.limits
@@ -115,11 +116,17 @@ class Supervisor:
             resource.setrlimit(resource.RLIMIT_NOFILE, (lim.nofile, lim.nofile))
             resource.setrlimit(resource.RLIMIT_FSIZE, (lim.fsize_bytes, lim.fsize_bytes))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            # Filesystem confinement is MANDATORY even in development / when netns is disabled.
+            # Parent/cwd validation alone cannot prevent access to another tenant's files.
+            try:
+                restrict_to_workspace(workspace)
+            except (OSError, ValueError):
+                os._exit(98)  # fail closed; no generated command was executed
             if require_netns:
                 try:
-                    os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace: loopback down, no route
-                except OSError:
-                    os._exit(97)  # fail closed: never run without network isolation when it is required
+                    os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace
+                except (OSError, AttributeError):
+                    os._exit(97)  # fail closed
 
         return fn
 
@@ -136,7 +143,7 @@ class Supervisor:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes),
+            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws),
             close_fds=True,
         )
         timed_out = False
@@ -151,6 +158,8 @@ class Supervisor:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGKILL)  # no surviving children after the execution ends
         rc = proc.returncode
+        if rc == 98:
+            return {"status": "REFUSED", "reason": "FS_ISOLATION_UNAVAILABLE"}
         if rc == 97 and self.require_netns:
             return {"status": "REFUSED", "reason": "NETNS_UNAVAILABLE"}
         return {
