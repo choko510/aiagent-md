@@ -126,11 +126,13 @@ class RuntimeWorker:
             hb.cancel()
             with contextlib.suppress(BaseException):
                 await hb
-        result = await asyncio.to_thread(self._finish, claim, outcome)
+        last_attempt = job.attempts >= job.max_attempts
+        result = await asyncio.to_thread(self._finish, claim, outcome, last_attempt)
         fault("worker_before_ack")
         if result == "RETRY":
-            await asyncio.to_thread(self.queue.nack, job, (outcome.detail or "SEGMENT_ERROR")[:60].upper()
-                                    .replace(" ", "_").replace(":", "_"))
+            code = "".join(ch if ch.isalnum() else "_" for ch in (outcome.detail or "SEGMENT_ERROR").upper())[:60]
+            await asyncio.to_thread(self.queue.nack, job, code,
+                                    min_delay_s=5.0 if outcome.detail == "GATEWAY_UNAVAILABLE" else 0.0)
         else:
             await asyncio.to_thread(self.queue.ack, job, result)
         log(logger, logging.INFO, "segment done", run=claim.run_id, outcome=outcome.status, result=result, detail=outcome.detail)
@@ -159,7 +161,7 @@ class RuntimeWorker:
         assert row is not None
         return str(row["profile_code"])
 
-    def _finish(self, claim: control.Claim, o: SegmentOutcome) -> str:
+    def _finish(self, claim: control.Claim, o: SegmentOutcome, last_attempt: bool = False) -> str:
         fault("worker_before_finish")
         try:
             if o.status == "FINAL":
@@ -177,8 +179,10 @@ class RuntimeWorker:
                 return "STALE_GOAL"
             if o.status == "FENCEDOUT":
                 return "FENCED"
+            if last_attempt:  # retries exhausted: the run must not stay RUNNING behind a dead-lettered job
+                return control.finish_segment(self.db, claim, "FAILED", error_code=(o.detail or "ERROR")[:60])
             control.release(self.db, claim)
-            return "RETRY"  # ERROR / REBUILD exhausted: queue retry with backoff, then DLQ
+            return "RETRY"  # ERROR / REBUILD exhausted: queue retry with backoff
         except control.Cancelled:
             return "CANCELLED"
         except (control.FencedOut, control.RunTerminal):
@@ -214,6 +218,7 @@ def build_from_env() -> tuple[RuntimeWorker, Database, DeepAgentsRuntime]:
 
 async def main_async() -> None:
     setup("runtime_worker")
+    config.require_isolation("runtime_worker")
     w, db, rt = build_from_env()
     with db.conn() as c:
         check_compatible(c)

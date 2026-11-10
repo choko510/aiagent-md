@@ -82,3 +82,25 @@ def dbs(pg: PgEnv) -> Iterator[dict[str, Database]]:
 @pytest.fixture()
 def tenant(pg: PgEnv) -> dict[str, str]:
     return admin.provision_tenant(pg.owner)
+
+
+# ------------------------------------------------------------------ multi-process stack + API client (E2E suites)
+@pytest.fixture(scope="session")
+def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator["Stack"]:
+    from stack import Stack
+
+    s = Stack(pg.dsn, tmp_path_factory.mktemp("stack"), owner_dsn=pg.owner).start_all()
+    yield s
+    s.close()
+
+
+@pytest.fixture()
+def api(pg: PgEnv) -> Iterator["TestClient"]:
+    from fastapi.testclient import TestClient
+
+    from aiagent_api.app import create_app
+
+    db = Database(pg.dsn["api"], max_size=4)
+    with TestClient(create_app(db)) as c:
+        yield c
+    db.close()

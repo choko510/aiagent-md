@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,12 @@ SYSTEM_PROMPT = ("You are the aiagent-md agent. Tools are proposals reviewed by 
 register_harness_profile(
     "gatewaychatmodel", HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False))
 )
+
+
+def fault(point: str) -> None:
+    """Fault injection: abrupt process death (like SIGKILL/OOM) at a named point. AIAGENT_FAULT=p1,p2."""
+    if point in os.environ.get("AIAGENT_FAULT", "").split(","):
+        os._exit(137)
 
 
 class AwaitingApproval(Exception):
@@ -135,8 +142,12 @@ async def call_model(rc: RunCtx, stream: str, system: str, messages: list[dict[s
                 result = data
     except RpcError as e:
         raise GatewayRejected(e.code) from None
-    assert result is not None
+    except (OSError, EOFError, TimeoutError) as e:  # gateway down / restarted: transient, retry the job
+        raise GatewayRejected("GATEWAY_UNAVAILABLE") from e
+    if result is None:
+        raise GatewayRejected("GATEWAY_UNAVAILABLE")
     msg: dict[str, Any] = result["message"]
+    fault("runtime_after_model")  # answer committed to HEAD by the gateway; framework has not checkpointed it
     return msg
 
 
@@ -166,10 +177,15 @@ class GatewayChatModel(BaseChatModel):
 
 async def submit_tool(rc: RunCtx, tool_call_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
-        return await rc.gw.tool.call("tool.submit", {"claim": rc.claim.to_wire(), "toolCallId": tool_call_id,
-                                                     "tool": name, "args": args})
+        out = await rc.gw.tool.call("tool.submit", {"claim": rc.claim.to_wire(), "toolCallId": tool_call_id,
+                                                    "tool": name, "args": args})
     except RpcError as e:
         raise GatewayRejected(e.code) from None
+    except (OSError, EOFError, TimeoutError) as e:
+        raise GatewayRejected("GATEWAY_UNAVAILABLE") from e
+    if out["status"] in ("DONE", "CONFIRMED"):
+        fault(f"after_tool_ack:{name}")
+    return out
 
 
 def content_of(o: dict[str, Any]) -> str:
@@ -248,6 +264,8 @@ class InternalResultAdmission(AgentMiddleware):
                     "content": m.text})
             except RpcError as e:
                 raise GatewayRejected(e.code) from None
+            except (OSError, EOFError, TimeoutError) as e:
+                raise GatewayRejected("GATEWAY_UNAVAILABLE") from e
             m.content = res["content"]
         return result
 

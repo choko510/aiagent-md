@@ -15,7 +15,7 @@ from .control import TERMINAL
 from .db import Database, Row
 from .events import append_event, enqueue_run_job
 
-DEFAULT_MODELS = {"default": ["fake-gateway"], "anthropic": ["claude-sonnet-5-5"]}
+DEFAULT_MODELS = {"default": ["fake-gateway"], "sandbox": ["fake-gateway"], "anthropic": ["claude-sonnet-5-5"]}
 
 
 class CommandError(Exception):

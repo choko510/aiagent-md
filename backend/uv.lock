@@ -120,6 +120,7 @@ version = "0.3.0"
 source = { editable = "packages/gateways" }
 dependencies = [
     { name = "aiagent-core" },
+    { name = "aiagent-sandbox" },
     { name = "httpx" },
     { name = "jsonschema" },
 ]
@@ -127,6 +128,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-sandbox", editable = "packages/sandbox" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = ">=4.25.0" },
 ]

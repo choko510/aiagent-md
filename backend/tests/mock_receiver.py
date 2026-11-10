@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sys
 
 
@@ -47,7 +48,7 @@ async def main(port: int, log: str, hang: bool, token: str) -> None:
         finally:
             w.close()
 
-    srv = await asyncio.start_server(handle, "127.0.0.1", port)
+    srv = await asyncio.start_server(handle, os.environ.get("MOCK_RECEIVER_HOST", "127.0.0.1"), port)
     async with srv:
         await srv.serve_forever()
 

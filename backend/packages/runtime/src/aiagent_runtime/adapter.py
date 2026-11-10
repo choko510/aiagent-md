@@ -8,7 +8,6 @@ still this claim's pointer) and the graph is rebuilt from HEAD after settling da
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +29,7 @@ from .agent import (
     RunCtx,
     UnknownEffect,
     build_graph,
+    fault,
     from_neutral,
     submit_tool,
     to_neutral,
@@ -52,11 +52,6 @@ class SegmentOutcome:
 _CODE_TO_STATUS = {"FENCED": "FENCEDOUT", "RESTORE_FENCED": "FENCEDOUT", "TENANT": "FENCEDOUT",
                    "STALE_GOAL": "STALEGOAL", "CANCELLED": "CANCELLED", "TERMINAL": "CANCELLED",
                    "BUDGET_EXHAUSTED": "BUDGET"}
-
-
-def fault(point: str) -> None:
-    if point in os.environ.get("AIAGENT_FAULT", "").split(","):
-        os._exit(137)
 
 
 def normalize_order(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -105,6 +105,21 @@ class ModelGateway:
         self.secrets = secrets or []
         self.max_retries, self.cancel_poll_s = max_retries, cancel_poll_s
 
+    def recover_orphans(self, older_than_s: float) -> int:
+        """Attempts left RESERVED/STREAMING by a crashed gateway: the provider may have been called (and billed), so
+        the reservation is converted to UNKNOWN-quality usage (conservative) and the attempt marked FAILED."""
+        with self.db.tx() as c:
+            rows = c.execute(
+                "UPDATE agent.model_attempts SET status_code='FAILED', usage_quality='UNKNOWN', reason_code='ORPHANED',"
+                " finished_at=now() WHERE status_code IN ('RESERVED','STREAMING')"
+                " AND created_at < now() - make_interval(secs => %s) RETURNING tenant_id, run_id, tokens_reserved",
+                (older_than_s,)).fetchall()
+            for r in rows:
+                c.execute("UPDATE agent.runs SET tokens_reserved = greatest(0, tokens_reserved - %s),"
+                          " tokens_used = tokens_used + %s WHERE tenant_id=%s AND id=%s",
+                          (r["tokens_reserved"], r["tokens_reserved"], r["tenant_id"], r["run_id"]))
+        return len(rows)
+
     # -------------------------------------------------------------------- admission
     def _admit(self, req: SealedModelRequest, *, cached: bool, est_tokens: int) -> str:
         attempt_id = uuid7()

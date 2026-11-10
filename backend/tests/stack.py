@@ -47,6 +47,7 @@ class Stack:
     ports: dict[str, int] = field(default_factory=dict)
     keys: dict[str, str] = field(default_factory=dict)
     receiver_hang: bool = False
+    owner_dsn: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -115,14 +116,26 @@ class Stack:
         else:
             mod = {"model": ["-m", "aiagent_gateways.servers", "model"], "tool": ["-m", "aiagent_gateways.servers", "tool"],
                    "sentinel": ["-m", "aiagent_sentinel.main"]}[name]
-            args, env = [PY, *mod], {**self.env_for(name), **extra_env}
+            args, env = [PY, *mod], {**self.env_for(name), "AIAGENT_ATTEMPT_ORPHAN_S": "0", **extra_env}
         out = open(self.tmp / f"{name}.log", "ab")  # noqa: SIM115
         self.procs[name] = subprocess.Popen(args, env=env, stdout=out, stderr=subprocess.STDOUT)
         wait_port(self.ports[name])
         if name == "sentinel":
             wait_port(self.ports["egress"])
 
+    def tune_queue(self) -> None:
+        """Fast retries / redelivery for tests (production values are in the migration defaults)."""
+        db = Database(self.owner_dsn, max_size=1)
+        try:
+            db.one("UPDATE queue.queues SET base_backoff_ms=50, max_backoff_ms=500, visibility_ms=3000,"
+                   " per_tenant_active_limit=8, global_active_limit=16, max_attempts=6, paused=false"
+                   " WHERE name='run' RETURNING 1")
+        finally:
+            db.close()
+
     def start_all(self) -> Stack:
+        if self.owner_dsn:
+            self.tune_queue()
         for n in ("receiver", "sentinel", "tool", "model"):
             self.start(n)
         return self
@@ -166,6 +179,24 @@ class Stack:
         for n in ("model", "tool", "sentinel"):
             self.ensure(n)  # a gateway fault killed the gateway process: restart it like a supervisor would
         return r
+
+    def drive(self, rounds: int = 6, **extra: str) -> list[subprocess.CompletedProcess[str]]:
+        """Run workers until no job is due within a few seconds (retries/backoff/redelivery included)."""
+        out = []
+        owner = Database(self.owner_dsn, max_size=1)
+        try:
+            for _ in range(rounds):
+                out.append(self.worker(**extra))
+                row = owner.one(
+                    "SELECT min(CASE WHEN status='READY' THEN run_after ELSE locked_until END) - now() AS wait"
+                    " FROM queue.jobs WHERE status IN ('READY','CLAIMED')")
+                wait = row["wait"] if row else None
+                if wait is None or wait.total_seconds() > 8:
+                    break
+                time.sleep(max(0.0, wait.total_seconds()) + 0.2)
+        finally:
+            owner.close()
+        return out
 
     def sends(self) -> list[dict[str, Any]]:
         if not self.log.exists():

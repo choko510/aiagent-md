@@ -25,6 +25,9 @@ _BLOCKED_V6 = [ipaddress.ip_network(n) for n in (
 _HOST = re.compile(r"\A(?=.{1,253}\Z)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\Z")
 
 
+_NUMERIC_LABEL = re.compile(r"\A(0x[0-9a-f]*|0[0-7]+|[0-9]+)\Z")
+
+
 class EgressDenied(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -43,7 +46,10 @@ def normalize_host(host: str) -> str:
         return str(ipaddress.ip_address(h))
     except ValueError:
         pass
-    if not _HOST.match(h) or h.replace(".", "").isdigit():  # "2130706433"-style integer IPs are not hostnames
+    labels = h.split(".")
+    # inet_aton-style numeric forms ("2130706433", "0x7f000001", "0177.0.0.1") are not hostnames: some resolvers
+    # turn them into loopback/private addresses.
+    if not _HOST.match(h) or labels[-1].isdigit() or any(_NUMERIC_LABEL.match(x) for x in labels):
         raise EgressDenied("BAD_HOST")
     return h
 

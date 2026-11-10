@@ -291,6 +291,10 @@ class ToolGateway:
             except RpcError as e:
                 return self._settle(claim, intent, attempt_id, tool_call_id, tool, stream, "DENIED",
                                     {"error": f"sentinel:{e.code}"}, effect="FAILED")
+        if hasattr(executor, "context"):  # executors that need the admitted identity (sandbox grants)
+            executor.context[effect_key] = {"tenant_id": claim.tenant_id, "task_id": claim.task_id,
+                                            "run_id": claim.run_id, "intent_id": intent["id"],
+                                            "lease_epoch": claim.lease_epoch}
         fault("gateway_before_send")
         try:
             res = _run(executor.execute(effect_key, args, permit))

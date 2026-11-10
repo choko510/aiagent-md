@@ -19,44 +19,7 @@ from stack import Stack
 pytestmark = pytest.mark.pg
 
 
-@pytest.fixture(scope="module")
-def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
-    s = Stack(pg.dsn, tmp_path_factory.mktemp("stack")).start_all()
-    yield s
-    s.close()
-
-
-@pytest.fixture()
-def api(pg: PgEnv) -> Iterator[TestClient]:
-    db = Database(pg.dsn["api"], max_size=4)
-    with TestClient(create_app(db)) as c:
-        yield c
-    db.close()
-
-
-def auth(t: dict[str, str]) -> dict[str, str]:
-    return {"Authorization": f"Bearer {t['token']}"}
-
-
-def submit(api: TestClient, t: dict[str, str], goal: str, **kw: str) -> str:
-    r = api.post("/v1/tasks", json={"schemaVersion": "1.0", "goal": goal, **kw}, headers=auth(t))
-    assert r.status_code == 201, r.text
-    return str(r.json()["taskId"])
-
-
-def state(api: TestClient, t: dict[str, str], task_id: str) -> dict:
-    r = api.get(f"/v1/tasks/{task_id}", headers=auth(t))
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-def approve(api: TestClient, t: dict[str, str], task_id: str, decision: str = "APPROVED") -> None:
-    for a in state(api, t, task_id)["approvals"]:
-        if a["decision"] == "PENDING":
-            r = api.post(f"/v1/approvals/{a['id']}/decision", headers=auth(t), json={
-                "schemaVersion": "1.0", "decision": decision, "requestSha256": a["requestSha256"],
-                "expectedRecordVersion": a["recordVersion"]})
-            assert r.status_code == 200, r.text
+from helpers import approve, state, submit  # noqa: E402
 
 
 def sends_for(stack: Stack, n0: int) -> list[dict]:

@@ -104,6 +104,7 @@ async def _serve(name: str, srv: RpcServer, db: Database, health_port: int | Non
 
 def main_model() -> None:
     setup("model_gateway")
+    config.require_isolation("model_gateway")
     keys = parse_keys(config.secret("AIAGENT_MODEL_GATEWAY_RPC_KEYS").reveal())  # type: ignore[union-attr]
     dsn = config.secret("AIAGENT_MODEL_GATEWAY_DSN").reveal()  # type: ignore[union-attr]
     providers: dict[str, Any] = {"fake": FakeModelProvider()}
@@ -122,12 +123,14 @@ def main_model() -> None:
     consent = {tuple(x.split(":", 1)) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x}
     db = Database(dsn, max_size=8, name="model_gateway")
     gw = ModelGateway(db, providers, routes, consent=consent, secrets=secrets)  # type: ignore[arg-type]
+    gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
     srv = build_model_server(db, keys, config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"), gw)
     asyncio.run(_serve("model_gateway", srv, db, config.env_int("AIAGENT_HEALTH_PORT", 0) or None))
 
 
 def main_tool() -> None:
     setup("tool_gateway")
+    config.require_isolation("tool_gateway")
     keys = parse_keys(config.secret("AIAGENT_TOOL_GATEWAY_RPC_KEYS").reveal())  # type: ignore[union-attr]
     dsn = config.secret("AIAGENT_TOOL_GATEWAY_DSN").reveal()  # type: ignore[union-attr]
     sentinel = None

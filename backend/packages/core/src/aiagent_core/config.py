@@ -85,3 +85,28 @@ def require_production_safety(component: str, checks: dict[str, bool]) -> None:
     missing = [k for k, ok in checks.items() if not ok]
     if missing and profile() == "production":
         raise ConfigError(f"{component}: production safety requirements not met: {', '.join(missing)}")
+
+
+def isolation_attestation() -> dict[str, object]:
+    """Provisioning (deploy/kvm) writes this file inside the Trusted Control VM after verifying the topology:
+    Trusted Control VM / Untrusted Execution VM on separate guest kernels, egress only via Sentinel, no Docker socket.
+    Its absence in production means the safety boundary is not established, so services refuse to start."""
+    import json
+
+    path = os.environ.get("AIAGENT_ISOLATION_ATTESTATION_FILE", "/etc/aiagent/isolation.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+REQUIRED_ATTESTATION = ("trusted_control_vm", "untrusted_execution_vm_separate_kernel", "egress_only_via_sentinel",
+                        "no_docker_socket")
+
+
+def require_isolation(component: str) -> None:
+    att = isolation_attestation()
+    require_production_safety(component, {f"isolation attestation: {k}": att.get(k) is True
+                                          for k in REQUIRED_ATTESTATION})

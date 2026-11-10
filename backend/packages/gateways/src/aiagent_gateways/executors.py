@@ -110,6 +110,53 @@ class HttpMessageExecutor:
         return None
 
 
+class SandboxCellExecutor:
+    """`sandbox_exec` -> Execution Supervisor in the Untrusted Execution VM. The gateway signs a single-use grant
+    bound to the admitted argv/cwd/run/lease/intent; the supervisor (no DB, no secrets, no network) verifies it. A lost
+    connection after the request was delivered is UNKNOWN (the command may have run)."""
+
+    def __init__(self, endpoint: str, rpc_key: bytes, grant_key: bytes, *, wall_ms: int = 60_000,
+                 memory_bytes: int = 512 * 1024 * 1024) -> None:
+        self.endpoint, self.rpc_key, self.grant_key = endpoint, rpc_key, grant_key
+        self.wall_ms, self.memory_bytes = wall_ms, memory_bytes
+        self.context: dict[str, Any] = {}
+
+    def destination(self) -> Destination | None:
+        return None  # no Internet egress: the cell is offline; only this scoped RPC exists
+
+    async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
+        import time
+        import uuid
+
+        from aiagent_core.rpc import RpcClient
+        from aiagent_domain.rpcwire import RpcError
+        from aiagent_sandbox.grant import Grant, sign
+
+        ctx = self.context.get(effect_key)
+        if ctx is None:
+            raise ExecutorFailed("no admission context")
+        g = Grant(uuid.uuid4().hex, ctx["tenant_id"], ctx["task_id"], ctx["run_id"], ctx["intent_id"],
+                  ctx["lease_epoch"], tuple(args["argv"]), args["cwdRelative"], self.wall_ms, self.memory_bytes,
+                  int(time.time()) + 120)
+        client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
+        try:
+            res = await client.call("exec.run", {"grant": sign(self.grant_key, g), "argv": args["argv"],
+                                                 "cwdRelative": args["cwdRelative"]})
+        except RpcError as e:
+            raise ExecutorFailed(e.code) from e  # refused before execution (grant/auth)
+        except ConnectionRefusedError as e:
+            raise ExecutorFailed("cell unavailable") from e
+        except (OSError, EOFError, TimeoutError) as e:
+            raise ExecutorUnknown(type(e).__name__) from e
+        if res.get("status") == "REFUSED":
+            raise ExecutorFailed(str(res.get("reason")))
+        return {"exitCode": res["exitCode"], "timedOut": res["timedOut"], "stdout": res["stdout"][:8000],
+                "stderr": res["stderr"][:4000]}
+
+    async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
+        return None
+
+
 def from_env() -> dict[str, Executor]:
     from aiagent_core.config import secret
 
@@ -121,4 +168,10 @@ def from_env() -> dict[str, Executor]:
             credential=secret("AIAGENT_MESSAGE_RECEIVER_TOKEN", required=False),
             credential_recipient=os.environ.get("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST"),
         )
+    cell = os.environ.get("AIAGENT_SANDBOX_ENDPOINT")
+    if cell:
+        rpc = secret("AIAGENT_SANDBOX_RPC_KEY")
+        grant = secret("AIAGENT_SANDBOX_GRANT_KEY")
+        assert rpc is not None and grant is not None
+        out["sandbox_cell"] = SandboxCellExecutor(cell, bytes.fromhex(rpc.reveal()), bytes.fromhex(grant.reveal()))
     return out

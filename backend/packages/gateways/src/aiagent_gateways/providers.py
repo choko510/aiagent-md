@@ -63,7 +63,6 @@ def _call(name: str, **args: Any) -> dict[str, Any]:
 
 def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -> dict[str, Any]:
     first = next((m.get("content", "") for m in messages if m.get("kind") == "user"), "").lower()
-    users = " ".join(m.get("content", "") for m in messages if m.get("kind") == "user").lower()
     r = _results(messages)
     if stream == "summarize":
         return {"content": f"SUMMARY of {len(messages)} earlier messages (goal: widget price)."}
@@ -71,8 +70,15 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
         if "search" in r:
             return {"content": "child-result: widget price is 42"}
         return _call("search", query="widget price")
-    if "goal revised" in users and "bob" in users and "send_message" not in r and "search" in r:
-        return _call("send_message", to="bob", body="price=42")
+    steer_idx = max((i for i, m in enumerate(messages) if m.get("kind") == "user" and "goal revised" in
+                     str(m.get("content", "")).lower()), default=None)
+    if steer_idx is not None:
+        after = _results(messages[steer_idx + 1:])
+        if "bob" in str(messages[steer_idx].get("content", "")).lower():
+            if "send_message" in after:
+                return {"content": f"done:{after['send_message'].get('status')}"}
+            return _call("send_message", to="bob", body="price=42")
+        return {"content": "answer: goal revised, nothing sent"}
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):
             return {"content": "done:delegated"}

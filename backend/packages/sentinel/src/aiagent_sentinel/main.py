@@ -45,6 +45,7 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
 
 async def serve() -> None:
     setup("sentinel")
+    config.require_isolation("sentinel")
     cfg = load_config()
     config.require_production_safety("sentinel", {"egress destinations configured": bool(cfg.destinations)})
     key = bytes.fromhex(config.secret("AIAGENT_SENTINEL_PERMIT_KEY").reveal())  # type: ignore[union-attr]

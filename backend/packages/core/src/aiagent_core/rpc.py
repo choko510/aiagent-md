@@ -194,6 +194,12 @@ class RpcClient:
         self.endpoint, self.caller, self.key, self.timeout_s = Endpoint(endpoint), caller, key, timeout_s
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        if self.endpoint.kind == "vsock":  # Trusted Control VM -> Untrusted Execution VM (no IP route needed)
+            cid, port = self.endpoint.path.split(":")
+            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)  # type: ignore[attr-defined]
+            sock.setblocking(False)
+            await asyncio.get_running_loop().sock_connect(sock, (int(cid), int(port)))
+            return await asyncio.open_connection(sock=sock)
         if self.endpoint.kind == "unix":
             return await asyncio.open_unix_connection(self.endpoint.path)  # type: ignore[attr-defined,no-any-return]
         host, port = self.endpoint.host_port

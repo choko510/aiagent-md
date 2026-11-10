@@ -139,7 +139,7 @@ class QueuePort:
                       (outcome, job.id, job.attempt_fence))
             return cur.rowcount == 1
 
-    def nack(self, job: Job, error_code: str, *, retryable: bool = True) -> str:
+    def nack(self, job: Job, error_code: str, *, retryable: bool = True, min_delay_s: float = 0.0) -> str:
         """Retry with bounded exponential backoff + full jitter, or dead-letter (non-retryable / exhausted)."""
         with self.db.tx() as c:
             q = c.execute("SELECT base_backoff_ms, max_backoff_ms FROM queue.queues WHERE name=%s", (job.queue,)).fetchone()
@@ -148,7 +148,8 @@ class QueuePort:
                       (error_code, job.id, job.attempt_fence))
             if not retryable or job.attempts >= job.max_attempts:
                 return "DEAD" if self._dead(c, job.id, job.attempt_fence, error_code) else "STALE"
-            delay_ms = random.uniform(0, min(q["max_backoff_ms"], q["base_backoff_ms"] * 2 ** (job.attempts - 1)))  # noqa: S311
+            delay_ms = max(min_delay_s * 1000, random.uniform(  # noqa: S311
+                0, min(q["max_backoff_ms"], q["base_backoff_ms"] * 2 ** (job.attempts - 1))))
             cur = c.execute(
                 "UPDATE queue.jobs SET status='READY', locked_until=NULL, locked_by=NULL, last_error_code=%s,"
                 " run_after = now() + make_interval(secs => %s / 1000.0), updated_at=now()"

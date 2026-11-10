@@ -1,0 +1,2 @@
+{"destinations": {"message-receiver": {"scheme": "http", "host": "receiver", "port": 8099, "methods": ["POST", "GET"],
+  "allow_private": ["172.31.250.10"]}}}

@@ -166,6 +166,7 @@ def main() -> None:
     from aiagent_core.logging import setup
 
     setup("api")
+    config.require_isolation("api")
     uvicorn.run(create_app(), host=os.environ.get("AIAGENT_API_HOST", "127.0.0.1"),
                 port=config.env_int("AIAGENT_API_PORT", 8080), log_config=None, timeout_graceful_shutdown=20)
 
