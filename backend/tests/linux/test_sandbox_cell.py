@@ -162,8 +162,6 @@ def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
         str(own / "escape"), str(s.root / ".consumed-grants"),
         "/proc/self/environ", "/etc/passwd",
     ]
-    import json
-
     script = (
         "from pathlib import Path\n"
         "paths = " + repr(targets) + "\n"
