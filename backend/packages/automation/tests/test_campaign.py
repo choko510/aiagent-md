@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from aiagent_automation.campaign import (CampaignController, CampaignPlan, CampaignState,
-    EffectState, FakeClock, Phase, Rejected, ResultState, StopPolicy)
+from aiagent_automation.campaign import (
+    CampaignController,
+    CampaignPlan,
+    CampaignState,
+    EffectState,
+    FakeClock,
+    Phase,
+    Rejected,
+    ResultState,
+    StopPolicy,
+)
 from aiagent_automation.store import SqliteHarnessStore
 
 
@@ -32,7 +41,7 @@ class MockQueue:
 
 @pytest.fixture
 def rig(tmp_path: Path):
-    clock = FakeClock(datetime(2026, 11, 11, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 11, 11, tzinfo=UTC))
     queue = MockQueue()
     store = SqliteHarnessStore(tmp_path / 'campaign.sqlite')
     ctl = CampaignController(store, clock, queue, MockVerifier())
@@ -48,7 +57,7 @@ def plan(clock, **overrides):
 
 
 def start(rig, **kwargs):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock, **kwargs), 'work1')
     assert ctl.dispatch_pending('c1') == 1
     assert ctl.admit_cycle('c1', 'c1:1', 1)
@@ -82,7 +91,7 @@ def test_bounded_continuation_max_cycles(rig):
 
 
 def test_deadline_durable(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
     clock.advance(hours=4)
     with pytest.raises(Rejected, match='DEADLINE_REACHED'):
@@ -92,7 +101,7 @@ def test_deadline_durable(rig):
 
 
 def test_stop_and_stale_delivery(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
     assert ctl.control('c1', 'STOP', 1) == 2
     assert ctl.view('c1')['state'] == 'STOPPED'
@@ -104,7 +113,7 @@ def test_stop_and_stale_delivery(rig):
 
 
 def test_pause_resume_fences_old_queue(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, queue = rig
     ctl.create(plan(clock), 'work1')
     assert ctl.control('c1', 'PAUSE', 1) == 2
     assert ctl.dispatch_pending('c1') == 0
@@ -117,7 +126,7 @@ def test_pause_resume_fences_old_queue(rig):
 
 
 def test_auth_revoke(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
     ctl.control('c1', 'REVOKE', 1)
     assert ctl.dispatch_pending('c1') == 0
@@ -173,11 +182,11 @@ def test_stop_with_unresolved_effect_does_not_promise_stopped(rig):
     ctl.record_effect('c1', 'intent1', EffectState.UNKNOWN)
     assert ctl.view('c1')['state'] == 'STOP_REQUESTED'
     ctl.record_effect('c1', 'intent1', EffectState.CONFIRMED, 'provider:authoritative')
-    assert ctl.view('c1')['state'] == 'STOPPED' 
+    assert ctl.view('c1')['state'] == 'STOPPED'
 
 
 def test_budget_insufficient_not_overbooked(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock, max_cost_micro_usd=100), 'work1')
     ctl.dispatch_pending('c1')
     ctl.admit_cycle('c1', 'c1:1', 1)
@@ -211,7 +220,7 @@ def test_model_success_not_verified_without_trusted_proof(rig):
 
 
 def test_target_verified_then_no_extra_cycle(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock, target_count=1), 'work1')
     ctl.dispatch_pending('c1')
     ctl.admit_cycle('c1', 'c1:1', 1)
@@ -222,7 +231,7 @@ def test_target_verified_then_no_extra_cycle(rig):
 
 
 def test_approval_pending_blocks_new_admission(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
     ctl.control('c1', 'APPROVAL_PENDING', 1)
     assert ctl.dispatch_pending('c1') == 0
@@ -241,7 +250,7 @@ def test_limits_must_be_finite():
 
 
 def test_duplicate_control_command_and_cas(rig):
-    ctl, store, clock, queue = rig
+    ctl, _store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
     assert ctl.control('c1', 'STOP', 1, command_id='ui-stop-1') == 2
     assert ctl.control('c1', 'STOP', 1, command_id='ui-stop-1') == 2
@@ -253,7 +262,7 @@ def test_duplicate_control_command_and_cas(rig):
 
 
 def test_outbox_relay_rejects_if_stop_wins_race(rig):
-    ctl, store, clock, queue = rig
+    ctl, store, clock, _queue = rig
     ctl.create(plan(clock), 'work1')
 
     class GuardedQueue(MockQueue):
@@ -292,7 +301,7 @@ def test_no_next_candidate_parks_without_spin(rig):
 
 
 def test_no_verifier_defaults_fail_closed(tmp_path):
-    clock = FakeClock(datetime(2026, 11, 11, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 11, 11, tzinfo=UTC))
     ctl = CampaignController(SqliteHarnessStore(tmp_path / 'x.sqlite'), clock, MockQueue())
     ctl.create(plan(clock), 'work1')
     ctl.admit_cycle('c1', 'c1:1', 1)
