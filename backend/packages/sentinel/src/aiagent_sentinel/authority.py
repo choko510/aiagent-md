@@ -132,11 +132,15 @@ class Sentinel:
             raise RpcError("DESTINATION_NOT_ALLOWED")
         with self.db.tx() as c:
             it = c.execute(
-                "SELECT tool_key, status_code, run_id FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
+                "SELECT i.tool_key, i.status_code, i.run_id, t.owner_user_id, t.workspace_id"
+                " FROM agent.tool_intents i JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+                " WHERE i.tenant_id=%s AND i.id=%s",
                 (tenant_id, intent_id),
             ).fetchone()
             if it is None or it["status_code"] not in ("UNKNOWN", "SENDING"):
                 raise RpcError("INTENT_NOT_RECONCILABLE")
+            if not control.scope_active(c, tenant_id, str(it["owner_user_id"]), str(it["workspace_id"])):
+                raise RpcError("SCOPE_REVOKED")
             spec = TOOLS.get(it["tool_key"])
             if spec is None or dest.name not in spec.egress:
                 raise RpcError("DESTINATION_NOT_BOUND_TO_TOOL")
@@ -165,11 +169,21 @@ class Sentinel:
         with self.db.tx() as c:
             row = c.execute(
                 "UPDATE agent.egress_permits p SET uses = uses + 1 FROM agent.tool_intents i, agent.runs r,"
-                " agent.schema_control s WHERE p.tenant_id=%s AND p.id=%s AND p.revoked_at IS NULL AND p.uses < p.max_uses"
+                " agent.tasks t, agent.schema_control s WHERE p.tenant_id=%s AND p.id=%s"
+                " AND p.revoked_at IS NULL AND p.uses < p.max_uses"
                 " AND p.expires_at > now() AND i.tenant_id=p.tenant_id AND i.id=p.tool_intent_id"
                 " AND r.tenant_id=p.tenant_id AND r.id=p.run_id AND r.restore_incarnation = s.restore_incarnation"
+                " AND t.tenant_id=r.tenant_id AND t.id=r.task_id AND i.task_id=t.id"
+                " AND EXISTS (SELECT 1 FROM agent.tenants tn"
+                " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=t.owner_user_id"
+                " JOIN agent.users u ON u.id=m.user_id"
+                " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=t.workspace_id"
+                " AND w.owner_user_id=t.owner_user_id WHERE tn.id=t.tenant_id AND tn.disabled_at IS NULL"
+                " AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL)"
                 " AND p.method = %s AND p.host = %s AND p.port = %s AND p.scheme = %s"
-                " AND (p.method = 'GET' OR (NOT r.cancel_requested AND r.status_code NOT IN ('CANCELLED','CANCELLING')"
+                " AND (p.method = 'GET' OR (NOT r.cancel_requested AND NOT r.pause_requested"
+                " AND r.status_code NOT IN ('CANCELLED','CANCELLING','PAUSED')"
+                " AND t.goal_revision=i.goal_revision"
                 "      AND r.lease_epoch = p.run_lease_epoch))"
                 " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN'))"
                 " AND NOT EXISTS (SELECT 1 FROM agent.approval_records a WHERE a.tenant_id=i.tenant_id"
