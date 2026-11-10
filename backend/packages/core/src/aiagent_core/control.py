@@ -360,11 +360,7 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
         if cancelling or revoked_now:
             target = "WAITING_RECONCILIATION" if pending else "CANCELLED"
         else:
-            target = (
-                "WAITING_RECONCILIATION"
-                if pending or run["status_code"] == "WAITING_RECONCILIATION"
-                else "PAUSED"
-            )
+            target = "WAITING_RECONCILIATION" if pending or run["status_code"] == "WAITING_RECONCILIATION" else "PAUSED"
         error = "SCOPE_REVOKED" if revoked_now else None
         if run["status_code"] == target and not run["leased"] and (not revoked_now or run["cancel_requested"]):
             return target
@@ -645,9 +641,7 @@ def finish_segment(
         revoked = not scope_active(c, claim.tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))
         if revoked or run["cancel_requested"] or run["status_code"] == "CANCELLING":
             target = (
-                "WAITING_RECONCILIATION"
-                if _has_unresolved_effects(c, claim.tenant_id, claim.run_id)
-                else "CANCELLED"
+                "WAITING_RECONCILIATION" if _has_unresolved_effects(c, claim.tenant_id, claim.run_id) else "CANCELLED"
             )
             if revoked:
                 error_code = "SCOPE_REVOKED"
