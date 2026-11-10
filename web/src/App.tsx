@@ -18,7 +18,7 @@ type CatalogItem = {
   installable: false;
   notice: string;
 };
-type Warning = { source: string; code: string };
+type Warning = { source: string; code: string; retryAfterSeconds?: number };
 type ListResponse = {
   items: CatalogItem[];
   nextCursor: string | null;
@@ -250,6 +250,9 @@ export default function App() {
           {data?.warnings.map((warning, index) => (
             <p className="warning" role="status" key={warning.source + index}>
               <strong>{warning.source === "mcp" ? "MCP Registry" : "ClawHub"}:</strong> {errorMessage(warning.code)}
+              {warning.code === "RATE_LIMITED" && typeof warning.retryAfterSeconds === "number" && (
+                <span> 約{warning.retryAfterSeconds}秒待ってから再検索してください。</span>
+              )}
             </p>
           ))}
           {error && <div role="alert" className="error">{error} <button type="button" onClick={() => setRefresh((value) => value + 1)}>再試行</button></div>}
