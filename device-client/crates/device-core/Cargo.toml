@@ -9,6 +9,7 @@ description = "Fail-closed local device simulation; not a production gateway"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"
