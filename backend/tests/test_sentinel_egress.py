@@ -392,3 +392,91 @@ def test_model_provider_streams_through_egress_with_identity() -> None:
 def test_model_provider_wrong_proxy_identity_refused() -> None:
     events, hits = run(_provider_case("wrong-token-" + "x" * 30))
     assert hits == [] and events == [("error", "HTTP_403")]
+
+def test_tool_https_connect_refused_before_permit_consumption() -> None:
+    """A permit cannot authorize an opaque TLS tunnel that could send multiple writes."""
+    class FakeSentinel:
+        calls = 0
+
+        def verify_and_consume(self, *args: object) -> tuple[str, str]:
+            self.calls += 1
+            raise AssertionError("tool permit must not be consumed for CONNECT")
+
+        def receipt(self, *args: object) -> None:
+            return None
+
+    async def scenario() -> tuple[bytes, int]:
+        cfg = EgressConfig.from_json(json.dumps({
+            "destinations": {"receiver": {"scheme": "https", "host": "receiver.test",
+                "port": 443, "methods": ["POST", "GET"]}}
+        }), production=False)
+        sen = FakeSentinel()
+
+        async def resolver(host: str, port: int) -> list[str]:
+            raise AssertionError("must deny before DNS / upstream connection")
+
+        proxy = EgressProxy(sen, cfg, resolver=resolver)  # type: ignore[arg-type]
+        port = await proxy.start("127.0.0.1", 0)
+        try:
+            r, w = await asyncio.open_connection("127.0.0.1", port)
+            w.write(b"CONNECT receiver.test:443 HTTP/1.1\r\n"
+                    b"Proxy-Authorization: Aiagent tool_gateway:forged\r\n\r\n")
+            await w.drain()
+            head = await r.read()
+            w.close()
+            await w.wait_closed()
+            return head, sen.calls
+        finally:
+            await proxy.close()
+
+    head, calls = run(scenario())
+    assert head.startswith(b"HTTP/1.1 403")
+    assert b"CONNECT_TOOL_FORBIDDEN" in head
+    assert calls == 0
+
+
+def test_static_credentials_only_allow_model_gateway() -> None:
+    cfg = {"destinations": {
+        "bad": {"scheme": "https", "host": "receiver.test", "port": 443,
+                "methods": ["POST"], "needs_permit": False, "identities": ["tool_gateway"]}
+    }}
+    with pytest.raises(ValueError, match="model_gateway"):
+        EgressConfig.from_json(json.dumps(cfg), production=False)
+
+
+@pytest.mark.pg
+def test_scope_revocation_after_permit_issuance_refuses_actual_send(
+    dbs: dict[str, Database], sentinel_env: dict
+) -> None:
+    cfg = EgressConfig.from_json(json.dumps({
+        "destinations": {"message-receiver": {"scheme": "http", "host": "receiver.test",
+            "port": 8080, "methods": ["POST", "GET"]}}
+    }), production=False)
+    s = Sentinel(dbs["sentinel"], cfg, secrets.token_bytes(32))
+    claim = sentinel_env["claim"]
+    token = s.authorize(claim, sentinel_env["intent"], "http", "receiver.test", 8080, "POST")
+    dbs["owner"].one(
+        "UPDATE agent.workspaces SET disabled_at=now() WHERE tenant_id=%s AND id=("
+        " SELECT workspace_id FROM agent.tasks WHERE tenant_id=%s AND id=%s) RETURNING 1",
+        (claim.tenant_id, claim.tenant_id, claim.task_id),
+    )
+    with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
+        s.verify_and_consume(token, "http", "receiver.test", 8080, "POST")
+
+
+@pytest.mark.pg
+def test_pause_after_permit_issuance_refuses_actual_send(
+    dbs: dict[str, Database], sentinel_env: dict
+) -> None:
+    cfg = EgressConfig.from_json(json.dumps({
+        "destinations": {"message-receiver": {"scheme": "http", "host": "receiver.test",
+            "port": 8080, "methods": ["POST", "GET"]}}
+    }), production=False)
+    s = Sentinel(dbs["sentinel"], cfg, secrets.token_bytes(32))
+    claim = sentinel_env["claim"]
+    token = s.authorize(claim, sentinel_env["intent"], "http", "receiver.test", 8080, "POST")
+    dbs["owner"].one(
+        "UPDATE agent.runs SET pause_requested=true WHERE id=%s RETURNING 1", (claim.run_id,)
+    )
+    with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
+        s.verify_and_consume(token, "http", "receiver.test", 8080, "POST")
