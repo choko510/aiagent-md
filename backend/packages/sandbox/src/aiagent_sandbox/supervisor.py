@@ -40,6 +40,31 @@ from .landlock import block_cross_task_process_access, disable_dumpability, rest
 MAX_OUTPUT = 64 * 1024
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWNET = 0x40000000
+CLONE_NEWPID = 0x20000000
+
+# This trusted bootstrap stays in the parent PID namespace. Only the forked
+# untrusted child becomes PID 1 in the per-Task PID namespace, with no view of
+# (or ability to signal) sibling Task processes.
+_PID_NAMESPACE_EXEC = """
+import os
+import sys
+
+try:
+    pid = os.fork()
+except OSError:
+    os._exit(125)
+if pid == 0:
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError:
+        os._exit(127)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status):
+    os._exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(125)
+"""
 
 
 @dataclass
@@ -126,11 +151,10 @@ class Supervisor:
                 os.setgroups([])
                 os.setgid(gid)  # type: ignore[arg-type]
                 os.setuid(uid)
-            if require_netns:
-                try:
-                    os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace
-                except (OSError, AttributeError):
-                    os._exit(97)  # fail closed
+            try:
+                os.unshare(CLONE_NEWUSER | CLONE_NEWPID | (CLONE_NEWNET if require_netns else 0))
+            except (OSError, AttributeError):
+                os._exit(97)  # fail closed: mandatory PID namespace unavailable
             # setuid and the NEWUSER transition may reset dumpability. Sibling
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
@@ -148,7 +172,7 @@ class Supervisor:
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            sys.executable, "-I", "-S", "-c", _PID_NAMESPACE_EXEC, *argv,
             cwd=str(cwd),
             env=env,
             stdin=asyncio.subprocess.DEVNULL,
@@ -175,8 +199,8 @@ class Supervisor:
                 "reason": "FS_ISOLATION_UNAVAILABLE",
                 "detail": err[:400].decode("utf-8", "replace"),
             }
-        if rc == 97 and self.require_netns:
-            return {"status": "REFUSED", "reason": "NETNS_UNAVAILABLE"}
+        if rc == 97:
+            return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
         return {
             "status": "EXITED",
             "exitCode": rc,
