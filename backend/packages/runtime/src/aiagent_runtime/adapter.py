@@ -42,9 +42,7 @@ class DerivedStateMismatch(Exception):
 
 @dataclass
 class SegmentOutcome:
-    status: (
-        str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | PAUSED | REVOKED | BUDGET | ERROR
-    )
+    status: str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | PAUSED | REVOKED | BUDGET | ERROR
     text: str | None = None
     approval_ids: list[str] = field(default_factory=list)
     detail: str | None = None
