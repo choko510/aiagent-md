@@ -167,6 +167,10 @@ def claim_run(
             raise NotClaimable("run is not the task's active run")
         if r["status_code"] not in CLAIMABLE:
             raise NotClaimable(r["status_code"])
+        # A committed Cancel must be settled even when Pause remains requested.
+        # In particular, a dead worker must never leave CANCELLING orphaned.
+        if r["cancel_requested"] or r["status_code"] == "CANCELLING":
+            raise NotClaimable("cancelling")
         if r["pause_requested"]:
             raise NotClaimable("paused")
         if r["restore_incarnation"] != inc["restore_incarnation"]:
@@ -305,6 +309,18 @@ def check_current(
     return row
 
 
+def _has_unresolved_effects(c: psycopg.Connection[Row], tenant_id: str, run_id: str) -> bool:
+    """Canonical unresolved Tool Intent predicate for both segment and re-delivery exits."""
+    return (
+        c.execute(
+            "SELECT 1 FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
+            " AND status_code IN ('SENDING','UNKNOWN') LIMIT 1",
+            (tenant_id, run_id),
+        ).fetchone()
+        is not None
+    )
+
+
 def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) -> str:
     """Settle a paused/revoked run when no claim could be minted.
 
@@ -325,7 +341,8 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
             (tenant_id, pointer["task_id"]),
         ).fetchone()
         run = c.execute(
-            "SELECT status_code, pause_requested, cancel_requested FROM agent.runs"
+            "SELECT status_code, pause_requested, cancel_requested,"
+            " coalesce(lease_expires_at > now(), false) AS leased FROM agent.runs"
             " WHERE tenant_id=%s AND id=%s FOR UPDATE",
             (tenant_id, run_id),
         ).fetchone()
@@ -333,24 +350,23 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
             return "STALE_NOT_FOUND"
         if run["status_code"] in TERMINAL:
             return str(run["status_code"])
-        if revoked:
-            if scope_active(c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"])):
-                return "SCOPE_RESTORED"
-            pending = c.execute(
-                "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
-                " AND status_code IN ('SENDING','UNKNOWN')",
-                (tenant_id, run_id),
-            ).fetchone()
-            target = "WAITING_RECONCILIATION" if pending and pending["n"] else "CANCELLED"
-            error = "SCOPE_REVOKED"
+        cancelling = bool(run["cancel_requested"] or run["status_code"] == "CANCELLING")
+        revoked_now = not scope_active(c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))
+        if revoked and not revoked_now and not cancelling:
+            return "SCOPE_RESTORED"
+        if not cancelling and not revoked_now and not run["pause_requested"]:
+            return "PAUSE_CLEARED"
+        pending = _has_unresolved_effects(c, tenant_id, run_id)
+        if cancelling or revoked_now:
+            target = "WAITING_RECONCILIATION" if pending else "CANCELLED"
         else:
-            if not run["pause_requested"]:
-                return "PAUSE_CLEARED"
-            if run["cancel_requested"]:
-                return "CANCELLING"
-            target = "PAUSED"
-            error = None
-        if run["status_code"] == target and (not revoked or run["cancel_requested"]):
+            target = (
+                "WAITING_RECONCILIATION"
+                if pending or run["status_code"] == "WAITING_RECONCILIATION"
+                else "PAUSED"
+            )
+        error = "SCOPE_REVOKED" if revoked_now else None
+        if run["status_code"] == target and not run["leased"] and (not revoked_now or run["cancel_requested"]):
             return target
         c.execute(
             "UPDATE agent.runs SET status_code=%s, error_code=%s,"
@@ -359,7 +375,7 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
             " ended_at=CASE WHEN %s THEN now() ELSE ended_at END,"
             " record_version=record_version+1, updated_at=now()"
             " WHERE tenant_id=%s AND id=%s",
-            (target, error, revoked, target in TERMINAL, tenant_id, run_id),
+            (target, error, revoked_now, target in TERMINAL, tenant_id, run_id),
         )
         if task["status_code"] not in TERMINAL:
             c.execute(
@@ -376,7 +392,11 @@ def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) 
             aggregate_type="run",
             aggregate_id=run_id,
             kind="run.state_changed",
-            payload={"from": run["status_code"], "to": target, "cause": error or "pause_at_admission"},
+            payload={
+                "from": run["status_code"],
+                "to": target,
+                "cause": error or ("cancel_at_admission" if cancelling else "pause_at_admission"),
+            },
             actor=SERVICE_ACTOR,
             owner_user_id=task["owner_user_id"],
             task_id=task["id"],
@@ -624,25 +644,19 @@ def finish_segment(
         target = outcome
         revoked = not scope_active(c, claim.tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))
         if revoked or run["cancel_requested"] or run["status_code"] == "CANCELLING":
-            pending = c.execute(
-                "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
-                " AND status_code IN ('SENDING','UNKNOWN')",
-                (claim.tenant_id, claim.run_id),
-            ).fetchone()
-            target = "WAITING_RECONCILIATION" if pending and pending["n"] else "CANCELLED"
+            target = (
+                "WAITING_RECONCILIATION"
+                if _has_unresolved_effects(c, claim.tenant_id, claim.run_id)
+                else "CANCELLED"
+            )
             if revoked:
                 error_code = "SCOPE_REVOKED"
         elif run["pause_requested"]:
-            # Pausing must not hide an uncertain external effect. The reconciliation
-            # state wins until its ledger is resolved (no new tool/model admissions).
-            pending = c.execute(
-                "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
-                " AND status_code IN ('SENDING','UNKNOWN')",
-                (claim.tenant_id, claim.run_id),
-            ).fetchone()
             target = (
                 "WAITING_RECONCILIATION"
-                if outcome == "WAITING_RECONCILIATION" or (pending and pending["n"])
+                if outcome == "WAITING_RECONCILIATION"
+                or run["status_code"] == "WAITING_RECONCILIATION"
+                or _has_unresolved_effects(c, claim.tenant_id, claim.run_id)
                 else "PAUSED"
             )
         elif outcome in ("SUCCEEDED", "PARTIAL") and task["goal_revision"] != claim.goal_revision:
