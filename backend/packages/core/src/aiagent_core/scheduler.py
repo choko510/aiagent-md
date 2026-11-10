@@ -156,7 +156,11 @@ class Scheduler:
                     nxt = None
                 else:
                     due = due_slots(
-                        s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now,
+                        s["cron_expr"],
+                        s["timezone_id"],
+                        s["last_slot_at"],
+                        s["created_at"],
+                        now,
                         limit=s["max_catchup"] if s["catchup_policy"] == "all_bounded" else 1,
                     )
                     slots = choose(due, s["catchup_policy"], s["max_catchup"], now)
