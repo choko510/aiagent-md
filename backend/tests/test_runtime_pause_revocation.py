@@ -84,9 +84,10 @@ async def test_running_pause_then_resume_acks_without_retry_or_dlq(
     assert await worker.handle(job2) == "SUCCEEDED"
     assert _run_state(dbs, ids["runId"]) == "SUCCEEDED"
     assert _queue_state(dbs, job2.id) == "DONE"
-    assert dbs["owner"].one(
-        "SELECT count(*) n FROM queue.dead_letters WHERE job_id IN (%s,%s)", (job1.id, job2.id)
-    )["n"] == 0
+    assert (
+        dbs["owner"].one("SELECT count(*) n FROM queue.dead_letters WHERE job_id IN (%s,%s)", (job1.id, job2.id))["n"]
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -108,9 +109,7 @@ async def test_revoked_before_claim_acks_with_audit_not_dlq(dbs: dict[str, Datab
     assert await worker.handle(job) == "CANCELLED"
     assert _run_state(dbs, ids["runId"]) == "CANCELLED"
     assert _queue_state(dbs, job.id) == "DONE"
-    assert dbs["owner"].one(
-        "SELECT count(*) n FROM queue.dead_letters WHERE job_id=%s", (job.id,)
-    )["n"] == 0
+    assert dbs["owner"].one("SELECT count(*) n FROM queue.dead_letters WHERE job_id=%s", (job.id,))["n"] == 0
     audit = dbs["owner"].all(
         "SELECT payload_json FROM agent.domain_events WHERE run_id=%s AND event_kind='run.state_changed'",
         (ids["runId"],),
