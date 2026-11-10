@@ -5,6 +5,6 @@ pub mod journal;
 pub mod mock;
 pub mod protocol;
 
-pub use agent::{Agent, Decision, LocalPolicy};
+pub use agent::{Agent, ConnectionPhase, Decision, LocalPolicy};
 pub use journal::{BeginResult, EffectState, LocalJournal};
 pub use protocol::{ActionRequest, CloudGrant, Epoch, Fence, Operation, Scope, StartPermit, Target};
