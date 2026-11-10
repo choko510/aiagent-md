@@ -99,7 +99,7 @@ def restrict_to_workspace(workspace: Path) -> None:
         for system in ("/usr", "/bin", "/lib", "/lib64", "/sbin"):
             allow(Path(system), _READ | _EXECUTE)
         for runtime_file in ("/etc/ld.so.cache", "/etc/localtime", "/dev/null", "/dev/urandom"):
-            allow(Path(runtime_file), _READ | _WRITE_FILE)
+            allow(Path(runtime_file), _READ_FILE | _WRITE_FILE)
         rights = _READ | _WRITE | _EXECUTE
         if abi >= 2:
             rights |= _REFER
