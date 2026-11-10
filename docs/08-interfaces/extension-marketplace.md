@@ -1,7 +1,7 @@
 # Extension Marketplace — Skills・MCPマーケット仕様
 
 > **Draft / PROVISIONAL / NOT IMPLEMENTED / NOT TESTED**  
-> 調査: 2026-11-10 JST。**base: main**。参考実装: [PR #82](https://github.com/choko510/aiagent-md/pull/82)（調査時 HEAD `d2db4f460de293adf56c04e7444ac8b296248e63`、未マージ）。  
+> 調査: 2026-11-10 JST。**base: main**。参考実装: [PR #82](https://github.com/choko510/aiagent-md/pull/82)（再確認時 HEAD `5228abe03e23bb82b1cafa970f2721ee2251d636`、未マージ。以降も変更され得るため実装前に再取得する）。  
 > このPRは補足仕様・実装計画だけを追加する。PR #82の変更や、既存88基礎仕様の正本をコピーしない。
 
 ## 0. 採用案
@@ -25,7 +25,7 @@ Webに `/marketplace` と `/settings/extensions` を設け、**Skills・Remote M
 - [06-05 Plugins](../06-memory-skills/plugins-recipes-and-hooks.md)
 - [05-01 Connector Framework](../05-connectors/connector-framework.md)
 - [08-01 REST](rest-api.md) / [09-02 Secrets](../09-security/secrets-and-credentials.md) / [09-08 Sentinel](../09-security/sentinel-authority.md)
-- [10-01 DB](../10-infrastructure/database-schema-and-migrations.md) / [Architecture Rules `E](../00-foundation/architecture-rules.md)
+- [10-01 DB](../10-infrastructure/database-schema-and-migrations.md) / [Architecture Rules §E](../00-foundation/architecture-rules.md)
 
 ## 1. 外部レジストリの調査（2026-11-10）
 
@@ -51,7 +51,7 @@ MCP公式Registryはpreviewのため、互換性/一時停止/データ更新の
 
 ## 2. PR #82のコード監査：何が存在し、何を追加するか
 
-[PR #82](https://github.com/choko510/aiagent-md/pull/82)（HEAD `d2db4f4`）はPython Agent Runtime、Gateway、Queue、PostgreSQL、認証/隔離の**実装PR**。本仕様は**未マージのPRを前提とした本番稼働主張ではない**。
+[PR #82](https://github.com/choko510/aiagent-md/pull/82)（再確認HEAD `5228abe`）はPython Agent Runtime、Gateway、Queue、PostgreSQL、認証/隔離の**実装PR**。本仕様は**未マージのPRを前提とした本番稼働主張ではない**。
 
 | 実ファイル | 静的に確認した現状 | Marketplaceで必要な差分 |
 |---|---|---|
@@ -66,7 +66,7 @@ MCP公式Registryはpreviewのため、互換性/一時停止/データ更新の
 
 **P0統合上の問題**：PR82のTrusted EgressはTool用HTTP `CONNECT`を禁止する。Remote MCPはHTTPS先が普通なので、**MCP Adapterを独立Trusted ConnectorとしてTLS終端・方法/宛先をSentinelが検査できる経路**を設計・実証するまで「接続可能」と扱わない。通常`httpx`で直接外向き通信する近道は禁止。既存のSchema固定/最終Admission/Side-Effect Ledgerを迂回しない。
 
-PR #82は本番KVM 2VMや実Provider等の残試験がある。Marketplaceが動いてもその本番未検証項目をPASSとはしない。PR #82の変更139ファイルとは本PRで編集パスを分ける。
+PR #82は本番KVM 2VMや実Provider等の残試験がある。Marketplaceが動いてもその本番未検証項目をPASSとはしない。PR #82の既存実装とは本PRで編集パスを分ける。2026-11-10の差分照合では、旧HEAD `d2db4f4`から最新確認 `5228abe`まで17コミット進み、`tool_gateway.py`、`control.py`、`worker.py`、`0005_roles_grants_rls.up.sql`、各種回帰テストに変更がある。新しいTool Lifecycleはこれらの最終Admission、`SENDING/UNKNOWN`再照合、Scope Revoke/Cancel、DB権限制限、復旧世代を壊してはならず、MKT-3開始時に最新HEADと再照合する。
 
 ## 3. 責務とデータ設計
 
@@ -91,6 +91,15 @@ PR #82は本番KVM 2VMや実Provider等の残試験がある。Marketplaceが動
 
 Source重複は`catalogKey`で別管理。ClawHub+GitHubの同一Skillはcommit/hash等の証拠が一致した場合だけUI上の候補を束ねる。Source名・Publisher名・スター数が同じだけではdedupeしない。
 
+## 3.1 ClawHub発行者の不変照合（P1 / MKT-2の必須条件）
+
+- `slug`はグローバル一意ではない。検索/一覧の各候補は常に **`source=clawhub, ownerHandle, slug`** で識別する。可能なら上流の不変publisher/skill IDも保存する。owner rename/transfer/slug再利用が発生した場合、旧ハンドル文字列だけで同一作者と断定しない。
+- `CatalogKey → owner-qualified detail → exactVersion → publication/scan → download response → Quarantine → Release → Installation` の全段階で **期待ownerとslugを再照合**する。上流が `ownerHandle` を受け付ける経路では必ず明示し、返されたowner識別子・出典を照合する。パラメータが無視されるslug-only APIは照合済みと扱わない。
+- ClawHubの公開 `GET /api/v1/download?slug=&version=` は**slug-only**であり、`ownerHandle`を付けてもサーバー側で所属が保証されると確認できない限り、そのレスポンスを特定publisherのSkillとしてInstallしない。別ownerが返る/ownerを証明できない場合は `OWNER_NOT_VERIFIABLE` として検疫・インストール拒否。UIの同名別owner候補は表示可能でも、自動的に誤ったパッケージへフォールバックしない。
+- Exact versionを決定後、ホスト型ZIPなら内容のSHA-256・manifest/fingerprint・出典ownerを検査。`public-github` JSON handoffならpublisherが指定したGitHubリポジトリ・subpath・**不変commit SHA**・取得後bundle digestまで別々に検証する。GitHub側名義や同じversionラベルをClawHub同一性の代替にしない。
+- 初回Install時に承認された`CatalogKey, publisher identity, exactVersion, artifactSha256, sourceCommitSha?`をimmutable Release/receiptに固定し、Update/Rollbackでも新しい候補を再検証。所有権移転・slug衝突・版差替えの際は自動導入を止め、人間の再承認と出典の再検証を要求する。
+- **回帰要件 MKT-T19**：同一slug/versionを所有するpublisher A/B、Aの詳細取得でBが返る、BのZIPが返る、slug移転・名前変更、Git handoff先入替え、Digest差替えのすべてでAへの誤導入は0。失敗時はinstalled/activatedにならず、監査Receiptには期待IDと観測IDをSecret無しで記録する。
+
 ## 4. インストール/削除状態とシーケンス
 
 `DISCOVERED(UI) → STAGED → VERIFIED → INSTALLED_DISABLED → ENABLED`。
@@ -112,7 +121,7 @@ Source重複は`catalogKey`で別管理。ClawHub+GitHubの同一Skillはcommit/
 
 - v1は`remotes.type = streamable-http`だけ。`packages`のみのstd​​io、legacy SSE、URL-templateが未対応なら`UNSUPPORTED_TRANSPORT/CONFIGURATION`。`npx/uvx/pip`等をHost実行しない。
 - OAuthはRFC9728 Protected Resource Metadata、RFC8414/OIDC discovery、OAuth PKCE+state+resource indicator、必要に応じてCIMD/事前登録/DCR。利用できないClient登録方式は`AUTH_SETUP_REQUIRED`。Callbackを単回・認証済Ownerへ束縛。Access/Refresh TokenをLLM/URL/ログ/Registryに出さない。EgressではOAuth issuer/redirect先/metadata/DNS rebinding/SSRFまで検査。
-- MCP descriptions、`annotations.readOnlyHint`、prompts/resources/instructions、`tools/list`はすべて非信頼。MCPが`readOnly`を宣言しても、Gatewayの実効Riskは上がらない・自動的に書込みを許さない。
+- MCP descriptions、`annotations.readOnlyHint`、prompts/resources/instructions、`tools/list`はすべて非信頼。MCPが`readOnly`を宣言しても、**Gatewayの実効Riskを自己申告だけで下げない**。保守的分類や権限確認によりRiskが上がることはあり得る。自己申告による自動許可・承認省略・書込み許可はしない。
 - `tools/list`のcursor上限、循環検出、tool数/JSON Schema bytes上限、`list_changed`再取得、旧Schema revisionの呼出拒否、Server再接続時のEndpoint Identity検証を実装。
 - 使用中Runの`ToolIdentity`とSchemaをimmutable snapshot固定。失効なら安全側にToolUnavailableを返す。Serverから到着したTool結果に含まれる指示をsystem/developer命令として実行しない。
 - MCP HTTPS通信はPR82 Sentinel/Egressの制限を満たす**信頼済みAdapter**で実証。外部ConnectionのHealthとCatalog APIの到達性を混同しない。
@@ -161,13 +170,14 @@ Source重複は`catalogKey`で別管理。ClawHub+GitHubの同一Skillはcommit/
 | MKT-T16 | PR #82統合 | 現行Gateway/Effect/Sentinelの回帰、実Remote MCPのHTTPS E2E、Tool直接送信0 |
 | MKT-T17 | Supply chain | Publisher spoof、版差替え、Git SHAとArtifact digest不一致を検疫 |
 | MKT-T18 | Privacy | Token/Private Skill本文/認証パラメータのLog/LLM/Stream漏えい0 |
+| MKT-T19 | Publisher identity | 同名別owner・slug移転・slug-only download・ZIP/Git handoff digest不一致を拒否し、別発行者のSkill誤導入0 |
 
 これらは設計ID。既存`REQ-ID→TEST-ID→SC-ID`運用ではSC-05/07/08/09/16を参照し、共有受入シナリオへの正式登録はOwner合意後。性能/成功率は未測定でありSLOを作り話にしない。
 
 ## 9. 実装順序とマージ条件
 
-1. **MKT-1**：Read-only Catalog Adapter (Official MCP/ClawHub/GitHub)、Cache/normalized search、React Marketplace UI、Mock+API試験。**PR82未マージでも実装可**。
-2. **MKT-2**：SkillのQuarantine/Bundle/Installation/ACL、Enable/Disable/Remove/Update/Rollback、on-demand loader。**PR82のBackend/DB統合後**。
+1. **MKT-1**：Read-only Catalog Adapter (Official MCP/ClawHub)、Cache/normalized search、React Marketplace UI、Mock+API試験。**PR82未マージでも実装可**。GitHubはMKT-2以降で、明示されたowner/repo/commit SHAとバンドル検疫を伴う手動Importとして実装（MKT-1に一般GitHub Skills検索は含めない）。
+2. **MKT-2**：SkillのQuarantine/Bundle/Installation/ACL、Enable/Disable/Remove/Update/Rollback、owner/slug/digest不変検証、承認済みGitHub commitの手動Import、on-demand loader。**PR82のBackend/DB統合後**。
 3. **MKT-3**：Remote MCP/OAuth/Connection、Gateway-only dynamic Tool、Run Snapshot、Sentinel強制TLS経路、実API E2E。**PR82・隔離/実送信の受入完了後**。
 4. **MKT-4**：権限差分再承認、監視、性能、管理者向けPrivate Source、障害復旧。
 5. **MKT-5（将来別PR）**：stdio/Plugin/Script。独立隔離Cell/Sidecar＋専用Security ADRと実機試験なしには出荷しない。
