@@ -1,0 +1,17 @@
+[project]
+name = "aiagent-memory"
+version = "0.1.0"
+description = "AI-02: read-only ACL/consent/retention-gated memory retrieval"
+requires-python = ">=3.12,<3.14"
+dependencies = ["aiagent-context"]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+aiagent-context = { workspace = true }
+
+# AI-07 enables shared workspace membership with one atomic backend/uv.lock update.
+[tool.uv]
+managed = false

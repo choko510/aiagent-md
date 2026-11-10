@@ -1,0 +1,17 @@
+[project]
+name = "aiagent-context"
+version = "0.1.0"
+description = "AI-02: provenance-preserving context plan and audited compaction ports"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# AI-07 enables shared workspace membership with one atomic backend/uv.lock update.
+[tool.uv]
+managed = false
