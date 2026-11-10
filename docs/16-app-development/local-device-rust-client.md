@@ -79,11 +79,19 @@ desktop/
 1. 未登録デバイスは`UNPAIRED`。ユーザー操作による「PCを接続」でDevice AgentがDevice Key Pairを生成。秘密鍵はWindows Credential Manager/DPAPI、macOS Keychain、Linuxの適切なSecret Storeを用い、暗号化できない場合は登録を拒否（平文設定への保存なし）。
 2. Device AgentがTLS先のDevice Gatewayから短命のpairing requestを受信し、ブラウザで本人に既存アカウント認証を求める。Cloudのowner/tenantは**認証されたサーバーセッション**から解決する。表示コードとPC側コードを照合しユーザーが承認する。
 3. サーバーはDevice public key/owner/tenant・失効世代・device capabilitiesの最小情報を保持。登録は鍵の所持証明でありTPM attestationを意味しない。主張されたOSやtoolchainをtrust proofとして扱わない。
-4. `wss://`のTLS（証明書検証必須）＋短命接続tokenとnonce署名でproof-of-possession。tokenをURL queryに含めず、ログ/診断に残さない。再接続には新たなchallengeと単調なconnection generationを要求。
+4. `wss://`のTLS（証明書検証必須）＋短命接続tokenとnonce署名でproof-of-possession。tokenをURL queryに含めず、ログ/診断に残さない。再接続には新たなchallengeと単調なconnection generationを要求。**アカウント切替ではこのconnectionを使い回さない**（§4.1参照）。
 5. `PAIRED_OFFLINE → ONLINE → STALE → OFFLINE`。`REVOKED`は新規接続・命令を拒否。Device再登録は新しいIdentityと明示承認が必要。Gatewayが落ちても`ONLINE`を推測しない。
 6. 盗難/紛失デバイスの失効、キー回転、サーバーPITR時の`restoreIncarnation`増分、全セッションの閉鎖と再ペアリング条件を実装。旧接続の通信再開だけで権限を復元しない。
 
 **技術選択**: rustlsを候補とするTLS、Tokio系async runtime、Serde + JSON Schemaを用いた厳格なwire検証。認証プロトコルや署名形式は暗号ライブラリの実績ある標準を使用し、独自暗号を作らない。ライブラリのバージョンと脆弱性・ライセンスは実装PRでpinする。
+
+### 4.1 同じOSユーザーでCloudアカウントを切り替える場合（P2-03）
+
+- Device Identityは物理PC単位の万能鍵ではなく、**`(OS user SID/UID, tenantId, ownerUserId, deviceIdentityId)`ごとに独立Key Pair**を発行し、OS Secure Storeでも分離する。Device登録状態・Local Policy・秘密設定・Grant/Journal/Artifact cacheのnamespaceを同じ組で分離し、アカウントBがAのDevice Key、実行履歴やArtifactを見られないようにする。アカウントBは別のCloud pairingと本人認証を必要とする。
+- アカウントA→Bへの切替は`ACCOUNT_SWITCH_PREPARE → STOP_NEW_ACTIONS → RECONCILE_OR_UNKNOWN → REVOKE_A_TUNNEL_AND_GRANTS → ZEROIZE_A_ACTIVE_MEMORY → AUTHENTICATE_B → LOAD_B_NAMESPACE`。AのActive Run / desktop lease、Cua/Chrome子プロセス、pending grants、認証token、旧接続を遮断し、Bのsessionで再利用しない。OSデスクトップのユーザー切替ではロック/非対話状態を別途検査する。
+- Aで既に始まった操作の完了可能性は消せない。AのReceiptは**Aの暗号化されたjournalに保存**し、後日A自身の再認証で旧Intentを照合可能にする。Aの未確定EffectをBへコピーしない。AのReceiptをBが提出/再解釈してBのTaskを完了させることは拒否する。Aのjournalをアカウント切替だけで消去せず、retention/明示削除規則を適用する。
+- OSユーザーを共有する場合、同じOS権限を持つ別プロセスからの完全分離は保証できない。ファイルACL/鍵ストアの保護限界をUIへ提示し、アカウント切替時にOwner/tenant境界違反をfail closedにする。
+
 
 ## 5. 操作認可：CloudとLocalの二段階
 
@@ -91,7 +99,9 @@ desktop/
 
 - Cloud: Authenticated user → Task/Run/Goal/Lease/HEAD proposal → Tool Registry schema → policy/budget → approval → Sentinel → Device Gateway delivery。
 - Local: device identity/session/restore generation → signed, single-intent action grant → allowed adapter/op/target/args digest → interactive user policy/consent/lock state → Cua/Browser/Build各Adapter固有の制約 → execute。
-- Action Grant（提案）に結合: `tenantId, ownerUserId, deviceId, taskId, runId, goalRevision, leaseEpoch, restoreIncarnation, toolIntentId, attemptFence, operation, targetFingerprint, argsSha256, policyRevision, expiresAt, nonce`。受信側は全て検証し、grantと実引数の不一致は拒否。
+- Action Grant（提案）に結合: `tenantId, ownerUserId, deviceId, deviceClaimEpoch, taskId, runId, goalRevision, leaseEpoch, restoreIncarnation, toolIntentId, attemptFence, operation, targetFingerprint, argsSha256, policyRevision, expiresAt, nonce`。**`deviceClaimEpoch`はPC横断Task移動専用の単調増加世代で、Runの`leaseEpoch`と独立**。Gatewayでの配送、Deviceの受信、Local Journalへの記録、**OS副作用の直前**にすべて照合する。値不一致/世代失効/オフライン/Grant期限切れは新規実行を拒否。grantと実引数の不一致も拒否。
+- **直前オンライン認可（P1-01）**: `click/type_text/press_key/navigation/send/install/write/build-with-side-effects`等の状態変更は、Local Policy判定後、操作の直前にCloud Tool Gatewayへ`authorize_start(toolIntentId, deviceId, deviceClaimEpoch, leaseEpoch, attemptFence, argsSha256)`を認証済み接続経由で照会する。Cloudは現行Device Claim/Run/Goal/Approval/Sentinel/Effect状態と認可対象の同一性を**同じトランザクション境界または同等のCAS/予約**で確かめ、使用済みなら拒否する。Localは新しい`START_PERMIT`（当該Intent/Claim/Connection/対象/期限に限定した単回Permit）を得た場合だけ開始を認める。インターネット不達時に既存Grantだけで開始しない。端末側にもサーバー応答と時刻・対象を確認する実行直前ゲートを置く。読み取りも秘密情報の流出を伴う場合はオンライン再認可を要求する。
+- 直前PermitとCloud側Handoff CASの競合は、Cloudが`inFlight`を予約したか`FENCED`にしたかを単一の順序で記録する。Permitを発行済みでもOS配送に至る前の切断/Cancelで停止する努力は必要だが、**Permitを取得した瞬間と物理入力の間を原子的にはできず、通信断後の即時失効は保証しない**。HandoffはinFlight/UNKNOWNを確認し、依存する新たな副作用を止める（§19.2/§9.1）。
 - `session`やタブ名、PID、URL文字列、ユーザー入力のownerIdは認可証明ではない。PID/window handle/tabIdは再利用されるため、実行直前にプロセス開始時刻・window generation・browser identity・tab document generation等を再照合。
 - Cloud側Grantの有効範囲とLocal Policyの積集合のみ有効。GUI操作は`READ_ONLY`、`WINDOW_CONTROL`、`DESKTOP_CONTROL`、`BROWSER_SITE`、`BUILD_RECIPE`、`ANDROID_TEST`等のカテゴリを細分化。Cuaのbounded manifestは上限で、Task/Origin別grantの代替ではない。
 - 画面全域のcapture、クリップボード、ファイルdialog、パスワード入力、UAC、OS設定、未知アプリ起動、任意コード/外部送信はデフォルト拒否。不可逆な外部操作は既存の個別approvalを要求。
@@ -104,9 +114,17 @@ desktop/
 - MCP serverが宣言するToolをそのままCloudへforwardしない。**静的なAdapter allowlist**（例: `list_windows`、`get_window_state`、`click`、`type_text`、`scroll`、`press_key`）と実際のschema双方を検証。未知版・Tool・schema差分は`DRIVER_INCOMPATIBLE`。
 - Cuaの`bounded` + capability manifestで許可範囲を減らす。`unrestricted`は使わない。`--grant existing-profile`を起動時一律に与えない。Chromeの既存プロフィールは`Chrome Adapter`側で明示ペアリングを基本とする。
 - GUI action前にfresh snapshot取得、対象のPID/window generation + element tokenを確認。`delivery_mode: background`から開始し、`background_unavailable`時に勝手にforegroundへ昇格しない。ユーザーの前面操作許可があり、同じターゲットを再検証したときのみ再提案。
-- 同じ物理desktopへの操作は**global exclusive lock**。異なるCua session名でもキーボード/focusは共有。Chrome Adapterと同じChromeウィンドウへの操作は排他・経路選択を統合し、Chromeで拒否されたOriginをCua経由で迂回させない。
+- 同じ物理desktopへの操作は**global exclusive lock**。異なるCua session名でもキーボード/focusは共有。Chrome Adapterと同じChromeウィンドウへの操作は排他・経路選択を統合し、Chromeで拒否されたOriginをCua経由で迂回させない。**この文だけでは強制不能なので§6.1の実行側制御を必須とする。**
 - 複数モニター、表示倍率、window移動、フォーカス、現在frameの鮮度を操作前後に検証。合成入力が対象以外のアプリに届いた兆候があれば以後停止。
 - Cuaの終了/再起動でセッション・element tokenを破棄し、新しいDriver generationで再取得。子プロセスに秘匿済みでないTool引数をログ出力させない。
+
+### 6.1 Desktop CuaとBrowserの強制分離（P1-04）
+
+- **Desktop Cua runtime**は`bounded` + **非ブラウザApp Identityのpositive allowlist** + `desktop.display: false` +必要最小限のUI toolを使用。Windowsなら署名・実行ファイルpath/Process Identity/StartTime/Window handle generation、macOSならbundle ID等を実行前・直前に照合。Chrome/Edge/Brave/Firefox/Chromium、ブラウザ内蔵WebView、ブラウザとして扱うElectron等は**Desktop入力からデフォルト除外**。未知App/Identity混在のウィンドウも拒否。Cua manifestのApp resourceが実際の制限を表現できない場合、そのAppをDesktop操作に許可しない。
+- Desktop Cuaからの汎用`click/type_text/press_key/drag`、座標入力、フォーカス変更、App launch、global shortcut、Address barへの入力を使って**ブラウザへ到達する経路をすべて拒否**。Window ID/Proc変化後や画面重複の疑いでは一旦停止。デスクトップ全体へのクリックと`get_desktop_state`は初版無効。Tool manifestだけに依存せず、Rust Adapterがtarget-classifier/Window ownership/Actionの二重検証を強制する。分類できない場合は`BROWSER_BOUNDARY_UNKNOWN`でfail closed。
+- **Browser runtime**はDesktop Cuaと**別プロセス・別MCP session・別Manifest/Grant**とし、Origin/Tab/Documentを束縛する**typed browser toolsのみ**を公開。ユーザーの既存Chromeは原則BrowserMCP local Adapterに限定し、Cuaのbrowser-only runtimeを採用する場合も同じOrigin/Tab/Document Policyを満たしたときだけ許可。`--grant existing-profile`をDesktop runtimeへ渡さない。
+- Cua公式のPermission仕様では`resources.browser.origins`と汎用Desktop入力/観測Toolは分離が必要（[Cua permissions](https://cua.ai/docs/cua-driver/guides/permissions)）。**同一runtimeにBrowser Origin制限と汎用Desktop入力を併存させず**、あるAdapterで拒否されたOriginを別Adapter/ショートカットへ再提案しても拒否する。守れないOS/アプリでは初版のブラウザ併用を無効化する。
+
 
 ## 7. Chrome拡張・サーバーブラウザとの責務分離
 
@@ -137,12 +155,22 @@ GUI操作とビルドは独立したAdapter/Policy境界とする。
 
 ## 9. 実行ジャーナル・通信断・再試行
 
-- Device Agentの暗号化/アクセス制限されたlocal SQLite journalに`(deviceId, toolIntentId, requestSha256, attemptFence, restoreIncarnation)`、`RECEIVED → ADMITTED → STARTED → COMPLETED/FAILED/UNKNOWN`、対応するdriver generation、receipt digest、許可記録を保存（生の入力文字列・秘密画像は保存しない）。
+- Device AgentのOwner/Tenant分離された暗号化/アクセス制限local SQLite journalに`(tenantId, ownerUserId, deviceIdentityId, deviceId, deviceClaimEpoch, toolIntentId, requestSha256, attemptFence, restoreIncarnation)`、`RECEIVED → ADMITTED → STARTED → COMPLETED/FAILED/UNKNOWN`、対応するdriver/connection generation、receipt digest、許可記録を保存（生の入力文字列・秘密画像は保存しない）。`deviceClaimEpoch`や署名/Intent/Request digest不一致では重複実行を許可しない。
 - `STARTED`記録のDurable commit後に副作用を送る。切断やクラッシュの発生箇所によって「操作済みか不明」が残るため**exactly-onceの保証はしない**。その場合は`UNKNOWN`をCloud Ledgerへ伝え、書き込み操作を自動再試行しない。
 - `RECEIVED`かつ実行前と証明できる操作は再配送可。`COMPLETED`/`FAILED`は同じintentionを再実行せず保存済みreceiptを返す。`toolIntentId`同一・request digest違いは`INTENT_CONFLICT`。読み取りで安全と証明できる操作だけ再実行を許可する。
-- Cloud側`tool_gateway.py`のEffect Ledger/Unknown/Reconcileを正本にし、Local SQLiteは重複実行防止の補助。Local成功をCloudの`CONFIRMED`へ反映する前に、Cloud側の現行run lease/goal/revocationを再検証。
-- Clientのreconnect/backoff/jitter/heartbeatは必要だが、接続復活だけで旧grantを復活させない。新しいconnection generation＋run fence＋restore incarnationを照合。長期offline時は保留操作を実行せず期限切れとして返す。
+- Cloud側`tool_gateway.py`のEffect Ledger/Unknown/Reconcileを正本にし、Local SQLiteは重複実行防止の補助。**実行開始の認可と、過去に始まったIntentのReceipt照合は別規則**。新規開始のみ現在のRun Lease/Goal/Device Claim/Revocationを要求する。既存Intentの正当なReceiptは、Run Cancel/Lease変更/Device Handoff後でも`toolIntentId, owner/tenant/device identity, original deviceClaimEpoch, attemptFence, request digest, signer, execution record, receipt digest`を照合し、Cloudの元IntentのEffect Ledgerへ`CONFIRMED/FAILED/UNKNOWN`として歴史的に記録できる。旧RunのReceiptを新Runの`RUN_COMPLETED`や新Goalの成功判定へ転用してはならない。
+- **Receipt専用経路（P1-05）**: `reconcile_existing_intent`は新規Tool dispatchと別API/権限。元Owner namespaceから署名されたReceiptだけ受け入れ、元Intentが当時の認可対象だったこと・実行Journalと一致することを検証。Receipt受信時の現行Run Lease/Grant失効**だけを理由に捨てない**。競合更新はCAS、重複Receiptはidempotent、矛盾Receiptは`RECEIPT_CONFLICT`で監査へ。
+- Clientのreconnect/backoff/jitter/heartbeatは必要だが、接続復活だけで旧grantを復活させない。新しいconnection generation＋run fence＋`deviceClaimEpoch`＋restore incarnationを照合。長期offline時は保留操作を実行せず期限切れとして返す。
 - Ctrl+CやStopは新規dispatch停止と子プロセス終了を優先するが、OSが既に受け取ったinputやAPK installをロールバックできない。partial/unknownを成功扱いしない。
+
+
+### 9.1 異なるIntent ID間の意味的重複防止（P1-02）
+
+- `toolIntentId`による重複防止は**同じID内のみ**。Cloud Gatewayは`semanticEffectKey`（例: `tenantId + project/task goalRevision + external target identity + action kind + normalized payload/idempotency scope`）と依存Step/resourceのEffect Barrierを発行・保持する。鍵生成はTool Gatewayが検証済み引数と認可された対象から行い、LLMやユーザーが任意の文字列で衝突回避/権限拡大できない。外部対象を正規化できないときも同一resourceの保守的なBarrierを使う。
+- 同一の外部対象/意味的に同じ送信・決済・投稿・install・delete等について、Aの`SENDING/STARTED/UNKNOWN`が残るとき、**別Run/別PC/新しい`toolIntentId`であっても`WAITING_RECONCILIATION`を優先**。Task全体を止める必要はなく、依存Stepと競合resource上の新規副作用を封鎖し、独立read-only/証跡検索・安全な別resource作業だけ進める。
+- Barrier解除は(1)元Intentの**信頼できるReceipt/外部照会**による`CONFIRMED`または`PROVEN_NOT_APPLIED`、あるいは(2)結果未確定であることと二重送信リスクを**人間が対象とペイロードを確認**し、既存Approval/Sentinelを経た独立の`RISK_ACCEPTED_RETRY`決定だけ。後者は自動解除ではなく、新Intent/新Permitで別の試行として監査し、元`UNKNOWN`は確定済みと書き換えない。元アクションが本当に取り消せた保証はない。
+- 例: PC Aで`送信`クリック後に切断→`UNKNOWN`。PC Bの新Runはメール/メッセージ送信の再実行不可で、送信済み確認を先行。通信断中のAに同じ送信を繰返させない。受信先/内容の違う独立メッセージは別Effectキーでも、同一スレッドへの順序依存がある場合はresource barrierで待つ。
+- **本規則はTool Gateway/Effect Ledgerの共通仕様への追加提案**。PR #82の`reconcile()`を複製してRust側に新しい正本を作らない。正式なDB unique/lock key、外部照会Providerとリスク分類はCHAT_03/09/10審査を要する。
 
 ## 10. APIとワイヤ契約（正式所有者の承認前）
 
@@ -171,16 +199,18 @@ GUI操作とビルドは独立したAdapter/Policy境界とする。
   "arguments": { "elementRef": "fresh-element-ref" },
   "argsSha256": "sha256-digest",
   "attemptFence": "1",
+  "deviceClaimEpoch": "12",
   "connectionGeneration": "9",
   "expiresAt": "2026-11-10T14:00:00Z",
   "grant": "short-lived-signed-envelope"
 }
 ```
 
-- 値は例示であり有効な署名や実UUIDではない。`grant`はServer発行の認証済みGrantを表す概念。生のowner/tenantは受信ペイロードの自己申告だけでは認証にならない。
+- 値は例示であり有効な署名や実UUIDではない。`grant`はServer発行の認証済みGrantを表す概念。`deviceClaimEpoch`はEnvelopeと署名付きGrant、Local Journal、Cloud Device Claim CASの**全てで同一**でなければならない。状態変更では操作直前に`START_PERMIT`を取得する（§5）。生のowner/tenantは受信ペイロードの自己申告だけでは認証にならない。
 - 型・`int64`・versionは`contracts/domain/v1`が正本、Python/Pydantic・Rust/Serde・WebViewの型を生成する。未知major/余分なfield/負数・オーバーフロー・期限・schema driftはfail closed。Device-specific enumを生成型へ重複手書きしない。
 - 新規DB表はDeviceIdentity/Pairing/Connection/Grants/Revoke/DispatchReceipt/ArtifactAccess等の**提案のみ**。CHAT_10が既存migrationに重複・衝突しないexpand/backfill/contract案を採用し、RLS/owner分離、同じ`tool_intents`/`side_effect_records`と整合させる。
 - Log/Observability: deviceId（必要なら匿名化）、operation class、intentId、duration bucket、result code、redacted receipt digestだけ。画面内容、パスワード、クリップボード、キー入力、Full DOM、full URL queryはログ不可。
+- `START_PERMIT`は内部Delivery Envelopeと同じ`deviceClaimEpoch`/Operation/Intent/Targetを結び、Cloud Tool Gatewayが一度だけ生成する短命の開始証明。署名されたRecipientであるDevice Agentだけが受け取り、別Device/別Owner/後継Runへ再使用不可。CloudがClaimを進めた後の遅延Permit生成はCASで拒否し、既発行PermitによるinFlight/UNKNOWNは§19の照合バリアに残す。
 
 ## 11. UXとプライバシー
 
@@ -325,10 +355,10 @@ Cloud側`PlacementPlannerPort`は各Task Stepの実行先を**候補として選
 1. **PREPARE**: UIから移動先Bを指定、または能力不足で推奨。CloudがOwner/Project/Task、Bのオンライン状態・Capability・必要なdata classを確認。まだ旧PC Aの権限をBへコピーしない。
 2. **QUIESCE**: Aの対象Runについて新規操作受付を止め、active actionを完了/失敗/UNKNOWNとして確定できる限り照会。GUIの途中操作があるならStop結果を明示し、Cloud Effect Ledgerで不確定を保持。
 3. **SNAPSHOT**: Cloud canonical HEADと同じrevisionのProject Snapshot / Test Manifest / Artifact digestを凍結。Aに残るローカル状態は分類して本人に確認。秘密を含む差分は共有不可。
-4. **FENCE**: CloudでCASの成立を条件に`deviceClaimEpoch`を進め、Aのデバイス別Action Grantを失効。復旧世代、Run lease、Effect Intentを再検証。**ACKやオフライン通知に依存せずサーバー配送時に旧世代を拒否**。
+4. **FENCE**: CloudでCASの成立を条件に`deviceClaimEpoch`を進め、Aのデバイス別Action Grant/Start Permitを失効。復旧世代、Run lease、Effect Intentを再検証。**ACKやオフライン通知に依存せずサーバー配送時に旧世代を拒否**し、Local側でも実行直前のOnline認可と当該epoch照合で旧命令を拒否。すでに開始された副作用は`IN_FLIGHT/UNKNOWN`として別の照合バリアへ（§9.1）。
 5. **STAGE**: B側で許可済みProject binding/worktreeとArtifactを整合確認。ステージング失敗ならBへActive権限を与えず、明示的`HANDOFF_BLOCKED`として残す。
-6. **ACTIVATE**: Bの登録済みDevice Key・Local Policy・ユーザー同意・必要SDK/USB対象を確認し、**新しいTask segment / Run claim**で再開。Aのraw session/approvalを横流ししない。
-7. **RECONCILE**: Aが遅れて再接続しても旧claimを再開不可。Aからの旧receiptは既存Tool Intentの照会情報としてのみ統合し、勝手に二重実行しない。Cloudが状態確定できない副作用は`UNKNOWN`でUser/Verifierへ提示。
+6. **ACTIVATE**: Bの登録済みDevice Key・Local Policy・ユーザー同意・必要SDK/USB対象を確認し、**新しいTask segment / Run claim**で再開。Aのraw session/approvalを横流ししない。**§9.1の`WAITING_RECONCILIATION`にある依存Stepへの新規状態変更IntentはBからも発行不可**。独立read-only作業のみ進行可。
+7. **RECONCILE**: Aが遅れて再接続しても旧claimを再開不可。Aからの旧receiptは**元Intentへの歴史的Effect照合**として取り込み、勝手に二重実行せず新Runの成功扱いもしない。Cloudが状態確定できない副作用は`UNKNOWN`でUser/Verifierへ提示し、関連対象の再送を止める。
 
 **線形化境界**はCloudのdevice claim CAS とTool Gatewayのdispatched-intent admission。旧PCにあらかじめ投入済みの命令の停止はネットワーク断中に物理的には保証できないため、短命Grant、Local expiry、通信不達で新規高リスク操作を拒否するPolicy、接続時の再検証を重ねる。`exactly-once`または通信断後の即時取消しを保証しない。
 
