@@ -1,0 +1,46 @@
+name: Marketplace MKT-1 (offline contract and UI)
+on:
+  pull_request:
+    paths:
+      - "backend/marketplace/**"
+      - "web/**"
+      - ".github/workflows/marketplace-mkt1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Read-only catalog adapters and API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.3"
+      - name: Install frozen Python graph
+        run: uv sync --project backend/marketplace --locked --extra test
+      - name: Compile and test offline (no external registry calls)
+        run: |
+          uv run --project backend/marketplace --locked --extra test python -m compileall -q backend/marketplace/src
+          uv run --project backend/marketplace --locked --extra test python -m pytest backend/marketplace/tests -q
+
+  web:
+    name: Marketplace UI TypeScript build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install lockfile-pinned dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Strict typecheck and build
+        run: npm run build
