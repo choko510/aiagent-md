@@ -66,6 +66,7 @@ export default function App() {
   const [data, setData] = useState<ListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CatalogItem | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -103,7 +104,7 @@ export default function App() {
         if (!abort.signal.aborted) setLoading(false);
       });
     return () => abort.abort();
-  }, [query, kind, source, cursor]);
+  }, [query, kind, source, cursor, refresh]);
 
   useEffect(() => {
     if (!detailId) {
@@ -218,7 +219,7 @@ export default function App() {
               <strong>{warning.source === "mcp" ? "MCP Registry" : "ClawHub"}:</strong> {errorMessage(warning.code)}
             </p>
           ))}
-          {error && <div role="alert" className="error">{error} <button type="button" onClick={() => { setQuery((q) => q + " "); setTimeout(() => setQuery(query), 0); }}>再試行</button></div>}
+          {error && <div role="alert" className="error">{error} <button type="button" onClick={() => setRefresh((value) => value + 1)}>再試行</button></div>}
           {loading ? (
             <div className="loading" role="status">拡張機能を検索しています...</div>
           ) : data?.items.length ? (
