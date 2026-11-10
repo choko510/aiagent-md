@@ -56,6 +56,9 @@ impl LocalPolicy {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionPhase { Unpaired, PairedOffline, OnlineMock, Stale, Revoked }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Denied(&'static str),
@@ -75,17 +78,43 @@ pub struct Agent<C: AuthenticatedChannelPort, A: AdapterPorts> {
     pub adapters: A,
     pub policy: LocalPolicy,
     journal: LocalJournal,
+    phase: ConnectionPhase,
     stopped: bool,
     revoked: bool,
 }
 impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
     pub fn new(scope: Scope, fence: Fence, channel: C, adapters: A,
                policy: LocalPolicy, journal: LocalJournal) -> Self {
-        Self { scope, fence, channel, adapters, policy, journal,
+        let phase = if channel.online() { ConnectionPhase::OnlineMock }
+                    else { ConnectionPhase::PairedOffline };
+        Self { scope, fence, channel, adapters, policy, journal, phase,
                stopped: false, revoked: false }
     }
     pub fn stop(&mut self) { self.stopped = true; }
-    pub fn revoke(&mut self) { self.revoked = true; self.stopped = true; }
+    pub fn revoke(&mut self) {
+        self.revoked = true;
+        self.stopped = true;
+        self.phase = ConnectionPhase::Revoked;
+    }
+    pub fn phase(&self) -> ConnectionPhase { self.phase }
+    pub fn disconnect(&mut self) {
+        if !self.revoked { self.phase = ConnectionPhase::PairedOffline; }
+    }
+    pub fn mark_stale(&mut self) {
+        if !self.revoked { self.phase = ConnectionPhase::Stale; }
+    }
+    /// Simulator-only reconnect. An old connection generation can never be revived.
+    pub fn reconnect_mock(&mut self, next_fence: Fence) -> Result<(), &'static str> {
+        if self.stopped || self.revoked || !next_fence.valid()
+            || next_fence.connection_generation <= self.fence.connection_generation
+            || !self.channel.online()
+        {
+            return Err("RECONNECT_DENIED");
+        }
+        self.fence = next_fence;
+        self.phase = ConnectionPhase::OnlineMock;
+        Ok(())
+    }
     pub fn stopped(&self) -> bool { self.stopped }
     pub fn revoked(&self) -> bool { self.revoked }
     pub fn effect(&self, intent_id: &str) -> Result<Option<EffectState>, String> {
@@ -95,7 +124,9 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
                    grant: &CloudGrant, now_ms: u64) -> Decision {
         // No offline starts, including "already approved" grants.
         if self.stopped || self.revoked { return Decision::Denied("LOCAL_STOP_OR_REVOKED"); }
-        if !self.channel.online() { return Decision::Denied("OFFLINE"); }
+        if self.phase != ConnectionPhase::OnlineMock || !self.channel.online() {
+            return Decision::Denied("OFFLINE");
+        }
         if request.scope != self.scope || request.fence != self.fence {
             return Decision::Denied("STALE_SCOPE_OR_FENCE");
         }
@@ -108,14 +139,15 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             None => return Decision::Denied("START_PERMIT_DENIED"),
         };
         // The cloud mock can drop offline while authorizing; fail closed again.
-        if !self.channel.online() || self.stopped || self.revoked {
+        if !self.channel.online() || self.phase != ConnectionPhase::OnlineMock
+            || self.stopped || self.revoked {
             return Decision::Denied("OFFLINE_OR_STOP_BEFORE_START");
         }
         if !permit.matches(request, grant, now_ms) {
             return Decision::Denied("START_PERMIT_MISMATCH");
         }
         // SQLite uses IMMEDIATE transaction, commits STARTED+one-use Permit together.
-        let begin = self.journal.begin(&request.tool_intent_id, &request.args_sha256,
+        let begin = self.journal.begin(&request.tool_intent_id, &request.journal_fingerprint(),
                                        &request.attempt_fence.to_string(), &permit.permit_nonce);
         match begin {
             Ok(BeginResult::Replay(EffectState::CompletedLocal)) => {
