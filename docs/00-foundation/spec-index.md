@@ -178,3 +178,8 @@ Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-de
 ## 2026-11-09 Python-first 移行（STEP 1）
 
 開発言語方針はPython-first（[ADR-036〜040](architecture-decisions.md)、物理配置は[System Architecture §13.2](system-architecture.md)、拘束規則は[Architecture Rules §E](architecture-rules.md)）。**新しい独立仕様MDは追加せず**、88件の正本・COMP-01・DEV-01〜11のモジュール数とIDは変更しない。各正本MDへ「2026-11-09 Python-first」節または該当箇所の改訂を加え、TS/Node前提の記述は移行監査台帳でA（修正）/B（保持）/C（再検討）に分類した。静的検査は`audit/cross-contract/check_python_first.py`。Agent Runtime OSSはSTEP 2で選定（ADR-038）。
+
+
+## 2026-11-10 Rust Local Device Client / Cua Driver companion（DEV-LDC）
+
+[ローカルDevice Agent・Cua・Chrome・Build/ADB統合設計](../16-app-development/local-device-rust-client.md) はDEV-05/06およびTool/Sentinel/Sandbox/Browserの**横断補足仕様**。Rustの対象はユーザーPCにインストールするDevice AgentとデスクトップUIであり、Python-firstのサーバー実装や既存Browser Workerを置換しない。DEV-LDC-REQ/T（本文では`LDC-REQ/T`）を提案し、正式なDomain/REST/DB型は各正本Ownerの承認後に確定する。**Design only / NOT RUN**。88件・COMP-01・DEV-01..20の歴史的カウントは変更しない。

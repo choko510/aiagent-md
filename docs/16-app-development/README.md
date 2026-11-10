@@ -74,3 +74,8 @@ Review source: user-provided audit of HEAD `d54a3b8`. The P0/P1 issues are resol
 | Dagger | 再現可能build（任意） | Cell内daemon/Engine権限の扱いをCHAT_09が審査するまで不採用 |
 
 Agentが生成したコードは、言語がPythonであってもBackend本体と同じプロセス・権限・venv・FSで実行しない（[Architecture Rules §E-4](../00-foundation/architecture-rules.md)）。各OSSの統合方式（Cell内実行の可否、ネットワーク要件、Model Gateway経由化）はSTEP 2で検証する。
+
+
+## Rust Local Device Client + Cua Driver（DEV-LDC / Companion Draft, 2026-11-10）
+
+[ローカルPC操作・実機デバッグ統合設計](local-device-rust-client.md) は本章の**補足仕様**であり、88基礎正本やDEV-01..20の履歴件数に加算しない。バックエンドはADR-036のPython-firstを維持し、ユーザー所有デバイスのRust/Tauriクライアントだけを別配布物とする。Cua Driverはローカル限定MCP/embedded daemon経由、Cloud Tool Gateway/Sentinel/Effect Ledgerを迂回しない。Windows GUIを先行し、Chrome既存プロフィールはBrowserMCPの別Adapter、Build/ADBは厳格な別権限。**実装・実機試験は未着手（NOT RUN）**。
