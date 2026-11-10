@@ -1,5 +1,8 @@
-"""STEP 3-E: generated code runs ONLY in the execution cell on a different kernel (Linux container / VM), reached via a
-scoped, authenticated RPC with a single-use grant - never in the control-plane processes. Requires Docker."""
+"""STEP 3-E: generated code runs in a Docker cell via authenticated RPC and single-use grants.
+
+Docker is NOT a separate guest kernel; this test does not prove KVM/libvirt VM isolation.
+Distinct guest kernel / vsock security requires a separate production topology acceptance test.
+"""
 
 from __future__ import annotations
 
