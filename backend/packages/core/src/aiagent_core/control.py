@@ -249,7 +249,7 @@ def release(db: Database, claim: Claim) -> bool:
 
 def _raise_for(c: psycopg.Connection[Row], claim: Claim) -> None:
     row = c.execute(
-        "SELECT r.status_code, r.lease_epoch, r.cancel_requested, t.goal_revision FROM agent.runs r"
+        "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, t.goal_revision FROM agent.runs r"
         " JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id WHERE r.tenant_id=%s AND r.id=%s",
         (claim.tenant_id, claim.run_id),
     ).fetchone()
@@ -263,6 +263,8 @@ def _raise_for(c: psycopg.Connection[Row], claim: Claim) -> None:
         raise FencedOut(claim.run_id)
     if row["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)
+    if row["pause_requested"] or row["status_code"] == "PAUSED":
+        raise Paused(claim.run_id)
     raise NotClaimable(row["status_code"])
 
 
@@ -525,7 +527,7 @@ def finish_segment(
     """
     with db.tx() as c:
         task = c.execute(
-            "SELECT id, owner_user_id, goal_revision, status_code FROM agent.tasks WHERE tenant_id=%s AND id=%s FOR UPDATE",
+            "SELECT id, owner_user_id, workspace_id, goal_revision, status_code FROM agent.tasks WHERE tenant_id=%s AND id=%s FOR UPDATE",
             (claim.tenant_id, claim.task_id),
         ).fetchone()
         run = c.execute(
@@ -540,20 +542,20 @@ def finish_segment(
         if run["lease_epoch"] != claim.lease_epoch:
             raise FencedOut(claim.run_id)
         target = outcome
-        if run["cancel_requested"] or run["status_code"] == "CANCELLING":
+        revoked = not scope_active(c, claim.tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))
+        if revoked or run["cancel_requested"] or run["status_code"] == "CANCELLING":
             pending = c.execute(
                 "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
                 " AND status_code IN ('SENDING','UNKNOWN')",
                 (claim.tenant_id, claim.run_id),
             ).fetchone()
             target = "WAITING_RECONCILIATION" if pending and pending["n"] else "CANCELLED"
-        elif outcome in ("SUCCEEDED", "PARTIAL"):
-            if task["goal_revision"] != claim.goal_revision:
-                raise StaleGoal(claim.run_id)
-            if run["pause_requested"]:
-                target = "PAUSED"
-        elif outcome == "WAITING_APPROVAL" and run["pause_requested"]:
+            if revoked:
+                error_code = "SCOPE_REVOKED"
+        elif run["pause_requested"]:
             target = "PAUSED"
+        elif outcome in ("SUCCEEDED", "PARTIAL") and task["goal_revision"] != claim.goal_revision:
+            raise StaleGoal(claim.run_id)
         terminal = target in TERMINAL
         c.execute(
             "UPDATE agent.runs SET status_code=%s, result_text=coalesce(%s, result_text), error_code=%s,"
