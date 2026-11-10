@@ -40,7 +40,11 @@ def _job(dbs: dict[str, Database], tenant: dict[str, str], ids: dict[str, str]) 
         " per_tenant_active_limit=100 WHERE name='run' RETURNING 1"
     )
     queue = QueuePort(dbs["relay"])
-    assert queue.enqueue("run", tenant["tenantId"], f"state-{uuid7()}", _pointer(tenant, ids))
+    pointer = _pointer(tenant, ids)
+    incarnation = dbs["owner"].one("SELECT restore_incarnation FROM agent.schema_control")
+    assert incarnation is not None
+    pointer["restoreIncarnation"] = str(incarnation["restore_incarnation"])
+    assert queue.enqueue("run", tenant["tenantId"], f"state-{uuid7()}", pointer)
     job = QueuePort(dbs["runtime"]).dequeue("run", "state-worker")
     assert job is not None
     return job
