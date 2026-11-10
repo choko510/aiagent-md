@@ -59,7 +59,7 @@ def kvm_api_available() -> bool:
     try:
         if not stat.S_ISCHR(path.stat().st_mode):
             return False
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
         try:
             return fcntl.ioctl(fd, KVM_API_VERSION, 0) == EXPECTED_API_VERSION
         finally:
@@ -178,7 +178,8 @@ def _valid_record(
         if hashlib.sha256(artifact.read_bytes()).hexdigest() != proof:
             return False
         when = dt.datetime.fromisoformat(check["recordedAt"].replace("Z", "+00:00"))
-        if not when.tzinfo or abs((fresh_time - when).total_seconds()) > 86400:
+        age = (fresh_time - when).total_seconds() if when.tzinfo else float('inf')
+        if age < -300 or age > 86400:
             return False
     except (AttributeError, OSError, TypeError, ValueError):
         return False
