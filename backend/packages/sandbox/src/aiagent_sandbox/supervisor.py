@@ -35,7 +35,7 @@ from aiagent_domain.rpcwire import (
 )
 
 from .grant import GrantError, verify
-from .landlock import disable_dumpability, restrict_to_workspace
+from .landlock import block_cross_task_process_access, disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
 CLONE_NEWUSER = 0x10000000
@@ -134,7 +134,8 @@ class Supervisor:
             # setuid and the NEWUSER transition may reset dumpability. Sibling
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
-                disable_dumpability()
+                disable_dumpability()  # defense in depth; execve resets this alone
+                block_cross_task_process_access()  # inherited by execve and child processes
             except OSError:
                 os._exit(98)
 
