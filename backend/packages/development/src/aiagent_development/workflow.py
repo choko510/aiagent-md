@@ -128,7 +128,11 @@ class DevelopmentWorkflow:
     def submit_patch(self, scope: ProjectScope, cycle_id: str, patch: PatchArtifact, repo_root: Path) -> Cycle:
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.EXECUTING)
-        if patch.run != c.run or patch.workspace_revision != scope.workspace_revision or patch.parent_sha != scope.base_sha:
+        if (
+            patch.run != c.run
+            or patch.workspace_revision != scope.workspace_revision
+            or patch.parent_sha != scope.base_sha
+        ):
             raise StaleReference("patch lineage/workspace/base differs")
         validate_manifest_paths(repo_root, patch.paths)
         if patch.diff_sha256 in c.submitted_digests:
@@ -190,7 +194,8 @@ class DevelopmentWorkflow:
             raise StaleReference("review is for an obsolete SHA")
         self.reviewers.assert_verified(c.scope, c.run, verdict)
         if verdict.reviewer_task_id == c.run.task_id or any(
-            r.reviewer_task_id == verdict.reviewer_task_id or r.reviewer_role == verdict.reviewer_role for r in c.reviews
+            r.reviewer_task_id == verdict.reviewer_task_id or r.reviewer_role == verdict.reviewer_role
+            for r in c.reviews
         ):
             raise InvalidEvidence("reviewers must be independent and roles unique")
         reviews = (*c.reviews, verdict)
@@ -210,10 +215,7 @@ class DevelopmentWorkflow:
         if tested != required or len(c.tests) != len(required):
             return False
         if any(
-            not t.executed
-            or t.exit_code != 0
-            or t.kind != "test"
-            or t.source_commit_sha != c.commit.commit_sha
+            not t.executed or t.exit_code != 0 or t.kind != "test" or t.source_commit_sha != c.commit.commit_sha
             for t in c.tests
         ):
             return False

@@ -95,7 +95,11 @@ class RunFence:
     restore_incarnation: int
 
     def __post_init__(self) -> None:
-        if not self.task_id or not self.run_id or min(self.goal_revision, self.lease_epoch, self.restore_incarnation) < 0:
+        if (
+            not self.task_id
+            or not self.run_id
+            or min(self.goal_revision, self.lease_epoch, self.restore_incarnation) < 0
+        ):
             raise ScopeDenied("invalid Run fence")
 
 
@@ -231,8 +235,10 @@ class ReviewVerdict:
 
     def __post_init__(self) -> None:
         require_sha(self.target_sha)
-        if not self.reviewer_task_id or not self.evidence_ref or self.reviewer_role not in (
-            "functional", "security", "ui-e2e"
+        if (
+            not self.reviewer_task_id
+            or not self.evidence_ref
+            or self.reviewer_role not in ("functional", "security", "ui-e2e")
         ):
             raise InvalidEvidence("reviewer identity/role/evidence required")
 

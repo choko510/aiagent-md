@@ -58,7 +58,9 @@ class FakeGateway:
         self.allowed = {"sandbox.build", "sandbox.static-check", "sandbox.test", "git.commit"}
         self.calls: list[tuple[str, str, str]] = []
 
-    def require_operation(self, scope: ProjectScope, run: RunFence, operation: str, target_sha: str, intent_ref: str) -> None:
+    def require_operation(
+        self, scope: ProjectScope, run: RunFence, operation: str, target_sha: str, intent_ref: str
+    ) -> None:
         if operation not in self.allowed or not intent_ref or not target_sha:
             raise ScopeDenied("no matching trusted Tool Intent/approval")
         self.calls.append((operation, target_sha, intent_ref))
@@ -171,10 +173,11 @@ class FakeStore:
         self.diffs.add(key)
 
 
-
 @pytest.fixture
 def harness(tmp_path: Path):
-    scope = ProjectScope("tenant-a", "owner-a", "project-a", "workspace-a", "choko/test-fixture", "feat/test", BASE, "r1")
+    scope = ProjectScope(
+        "tenant-a", "owner-a", "project-a", "workspace-a", "choko/test-fixture", "feat/test", BASE, "r1"
+    )
     fence = RunFence("task-builder", "run-1", 1, 3, 0)
     runs = FakeRunAuthority()
     workspace = FakeWorkspace(scope)
@@ -185,7 +188,9 @@ def harness(tmp_path: Path):
     store = FakeStore()
     root = tmp_path / "project"
     root.mkdir()
-    flow = DevelopmentWorkflow(runs=runs, reviewers=reviewers, workspaces=workspace, gateway=gateway, sandbox=cell, git=git, store=store)
+    flow = DevelopmentWorkflow(
+        runs=runs, reviewers=reviewers, workspaces=workspace, gateway=gateway, sandbox=cell, git=git, store=store
+    )
     return flow, scope, fence, runs, workspace, gateway, git, cell, store, root, reviewers
 
 
@@ -197,9 +202,13 @@ def stage(h, cycle_id="cycle-1", digest=DIGEST):
     flow.execute(
         scope,
         cycle_id,
-        ExecutionRequest(scope, fence, f"plan-{cycle_id}", "build", ("offline-static-build",), TOOLCHAIN, "build-intent"),
+        ExecutionRequest(
+            scope, fence, f"plan-{cycle_id}", "build", ("offline-static-build",), TOOLCHAIN, "build-intent"
+        ),
     )
-    flow.submit_patch(scope, cycle_id, PatchArtifact(f"artifact-{cycle_id}", digest, ("src/main.py",), BASE, "r1", fence), root)
+    flow.submit_patch(
+        scope, cycle_id, PatchArtifact(f"artifact-{cycle_id}", digest, ("src/main.py",), BASE, "r1", fence), root
+    )
     return flow, scope, fence
 
 
@@ -215,7 +224,9 @@ def run_tests(h, cycle_id="cycle-1", names=("unit", "security")):
         flow.execute(
             scope,
             cycle_id,
-            ExecutionRequest(scope, fence, f"plan-{cycle_id}", "test", ("fixture-test", test), TOOLCHAIN, f"test-{test}"),
+            ExecutionRequest(
+                scope, fence, f"plan-{cycle_id}", "test", ("fixture-test", test), TOOLCHAIN, f"test-{test}"
+            ),
         )
 
 
@@ -260,7 +271,21 @@ def test_obsolete_review_and_changed_head_rejected(harness):
         flow.review(scope, "cycle-1", verdict(git.head_sha, "security"))
 
 
-@pytest.mark.parametrize("path", ["../secrets", "/etc/passwd", "src/../../tmp", "C:/Users/a", "..\\secret", ".git/config", "a//b", "a/./b", "a/", "~/.ssh/id_rsa"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../secrets",
+        "/etc/passwd",
+        "src/../../tmp",
+        "C:/Users/a",
+        "..\\secret",
+        ".git/config",
+        "a//b",
+        "a/./b",
+        "a/",
+        "~/.ssh/id_rsa",
+    ],
+)
 def test_path_traversal_rejected(path):
     with pytest.raises(InvalidPath):
         safe_relative_path(path)
@@ -334,9 +359,15 @@ def test_duplicate_diff_across_cycles_rejected(harness):
     flow, scope, fence = harness[:3]
     flow.create("second", scope, fence, "request-second")
     flow.plan(scope, "second", TaskPlan("plan-second", "request-second", ("unit",), 1))
-    flow.execute(scope, "second", ExecutionRequest(scope, fence, "plan-second", "build", ("offline-build",), TOOLCHAIN, "build-second"))
+    flow.execute(
+        scope,
+        "second",
+        ExecutionRequest(scope, fence, "plan-second", "build", ("offline-build",), TOOLCHAIN, "build-second"),
+    )
     with pytest.raises(StateConflict):
-        flow.submit_patch(scope, "second", PatchArtifact("second-patch", DIGEST, ("src/other.py",), BASE, "r1", fence), harness[9])
+        flow.submit_patch(
+            scope, "second", PatchArtifact("second-patch", DIGEST, ("src/other.py",), BASE, "r1", fence), harness[9]
+        )
 
 
 def test_other_tenant_workspace_rejected(harness):
@@ -355,7 +386,9 @@ def test_cell_fence_mismatch_rejected(harness):
     flow.plan(scope, "cycle-1", TaskPlan("plan", "change", ("unit",), 1))
     harness[7].wrong_fence = True
     with pytest.raises(InvalidEvidence):
-        flow.execute(scope, "cycle-1", ExecutionRequest(scope, fence, "plan", "build", ("fixed-test",), TOOLCHAIN, "intent"))
+        flow.execute(
+            scope, "cycle-1", ExecutionRequest(scope, fence, "plan", "build", ("fixed-test",), TOOLCHAIN, "intent")
+        )
 
 
 def test_commit_ack_unknown_remains_blocked(harness):

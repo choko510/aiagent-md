@@ -1,4 +1,5 @@
 """AI-03 development vertical-slice contract tests. All Git operations use temp fixtures."""
+
 from __future__ import annotations
 
 import hashlib
@@ -51,13 +52,17 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
 @pytest.fixture
 def env(repo: tuple[Path, str]):
     root, head = repo
-    scope = ProjectScope("tenant-A", "owner-A", "project-A", "workspace-A", "fixture/project", "feat/change", head, "revision-1")
+    scope = ProjectScope(
+        "tenant-A", "owner-A", "project-A", "workspace-A", "fixture/project", "feat/change", head, "revision-1"
+    )
     run = RunFence("builder-task", "run-1", 1, 1, 1)
     auth = MockAuthority(scope, run)
     scm = MockGitProvider(scope, auth)
     sandbox = MockSandbox()
     store = MemoryCycleStore()
-    flow = DevelopmentWorkflow(runs=auth, reviewers=auth, workspaces=auth, gateway=auth, sandbox=sandbox, git=scm, store=store)
+    flow = DevelopmentWorkflow(
+        runs=auth, reviewers=auth, workspaces=auth, gateway=auth, sandbox=sandbox, git=scm, store=store
+    )
     return root, scope, run, auth, scm, sandbox, store, flow
 
 
@@ -71,7 +76,9 @@ def _prepare(env, cycle="cycle-1", *, tests=("unit", "security")):
     flow.create(cycle, scope, run, "change-1")
     flow.plan(scope, cycle, TaskPlan("plan-1", "change-1", tests, run.goal_revision))
     flow.execute(scope, cycle, _request(env))
-    patch = PatchArtifact("artifact-1", hashlib.sha256(b"patch-1").hexdigest(), ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    patch = PatchArtifact(
+        "artifact-1", hashlib.sha256(b"patch-1").hexdigest(), ("app.py",), scope.base_sha, scope.workspace_revision, run
+    )
     flow.submit_patch(scope, cycle, patch, root)
     flow.commit(scope, cycle, message="test-only commit", intent_ref="commit-1")
     committed = flow._load(scope, cycle)
@@ -89,7 +96,9 @@ def _test(env, test_id, *, executed=True, exit_code=0, cycle="cycle-1"):
 
 def _review(env, role, *, passed=True, finding=None, sha=None):
     _, scope, _, _, scm, _, _, flow = env
-    verdict = ReviewVerdict(f"task-{role}", role, sha or scm.head(scope), passed, f"evidence-{role}", (finding,) if finding else ())
+    verdict = ReviewVerdict(
+        f"task-{role}", role, sha or scm.head(scope), passed, f"evidence-{role}", (finding,) if finding else ()
+    )
     return flow.review(scope, "cycle-1", verdict)
 
 
@@ -137,7 +146,24 @@ def test_stale_sha_review_and_branch_change_fail_closed(env):
         _review(env, "functional")
 
 
-@pytest.mark.parametrize("path", ["../private", "a/../../b", "/etc/passwd", "C:/Windows/system32", "a\\b", "x//y", ".git/config", "a/.GIT/config", "a/./b", "~/.ssh/id_rsa", "a\x00b", "a\nfoo", "a/"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../private",
+        "a/../../b",
+        "/etc/passwd",
+        "C:/Windows/system32",
+        "a\\b",
+        "x//y",
+        ".git/config",
+        "a/.GIT/config",
+        "a/./b",
+        "~/.ssh/id_rsa",
+        "a\x00b",
+        "a\nfoo",
+        "a/",
+    ],
+)
 def test_path_traversal_and_metadata_denied(path):
     with pytest.raises(InvalidPath):
         safe_relative_path(path)
@@ -182,7 +208,12 @@ def test_cancel_or_fence_after_admission_blocks_commit(env):
     flow.create("cycle-1", scope, run, "change-1")
     flow.plan(scope, "cycle-1", TaskPlan("plan-1", "change-1", ("unit",), 1))
     flow.execute(scope, "cycle-1", _request(env))
-    flow.submit_patch(scope, "cycle-1", PatchArtifact("patch", "f" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run), root)
+    flow.submit_patch(
+        scope,
+        "cycle-1",
+        PatchArtifact("patch", "f" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run),
+        root,
+    )
     original = auth.require_operation
 
     def revoke_after_approval(*args):
@@ -196,7 +227,13 @@ def test_cancel_or_fence_after_admission_blocks_commit(env):
     auth.active = True
     auth.run = replace(run, lease_epoch=run.lease_epoch + 1)
     with pytest.raises(ScopeDenied):
-        scm.commit_patch(scope, PatchArtifact("patch", "b" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run), scope.base_sha, "i", "commit")
+        scm.commit_patch(
+            scope,
+            PatchArtifact("patch", "b" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run),
+            scope.base_sha,
+            "i",
+            "commit",
+        )
 
 
 @pytest.mark.parametrize("executed,code", [(False, None), (True, 1)])

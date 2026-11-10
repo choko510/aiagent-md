@@ -3,6 +3,7 @@
 The synthetic SHA returned here is not a real Git commit object, no network is used.
 Local actual Git fixture setup is confined to tests/ and never in Trusted Backend.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -29,7 +30,9 @@ from .contracts import (
 class MockAuthority:
     scope: ProjectScope
     run: RunFence
-    allowed: set[str] = field(default_factory=lambda: {"sandbox.build", "sandbox.test", "sandbox.static-check", "git.commit"})
+    allowed: set[str] = field(
+        default_factory=lambda: {"sandbox.build", "sandbox.test", "sandbox.static-check", "git.commit"}
+    )
     active: bool = True
     calls: list[str] = field(default_factory=list)
 
@@ -39,14 +42,19 @@ class MockAuthority:
 
     def assert_verified(self, scope: ProjectScope, builder_run: RunFence, verdict: ReviewVerdict) -> None:
         self.assert_current(scope, builder_run)
-        if verdict.reviewer_task_id == builder_run.task_id or verdict.reviewer_task_id != f"task-{verdict.reviewer_role}":
+        if (
+            verdict.reviewer_task_id == builder_run.task_id
+            or verdict.reviewer_task_id != f"task-{verdict.reviewer_role}"
+        ):
             raise ScopeDenied("reviewer task is not independently verified")
 
     def assert_scope(self, scope: ProjectScope) -> None:
         if not self.active or scope != self.scope:
             raise ScopeDenied("workspace ownership or revision mismatched")
 
-    def require_operation(self, scope: ProjectScope, run: RunFence, operation: str, target_sha: str, intent_ref: str) -> None:
+    def require_operation(
+        self, scope: ProjectScope, run: RunFence, operation: str, target_sha: str, intent_ref: str
+    ) -> None:
         self.assert_current(scope, run)
         if operation not in self.allowed or not target_sha or not intent_ref:
             raise ScopeDenied(f"unapproved {operation} action")
@@ -119,7 +127,9 @@ class MockGitProvider:
                 raise ScopeDenied("unapproved repository or branch")
             return self.heads[key]
 
-    def commit_patch(self, scope: ProjectScope, patch: PatchArtifact, expected_head_sha: str, intent_ref: str, message: str) -> CommitEvidence:
+    def commit_patch(
+        self, scope: ProjectScope, patch: PatchArtifact, expected_head_sha: str, intent_ref: str, message: str
+    ) -> CommitEvidence:
         with self._lock:
             self.authority.assert_current(scope, patch.run)
             if "git.commit" not in self.authority.allowed or not intent_ref or not message.strip():
@@ -130,7 +140,9 @@ class MockGitProvider:
             if sha == expected_head_sha:
                 raise InvalidEvidence("unexpected synthetic SHA collision")
             self.heads[(scope.repository, scope.branch, scope.workspace_id)] = sha
-            return CommitEvidence(expected_head_sha, sha, patch.diff_sha256, patch.artifact_ref, "mock-commit:" + intent_ref)
+            return CommitEvidence(
+                expected_head_sha, sha, patch.diff_sha256, patch.artifact_ref, "mock-commit:" + intent_ref
+            )
 
     def push(self, scope: ProjectScope, expected_head_sha: str, intent_ref: str) -> str:
         with self._lock:

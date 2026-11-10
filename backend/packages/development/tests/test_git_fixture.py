@@ -28,10 +28,30 @@ def test_real_git_fixture_worktree_and_compare_and_swap(tmp_path: Path):
     worktree = tmp_path / "isolated-worktree"
     repo.mkdir()
     git(repo, "init", "-b", "feat/fixture")
-    git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "base")
+    git(
+        repo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "base",
+    )
     base = git(repo, "rev-parse", "HEAD").stdout.strip()
     git(repo, "worktree", "add", "--detach", str(worktree), base)
-    git(worktree, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "candidate")
+    git(
+        worktree,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "candidate",
+    )
     new = git(worktree, "rev-parse", "HEAD").stdout.strip()
     assert new != base
     git(repo, "update-ref", "refs/heads/feat/fixture", new, base)
