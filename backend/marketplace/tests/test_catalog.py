@@ -1,5 +1,7 @@
 """MKT-1 offline tests: no real remote API, no installation or execution."""
 import asyncio
+import base64
+import json
 import os
 
 import httpx
@@ -444,3 +446,112 @@ def test_development_preview_rejects_missing_token(monkeypatch):
     monkeypatch.delenv("AIAGENT_MARKETPLACE_DEV_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="DEV_TOKEN"):
         importlib.import_module("aiagent_marketplace.app").create_development_app()
+
+
+def test_invalid_opaque_item_ids_are_400_not_500():
+    # Valid base64url/JSON can still contain an unhashable source or identity.
+    payloads = [
+        [["mcp"], "example/test"],
+        [{"source": "mcp"}, "example/test"],
+        ["mcp", ["example/test"]],
+        ["mcp", {"key": "example/test"}],
+        ["mcp"],
+        ["mcp", "example/test", "extra"],
+        {"0": "mcp", "1": "example/test"},
+        None,
+        3,
+        ["not-a-source", "example/test"],
+    ]
+    app = FastAPI()
+    app.include_router(create_router(CatalogService(FakeTransport()), authenticate=lambda: "test"))
+    with TestClient(app) as client:
+        for payload in payloads:
+            token = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            resp = client.get("/api/v1/marketplace/items/" + token)
+            assert resp.status_code == 400, (payload, resp.text)
+            assert resp.json()["detail"] == "INVALID_ITEM_ID"
+        # Invalid but URL-safe Base64 input must also be a predictable 400.
+        resp = client.get("/api/v1/marketplace/items/_")
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "INVALID_ITEM_ID"
+
+
+def test_429_warning_includes_bounded_retry_and_prevents_repeat_upstream_calls():
+    class LimitedTransport(FakeTransport):
+        async def get(self, source, path, params):
+            if source == "mcp":
+                self.calls.append((source, path, dict(params)))
+                raise CatalogError("RATE_LIMITED", 503, 13)
+            return await super().get(source, path, params)
+
+    transport = LimitedTransport(pages={
+        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
+    })
+    service = CatalogService(transport)
+    first = run(service.list_items())
+    assert first["partial"] is True
+    assert first["warnings"] == [{"source": "mcp", "code": "RATE_LIMITED", "retryAfterSeconds": 13}]
+    assert len(first["items"]) == 1
+    assert sum(call[0] == "mcp" for call in transport.calls) == 1
+
+    second = run(service.list_items())
+    assert second["partial"] is True
+    assert second["warnings"][0]["source"] == "mcp"
+    assert second["warnings"][0]["code"] == "RATE_LIMITED"
+    assert 1 <= second["warnings"][0]["retryAfterSeconds"] <= 13
+    assert sum(call[0] == "mcp" for call in transport.calls) == 1
+    assert second["items"][0]["kind"] == "SKILL"
+
+    # Retrying a single source likewise reports the hint without another fetch.
+    blocked = run(service.list_items(source="mcp"))
+    assert blocked["items"] == []
+    assert blocked["warnings"][0]["retryAfterSeconds"] > 0
+    assert sum(call[0] == "mcp" for call in transport.calls) == 1
+
+
+def test_429_retry_after_is_clamped_and_missing_header_has_backoff():
+    class MissingRetry(FakeTransport):
+        async def get(self, source, path, params):
+            self.calls.append((source, path, dict(params)))
+            raise CatalogError("RATE_LIMITED", 503)
+
+    service = CatalogService(MissingRetry())
+    first = run(service.list_items(source="clawhub"))
+    assert first["warnings"][0]["retryAfterSeconds"] == 30
+
+    class HugeRetry(FakeTransport):
+        async def get(self, source, path, params):
+            raise CatalogError("RATE_LIMITED", 503, 86400)
+
+    huge = run(CatalogService(HugeRetry()).list_items(source="mcp"))
+    assert huge["warnings"][0]["retryAfterSeconds"] == 120
+
+
+def test_cooldown_expiry_allows_the_source_again(monkeypatch):
+    import aiagent_marketplace.catalog as catalog
+
+    clock = [1000.0]
+    monkeypatch.setattr(catalog.time, "monotonic", lambda: clock[0])
+
+    class OnceLimited(FakeTransport):
+        async def get(self, source, path, params):
+            if not self.calls:
+                self.calls.append((source, path, dict(params)))
+                raise CatalogError("RATE_LIMITED", 503, 5)
+            return await super().get(source, path, params)
+
+    transport = OnceLimited(pages={
+        ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {}},
+    })
+    service = CatalogService(transport)
+    first = run(service.list_items(source="mcp"))
+    assert first["warnings"][0]["retryAfterSeconds"] == 5
+    clock[0] += 4.0
+    second = run(service.list_items(source="mcp"))
+    assert second["warnings"][0]["retryAfterSeconds"] == 1
+    assert len(transport.calls) == 1
+    clock[0] += 1.0
+    third = run(service.list_items(source="mcp"))
+    assert len(third["items"]) == 1
+    assert third["warnings"] == []
+    assert len(transport.calls) == 2
