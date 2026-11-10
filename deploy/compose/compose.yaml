@@ -36,7 +36,8 @@ networks:
   db: {internal: true}
   rpc: {internal: true}
   web: {internal: true}
-  egress: {}
+  egress:
+    driver_opts: {com.docker.network.bridge.name: br-aiagent-eg}  # matched by deploy/nftables
   edge: {}
 
 secrets:

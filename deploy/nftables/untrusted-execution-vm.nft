@@ -1,0 +1,11 @@
+#!/usr/sbin/nft -f
+# Untrusted Execution VM: NO IP connectivity at all (the VM also has no NIC defined in libvirt). The only channel to
+# the Trusted Control VM is virtio-vsock, which is not inet traffic; the supervisor authenticates every request and
+# accepts only signed, single-use grants.
+flush ruleset
+
+table inet cell {
+  chain input   { type filter hook input priority 0;   policy drop; iif "lo" accept; }
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output  { type filter hook output priority 0;  policy drop; oif "lo" accept; }
+}
