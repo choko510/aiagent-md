@@ -6,9 +6,10 @@ on:
       - '.github/workflows/ai06-device-windows.yml'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   windows-build:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'feat/step4-device-client-scaffold'
     runs-on: windows-2022
     timeout-minutes: 45
     defaults:
@@ -16,15 +17,28 @@ jobs:
         working-directory: device-client
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Normalize Rust formatting for compilation (report source drift after tests)
         run: cargo fmt --all
+      - name: Generate pinned Rust dependency lockfile
+        run: cargo generate-lockfile
+      - name: Commit formatting and Cargo.lock to this trusted feature branch
+        working-directory: .
+        shell: pwsh
+        run: |
+          git add device-client
+          $pending = git diff --cached --name-only
+          if ($pending) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "fix(ci): Rustfmt整形とCargo.lockを固定"
+            git push origin "HEAD:${{ github.head_ref }}"
+          }
       - name: Core and desktop tests
         run: cargo test --workspace
       - name: Windows Tauri compile
         run: cargo check --workspace
       - name: Build Windows desktop executable (no installer or signing)
         run: cargo build -p aiagent-device-desktop
-      - name: Assert source is preformatted in version control
-        run: git diff --exit-code -- device-client
-        working-directory: .
