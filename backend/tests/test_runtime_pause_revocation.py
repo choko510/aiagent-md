@@ -6,15 +6,13 @@ fake segment stands in for the model to force a pause/revocation precisely at th
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_core.queue import QueuePort
 from aiagent_domain import uuid7
-from aiagent_runtime.adapter import SegmentOutcome, _CODE_TO_STATUS
+from aiagent_runtime.adapter import _CODE_TO_STATUS, SegmentOutcome
 from aiagent_runtime.worker import RuntimeWorker
 
 pytestmark = pytest.mark.pg
