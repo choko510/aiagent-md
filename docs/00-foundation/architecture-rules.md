@@ -67,3 +67,8 @@
 8. **Async/Cancellation**: asyncioのtask cancelは協調的であり外部送信の取消しを意味しない。Cancel/Steer/Lease失効/Approval取消し後は、Gatewayで新規dispatch fenceを再検査し古いTool実行を禁止する。Blocking SDKはthread/process poolへ隔離し、event loopを長時間占有しない。
 9. **品質基盤（実装段階で固定）**: `uv sync --locked`、`ruff check`/`ruff format --check`、`mypy --strict`（または採用時`pyright`）、`pytest`（async試験はanyio/pytest-asyncio）、Playwright Python E2E。UIは`web/`配下のみでTS typecheck/lint/testを実行。lockfile・image digest・Python版（ADR-040）は実装開始時に記録し、STEP 1では実行済みと記載しない。
 10. **TS残置の扱い**: 上流OSSの調査引用（Mastra、OpenClaw、MCP TypeScript SDK、pg-boss等）は**調査履歴**として保持し、採用方針と混同しない。Pythonに同等機能が無い場合は無理に移植せず、必要なアルゴリズムだけを独立Portとして仕様化する。
+
+
+## F. ユーザー所有Device Client（ADR-041 / 2026-11-10、設計提案）
+
+Python-firstの`§E`はCloud Backend/Agent Runtime/Browser Worker等の配置方針。ユーザーPCへ独立配布するDevice Agentは、OS native API、鍵ストア、interactive desktop権限を所有する**異なる信頼境界**としてRust/Tauriを選択する（[ADR-041](architecture-decisions.md)、[DEV-LDC](../16-app-development/local-device-rust-client.md)）。Backendの言語・Tool Intent/Approval/Sentinel/Effect Ledger正本は変更しない。ユーザーPCをUntrusted Execution VMのRuntime Cellとみなして`sandbox.exec`の権限を再利用してはならない。OS操作・Chrome・Build・ADBはAdapter別にlocal grantを検証。新たな遠隔通信もSentinel/Tool Gatewayで検証するまで本番許可しない。

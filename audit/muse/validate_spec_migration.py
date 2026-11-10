@@ -93,24 +93,71 @@ for path in companion_paths:
     if not cp.is_file() or len(cp.read_text(encoding="utf-8")) < 600:
         errors.append(f"Missing/thin audited companion: {path}")
 
-# Marketplace stays a companion (not a 89th canonical module): verify safety
-# invariants and exact acceptance-ID coverage independently of provenance hash.
+# MKT-COMPANION-STATIC: design/provenance contract, NOT runtime verification.
 marketplace_path = "docs/08-interfaces/extension-marketplace.md"
-if marketplace_path in companion_paths:
+marketplace_pairs = [pair for pair in companion_records if pair[1] == marketplace_path]
+if marketplace_pairs != [("COMP-03", marketplace_path)]:
+    errors.append("COMP-03 Marketplace must be registered without replacing LDC COMP-02")
+elif not (ROOT / marketplace_path).is_file():
+    errors.append("COMP-03 Marketplace specification missing")
+else:
     body = (ROOT / marketplace_path).read_text(encoding="utf-8")
     marker_ids = re.findall(r"^\|\s*(MKT-T\d{2})\s*\|", body, re.M)
-    expected_ids = [f"MKT-T{n:02d}" for n in range(1, 20)]
-    if marker_ids != expected_ids:
-        errors.append("Marketplace test table must have unique, ordered MKT-T01..T19")
-    for phrase in (
+    if marker_ids != [f"MKT-T{n:02d}" for n in range(1, 20)]:
+        errors.append("Marketplace acceptance table MKT-T01..T19 must be unique and ordered")
+    for marker in (
         "OWNER_NOT_VERIFIABLE", "ownerHandle", "artifactSha256",
-        "MKT-T19", "Riskを自己申告だけで下げない", "PR #82",
-        "NOT IMPLEMENTED", "GitHubはMKT-2以降",
+        "MKT-T19", "Riskを自己申告だけで下げない",
+        "GitHubはMKT-2以降", "NOT IMPLEMENTED", "PR #82",
     ):
-        if phrase not in body:
-            errors.append(f"Marketplace companion missing invariant: {phrase}")
+        if marker not in body:
+            errors.append(f"COMP-03 Marketplace invariant missing: {marker}")
+
+# LDC-COMPANION-STATIC: spec/provenance contract only. Not a runtime safety test.
+# COMP-02 must be cataloged beside COMP-01, without changing 88 canonical modules.
+ldc_path = "docs/16-app-development/local-device-rust-client.md"
+ldc_pairs = [pair for pair in companion_records if pair[1] == ldc_path]
+if ldc_pairs != [("COMP-02", ldc_path)]:
+    errors.append("COMP-02 must register exact LDC companion path in spec-index")
+elif not (ROOT / ldc_path).is_file():
+    errors.append("COMP-02 missing Rust Local Device Client specification")
 else:
-    errors.append("Marketplace Companion COMP-02 not registered in inventory")
+    ldc_text = (ROOT / ldc_path).read_text(encoding="utf-8")
+    expected_ldc = [f"{n:02d}" for n in range(1, 33)]
+    # A requirement must own exactly one test cell, using the same suffix.
+    # This catches a dropped row, a duplicate, a swapped mapping and a stray ID.
+    ldc_matrix = re.findall(
+        r"^\|\s*LDC-REQ-(\d{2})\b[^|\n]*\|\s*LDC-T(\d{2})\s*\|",
+        ldc_text, re.M,
+    )
+    if [req for req, _ in ldc_matrix] != expected_ldc:
+        errors.append("LDC-REQ-01..32 missing, duplicated or out of order in trace matrix")
+    if [test for _, test in ldc_matrix] != expected_ldc:
+        errors.append("LDC-T01..32 does not map 1:1 to LDC-REQ-01..32")
+    ldc_sections = re.findall(r"^## (\d+)\. ", ldc_text, re.M)
+    if ldc_sections != [str(n) for n in range(1, 24)]:
+        errors.append(f"LDC spec section inventory must be 1..23: {ldc_sections}")
+    for marker in (
+        "deviceClaimEpoch", "START_PERMIT", "WAITING_RECONCILIATION",
+        "semanticEffectKey", "RISK_ACCEPTED_RETRY", "reconcile_existing_intent",
+        "RECEIPT_CONFLICT", "core.fsmonitor", "UNKNOWN_DIRTY_STATE",
+        "Desktop Cua runtime", "Browser runtime", "include_screenshot: false",
+        "consentPayloadSha256", "ACCOUNT_SWITCH_PREPARE",
+        "ZEROIZE_A_ACTIVE_MEMORY", "NOT RUN",
+        "LDC-NT01", "LDC-NT02", "LDC-NT03", "LDC-NT04",
+        "LDC-NT05", "LDC-NT06", "LDC-NT07",
+    ):
+        if marker not in ldc_text:
+            errors.append(f"COMP-02 LDC safety boundary or negative test missing: {marker}")
+    # Catch concrete regressions to legacy unsafe rules.
+    for forbidden in (
+        "Local成功をCloudの`CONFIRMED`へ反映する前に、Cloud側の現行run lease",
+        "Git: `git rev-parse`、commit/branch/dirty summary",
+    ):
+        if forbidden.replace("\\`", "`") in ldc_text:
+            errors.append(f"COMP-02 reverted a reviewed security boundary: {forbidden}")
+    if "COMP-02" not in text:
+        errors.append("LDC companion is missing from the canonical spec-index")
 
 # Do not mistake historical Round6/Round7 pinned-85 provenance workflows
 # for the updated 88-module design validation.
