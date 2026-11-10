@@ -250,15 +250,15 @@ LDC-1〜4が揃うまで、ユーザーの実PCに対する本番無人操作を
 | LDC-REQ-01 device identity | LDC-T01 | 別owner/tenantでdevice列挙・接続拒否、コード期限切れ、鍵取替不可 | SC-06/08 |
 | LDC-REQ-02 transport | LDC-T02 | 自己署名TLS、無効token、nonce replay、pin不正、device revokeは0操作 | SC-08/21 |
 | LDC-REQ-03 Sentinel admission | LDC-T03 | Tool Gateway/承認/Sentinelを迂回した命令は0操作・0receipt | SC-08/19 |
-| LDC-REQ-04 fencing | LDC-T04 | old run/goal/lease/restore incarnation/connection世代を拒否 | SC-07/21 |
-| LDC-REQ-05 effect journal | LDC-T05 | 応答欠落・process kill・再配達後の二重write 0、未確定はUNKNOWN | SC-07/21 |
+| LDC-REQ-04 fencing | LDC-T04 | old run/goal/lease/restore incarnation/connection/`deviceClaimEpoch`を拒否、in-flight OS入力はUNKNOWN分類し即時失効を誇張しない | SC-07/21 |
+| LDC-REQ-05 effect journal | LDC-T05 | 応答欠落・process kill・再配達後の同一/別Intent二重write 0、別Runの依存StepはWAITING_RECONCILIATION。明示RISK_ACCEPTED_RETRYは例外として別記 | SC-07/21 |
 | LDC-REQ-06 Cua schema | LDC-T06 | Tool未登録、schema差異、driver再起動時の古いelement token拒否 | SC-08/24 |
 | LDC-REQ-07 background policy | LDC-T07 | background失敗時にforegroundへ自動昇格せず入力漏れ0 | SC-08/24 |
-| LDC-REQ-08 desktop lease | LDC-T08 | 複数Run/Cua＋Chrome同一画面でfocus競合0、排他のフェンス | SC-07/24 |
-| LDC-REQ-09 Chrome privilege | LDC-T09 | 未許可Origin、別tab、cookie/storage/raw CDP拒否、ユーザーStop尊重 | SC-06/23/24 |
+| LDC-REQ-08 desktop lease | LDC-T08 | 複数Run/Cua＋Chrome同一画面でfocus競合0、Desktop runtimeから禁止OriginへGUI迂回0、ブラウザ対象未知時は拒否 | SC-07/24 |
+| LDC-REQ-09 Chrome privilege | LDC-T09 | 未許可Origin、別tab、cookie/storage/raw CDPを拒否。Cua Desktop click/type/hotkeyでChrome/Edge/Braveへ迂回0 | SC-06/23/24 |
 | LDC-REQ-10 build safety | LDC-T10 | 悪意あるbuild scriptでhost・秘密・ネットワークへ到達できない | SC-17/18/24 |
 | LDC-REQ-11 ADB scope | LDC-T11 | 別serial/別packageへinstall/debugできず、device抜差しで再確認 | SC-24/31 |
-| LDC-REQ-12 screen privacy | LDC-T12 | password画面・敏感windowでcapture/export/log禁止 | SC-08/23 |
+| LDC-REQ-12 screen privacy | LDC-T12 | password画面・敏感windowでcapture/export/log禁止、Cuaの既定screenshot無効、UIA treeのROI外送信0 | SC-08/23 |
 | LDC-REQ-13 interactive session | LDC-T13 | lock screen/RDP切断/別session/ UAC secure desktopでGUI拒否 | SC-08/24 |
 | LDC-REQ-14 release | LDC-T14 | 改ざんCua binary/署名不一致/update rollback/既存設定を検証 | SC-18/24 |
 | LDC-REQ-15 reconnect | LDC-T15 | Network partition→reconnectで旧grant再実行0、read-onlyなら安全に復旧 | SC-07/21 |
@@ -373,7 +373,9 @@ Tauriの「このTaskを別PCで続ける」からBの候補（オンライン�
 プロジェクト検出は**登録済みルート（ワークスペースフォルダ）とユーザーが明示した対象のみ**。ホームディレクトリ全体・ネットワーク共有・全ドライブ・ブラウザ履歴の無断走査は行わない。初回は候補表示の`DISCOVERED_UNBOUND`、ユーザーが選択した後に`PROJECT_BOUND`。**検出 = 操作権限ではない**。
 
 - ファイル一覧: 登録済みroot以下の`Cargo.toml`、`Cargo.lock`、`settings.gradle[.kts]`、`build.gradle[.kts]`、`gradlew`、`.git`、`package.json`、`pyproject.toml`、`pubspec.yaml`、`*.xcodeproj`などを**限定深度/件数/時間/総bytes**で調査。Dotfiles・秘密ファイルの中身をCloudへ自動送信しない。
-- Git: `git rev-parse`、commit/branch/dirty summary、remote URLの正規化・credential除去。Git hook、build script、ローカル実行可能ファイルを検出のために実行しない。実行するprobeの`argv/cwd/env`は固定かつ有限時間。
+- Git: **検出段階では未信頼Repoに対して`git status`/`git rev-parse`等を直接起動しない**。Git実行ファイルの絶対path/署名だけではRepoが読ませる`.git/config`や`core.fsmonitor`などの外部コマンド起動を防げない。初回Probeは`git`子プロセスを使わず、Rustの限定的なread-only parserで`.git`の形（worktreeのgitdir fileを含む）、HEAD/refs/packed-refs、object IDと必要なmetadataだけを**boundedに解析**する。malformed/untrusted config、submodules、worktree外へ向くgitdirは`UNTRUSTED_GIT_METADATA`として停止または部分情報に限定。raw remote URLやcredentialをCloudへ自動送信しない。dirty summaryは安全に取得できない場合`UNKNOWN_DIRTY_STATE`と表示。
+- **任意コード起動の遮断（P1-03）**: 特に`core.fsmonitor`（`git status`でhook command実行）、`core.hooksPath`、外部filter/`filter.*.process`、Git aliases、`include.path/includeIf`、config-driven program、`GIT_CONFIG_*`/`GIT_*_COMMAND`環境変数、`PATH` hijack、external diff、credential helper、repository内の`git` shadow binaryを敵対入力とする。外部Gitコマンドがどうしても必要な後段では、OSプロセス生成・通信・任意書込みを**強制的に禁止する隔離Worker**内だけで、Git system/global/local configを無効化し、空の明示的config/env、`core.fsmonitor=false`、無効hook/filter/credential helper、固定argv/cwd/timeout/resource limitsで起動する。**OS側で子プロセス起動を確実に遮断できない環境では、この後段Probe自体を提供しない**。`-c core.fsmonitor=false`単独では十分なSandboxではない。ユーザーが明示的に信頼しないRepoでBuild/Hookを実行しない。
+- `P1-03`の一次資料: [Git git-config: core.fsmonitor](https://git-scm.com/docs/git-config#Documentation/git-config.txt-corefsmonitor)、[githooks: fsmonitor-watchman](https://git-scm.com/docs/githooks#_fsmonitor_watchman)。Gitの挙動はGit版で異なるため、対象OS/版の実際の負例試験が完了するまではGitコマンドベースのProbeを解禁しない。
 - Toolchain: `rustc/cargo`、JDK/Gradle、Android SDK/ADB、Xcode/xcrun（macOS）、Flutter、Node等の存在・対応版を**独立Probe Adapter**で取得。`--version`や`adb devices`も外部プロセスの実行なので、登録済みバイナリの署名/絶対パス、出力上限、環境変数制限、timeoutを用いる。未信頼ワークスペースの同名実行ファイルをPATH優先で起動しない。
 - 接続端末: ADBは権限付きProbeだけでUSB機種/serialを最小表示。OSやADBが拒否した場合は`UNKNOWN_DEVICE_ACCESS`。機器固有ID・ユーザー保存データをCloudへ無条件に転送しない。
 - Repo Identity: Projectの正本は既存DEV-01 ProjectRef。PC間の一致候補には認証済みGit provider repo ID、git remote/commit SHA、workspace manifest digestを利用し、絶対パス・同じディレクトリ名・ユーザーの自己申告だけで同一Projectと判定しない。ローカル`bindingId`はDevice毎に別。
@@ -400,8 +402,8 @@ Tauriの「このTaskを別PCで続ける」からBの候補（オンライン�
 ### 21.1 ユーザー体験と安全境界
 
 1. ショートカットまたはTauriの「ここを修正」から**一時的な範囲選択Overlay**を表示。ユーザーがウィンドウ/モニターと領域を選び、「何がおかしいか」をテキスト（任意で声入力）で説明。
-2. Rust Agentは**選択範囲のみ**を取得し、CuaのUIA tree、window/process identity、モニター/DPI、crop矩形、frameGeneration、capture時刻を記録。必要ならLocal OCRを実行。Secure desktop、password manager、credential dialog、機密画面、不明感度は**全面遮断**。オーバーレイ全画面のスキャン・自動常時録画はしない。
-3. 画像とユーザーの意図をローカルPreviewで確認。Cloudへ送るデータ（crop、説明、OCR、必要なログ）と保持期間を表示し、**送信前に明示承認**。画像を端末内でしか扱わない「添付しない」選択も可。
+2. Rust Agentは選択されたWindow/ROIを識別し、**意図的に選択した範囲の画像と最小化された情報だけを永続化・Cloud送信の候補にする**。OS APIが一時的にWindow全体のFrame Bufferを取得することはあり得るため、「OS内部でも選択範囲以外を一切読まない」とは保証しない。全FrameはLocal processの短命メモリに保持し、ROI抽出後ただちに破棄して他のプロセス・ログ・ディスクへ残さない。初期Capture段階ではCuaの`get_window_state`を呼ぶなら必ず`include_screenshot: false`、`get_desktop_state`は禁止。**UIA treeにもROI外の文字列が含まれ得る**ため初期段階では取得しないか、利用者の別同意後に空間bboxと要素属性を検証してROI内の必要な項目のみ抽出・Local Filteringし、生のTreeをCloudに送らない。Secure desktop、password manager、credential dialog、機密画面、不明感度は全面遮断。オーバーレイ全画面のスキャン・自動常時録画はしない。
+3. 画像とユーザーの意図をローカルPreviewで確認。Cloudへ送るデータ（crop、説明、OCR、必要なログ）と保持期間を表示し、**送信前に明示承認**。Previewは**redaction/encoding後の実際の送信予定バイト列**から表示し、`consentPayloadSha256`（画像+OCR+個別添付Manifestのcanonical byte digest、owner/task/privacy revision/送信先/期限）を保存。Upload時に完全一致するDigest・添付件数/サイズ・Policy・Ownerを再検証し、再Capture/再OCR/再Encode等で1 byteでも変化したら承認を失効し新しいPreviewを提示。Stream途中で同意取消しなら中断し、未送信を「送信済み」としない。画像を端末内でしか扱わない「添付しない」選択も可。
 4. LDC-F03から対象Project候補を提示。Windowプロセス名/タイトルだけで自動結び付けず、Project Binding・起動プロセス/preview session・source Sha/署名等の根拠を確認。曖昧ならユーザーが選ぶ。
 5. Cloud側はDEV-06/DEV-12のReproCaseを作り、元SHAの症状を`REPRODUCED / NOT_REPRODUCED / FLAKY / INCONCLUSIVE`で判定する。スクショだけで「バグ確定」としない。自動診断ではConsole/Network/Trace/Build logs/必要なADB logcatを最小限で取得。
 6. 既存のDeveloper Builderが**隔離された作業環境**で修正し、immutable base SHAからpatch/reviewを作成。ローカルPCの任意ディレクトリを勝手に書き換えない。修正patchをローカルへ適用する場合はGit/workspace CASと許可。
@@ -412,11 +414,12 @@ Tauriの「このTaskを別PCで続ける」からBの候補（オンライン�
 
 ### 21.2 画像座標と再現の厳格な扱い
 
-`ScreenRegionIssue`（提案）の必須項目: `issueId, deviceId, userSessionGeneration, displayId, displayTopologyGeneration, windowRef, windowGeneration, rectanglePhysicalPx, captureScale, frameDigest, capturedAt, userDescription, sanitizedCropArtifactRef?, accessibilityAnchors[], projectBindingId?, candidateProjectRefs[], baseSha?, privacyPolicyRevision, retention, sourceEvidenceRefs[]`。
+`ScreenRegionIssue`（提案）の必須項目: `issueId, deviceId, userSessionGeneration, displayId, displayTopologyGeneration, windowRef, windowGeneration, rectanglePhysicalPx, captureScale, frameDigest, capturedAt, userDescription, sanitizedCropArtifactRef?, consentPayloadSha256?, sanitizedAccessibilityAnchors[], projectBindingId?, candidateProjectRefs[], baseSha?, privacyPolicyRevision, retention, sourceEvidenceRefs[]`。
 
 - ROIは**物理ピクセル**で保存し、UIのDIP/論理座標との換算を明記。高DPI、マルチモニター、負座標、ウィンドウ移動、再描画後のフレーム再利用を誤認しない。
 - 元スクショ上の座標を永続的なクリック対象にしない。再現時はWindow/Element/DOMのsemantic anchorを優先し、新鮮なsnapshotが取れないなら`STALE_TARGET`で停止。画像座標だけで画面外の操作を推定しない。
-- Capture許可と操作許可は別。画面に未許可アプリが入るときはcropのみ/マスクでも秘匿を保証できない場合はcapture全体を拒否。
+- Capture許可と操作許可は別。Frame取得→Local crop→PII/Secret分類→mask→encode→同意Preview→Digest固定→送信を明示的に分離する。画面に未許可アプリが入るときはcropのみ/マスクでも秘匿を保証できない場合はcapture全体を拒否。Cua`get_window_state`の既定screenshotは取得しない（`include_screenshot: false`）。UIAのWindow全体のtext/valuesやWindowタイトルも機密候補であり、ROI外のデータはPreview/Artifact/Cloudに残さない。
+- **P2-01のメモリ境界**: 全Frame/Raw UIA情報はLocal IPC/クラウド輸送に渡さず短命の明示的Bufferに閉じる。Crash dump/telemetry/ログから除外し、可能な範囲でrelease時にzeroize。OSがフレーム全体へのアクセス自体を提供しない選択Crop APIを使える場合は最小範囲APIを優先。表示Previewと実送信`consentPayloadSha256`の不一致・TOCTOU・Window世代更新時は`CONSENT_STALE`で拒否。
 - Debug log/HAR/stacktraceは機密・非信頼入力。Agent Promptに命令として昇格させない。ログ・画面・OCRと実コードの対応はEvidenceとして記録し、根拠不明の推論は`HYPOTHESIS`。
 
 ### 21.3 Step DAG・分岐・停止条件
@@ -442,19 +445,19 @@ Tauriの「このTaskを別PCで続ける」からBの候補（オンライン�
 | LDC-REQ-17 Placement | LDC-T17 | デバイス必須StepはLocal、推論はCloud。権限・能力・データ所在に違反する自動fallbackは0 | DEV-05 / Tool GW |
 | LDC-REQ-18 Local OCR | LDC-T18 | 許可したROI内OCR・座標対応、未許可画面はCloud送信0、OCR未対応で勝手にCloud転送0 | CHAT_09 |
 | LDC-REQ-19 Device capability freshness | LDC-T19 | SDK削除/変更・電源/接続失効で古いPlanを拒否、read-only候補のみ再計画 | CHAT_01/09 |
-| LDC-REQ-20 Handoff CAS | LDC-T20 | A→B移動時のActive claim 1、競合操作0、旧Run/旧grant再利用0 | CHAT_02/03/10 |
+| LDC-REQ-20 Handoff CAS | LDC-T20 | A→B移動時のActive claim 1、Action Grant/Envelope/Journal/StartPermitのdeviceClaimEpoch一致、遅延開始0、既にOSへ配達した操作はUNKNOWN | CHAT_02/03/10 |
 | LDC-REQ-21 Workspace fidelity | LDC-T21 | 同一ProjectのSHA/Tree/dirtyを照合し、未保存変更・Secret・ローカルパスを暗黙転送しない | DEV-01 |
-| LDC-REQ-22 Cross-device effects | LDC-T22 | install/click失敗ACK不明→UNKNOWN、A切断でもBで副作用二重実行0 | Effect Ledger |
+| LDC-REQ-22 Cross-device effects | LDC-T22 | Aの送信後ACK不明→UNKNOWN。Bの別toolIntentId/新Runでも同一semanticEffectKeyの新規送信0、WAITING_RECONCILIATION。認証済み旧Receiptは元Intentの履歴へ取込 | Effect Ledger |
 | LDC-REQ-23 Safe discovery | LDC-T23 | 未登録root、symlink逸脱、無断全ドライブ探索、build/hook実行0 | CHAT_09 |
 | LDC-REQ-24 Project identification | LDC-T24 | 異なるPCの同名folderを別Project、認証済みrepo IDとsource SHAが一致した場合のみ候補結合 | DEV-01 |
-| LDC-REQ-25 Probe isolation | LDC-T25 | workspace内の悪意あるcargo/gradleやPATH上の偽binを起動しない。probe上限が効く | CHAT_09 |
-| LDC-REQ-26 Targeted capture | LDC-T26 | DPI/マルチモニター/負座標で指定ROIを再現、機密/別windowの画面転送0 | Browser / QA |
+| LDC-REQ-25 Probe isolation | LDC-T25 | 悪意ある`.git/config`の`core.fsmonitor`、config include、外部filter/helper、偽`git`/cargo/gradleによる外部process起動・通信・漏洩0。隔離不可時dirty UNKNOWN | CHAT_09 |
+| LDC-REQ-26 Targeted capture | LDC-T26 | DPI/マルチモニター/負座標で指定ROI再現、`include_screenshot:false`でUIA初期撮影なし、ROI外tree/Frame送信0、PreviewDigestと送信bytesの不一致拒否 | Browser / QA |
 | LDC-REQ-27 BugProject binding | LDC-T27 | 複数Projectが同じ画面に関連する場合は人手選択、誤repoへ修正適用0 | DEV-01 / DEV-09 |
 | LDC-REQ-28 Debug loop | LDC-T28 | baseline元SHAでFAIL、修正SHAでPASS + 必須回帰 + 同じ実機/fixtureで初めてFIXED_VERIFIED | DEV-06 / DEV-12 |
 | LDC-REQ-29 Device test | LDC-T29 | adb serial/package誤り、USB抜差し、未接続、別PCでの端末不足をPASSにしない | DEV-05 / LDC-T11 |
-| LDC-REQ-30 Unified Stop/Budget | LDC-T30 | Cloud/Local/別PCでUser Stop・Budget・Device Revokeを尊重し新規副作用0 | CHAT_02/03/09 |
-| LDC-REQ-31 Privacy/evidence | LDC-T31 | ROI/ログ/diagnostic/ArtifactにSecret残存0、消去/retention、Cloud送信同意が粒度別 | CHAT_09/11 |
-| LDC-REQ-32 Offline semantics | LDC-T32 | offline中のLocal表示は可、Cloud推論・遠隔UI操作を勝手に実行しない | CHAT_02/09 |
+| LDC-REQ-30 Unified Stop/Budget | LDC-T30 | Cloud/Local/別PCでUser Stop・Budget・Device Revokeを尊重し新規副作用0、取消後でも真正な旧Receiptを旧Effectへ記録 | CHAT_02/03/09 |
+| LDC-REQ-31 Privacy/evidence | LDC-T31 | ROI/ログ/diagnostic/ArtifactにSecret残存0、Cloud送信前のconsentPayloadSha256固定、同意取消/owner切替でbyte不一致の転送0 | CHAT_09/11 |
+| LDC-REQ-32 Offline semantics | LDC-T32 | offline中のLocal表示は可、Cloud推論・遠隔UI操作を勝手に実行しない。Owner切替で古いconnection/Grant/JournalへBがアクセス0 | CHAT_02/09 |
 
 **新しいE2Eシナリオ（ローカル提案・未採番）**
 
@@ -474,3 +477,20 @@ Tauriの「このTaskを別PCで続ける」からBの候補（オンライン�
 6. **LDC-6A: Regression and rollout** — 他PC/OS、高DPI、Task移動競合、USB切断、メモリ圧、偽Toolchain、機密画面の故障注入を実測。段階的にenable。
 
 **新しい正本/API/DBの所有者**: CHAT_01が`CapabilitySnapshot/PlacementPlan/DeviceClaim/ScreenRegionIssue`型、CHAT_02/03がPlacement admission・handoff fence・Effect Ledger、CHAT_09がLocalPolicy・画面/ファイル送信・elevation禁止、CHAT_10がDevice Claim CAS・Artifact retention、CHAT_08がTauri/Cloud UI、CHAT_05/16がBuild/ADB Recipe、CHAT_11がTest/SCの正本を審査する。これらは本PR内で**契約案に留め、未承認Schema/テーブル/エンドポイントを実装済みと主張しない**。
+
+## 23. PR #83 監査指摘の対処追跡（2026-11-10）
+
+> 8件とも**設計修正のみ**。ここでいう「修正」は静的な仕様更新を意味し、Rust Client/Device Gateway/OSテストでの機能実証ではない。正式なOwner合意、schema/protocol lock、OS実機受入は引き続き未実施。
+
+| 指摘 | 仕様上の解消先 | 必須の失敗注入・検査 | 状態 |
+|---|---|---|---|
+| P1-01 | `5, `9, `10, `19.2: deviceClaimEpoch + START_PERMIT | LDC-T04/20: Aで旧Claim Permit受信→CAS移動→OS未配送の旧開始拒否・OS配達済みはUNKNOWN | SPEC_UPDATED / NOT RUN |
+| P1-02 | `9.1, `19.2: semanticEffectKey + WAITING_RECONCILIATION | LDC-T05/22: Aの送信UNKNOWN後、Bが新Intent IDで同一送信を試みても拒否 | SPEC_UPDATED / NOT RUN |
+| P1-03 | `20.1: Rust read-only Git Probe、隔離不可ならGitコマンド不使用 | LDC-T25: core.fsmonitor + Git include/filter helperでプロセス0 | SPEC_UPDATED / NOT RUN |
+| P1-04 | `6.1, `7: Cua Desktop positive allowlist + Browser runtime独立 | LDC-T08/09: Browser Origin拒否後のDesktop click/type/hotkey迂回を拒否 | SPEC_UPDATED / NOT RUN |
+| P1-05 | `9, `19.2: original-intent reconcile とnew-dispatch admission分離 | LDC-T22/30: Cancel後の真正Receiptは元Ledgerに記録、新Runは完了しない | SPEC_UPDATED / NOT RUN |
+| P2-01 | `21.1/21.2: Screenshot flag、ROI UIA最小化、送信bytes digest | LDC-T12/26/31: ROI外転送0、Preview差替え拒否 | SPEC_UPDATED / NOT RUN |
+| P2-02 | COMP-02 + spec-provenance manifest + validate_spec_migration | LDC静的監査: REQ/T 01..32の連続性と1対1追跡、Manifest blob整合をCI | SPEC_UPDATED / CI確認待ち |
+| P2-03 | `4.1: Owner/Tenant/OS User namespace、Account Switch Barrier | LDC-T01/30/32: A→B切替でAのTunnel/Grant/Journals混入0 | SPEC_UPDATED / NOT RUN |
+
+追加の否定試験: `LDC-NT01` stale Claim + delayed Permit、`LDC-NT02` unknown semantic duplicate、`LDC-NT03` malicious git config/fsmonitor、`LDC-NT04` Cua/browser boundary crossing、`LDC-NT05` stale-run authenticated Receipt reconciliation、`LDC-NT06` ROI full-frame/UIA/Preview bytes mismatch、`LDC-NT07` account switch namespace separation。すべて**設計のみ・未実行**。
