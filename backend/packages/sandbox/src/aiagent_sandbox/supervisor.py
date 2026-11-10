@@ -35,7 +35,7 @@ from aiagent_domain.rpcwire import (
 )
 
 from .grant import GrantError, verify
-from .landlock import restrict_to_workspace
+from .landlock import disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
 CLONE_NEWUSER = 0x10000000
@@ -131,6 +131,12 @@ class Supervisor:
                     os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace
                 except (OSError, AttributeError):
                     os._exit(97)  # fail closed
+            # setuid and the NEWUSER transition may reset dumpability. Sibling
+            # commands run with the same numeric UID; a ptrace window is unsafe.
+            try:
+                disable_dumpability()
+            except OSError:
+                os._exit(98)
 
         return fn
 
