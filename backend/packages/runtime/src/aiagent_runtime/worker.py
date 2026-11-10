@@ -119,8 +119,25 @@ class RuntimeWorker:
         except (control.RunTerminal, control.TenantMismatch, control.RestoreFenced) as e:
             await asyncio.to_thread(self.queue.ack, job, f"STALE_{e.code}")
             return f"STALE_{e.code}"
-        except (control.FencedOut, control.NotClaimable) as e:
-            await asyncio.to_thread(self.queue.nack, job, e.code)  # live lease elsewhere / paused: retry later
+        except control.ScopeRevoked:
+            state = await asyncio.to_thread(control.settle_stopped, self.db, p.tenant_id, p.run_id, revoked=True)
+            if state == "SCOPE_RESTORED":
+                await asyncio.to_thread(self.queue.nack, job, "SCOPE_RESTORED")
+            else:
+                await asyncio.to_thread(self.queue.ack, job, "SCOPE_REVOKED")
+            return state
+        except control.NotClaimable as e:
+            if str(e) == "paused":
+                state = await asyncio.to_thread(control.settle_stopped, self.db, p.tenant_id, p.run_id, revoked=False)
+                if state == "PAUSE_CLEARED":
+                    await asyncio.to_thread(self.queue.nack, job, "PAUSE_CLEARED")
+                else:
+                    await asyncio.to_thread(self.queue.ack, job, "PAUSED")
+                return state
+            await asyncio.to_thread(self.queue.nack, job, e.code)
+            return e.code
+        except control.FencedOut as e:
+            await asyncio.to_thread(self.queue.nack, job, e.code)
             return e.code
         fault("worker_after_claim")
         profile = await asyncio.to_thread(self._profile, claim)
@@ -129,13 +146,18 @@ class RuntimeWorker:
             try:
                 await asyncio.to_thread(control.mark_running, self.db, claim)
             except control.Cancelled:
-                pass  # finish below turns it into CANCELLED / WAITING_RECONCILIATION
-            outcome = SegmentOutcome("CANCELLED")
-            for _ in range(MAX_REBUILDS + 1):
-                outcome = await self.runtime.run_segment(claim, profile)
-                if outcome.status != "REBUILD":
-                    break
-                log(logger, logging.WARNING, "rebuild from HEAD", run=claim.run_id, detail=outcome.detail)
+                outcome = SegmentOutcome("CANCELLED")
+            except control.Paused:
+                outcome = SegmentOutcome("PAUSED")
+            except control.ScopeRevoked:
+                outcome = SegmentOutcome("REVOKED", detail="SCOPE_REVOKED")
+            else:
+                outcome = SegmentOutcome("CANCELLED")
+                for _ in range(MAX_REBUILDS + 1):
+                    outcome = await self.runtime.run_segment(claim, profile)
+                    if outcome.status != "REBUILD":
+                        break
+                    log(logger, logging.WARNING, "rebuild from HEAD", run=claim.run_id, detail=outcome.detail)
         finally:
             hb.cancel()
             with contextlib.suppress(BaseException):
@@ -198,6 +220,11 @@ class RuntimeWorker:
                 return control.finish_segment(self.db, claim, "WAITING_RECONCILIATION", error_code="UNKNOWN_EFFECT")
             if o.status == "CANCELLED":
                 return control.finish_segment(self.db, claim, "CANCELLED")
+            if o.status == "PAUSED":
+                return control.finish_segment(self.db, claim, "PAUSED")
+            if o.status == "REVOKED":
+                state = control.settle_stopped(self.db, claim.tenant_id, claim.run_id, revoked=True)
+                return "RETRY" if state == "SCOPE_RESTORED" else state
             if o.status == "BUDGET":
                 return control.finish_segment(self.db, claim, "BUDGET_EXHAUSTED", error_code="BUDGET_EXHAUSTED")
             if o.status == "STALEGOAL":
@@ -211,6 +238,10 @@ class RuntimeWorker:
             return "RETRY"  # ERROR / REBUILD exhausted: queue retry with backoff
         except control.Cancelled:
             return "CANCELLED"
+        except control.Paused:
+            return control.finish_segment(self.db, claim, "PAUSED")
+        except control.ScopeRevoked:
+            return control.settle_stopped(self.db, claim.tenant_id, claim.run_id, revoked=True)
         except (control.FencedOut, control.RunTerminal):
             return "FENCED"
         except control.StaleGoal:
