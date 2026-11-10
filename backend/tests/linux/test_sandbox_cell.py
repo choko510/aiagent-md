@@ -220,10 +220,7 @@ def test_task_pid_namespace_blocks_cross_task_signals_and_preserves_child_manage
         "print('ATTACK_FINISHED', flush=True)\n"
     )
     victim = (
-        "import os, time\n"
-        "assert os.getpid() == 1, os.getpid()\n"
-        "time.sleep(1.0)\n"
-        "print('VICTIM_ALIVE', flush=True)\n"
+        "import os, time\nassert os.getpid() == 1, os.getpid()\ntime.sleep(1.0)\nprint('VICTIM_ALIVE', flush=True)\n"
     )
     a_argv, b_argv = [sys.executable, "-c", attack], [sys.executable, "-c", victim]
 
