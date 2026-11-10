@@ -30,7 +30,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install isolated local packages and pytest
-        run: python -m pip install -e backend/packages/context -e backend/packages/memory 'pytest==9.2.0'
+        run: python -m pip install -e backend/packages/context -e backend/packages/memory 'pytest==9.2.0' 'pytest-asyncio==1.4.1.post1' 'pytest-timeout>=2.4.0' 'ruff>=0.14.0'
+      - name: Ruff lint and format
+        run: |
+          ruff check backend/packages/context backend/packages/memory
+          ruff format --check backend/packages/context backend/packages/memory
       - name: Check installed package dependencies
         run: python -m pip check
       - name: Compile all implementation sources
