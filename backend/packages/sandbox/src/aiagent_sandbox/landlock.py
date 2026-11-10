@@ -9,6 +9,7 @@ Requires Linux Landlock; unsupported kernels fail closed rather than running unr
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 from pathlib import Path
 
@@ -74,6 +75,68 @@ def disable_dumpability() -> None:
     """
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE = 4
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint32),
+    ]
+
+
+class _SockFProg(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def block_cross_task_process_access() -> None:
+    """Seccomp-BPF filter inherited across exec: deny same-UID process inspection.
+
+    Dumpability is reset on execve of ordinary binaries, so PR_SET_DUMPABLE=0
+    alone CANNOT prevent ptrace against sibling tasks. Fail closed if this
+    persistent syscall filter is unavailable.
+    """
+    machine = os.uname().machine
+    if machine == "x86_64":
+        arch = 0xC000003E  # AUDIT_ARCH_X86_64
+        blocked = (101, 310, 311, 312, 438, 303, 304)
+    elif machine == "aarch64":
+        arch = 0xC00000B7  # AUDIT_ARCH_AARCH64
+        blocked = (117, 270, 271, 272, 438, 264, 265)
+    else:
+        raise OSError("unsupported seccomp architecture")
+
+    # struct seccomp_data: nr at offset 0, arch at 4. Unknown ABI is fatal.
+    prog: list[tuple[int, int, int, int]] = [
+        (0x20, 0, 0, 4),  # BPF_LD | BPF_W | BPF_ABS: arch
+        (0x15, 1, 0, arch),  # BPF_JMP | BPF_JEQ: jump over KILL on matching arch
+        (0x06, 0, 0, 0x80000000),  # SECCOMP_RET_KILL_PROCESS
+        (0x20, 0, 0, 0),  # load syscall number
+    ]
+    if machine == "x86_64":
+        # The x32 ABI shares AUDIT_ARCH_X86_64; reject the entire x32 syscall
+        # range so the filter cannot be bypassed with __X32_SYSCALL_BIT.
+        prog += [
+            (0x45, 0, 1, 0x40000000),  # BPF_JSET x32 bit -> KILL
+            (0x06, 0, 0, 0x80000000),
+        ]
+    for number in blocked:
+        prog.extend([
+            (0x15, 0, 1, number),  # if syscall matches -> EPERM
+            (0x06, 0, 0, 0x00050000 | errno.EPERM),  # SECCOMP_RET_ERRNO
+        ])
+    prog.append((0x06, 0, 0, 0x7FFF0000))  # SECCOMP_RET_ALLOW
+
+    filters = (_SockFilter * len(prog))(*(_SockFilter(*entry) for entry in prog))
+    program = _SockFProg(len(prog), filters)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    if libc.prctl(22, 2, ctypes.byref(program), 0, 0) != 0:  # PR_SET_SECCOMP / SECCOMP_MODE_FILTER
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err))
 
