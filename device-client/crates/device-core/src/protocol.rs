@@ -133,6 +133,24 @@ impl ActionRequest {
         Self { scope, fence, tool_intent_id, attempt_fence, operation,
                target, args_sha256, args }
     }
+    /// Internal journal identity: prevents a reused intent changing operation/target/fences.
+    /// This is a local digest, not the canonical Cloud Tool Gateway request hash.
+    pub fn journal_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        for part in [
+            self.scope.namespace(),
+            self.tool_intent_id.clone(),
+            self.attempt_fence.to_string(),
+            serde_json::to_string(&self.fence).expect("typed fence"),
+            serde_json::to_string(&self.operation).expect("typed operation"),
+            serde_json::to_string(&self.target).expect("typed target"),
+            self.args_sha256.clone(),
+        ] {
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part.as_bytes());
+        }
+        hex_digest(&hasher.finalize())
+    }
     pub fn has_valid_shape(&self) -> bool {
         !self.tool_intent_id.trim().is_empty() && self.tool_intent_id.len() <= 256
             && self.args.len() <= 64 * 1024
