@@ -105,10 +105,6 @@ class Supervisor:
 
         def fn() -> None:
             os.setsid()  # new session + process group: the whole tree is killable
-            if uid is not None and os.geteuid() == 0:
-                os.setgroups([])
-                os.setgid(gid)  # type: ignore[arg-type]
-                os.setuid(uid)
             resource.setrlimit(resource.RLIMIT_CPU, (lim.cpu_s, lim.cpu_s))
             mem = min(memory_bytes, lim.memory_bytes)
             resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
@@ -123,6 +119,13 @@ class Supervisor:
             except (OSError, ValueError) as e:
                 os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
+            # Install the Landlock rules before dropping credentials; the supervisor
+            # can traverse protected root-owned parent directories while configuring
+            # the rule, but the generated program only ever runs with the cell UID.
+            if uid is not None and os.geteuid() == 0:
+                os.setgroups([])
+                os.setgid(gid)  # type: ignore[arg-type]
+                os.setuid(uid)
             if require_netns:
                 try:
                     os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace
