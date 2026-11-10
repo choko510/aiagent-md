@@ -40,21 +40,31 @@ def restore() -> ModuleType:
 
 
 def fake_live(hv: ModuleType) -> dict:
-    return {"status": "TOPOLOGY_READONLY_PASS", "hostId": "sha256:" + "a" * 64,
-            "topologyDigest": "sha256:" + "b" * 64}
+    return {"status": "TOPOLOGY_READONLY_PASS", "hostId": "sha256:" + "a" * 64, "topologyDigest": "sha256:" + "b" * 64}
 
 
 def add_evidence(
-    hv: ModuleType, directory: Path, kind: str, *, execution: str = "CI",
-    host: str = "sha256:" + "a" * 64, digest: str = "sha256:" + "b" * 64,
+    hv: ModuleType,
+    directory: Path,
+    kind: str,
+    *,
+    execution: str = "CI",
+    host: str = "sha256:" + "a" * 64,
+    digest: str = "sha256:" + "b" * 64,
 ) -> dict:
     body = json.dumps({"test": kind, "note": "synthetic test data"}).encode()
     filename = kind + ".json"
     (directory / filename).write_bytes(body)
-    return {"id": kind, "status": "PASS", "execution": execution,
-            "evidenceSha256": hashlib.sha256(body).hexdigest(),
-            "evidenceFile": filename, "hostId": host, "topologyDigest": digest,
-            "recordedAt": hv.now_iso()}
+    return {
+        "id": kind,
+        "status": "PASS",
+        "execution": execution,
+        "evidenceSha256": hashlib.sha256(body).hexdigest(),
+        "evidenceFile": filename,
+        "hostId": host,
+        "topologyDigest": digest,
+        "recordedAt": hv.now_iso(),
+    }
 
 
 def test_missing_kvm_is_blocked(hv: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,9 +114,11 @@ def test_static_topology_rejects_execution_nic(hv: ModuleType, monkeypatch: pyte
     xml = """<domain type='kvm'><name>aiagent-exec</name><devices>
         <disk><source file='/tmp/exec.qcow2'/></disk>
         <interface type='network'/><vsock><cid auto='no' address='3'/></vsock></devices></domain>"""
-    control = xml.replace("aiagent-exec", "aiagent-control").replace(
-        "/tmp/exec.qcow2", "/tmp/control.qcow2"
-    ).replace("address='3'", "address='2000'")
+    control = (
+        xml.replace("aiagent-exec", "aiagent-control")
+        .replace("/tmp/exec.qcow2", "/tmp/control.qcow2")
+        .replace("address='3'", "address='2000'")
+    )
 
     def runner(*args: str) -> tuple[bool, str]:
         n = args[-1]
@@ -172,14 +184,17 @@ def test_stale_evidence_and_traversal_rejected(hv: ModuleType, tmp_path: Path) -
     assert result["status"] == "NOT_RUN"
 
 
-@pytest.mark.parametrize("url,ok", [
-    ("postgresql://postgres:pw@127.0.0.1:55432/aiagent_hv_disposable", True),
-    ("postgresql://postgres:pw@remote:5432/aiagent_hv_disposable", False),
-    ("postgresql://postgres:pw@127.0.0.1:5432/production", False),
-    ("postgresql://postgres:pw@127.0.0.1/aiagent_hv_disposable", False),
-    ("file:///tmp/aiagent_hv_disposable", False),
-    ("", False),
-])
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("postgresql://postgres:pw@127.0.0.1:55432/aiagent_hv_disposable", True),
+        ("postgresql://postgres:pw@remote:5432/aiagent_hv_disposable", False),
+        ("postgresql://postgres:pw@127.0.0.1:5432/production", False),
+        ("postgresql://postgres:pw@127.0.0.1/aiagent_hv_disposable", False),
+        ("file:///tmp/aiagent_hv_disposable", False),
+        ("", False),
+    ],
+)
 def test_benchmark_refuses_non_disposable_url(queue_gate: ModuleType, url: str, ok: bool) -> None:
     assert queue_gate.safe_target(url) is ok
 
@@ -197,9 +212,16 @@ def test_load_limits_and_write_confirmation(queue_gate: ModuleType, monkeypatch:
 
 
 def test_restore_requires_quarantine(restore: ModuleType) -> None:
-    safe = {"incarnation": 2, "dispatch_paused": True, "active_queues": 0,
-            "unrevoked_permits": 0, "sending_intents": 0, "sending_effects": 0,
-            "live_leases": 0, "unknown_effects": 3}
+    safe = {
+        "incarnation": 2,
+        "dispatch_paused": True,
+        "active_queues": 0,
+        "unrevoked_permits": 0,
+        "sending_intents": 0,
+        "sending_effects": 0,
+        "live_leases": 0,
+        "unknown_effects": 3,
+    }
     assert restore.safety_checks(safe)["status"] == "QUARANTINE_READONLY_PASS"
     assert restore.safety_checks({**safe, "active_queues": 1})["status"] == "BLOCKED"
     assert restore.safety_checks({**safe, "unrevoked_permits": 1})["status"] == "BLOCKED"
