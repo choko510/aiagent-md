@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Only the local simulator window. No shell, FS, OS or network commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

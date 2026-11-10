@@ -1,0 +1,9 @@
+/target/
+/src-tauri/gen/
+/node_modules/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
