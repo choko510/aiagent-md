@@ -7,7 +7,7 @@ The production PostgreSQL adapter and new Task/Run admission hook belong to AI-0
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Callable, Protocol, TypeVar
 
@@ -198,7 +198,7 @@ class DenyUntrustedVerification:
 
 class SystemClock:
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 @dataclass
@@ -218,9 +218,9 @@ def parse_utc(value: str) -> datetime:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as error:
         raise Rejected("INVALID_DEADLINE") from error
-    if dt.tzinfo is None or dt.utcoffset() != timezone.utc.utcoffset(dt):
+    if dt.tzinfo is None or dt.utcoffset() != UTC.utcoffset(dt):
         raise Rejected("UTC_DEADLINE_REQUIRED")
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(UTC)
 
 
 class CampaignController:
@@ -293,7 +293,7 @@ class CampaignController:
         for item in self.store.read(campaign_id).outbox:
             if item.status != "PENDING":
                 continue
-            def allowed(c: Campaign) -> bool:
+            def allowed(c: Campaign, item: Dispatch = item) -> bool:
                 try:
                     self._gate(c, item.control_version)
                 except (Rejected, _CommitRejection):
@@ -307,7 +307,7 @@ class CampaignController:
                                               dedupe_key=item.dedupe_key, control_version=item.control_version)
             if not accepted:
                 continue
-            def ack(c: Campaign) -> None:
+            def ack(c: Campaign, item: Dispatch = item) -> None:
                 for pending in c.outbox:
                     if pending.dedupe_key == item.dedupe_key:
                         pending.status = "SENT"
