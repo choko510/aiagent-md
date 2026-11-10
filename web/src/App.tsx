@@ -71,6 +71,39 @@ export default function App() {
   const [detail, setDetail] = useState<CatalogItem | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!detailId) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = document.querySelector<HTMLElement>(".detail-panel");
+    const close = panel?.querySelector<HTMLButtonElement>(".close-button");
+    close?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDetailId(null);
+        return;
+      }
+      if (event.key !== "Tab" || !panel) return;
+      const controls = Array.from(panel.querySelectorAll<HTMLElement>("button:not([disabled]),a[href]"));
+      if (controls.length === 0) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        last.focus();
+        event.preventDefault();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        first.focus();
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [detailId]);
+
   const resetPaging = () => {
     setCursor(null);
     setHistory([]);
