@@ -1,5 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
-:root { font-family: Inter, "Segoe UI", "Yu Gothic UI", sans-serif; color:#1a2335; background:#f6f8fc; font-synthesis:none; }
+:root { font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif; color:#1a2335; background:#f6f8fc; font-synthesis:none; }
 * { box-sizing:border-box; }
 body { margin:0; min-width:320px; }
 button, input, select { font:inherit; }
