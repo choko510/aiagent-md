@@ -1,0 +1,39 @@
+name: AI-02 Context and Memory (isolated mocks)
+on:
+  pull_request:
+    paths:
+      - 'backend/packages/context/**'
+      - 'backend/packages/memory/**'
+      - '.github/workflows/ai02-context-memory.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/packages/context/**'
+      - 'backend/packages/memory/**'
+      - '.github/workflows/ai02-context-memory.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ai02-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit-and-mock-integration:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install isolated local packages and pytest
+        run: python -m pip install -e backend/packages/context -e backend/packages/memory 'pytest==9.2.0'
+      - name: Check installed package dependencies
+        run: python -m pip check
+      - name: Compile all implementation sources
+        run: python -m compileall -q backend/packages/context/src backend/packages/memory/src
+      - name: Fault injection, quality gates, ACL and Mock integration
+        run: python -m pytest -q -ra -p no:cacheprovider backend/packages/context/tests backend/packages/memory/tests
