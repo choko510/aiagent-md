@@ -98,7 +98,7 @@ for path in companion_paths:
 marketplace_path = "docs/08-interfaces/extension-marketplace.md"
 if marketplace_path in companion_paths:
     body = (ROOT / marketplace_path).read_text(encoding="utf-8")
-    marker_ids = re.findall(r"^\\|\\s*(MKT-T\\d{2})\\s*\\|", body, re.M)
+    marker_ids = re.findall(r"^\|\s*(MKT-T\d{2})\s*\|", body, re.M)
     expected_ids = [f"MKT-T{n:02d}" for n in range(1, 20)]
     if marker_ids != expected_ids:
         errors.append("Marketplace test table must have unique, ordered MKT-T01..T19")
