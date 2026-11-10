@@ -363,9 +363,7 @@ def test_pause_keeps_unknown_external_effect_waiting_for_reconciliation(
     ids = submit(dbs, tenant)
     claim = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker")
     commands.pause(dbs["api"], scope(tenant), ids["taskId"])
-    outcome = control.finish_segment(
-        dbs["runtime"], claim, "WAITING_RECONCILIATION", error_code="UNKNOWN_EFFECT"
-    )
+    outcome = control.finish_segment(dbs["runtime"], claim, "WAITING_RECONCILIATION", error_code="UNKNOWN_EFFECT")
     assert outcome == "WAITING_RECONCILIATION"
     assert run_row(dbs, ids["runId"])["status_code"] == "WAITING_RECONCILIATION"
     assert (
