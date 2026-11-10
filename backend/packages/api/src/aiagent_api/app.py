@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from aiagent_core import commands, config
+from aiagent_core.step4_gate import capability_snapshot
 from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
 from aiagent_core.migrate import check_compatible
@@ -79,6 +80,11 @@ def create_app(db: Database | None = None) -> FastAPI:
         except Exception:
             return JSONResponse({"ready": False}, status_code=503)
         return JSONResponse({"ready": True})
+
+    @app.get("/v1/step4/capabilities")
+    async def step4_capabilities(_scope: S) -> dict[str, Any]:
+        """Authenticated, read-only projection. An entry never grants a device or tool capability."""
+        return {"schemaVersion": "1.0", "capabilities": capability_snapshot()}
 
     @app.post("/v1/tasks", status_code=201)
     async def submit(request: Request, s: S, idempotency_key: Annotated[str | None, Header()] = None) -> dict[str, str]:

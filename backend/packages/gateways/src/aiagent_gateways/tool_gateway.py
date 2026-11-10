@@ -25,6 +25,7 @@ from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database, Row
 from aiagent_core.events import append_event, enqueue_run_job
+from aiagent_core.step4_gate import is_reserved_tool
 from aiagent_domain import canonical_json, sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
@@ -121,6 +122,12 @@ class ToolGateway:
 
             data = json.loads(hit["content"])
             return outcome(data.pop("status"), data, replayed=True)
+        # STEP 4 names must remain fail-closed even if a registry/profile changes
+        # before the PostgreSQL, Run/Goal/fence, effect-ledger and Sentinel adapters exist.
+        if is_reserved_tool(tool):
+            return await asyncio.to_thread(
+                self._deny, claim, tool_call_id, tool, "STEP4_NOT_INTEGRATED", stream
+            )
         spec = TOOLS.get(tool)
         if spec is None:
             return self._deny(claim, tool_call_id, tool, "unknown tool", stream)
