@@ -14,14 +14,14 @@ from typing import Any
 from fastapi import FastAPI
 
 from .api import create_router
-from .catalog import CatalogService, FixedSourceHTTP
+from .catalog import CachedJSONTransport, CatalogService, FixedSourceHTTP
 
 
 def create_development_app() -> FastAPI:
     if os.environ.get("AIAGENT_MARKETPLACE_DEV_MODE") != "1":
         raise RuntimeError("MKT-1 standalone server is disabled outside explicit local development")
     transport = FixedSourceHTTP()
-    service = CatalogService(transport)
+    service = CatalogService(CachedJSONTransport(transport))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> Any:
