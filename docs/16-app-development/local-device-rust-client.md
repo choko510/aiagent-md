@@ -253,3 +253,194 @@ LDC-1〜4が揃うまで、ユーザーの実PCに対する本番無人操作を
 5. CHAT_11: LDC-T01..16をWindows/macOS/Linux実機で実測し、`DESIGNED`から`TESTED`へ更新。
 
 **Release gate**: リモートDevice操作の未承認0・クロステナント0・生秘密露出0・旧世代操作0の否定試験、真正な実デバイスを使うGUI/Build/E2E、Cua互換性、installer署名、障害復旧の証跡がそろうまで`NOT PRODUCTION READY`。
+
+
+## 17. Desktop固有機能：追加要求と全体の連携（2026-11-10、ユーザー要望）
+
+本節の4機能は本仕様のLDC-0〜6を**拡張する設計提案**であり、PR #82をマージ済み/実装済みとはみなさない。すべて**DESIGNED / NOT RUN**。既存のDEV-01 Project/Workspace/Git、DEV-05 Build、DEV-06 Browser Debugger、DEV-12 Reproduction Lab、DEV-09 UI、Task/Run/Tool Gateway/Approval/Sentinel/Artifactの正本を再定義しない。
+
+| ID | 機能 | 必要な新規責務 | 最初の実装目標 |
+|---|---|---|---|
+| LDC-F01 | **Local/Cloud自動振り分け** | Capability Catalog / Placement Planner / Local Data Boundary | OCR・アクセシビリティ・許可済みBuildはLocal、計画・推論・修正案はCloudへ |
+| LDC-F02 | **PC横断Task移動** | Handoff Coordinator / Device Claim Fence / Workspace Transfer | デスクトップのTaskを別の登録済みノートPCで再開 |
+| LDC-F03 | **ローカルプロジェクト自動認識** | Scoped Discovery / Toolchain Probe / Project Binding | Cargo・Gradle・Git・SDK・ADB等を検出し操作候補を提示 |
+| LDC-F04 | **範囲選択 → 修正 → 自動デバッグ → 実機テスト** | Annotated Bug Report / Repro Run / Build/Test Verification | 画面の気になる領域から修正前後と端末実行結果まで追跡 |
+
+**統合経路**: ユーザーが範囲選択 → LDC-F03が対象Project/Window/Deviceを候補提示 → LDC-F01がcapture・OCR・build等を許可済みPCへ配置 → Cloud DEV-06/12が再現・原因調査・修正 → LDC-F04がBuild/ADB/UI検証 → 別PCが必要な場合はLDC-F02で安全に再開。4機能は「1個の無制限Agentモード」ではなく、**有限Task/Run + 個別Tool Intent + 明示的デバイス権限**の組合せ。
+
+### 17.1 公開能力とUI原則
+
+- クラウド接続なしでもローカルで「登録済みProject一覧・SDK検出結果・範囲選択の未送信Preview」を表示できる。**Cloud推論が必要な操作をOffline中に無断実行しない**。
+- Tauri UIのトップには`現在の実行先（Local/Cloud）`・対象PC・対象Project・共有する情報の種類・現在のRun・承認待ち・停止を表示。
+- 自動判定が不可能な場合は不確実な状態を明示し、推測でPCを選んだり許可を拡張したりしない。費用削減や速度最適化は承認・機密境界より優先しない。
+
+## 18. LDC-F01 — Local/Cloud自動振り分け
+
+### 18.1 分割方針
+
+**Local first for device/OS-bound operations; Cloud for reasoning/coordination.** 推論は基本的に既存のPython Agent Runtime / Model Gatewayに残し、Rust Device Agentを第二のAgent Loopにしない。
+
+| 処理 | 初期配置 | fallback / 特記事項 |
+|---|---|---|
+| OS Window/UIA tree・マウス/キーボード・キャプチャ | 対象Local DeviceのCua | GUI対象をCloudへ移動不可。Offline時は操作停止 |
+| OCR・画面の簡易前処理・画面解像度/DPI補正 | 対象Local Device（OS API候補: Windows OCR / Apple Vision / Linux OCR Adapter） | OS APIの対応・ライセンス・品質はPoC評価。未対応時は**ユーザー同意したredacted画像**をCloudへ送る選択肢のみ |
+| プロジェクト検出・SDK/USB認識 | 対象Local Device | ローカル探索結果を勝手に全量アップロードしない |
+| Rust/Cargo・Android/Gradle等のビルド | 明示許可されたLocal隔離Runner、もしくは既存Untrusted VM Cell | 未信頼ビルドはLocalの通常ユーザー権限で実行しない。隔離不可→BLOCKED、勝手にCloud/Hostへ昇格しない |
+| Goal分解・Planning・レビュー・原因仮説・パッチ提案 | Cloud Agent Runtime / Model Gateway | 機密原本を送る前にUser/Local Policy検証。Cloud不可時は停止・限定的にローカル保存 |
+| Browser自動デバッグ | 既存Cloud Browser Worker **または**許可済みLocal Chrome Adapter | この2つは権限・セッション・Originが異なる。無言で相互に切替不可 |
+| Unit/E2E/実機テスト | 現行テストレシピとデバイスに合う許可済み環境 | ユーザーの物理USB端末は移せない。物理端末テストは接続先PCを選ぶ |
+
+### 18.2 Placement Planner 契約案
+
+Cloud側`PlacementPlannerPort`は各Task Stepの実行先を**候補として選ぶ**。Tool Gatewayが最後の権限判断をするため、Plannerの候補をGrantとみなさない。入力は最小化した`CapabilitySnapshot`、実際のユーザー承認、必要なArtifact所在、ToolchainVersion、DeviceOnlineState、cost/budget、Projectのデータ所在、機密性ラベル、Run lease等。
+
+- 能力広告は`deviceId, clientVersion, adapterVersion, osFamily, interactiveSessionState, supportedOperations, toolchainVersionDigests, observedAt, capabilityGeneration, policyRevision, resourcePressureBucket`を基本とする。**OS/SDKがインストール済みという自己申告は能力証明ではない**。実行前にLocal Deviceの能力とPolicyを再評価する。
+- 実行候補は`REQUIRE_LOCAL_DEVICE` / `PREFER_LOCAL` / `PREFER_CLOUD_CELL` / `CLOUD_ONLY_REASONING` / `USER_CHOICE_REQUIRED` / `NO_ELIGIBLE_TARGET`。決定順は(1)権限/データ所在、(2)必須環境・端末、(3)隔離条件、(4)期限・リソース、(5)推定時間/転送量/費用。料金比較だけでデータ境界を緩めない。
+- `Plan = (taskId, runId, goalRevision, stepId, projectRevision, sourceSha, selectedDeviceId?, adapter, operation, reasonCode, capabilityGeneration, policyRevision, inputArtifactRefs, outputArtifactPolicy, fallbackRules, expiry)`。必要ならrecordVersion/CAS。型正本はCHAT_01/03承認待ち。
+- 自動再配置は**読み取り・再計算可能なStep**に限定。GUI click、書き込み、Push、APK install、外部送信は同じ副作用を繰り返す危険があるため、移動前に元デバイスのEffect状態を`CONFIRMED / NOT_STARTED / UNKNOWN`へ照会。
+- デバイス側はPlan単位の実行を直接受け取らず、既存の**typed Tool Intent + signed action grant**のみ受け取る。Cloud Plannerが選んだdeviceでもLocalがより厳しく拒否できる。
+- 画面画像/DOM/Console/ファイル内容をCloud推論へ送る場合はUser Policyの`dataClass + sourceApp + projectId + purpose + maxBytes + retention + destination`を検査。Secret redactionが不確実なら全文送信しない。
+- Local OCR結果は位置情報と信頼度、元フレームのDigest、Window/Display Generationを付与。OCRテキストをUIA要素のIDと混同せず、低確信の場合は再観測か人手確認。
+- リソース圧迫時は低優先OCRやテストを遅延できるが、重いCloudモデルへ画像を自動エスカレーションしない。ユーザーに「別環境を使う理由」を表示。
+
+### 18.3 測定と障害
+
+ローカル/クラウドへの配置理由、実行場所、権限拒否、queue wait、tool execution time、画像転送量、Cloud推論時間、電力/CPU負荷の概算を**機密を含まない指標**で記録。固定fixtureで`Local preferred`と`Cloud preferred`を比較し、速度・費用・成功率を測る。失敗時の許可範囲拡大をfallbackと呼ばない。
+
+## 19. LDC-F02 — PC横断Task移動（Handoff）
+
+### 19.1 「Task移動」の正確な意味
+
+**移すのはTaskの継続に必要な検証済み状態と実行先の権限であり、動作中プロセス・ウィンドウ・GUIセッションそのものは移動しない。**
+
+- Task/Run/GoalRevision/Checkpoint HEAD/Tool Intent/Effect Ledgerの正本はCloud側に維持。別PCは新しいDevice Claimを取得してから、持ち込めるArtifact/Project Snapshotを開いて続きを実行する。
+- 継承可能: 明示的に共有を許可したrepoのcommit SHA、承認済みworkspace snapshot、redacted log/test result、再現手順、選択したUI領域（redacted）、build recipe digest、目的と未完ToDo。
+- 自動継承禁止: OSパス、開いたウィンドウやPID、Clipboard、USB端末の接続、Chrome Cookie/プロフィール、Keychain/資格情報、署名鍵、環境変数、実機のprivate data、進行中のShell/GradleプロセスやCua element token。
+- **端末Aのローカルのみの変更（未保存ファイル、Git dirty diff、untracked files）はデフォルトで移送しない**。安全なProject Artifact Snapshot化をユーザーが選び、secret scan・サイズ上限・ファイル単位の送信同意を通したものだけ別PCへ転送。Aがオフラインなら未取得の変更を「転送済み」と表示しない。
+- 同一Git repoでも端末Bのワークスペースを勝手に上書きしない。`sourceSha/workspaceRevision/expectedHeadSha`が一致しない場合はDiff確認、競合解決、別worktree作成の選択が必要。
+- 署名に必要なiOS/macOS credentials、ADB実機serialの再同意は移動先BのLocal Policyで評価。未対応toolchainや物理端末不足は`BLOCKED_TARGET_CAPABILITY`で停止。
+
+### 19.2 中断・移動・再開の原子的手順
+
+1. **PREPARE**: UIから移動先Bを指定、または能力不足で推奨。CloudがOwner/Project/Task、Bのオンライン状態・Capability・必要なdata classを確認。まだ旧PC Aの権限をBへコピーしない。
+2. **QUIESCE**: Aの対象Runについて新規操作受付を止め、active actionを完了/失敗/UNKNOWNとして確定できる限り照会。GUIの途中操作があるならStop結果を明示し、Cloud Effect Ledgerで不確定を保持。
+3. **SNAPSHOT**: Cloud canonical HEADと同じrevisionのProject Snapshot / Test Manifest / Artifact digestを凍結。Aに残るローカル状態は分類して本人に確認。秘密を含む差分は共有不可。
+4. **FENCE**: CloudでCASの成立を条件に`deviceClaimEpoch`を進め、Aのデバイス別Action Grantを失効。復旧世代、Run lease、Effect Intentを再検証。**ACKやオフライン通知に依存せずサーバー配送時に旧世代を拒否**。
+5. **STAGE**: B側で許可済みProject binding/worktreeとArtifactを整合確認。ステージング失敗ならBへActive権限を与えず、明示的`HANDOFF_BLOCKED`として残す。
+6. **ACTIVATE**: Bの登録済みDevice Key・Local Policy・ユーザー同意・必要SDK/USB対象を確認し、**新しいTask segment / Run claim**で再開。Aのraw session/approvalを横流ししない。
+7. **RECONCILE**: Aが遅れて再接続しても旧claimを再開不可。Aからの旧receiptは既存Tool Intentの照会情報としてのみ統合し、勝手に二重実行しない。Cloudが状態確定できない副作用は`UNKNOWN`でUser/Verifierへ提示。
+
+**線形化境界**はCloudのdevice claim CAS とTool Gatewayのdispatched-intent admission。旧PCにあらかじめ投入済みの命令の停止はネットワーク断中に物理的には保証できないため、短命Grant、Local expiry、通信不達で新規高リスク操作を拒否するPolicy、接続時の再検証を重ねる。`exactly-once`または通信断後の即時取消しを保証しない。
+
+### 19.3 UX・競合
+
+Tauriの「このTaskを別PCで続ける」からBの候補（オンライン、必要Toolchain、SDK、接続端末、必要Artifactの有無）を表示。`引き継ぐ: Task/Commit/テスト証跡`、`引き継がない: ログイン状態/USB/実行中プロセス`を明示。`移動先での再承認待ち`を正規状態にする。複数PCが同時に「引き継ぎ」を要求した場合はCloud CASの勝者一台だけがActive。PC Aへの復帰も同じHandoff手順を行う。
+
+## 20. LDC-F03 — ローカルプロジェクト自動認識
+
+### 20.1 発見範囲と信頼
+
+プロジェクト検出は**登録済みルート（ワークスペースフォルダ）とユーザーが明示した対象のみ**。ホームディレクトリ全体・ネットワーク共有・全ドライブ・ブラウザ履歴の無断走査は行わない。初回は候補表示の`DISCOVERED_UNBOUND`、ユーザーが選択した後に`PROJECT_BOUND`。**検出 = 操作権限ではない**。
+
+- ファイル一覧: 登録済みroot以下の`Cargo.toml`、`Cargo.lock`、`settings.gradle[.kts]`、`build.gradle[.kts]`、`gradlew`、`.git`、`package.json`、`pyproject.toml`、`pubspec.yaml`、`*.xcodeproj`などを**限定深度/件数/時間/総bytes**で調査。Dotfiles・秘密ファイルの中身をCloudへ自動送信しない。
+- Git: `git rev-parse`、commit/branch/dirty summary、remote URLの正規化・credential除去。Git hook、build script、ローカル実行可能ファイルを検出のために実行しない。実行するprobeの`argv/cwd/env`は固定かつ有限時間。
+- Toolchain: `rustc/cargo`、JDK/Gradle、Android SDK/ADB、Xcode/xcrun（macOS）、Flutter、Node等の存在・対応版を**独立Probe Adapter**で取得。`--version`や`adb devices`も外部プロセスの実行なので、登録済みバイナリの署名/絶対パス、出力上限、環境変数制限、timeoutを用いる。未信頼ワークスペースの同名実行ファイルをPATH優先で起動しない。
+- 接続端末: ADBは権限付きProbeだけでUSB機種/serialを最小表示。OSやADBが拒否した場合は`UNKNOWN_DEVICE_ACCESS`。機器固有ID・ユーザー保存データをCloudへ無条件に転送しない。
+- Repo Identity: Projectの正本は既存DEV-01 ProjectRef。PC間の一致候補には認証済みGit provider repo ID、git remote/commit SHA、workspace manifest digestを利用し、絶対パス・同じディレクトリ名・ユーザーの自己申告だけで同一Projectと判定しない。ローカル`bindingId`はDevice毎に別。
+- symlink/junction/reparse pointを解決して許可rootを逸脱しない。見つけたProjectのREADME/コメント/Gradle Script等は**非信頼データ**であり、AI Toolの許可やCloudへの送信命令を含んでも実行しない。
+- 検出結果は`pathless summary`（Project候補、framework、Git snapshot、SDK適合、available test adapters、observedAt、probeResult、warnings）をTauri UIへ表示。Cloudへの同期はプロジェクトを選んだ時点で`metadata-only`を既定とし、詳細内容送信は別許可。
+
+### 20.2 Capability Discovery → Tool Suggestion
+
+`ProjectCapabilityManifest`（提案）を`projectBindingId, deviceId, sourceRevision, gitHeadSha?, dirtyState, kindCandidates[], selectedKind?, toolchainDigests[], detectedDeviceRefs[], allowedRecipes[], probeVersion, observedAt, freshnessTTL, errors[]`として作成。安全な判定のみで次を提示:
+
+| 検出 | ユーザーに示すTool候補 | 注意 |
+|---|---|---|
+| `Cargo.toml` + Rust toolchain | cargo check/test/build、Rust desktop debug | build.rsを含むので信頼/隔離確認が必要 |
+| `settings.gradle.kts` + Android SDK | Gradle debug build、Android実機起動/ログ | APKインストール先serialとpackageを独立承認 |
+| Web `package.json` +許可済みpreview recipe | dev preview、Browser UI debug | npm scriptsは任意コード、元ファイルそのまま実行しない |
+| `.git` +認証済みRepo | 差分レビュー、test selection、PR生成 | git remoteに埋まる資格情報はredact |
+| Xcode project + macOS署名環境 | iOS Simulator、署名可能なら実機テスト | Windows上でiOSネイティブbuild可能と誤表示しない |
+| SDK未導入/版不一致 | 必要SDKの提案・セットアップ案内 | 無断インストール・管理者昇格は禁止 |
+
+ファイルやGit HEAD変化時は**bounded debounceで再Probe**し、stale manifestを`CAPABILITY_STALE`として再確認。WatcherのOSイベント漏れを想定し、build開始時は必ず実ファイル/Toolchainを再照合。`detected`を`permission granted`として使用しない。
+
+## 21. LDC-F04 — 画面を囲んで修正 → 自動デバッグ → 実機テスト
+
+### 21.1 ユーザー体験と安全境界
+
+1. ショートカットまたはTauriの「ここを修正」から**一時的な範囲選択Overlay**を表示。ユーザーがウィンドウ/モニターと領域を選び、「何がおかしいか」をテキスト（任意で声入力）で説明。
+2. Rust Agentは**選択範囲のみ**を取得し、CuaのUIA tree、window/process identity、モニター/DPI、crop矩形、frameGeneration、capture時刻を記録。必要ならLocal OCRを実行。Secure desktop、password manager、credential dialog、機密画面、不明感度は**全面遮断**。オーバーレイ全画面のスキャン・自動常時録画はしない。
+3. 画像とユーザーの意図をローカルPreviewで確認。Cloudへ送るデータ（crop、説明、OCR、必要なログ）と保持期間を表示し、**送信前に明示承認**。画像を端末内でしか扱わない「添付しない」選択も可。
+4. LDC-F03から対象Project候補を提示。Windowプロセス名/タイトルだけで自動結び付けず、Project Binding・起動プロセス/preview session・source Sha/署名等の根拠を確認。曖昧ならユーザーが選ぶ。
+5. Cloud側はDEV-06/DEV-12のReproCaseを作り、元SHAの症状を`REPRODUCED / NOT_REPRODUCED / FLAKY / INCONCLUSIVE`で判定する。スクショだけで「バグ確定」としない。自動診断ではConsole/Network/Trace/Build logs/必要なADB logcatを最小限で取得。
+6. 既存のDeveloper Builderが**隔離された作業環境**で修正し、immutable base SHAからpatch/reviewを作成。ローカルPCの任意ディレクトリを勝手に書き換えない。修正patchをローカルへ適用する場合はGit/workspace CASと許可。
+7. LDC-F01がBuildを適正配置。Localが適する場合も**未信頼build.rs/Gradle scriptsは隔離**。必要なAPK/バイナリは署名・ハッシュ検証後、ユーザーが許可したADB serial/package（または別OSのテストRunner）だけに配布。
+8. Cua/BrowserMCP/ADBで元の再現操作を**権限とデバイスleaseの範囲内**で再実行。テスト前後に対象process/window/package/revisionの一致を確認。GUI操作が許可されない場合は実行不能を明示。
+9. 元の失敗recipe・同じinputで修正後のテストを行い、スクショのROI比較（DPI/解像度/色/環境を正規化）、UIA tree/DOMの意味検査、Console/Network/ADB logs、回帰テストを照合。同じ問題が消えても他の必須テストが未実施なら`PARTIAL`。最新source SHAとbuild artifact digestに結合した証拠が揃ったときだけ`FIXED_VERIFIED`。
+10. TauriのDebug Studioで、赤枠の元画像・再現手順・変更diff・修正後画像・実機結果・検証できなかった項目を表示。「適用/PR作成/再試行」は既存Git/Tool Gatewayの個別許可を利用。**本番公開/外部送信/アプリ削除/本番データ破壊の許可を自動付与しない**。
+
+### 21.2 画像座標と再現の厳格な扱い
+
+`ScreenRegionIssue`（提案）の必須項目: `issueId, deviceId, userSessionGeneration, displayId, displayTopologyGeneration, windowRef, windowGeneration, rectanglePhysicalPx, captureScale, frameDigest, capturedAt, userDescription, sanitizedCropArtifactRef?, accessibilityAnchors[], projectBindingId?, candidateProjectRefs[], baseSha?, privacyPolicyRevision, retention, sourceEvidenceRefs[]`。
+
+- ROIは**物理ピクセル**で保存し、UIのDIP/論理座標との換算を明記。高DPI、マルチモニター、負座標、ウィンドウ移動、再描画後のフレーム再利用を誤認しない。
+- 元スクショ上の座標を永続的なクリック対象にしない。再現時はWindow/Element/DOMのsemantic anchorを優先し、新鮮なsnapshotが取れないなら`STALE_TARGET`で停止。画像座標だけで画面外の操作を推定しない。
+- Capture許可と操作許可は別。画面に未許可アプリが入るときはcropのみ/マスクでも秘匿を保証できない場合はcapture全体を拒否。
+- Debug log/HAR/stacktraceは機密・非信頼入力。Agent Promptに命令として昇格させない。ログ・画面・OCRと実コードの対応はEvidenceとして記録し、根拠不明の推論は`HYPOTHESIS`。
+
+### 21.3 Step DAG・分岐・停止条件
+
+`CAPTURE → CONSENT → BIND_PROJECT → CREATE_REPRO → BASELINE_FAIL → PLAN_FIX → PATCH → REVIEW → BUILD → DEPLOY_TEST_TARGET → REPLAY → VERIFY → REPORT`。各段は有限のTask/Run/Execution; Cloud checkpointを正本とし、画像やログをContextに無限追加しない。
+
+- `BASELINE_FAIL`が未再現なら修正を強行せず`INCONCLUSIVE`またはUser確認へ。再現が必須でない静的UI修正案は`UNVERIFIED_FIX_PROPOSAL`として明確に区別。
+- 予算: 最大修正ループ回数、時間、Cloud token/費用、Local CPU/電力、Device操作回数、収集log/画像サイズをTask開始時に提示し、超過時`WAITING_BUDGET / BLOCKED`。
+- Android端末が接続されていない場合: emulatorでの代替を**別環境の結果**として示し、物理端末PASSと偽らない。端末Bへ移動するならLDC-F02 handoffを実行し、ADB serialとpackageの再承認が必要。
+- 修正前/修正後で異なるApp version、device、orientation、network fixture、permissionsがあるときは`ENV_MISMATCH`で結果を区別。単なる画像差分の減少では成功とせず意味論Oracleを優先。
+- Crash、USB抜去、Device disconnect、ユーザーStop、権限失効で既存Runの状態を保守的に処理し、未確定なinstall/入力はEffect Ledger`UNKNOWN`へ。サイレントリトライは禁止。
+
+### 21.4 GUIの提案
+
+`Bug Capture Overlay`（赤枠/範囲/説明/送信内容確認）、`Project Link Panel`（候補Project・SDK/ADB能力）、`Task Execution Map`（Local/Cloud/実行先PC・費用理由）、`Debug Studio`（before/after、再現、修正diff、実機ログ、認可、再開/停止）、`Handoff Picker`（次のPC、未移送状態警告）。Tauri側でプロジェクト選択・送信・実行を承認し、Cloud UIの`Observe-only`をローカルデスクトップ操作の許可に変換しない。
+
+## 22. 追加REQ / TEST / 受入・実装計画
+
+本節は既存LDC-REQ-01..16/LDC-T01..16を拡張。すべて**DESIGNED / NOT RUN**。SC-24〜40等のグローバルシナリオとの正式対応はCHAT_11承認後。
+
+| Requirement | Test | 判定（肯定＋必須否定試験） | 関連正本 |
+|---|---|---|---|
+| LDC-REQ-17 Placement | LDC-T17 | デバイス必須StepはLocal、推論はCloud。権限・能力・データ所在に違反する自動fallbackは0 | DEV-05 / Tool GW |
+| LDC-REQ-18 Local OCR | LDC-T18 | 許可したROI内OCR・座標対応、未許可画面はCloud送信0、OCR未対応で勝手にCloud転送0 | CHAT_09 |
+| LDC-REQ-19 Device capability freshness | LDC-T19 | SDK削除/変更・電源/接続失効で古いPlanを拒否、read-only候補のみ再計画 | CHAT_01/09 |
+| LDC-REQ-20 Handoff CAS | LDC-T20 | A→B移動時のActive claim 1、競合操作0、旧Run/旧grant再利用0 | CHAT_02/03/10 |
+| LDC-REQ-21 Workspace fidelity | LDC-T21 | 同一ProjectのSHA/Tree/dirtyを照合し、未保存変更・Secret・ローカルパスを暗黙転送しない | DEV-01 |
+| LDC-REQ-22 Cross-device effects | LDC-T22 | install/click失敗ACK不明→UNKNOWN、A切断でもBで副作用二重実行0 | Effect Ledger |
+| LDC-REQ-23 Safe discovery | LDC-T23 | 未登録root、symlink逸脱、無断全ドライブ探索、build/hook実行0 | CHAT_09 |
+| LDC-REQ-24 Project identification | LDC-T24 | 異なるPCの同名folderを別Project、認証済みrepo IDとsource SHAが一致した場合のみ候補結合 | DEV-01 |
+| LDC-REQ-25 Probe isolation | LDC-T25 | workspace内の悪意あるcargo/gradleやPATH上の偽binを起動しない。probe上限が効く | CHAT_09 |
+| LDC-REQ-26 Targeted capture | LDC-T26 | DPI/マルチモニター/負座標で指定ROIを再現、機密/別windowの画面転送0 | Browser / QA |
+| LDC-REQ-27 BugProject binding | LDC-T27 | 複数Projectが同じ画面に関連する場合は人手選択、誤repoへ修正適用0 | DEV-01 / DEV-09 |
+| LDC-REQ-28 Debug loop | LDC-T28 | baseline元SHAでFAIL、修正SHAでPASS + 必須回帰 + 同じ実機/fixtureで初めてFIXED_VERIFIED | DEV-06 / DEV-12 |
+| LDC-REQ-29 Device test | LDC-T29 | adb serial/package誤り、USB抜差し、未接続、別PCでの端末不足をPASSにしない | DEV-05 / LDC-T11 |
+| LDC-REQ-30 Unified Stop/Budget | LDC-T30 | Cloud/Local/別PCでUser Stop・Budget・Device Revokeを尊重し新規副作用0 | CHAT_02/03/09 |
+| LDC-REQ-31 Privacy/evidence | LDC-T31 | ROI/ログ/diagnostic/ArtifactにSecret残存0、消去/retention、Cloud送信同意が粒度別 | CHAT_09/11 |
+| LDC-REQ-32 Offline semantics | LDC-T32 | offline中のLocal表示は可、Cloud推論・遠隔UI操作を勝手に実行しない | CHAT_02/09 |
+
+**新しいE2Eシナリオ（ローカル提案・未採番）**
+
+- LDC-SC06: Windows PC AのCargo repoを発見、source SHA検出、Cloudレビュー、隔離されたLocal Build、検証結果Artifactを報告。
+- LDC-SC07: PC AでTask開始 → PC Bへ安全に移動 → 異なるローカル絶対パスでも同一Projectを確認 → Resume。Aを強制オフラインにして旧write拒否とUNKNOWN検証。
+- LDC-SC08: 高DPIマルチモニターでUI領域を囲む → Project結合 → 元SHAで再現 → 修正/ビルド → ユーザー指定Android実機へinstall → 同じrecipe +回帰テスト → before/afterの根拠付き完了報告。
+- LDC-SC09: Android端末がAにしかない場合にBへの移動を提案。Bでは`BLOCKED_TARGET_CAPABILITY`、端末がないまま成功報告ゼロ。
+- LDC-SC10: 誤ってCredential画面を囲む、Source内のPrompt Injection、送信同意取消、悪意あるBuild Script、古いRunの再配送を同時注入。未承認送信/書込みゼロ。
+
+**実装の独立スライス（元のLDC-0..6に追加）**
+
+1. **LDC-2A: Scoped Project Discovery** — Rust read-only Probe + Tauri候補一覧。Node/SDK/ADB検出は許可後。Read-onlyで先行可能。
+2. **LDC-2B: Placement Planner** — Cloud Python側の能力照合とLocal/OCR PoC。実行先候補を示すだけでTool Grant発行しない。
+3. **LDC-3A: User Region Capture** — Windows選択Overlayと高DPI座標・ローカル赤枠/Mask、送信同意ダイアログ。初めは画像のCloud送信なし。
+4. **LDC-4A: Cross-device Handoff** — Cloud Task/Run HEAD/Device Lease/Artifactの連携をLDC-4完了後に実装。UI操作中のlive transferは禁止。
+5. **LDC-5A: Debug-to-Device Loop** — DEV-06/12の再現とLDC-F04の範囲選択、Build/ADB Adapterを縦につなぎ、元SHA失敗→新SHA成功を検証。実AndroidとChromeの各権限は個別に導入。
+6. **LDC-6A: Regression and rollout** — 他PC/OS、高DPI、Task移動競合、USB切断、メモリ圧、偽Toolchain、機密画面の故障注入を実測。段階的にenable。
+
+**新しい正本/API/DBの所有者**: CHAT_01が`CapabilitySnapshot/PlacementPlan/DeviceClaim/ScreenRegionIssue`型、CHAT_02/03がPlacement admission・handoff fence・Effect Ledger、CHAT_09がLocalPolicy・画面/ファイル送信・elevation禁止、CHAT_10がDevice Claim CAS・Artifact retention、CHAT_08がTauri/Cloud UI、CHAT_05/16がBuild/ADB Recipe、CHAT_11がTest/SCの正本を審査する。これらは本PR内で**契約案に留め、未承認Schema/テーブル/エンドポイントを実装済みと主張しない**。
