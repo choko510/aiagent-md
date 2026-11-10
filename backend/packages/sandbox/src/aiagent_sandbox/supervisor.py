@@ -172,7 +172,12 @@ class Supervisor:
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "-S", "-c", _PID_NAMESPACE_EXEC, *argv,
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            _PID_NAMESPACE_EXEC,
+            *argv,
             cwd=str(cwd),
             env=env,
             stdin=asyncio.subprocess.DEVNULL,
