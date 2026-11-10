@@ -37,7 +37,7 @@ class OutboxRelay:
         with self.db.tx() as c:
             rows = c.execute(
                 "WITH cand AS (SELECT tenant_id, id FROM agent.outbox_messages WHERE dispatched_at IS NULL"
-                " AND next_attempt_at <= now() AND (relay_lease_until IS NULL OR relay_lease_until <= now())"
+                " AND topic = 'run' AND next_attempt_at <= now() AND (relay_lease_until IS NULL OR relay_lease_until <= now())"
                 " ORDER BY next_attempt_at, id LIMIT %s FOR UPDATE SKIP LOCKED)"
                 " UPDATE agent.outbox_messages o SET relay_lease_epoch = o.relay_lease_epoch + 1, relay_owner_ref=%s,"
                 " relay_lease_until = now() + make_interval(secs => %s), dispatch_attempts = o.dispatch_attempts + 1"
@@ -60,8 +60,8 @@ class OutboxRelay:
         ]
 
     def publish(self, m: OutboxClaim) -> None:
-        if m.topic != "run":  # notification / sse topics are delivered by their own workers (not in STEP 3 scope)
-            return
+        if m.topic != "run":
+            raise ValueError(f"unsupported relay topic: {m.topic}")
         with self.db.tx() as c:
             enqueue(c, "run", m.tenant_id, f"outbox:{m.id}", m.payload)
 
