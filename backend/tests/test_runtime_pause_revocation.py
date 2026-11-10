@@ -171,6 +171,9 @@ async def test_paused_redelivery_preserves_unresolved_effect_and_acks(
         > claim.lease_epoch
     )
     assert _queue_state(dbs, job.id) == "DONE"
+    duplicate = _job(dbs, tenant, ids)
+    assert await worker.handle(duplicate) == "WAITING_RECONCILIATION"
+    assert _queue_state(dbs, duplicate.id) == "DONE"
 
 
 @pytest.mark.asyncio
