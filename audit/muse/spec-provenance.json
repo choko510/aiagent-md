@@ -4,13 +4,13 @@
   "moduleCount": 88,
   "historicalSourceBase": "8b153c238c8a4cc18b6e9d258e55d3265e5249d5",
   "gitRevisionSource": "90482eabe070630fa532f790052ebb45ae3fcee7",
-  "note": "2026-11-09: PR #74 RTK/Caveman/Headroom and PR #76 DeepAgents/Mastra/OpenClaw draft proposals integrated preserving both context validators, benchmark gates, original/summary provenance and existing 88 canonical modules. OPT-T01..20 and ACM-OSS-T01..14 designed/NOT RUN; not runtime, KVM, DB or Owner sign-off. 2026-11-10: ADR-038/039 STEP 2 (Agent Runtime/Queue selection from PYRT-T00..T12 PoC conformance results) updated 10 canonical modules; hashes refreshed. PoC runs on fake gateways, not production/KVM/Owner verification. 2026-11-10: PR #80 review (P1-01..05, P2) applied to Runtime/Checkpoint/Tool Gateway/Model Router/Queue/QA modules; ADR-039 set PROVISIONAL. PR #80 review round 2: terminal Run states, fenced framework_ref discard, digest-only diagnostics, ACK-after-expiry semantics (task-run-manager, checkpoint, job-queue). 2026-11-10: PR #81 X Research Provider TwiFork read-only/user-login design; provenance hash updated (design only, not runtime validation). 2026-11-10: STEP 3 implementation (backend/) - architecture-decisions.md gains the 'ADR-038/039 STEP 3 実装結果' section; code implemented and tested on dev/CI, NOT production KVM verified, no Owner sign-off.",
+  "note": "2026-11-09: PR #74 RTK/Caveman/Headroom and PR #76 DeepAgents/Mastra/OpenClaw draft proposals integrated preserving both context validators, benchmark gates, original/summary provenance and existing 88 canonical modules. OPT-T01..20 and ACM-OSS-T01..14 designed/NOT RUN; not runtime, KVM, DB or Owner sign-off. 2026-11-10: ADR-038/039 STEP 2 (Agent Runtime/Queue selection from PYRT-T00..T12 PoC conformance results) updated 10 canonical modules; hashes refreshed. PoC runs on fake gateways, not production/KVM/Owner verification. 2026-11-10: PR #80 review (P1-01..05, P2) applied to Runtime/Checkpoint/Tool Gateway/Model Router/Queue/QA modules; ADR-039 set PROVISIONAL. PR #80 review round 2: terminal Run states, fenced framework_ref discard, digest-only diagnostics, ACK-after-expiry semantics (task-run-manager, checkpoint, job-queue). 2026-11-10: PR #81 X Research Provider TwiFork read-only/user-login design; provenance hash updated (design only, not runtime validation). 2026-11-10: STEP 3 implementation (backend/) - architecture-decisions.md gains the 'ADR-038/039 STEP 3 実装結果' section; code implemented and tested on dev/CI, NOT production KVM verified, no Owner sign-off. 2026-11-10: ADR-041 Rust Local Device Client + Cua MCP architecture proposal added. Design only; Device Gateway, client and hardware tests NOT RUN. Original 88 module set unchanged. 2026-11-10: PR #83 audit P1-01..05/P2-01..03 resolved as spec proposals, COMP-02 added to audited companions, LDC-REQ-01..32/T01..32 designed and not runtime tested.",
   "modules": {
     "docs/00-foundation/README.md": "9981b45c8bcae1e2a012e007eb42afdd39bfd032",
     "docs/00-foundation/product-requirements.md": "7fbfe9ca8d43ab2696a04f048d34a7cd32a104a9",
     "docs/00-foundation/system-architecture.md": "9016bfc0d1506962307eec747e4d96ff9dbaeb37",
     "docs/00-foundation/domain-glossary.md": "7d4b478329679c24cde44f9a7edeac452ace99a0",
-    "docs/00-foundation/architecture-decisions.md": "a4943127595ea563400fcf2b38fae4aa7efeb03d",
+    "docs/00-foundation/architecture-decisions.md": "4995df4183ce884798bd4b8b6bb5fd6686b6930b",
     "docs/01-contracts/core-domain-models.md": "64392b84db7bc09743ea4f1e61c2ad402238aaa3",
     "docs/01-contracts/event-envelope-and-stream.md": "ae788026d16ae2ae3cdae880b052af103bd38ab1",
     "docs/01-contracts/task-run-state-machines.md": "d9ca5b20f58c32f032506c21a2aad1550553bf4a",
@@ -95,8 +95,9 @@
     "docs/14-adaptive-experience/feedback-learning.md": "55d8255b15a82604abd0d036098f18b850d52ac9",
     "docs/15-multimodal/multimodal-ingestion.md": "c933491f0a3d128d40f27bcea6ceb03b3218f45f"
   },
-  "companionCount": 1,
+  "companionCount": 2,
   "companionSpecs": {
-    "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e"
+    "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e",
+    "docs/16-app-development/local-device-rust-client.md": "7be7b43cffb98e83f4eca81fdaf3d3babbf29669"
   }
 }

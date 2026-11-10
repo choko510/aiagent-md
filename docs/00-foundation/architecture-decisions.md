@@ -313,3 +313,11 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | `docs/15-multimodal/multimodal-ingestion.md` | B | 論理型、parserは隔離Python Worker |
 | `docs/16-app-development/README.md` | C | OpenHands SDK等の統合はSTEP 2で検証 |
 | `docs/16-app-development/code-intelligence-and-adaptive-testing.md` | B | 対象プロジェクトの言語サポート一覧（TS/JS含む） |
+
+## ADR-041: Rust製ユーザー所有Device ClientとCua Driverの分離統合（2026-11-10）
+
+- **State:** CLIENT_LANGUAGE_PRODUCT_FIXED（ユーザー決定） / INTEGRATION_PROVISIONAL（設計提案・未実装・未検証）。
+- **Decision:** ユーザー所有PCに配布するローカルDevice Agentの実装言語はRust、UI shellはTauri 2。GUI操作の初版は独立Cua DriverとのMCP stdio統合を採用。Windows/Linuxは子プロセス、macOSは署名付きホストが管理するembedded daemonを使用。Chrome拡張、Build、Androidは独立Adapter。詳細は[DEV-LDC](../16-app-development/local-device-rust-client.md)。
+- **ADR-036との整合:** Python-firstはTrusted Control VMのBackend/Agent Runtime/Gateway/Browser Worker/Memory/Automationを対象とする。外部に配布するRust Device AgentはOS権限とデバイス操作の独立した信頼境界にある。BackendのRust全面移行、同一バイナリ化、Agent Loopの言語変更、Runtime CellからローカルPCへの直接Shell権限は**認めない**。
+- **Rejected:** Rustで全OS GUIを自作、未公開Rust SDK crateを直接vendoringして初版に固定、Cua/Chromeのraw MCPやCDPをCloudへ転送、`sandbox.exec`をローカルPCで再利用、ユーザーPCで無制限Shellを許可。
+- **Acceptance:** Cloud Tool Gateway/Approval/Sentinelの正本維持、Device Side再認可、旧世代・通信断・重複副作用のfail closed、Windows 11実機のUI/署名/操作検証、Cua version lockとライセンス監査。Owner: CHAT_00/01/02/03/04/08/09/10/11/DEV。**未承認のSchema/DB/APIをLocked扱いしない。**
