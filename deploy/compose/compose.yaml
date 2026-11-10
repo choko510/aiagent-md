@@ -119,7 +119,9 @@ services:
     depends_on: {api: {condition: service_healthy}}
     volumes: !reset []
     command: ["python", "-m", "aiagent_core.tcpforward", "0.0.0.0:8080", "api:8080"]
-    healthcheck: {disable: true}
+    # A real healthcheck (not `disable`): `docker compose up --wait` fails on services whose healthcheck is disabled.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=3).close()"]
     deploy: {resources: {limits: {cpus: "0.25", memory: 64m, pids: 64}}}
 
   relay:  # Outbox relay + Scheduler (QueuePort producer side)

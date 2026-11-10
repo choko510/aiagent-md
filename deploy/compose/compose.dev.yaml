@@ -34,7 +34,7 @@ services:
     environment: {AIAGENT_PROFILE: development}
   receiver:  # fake external world, reachable ONLY through sentinel (devsim network)
     image: "aiagent/all:${TAG:-dev}"
-    networks: {devsim: {ipv4_address: 172.31.250.10}}
+    networks: {devsim: {ipv4_address: 10.250.250.10}}
     read_only: true
     user: "10001:10001"
     tmpfs: ["/tmp"]
@@ -58,4 +58,4 @@ services:
 networks:
   devsim:
     internal: true
-    ipam: {config: [{subnet: 172.31.250.0/24}]}
+    ipam: {config: [{subnet: 10.250.250.0/24}]}

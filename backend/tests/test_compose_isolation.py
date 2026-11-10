@@ -75,8 +75,8 @@ def test_sentinel_is_the_only_egress() -> None:
 
 @pytest.mark.parametrize("service", ["runtime", "model-gateway", "tool-gateway"])
 def test_fake_world_unreachable_except_via_sentinel(service: str) -> None:
-    assert probe(service, "172.31.250.10", 8099).startswith("BLOCKED")
-    assert probe("sentinel", "172.31.250.10", 8099).startswith("OPEN")
+    assert probe(service, "10.250.250.10", 8099).startswith("BLOCKED")
+    assert probe("sentinel", "10.250.250.10", 8099).startswith("OPEN")
 
 
 @pytest.mark.parametrize("service", ["runtime", "model-gateway", "tool-gateway", "sentinel", "api", "relay"])
