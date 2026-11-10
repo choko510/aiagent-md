@@ -64,7 +64,7 @@ def run(coro):
 
 
 def test_browse_normalization_and_pagination():
-    async def mcp(params):
+    def mcp(params):
         assert params["version"] == "latest"
         assert params["limit"] == 2
         return {
