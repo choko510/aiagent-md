@@ -335,27 +335,31 @@ def test_t07c_cancelled_unknown_effect_converges_after_reconciliation(stack: Sta
 
     from aiagent_core.rpc import RpcClient
 
-    intent_id = q(
-        pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,)
-    )[0]["id"]
+    intent_id = q(pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,))[
+        0
+    ]["id"]
     ops = RpcClient(f"tcp:127.0.0.1:{stack.ports['tool']}", "ops", bytes.fromhex(stack.keys["ops_tool"]))
     res = asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))
     assert res["status"] == "CONFIRMED"
     assert state(api, t, task)["run"]["state"] == "CANCELLED"
     assert state(api, t, task)["state"] == "CANCELLED"
-    assert q(
-        pg.owner,
-        "SELECT count(*) AS n FROM agent.run_checkpoints WHERE run_id=%s"
-        " AND entry_kind='tool' AND tool_call_id=(SELECT invocation_key FROM agent.tool_intents WHERE id=%s)",
-        (pending["run"]["id"], intent_id),
-    )[0]["n"] == 1
+    assert (
+        q(
+            pg.owner,
+            "SELECT count(*) AS n FROM agent.run_checkpoints WHERE run_id=%s"
+            " AND entry_kind='tool' AND tool_call_id=(SELECT invocation_key FROM agent.tool_intents WHERE id=%s)",
+            (pending["run"]["id"], intent_id),
+        )[0]["n"]
+        == 1
+    )
     assert len(sends_for(stack, task, pg)) == 1
     stack.drive()
     assert len(sends_for(stack, task, pg)) == 1
     assert state(api, t, task)["run"]["state"] == "CANCELLED"
-    assert asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))[
-        "status"
-    ] == "CONFIRMED"
+    assert (
+        asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))["status"]
+        == "CONFIRMED"
+    )
 
 
 def test_t07b_remote_ack_lost_timeout_is_unknown(pg: PgEnv, api, t, tmp_path) -> None:
