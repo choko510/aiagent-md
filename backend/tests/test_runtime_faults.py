@@ -331,9 +331,9 @@ def test_t07c_cancelled_unknown_effect_converges_after_reconciliation(stack: Sta
     reply = api.post(f"/v1/tasks/{task}/cancel", headers={"Authorization": f"Bearer {t['token']}"})
     assert reply.status_code == 200, reply.text
     assert state(api, t, task)["run"]["state"] == "WAITING_RECONCILIATION"
-    from aiagent_core.rpc import RpcClient
-
     import asyncio
+
+    from aiagent_core.rpc import RpcClient
 
     intent_id = q(
         pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,)
