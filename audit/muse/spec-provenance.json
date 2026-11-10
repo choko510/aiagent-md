@@ -96,8 +96,9 @@
     "docs/14-adaptive-experience/feedback-learning.md": "55d8255b15a82604abd0d036098f18b850d52ac9",
     "docs/15-multimodal/multimodal-ingestion.md": "c933491f0a3d128d40f27bcea6ceb03b3218f45f"
   },
-  "companionCount": 1,
+  "companionCount": 2,
   "companionSpecs": {
-    "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e"
+    "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e",
+    "docs/08-interfaces/extension-marketplace.md": "0cab012394022b0508c4f3136789f69a9996f3ca"
   }
 }
