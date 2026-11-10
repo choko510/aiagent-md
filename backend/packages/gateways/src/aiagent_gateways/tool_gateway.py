@@ -337,8 +337,8 @@ class ToolGateway:
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
             run = c.execute(
-                "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.restore_incarnation, t.goal_revision,"
-                " t.owner_user_id, s.restore_incarnation AS cur_inc FROM agent.runs r JOIN agent.tasks t ON"
+                "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation, t.goal_revision,"
+                " t.owner_user_id, t.workspace_id, s.restore_incarnation AS cur_inc FROM agent.runs r JOIN agent.tasks t ON"
                 " t.tenant_id=r.tenant_id AND t.id=r.task_id CROSS JOIN agent.schema_control s"
                 " WHERE r.tenant_id=%s AND r.id=%s FOR SHARE OF r",
                 (claim.tenant_id, claim.run_id),
@@ -355,6 +355,10 @@ class ToolGateway:
             assert run is not None and apr is not None and led is not None
             if led["status_code"] != "PENDING_APPROVAL":
                 return outcome(led["status_code"], dict(led["result_json"] or {}))
+            if not control.scope_active(c, claim.tenant_id, claim.owner_user_id, str(run["workspace_id"])):
+                raise RpcError("SCOPE_REVOKED")
+            if run["pause_requested"] or run["status_code"] == "PAUSED":
+                raise RpcError("PAUSED")
             if (
                 run["lease_epoch"] != claim.lease_epoch
                 or run["owner_user_id"] != claim.owner_user_id
