@@ -69,8 +69,10 @@ class FixedSourceHTTP:
             await self._client.aclose()
 
     async def get(self, source: str, path: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        if source not in BASE_URLS or not path.startswith("/") or path.startswith("//"):
+        if source not in BASE_URLS:
             raise CatalogError("INVALID_SOURCE", 400)
+        if not path.startswith("/") or path.startswith("//"):
+            raise CatalogError("INVALID_PATH", 400)
         if len(path) > 600 or any(c in path for c in "\r\n\\"):
             raise CatalogError("INVALID_PATH", 400)
         # Never follow an upstream redirect, including an OAuth redirect.
@@ -103,6 +105,29 @@ class FixedSourceHTTP:
         if not isinstance(payload, dict):
             raise CatalogError("UPSTREAM_INVALID_SCHEMA", 503)
         return payload
+
+
+class CachedJSONTransport:
+    """Bounded, short-lived metadata cache. Cache successes only, never errors."""
+
+    def __init__(self, inner: JSONTransport, *, ttl_seconds: float = 45.0, max_entries: int = 256) -> None:
+        self.inner = inner
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+
+    async def get(self, source: str, path: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        key = (source, path, tuple(sorted((str(k), str(v)) for k, v in params.items())))
+        now = time.monotonic()
+        cached = self._entries.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+        result = await self.inner.get(source, path, params)
+        if len(self._entries) >= self.max_entries:
+            # Evict the oldest expiry, including already-expired entries.
+            self._entries.pop(min(self._entries, key=lambda k: self._entries[k][0]), None)
+        self._entries[key] = (time.monotonic() + self.ttl_seconds, result)
+        return result
 
 
 def _text(value: Any, max_len: int = 320) -> str:
@@ -140,7 +165,8 @@ def _mcp_item(entry: Any) -> dict[str, Any] | None:
     name = _text(server.get("name"), 200)
     if not name or "/" not in name:
         return None
-    info = (entry.get("_meta") or {}).get("io.modelcontextprotocol.registry/official", {})
+    metadata = entry.get("_meta") if isinstance(entry.get("_meta"), dict) else {}
+    info = metadata.get("io.modelcontextprotocol.registry/official", {})
     info = info if isinstance(info, dict) else {}
     if info.get("status") == "deleted":
         return None
@@ -231,16 +257,23 @@ class CatalogService:
             raise CatalogError("INVALID_FILTER", 422)
         if (kind == "SKILL" and source == "mcp") or (kind == "MCP" and source == "clawhub"):
             raise CatalogError("INVALID_FILTER", 422)
+        short_mcp_query = bool(q and len(q) < 3 and kind != "SKILL")
+        if short_mcp_query and (source == "mcp" or kind == "MCP"):
+            raise CatalogError("MCP_QUERY_TOO_SHORT", 422)
         selected = [
             s for s in ("mcp", "clawhub")
-            if (source == "all" or source == s) and (kind == "all" or (kind == "MCP") == (s == "mcp"))
+            if (source == "all" or source == s)
+            and (kind == "all" or (kind == "MCP") == (s == "mcp"))
+            and not (s == "mcp" and short_mcp_query)
         ]
-        if source == "mcp" and q and len(q) < 3:
-            raise CatalogError("MCP_QUERY_TOO_SHORT", 422)
         fingerprint = {"q": q, "kind": kind, "source": source, "limit": limit}
         state: dict[str, Any] = {s: {"cursor": None, "done": False} for s in selected}
+        page_number = 0
         if cursor:
             c = self._unseal(cursor)
+            page_number = c.get("page", 0)
+            if not isinstance(page_number, int) or not 0 <= page_number <= 10000:
+                raise CatalogError("INVALID_CURSOR", 400)
             if c.get("filters") != fingerprint or not isinstance(c.get("state"), dict):
                 raise CatalogError("CURSOR_FILTER_MISMATCH", 400)
             state = c["state"]
@@ -253,14 +286,14 @@ class CatalogService:
                 if cur is not None and (not isinstance(cur, str) or len(cur) > 1024):
                     raise CatalogError("INVALID_CURSOR", 400)
         entries: list[dict[str, Any]] = []
-        warnings: list[dict[str, str]] = []
-        quota = (limit + len(selected) - 1) // len(selected)
-        for s in selected:
-            if state[s]["done"]:
-                continue
-            if s == "mcp" and q and len(q) < 3:
-                state[s]["done"] = True
-                warnings.append({"source": "mcp", "code": "MCP_QUERY_TOO_SHORT"})
+        warnings: list[dict[str, str]] = (
+            [{"source": "mcp", "code": "MCP_QUERY_TOO_SHORT"}] if short_mcp_query else []
+        )
+        progressed = False
+        base_quota, extra = divmod(limit, len(selected))
+        for index, s in enumerate(selected):
+            quota = base_quota + (1 if extra and index == page_number % len(selected) else 0)
+            if state[s]["done"] or quota == 0:
                 continue
             try:
                 if s == "mcp":
@@ -297,14 +330,18 @@ class CatalogService:
                 if next_cursor and next_cursor == state[s]["cursor"]:
                     raise CatalogError("UPSTREAM_CURSOR_LOOP")
                 state[s] = {"cursor": next_cursor, "done": not bool(next_cursor)}
+                progressed = True
             except CatalogError as exc:
                 warnings.append({"source": s, "code": exc.code})
         next_token = None
         if any(not v["done"] for v in state.values()):
-            # A wholly failed page has no forward progress; return retry warning, not
-            # an endless identical next-page token.
-            if entries or any(v["done"] for v in state.values()):
-                next_token = self._seal({"filters": fingerprint, "state": state, "exp": int(time.time()) + CURSOR_TTL_SECONDS})
+            # Even an empty filtered page can have a valid upstream nextCursor.
+            # Do not issue an unchanged token when all sources failed.
+            if progressed:
+                next_token = self._seal({
+                    "filters": fingerprint, "state": state,
+                    "page": page_number + 1, "exp": int(time.time()) + CURSOR_TTL_SECONDS,
+                })
         if warnings and not entries and not next_token:
             # Source outages must not masquerade as an empty successful catalog.
             return {"items": [], "nextCursor": None, "warnings": warnings, "partial": True}
