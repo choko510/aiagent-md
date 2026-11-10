@@ -17,7 +17,7 @@ services:
   model-gateway:
     image: "aiagent/all:${TAG:-dev}"
     volumes: !reset []
-    secrets: [model_gateway_dsn, model_gateway_rpc_keys]
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, egress_model_token]
     environment: {AIAGENT_PROFILE: development, AIAGENT_ANTHROPIC_API_KEY_FILE: ""}
   tool-gateway:
     image: "aiagent/all:${TAG:-dev}"

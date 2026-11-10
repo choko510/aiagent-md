@@ -62,6 +62,8 @@ secrets:
   sandbox_grant_key: {file: ./secrets/sandbox_grant_key}
   anthropic_api_key: {file: ./secrets/anthropic_api_key}
   receiver_token: {file: ./secrets/receiver_token}
+  egress_model_token: {file: ./secrets/egress_model_token}
+  egress_static_tokens: {file: ./secrets/egress_static_tokens}
 
 services:
   postgres:
@@ -159,7 +161,7 @@ services:
     image: aiagent/gateways:${TAG:-dev}
     networks: [db, rpc]  # provider traffic goes through sentinel's egress proxy on the rpc network
     depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
-    secrets: [model_gateway_dsn, model_gateway_rpc_keys, anthropic_api_key]
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, anthropic_api_key, egress_model_token]
     environment:
       <<: *env
       AIAGENT_MODEL_GATEWAY_DSN_FILE: /run/secrets/model_gateway_dsn
@@ -167,6 +169,7 @@ services:
       AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:0.0.0.0:7101
       AIAGENT_ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
       AIAGENT_EGRESS_PROXY_MODEL: http://sentinel:3128
+      AIAGENT_EGRESS_MODEL_TOKEN_FILE: /run/secrets/egress_model_token
       AIAGENT_MODEL_CONSENT: ${AIAGENT_MODEL_CONSENT:-}
     command: ["python", "-m", "aiagent_gateways.servers", "model"]
     deploy: {resources: {limits: {cpus: "1", memory: 512m, pids: 256}}}
@@ -200,7 +203,7 @@ services:
     image: aiagent/sentinel:${TAG:-dev}
     networks: [db, rpc, egress]
     depends_on: {migrate: {condition: service_completed_successfully}}
-    secrets: [sentinel_dsn, sentinel_rpc_keys, sentinel_permit_key]
+    secrets: [sentinel_dsn, sentinel_rpc_keys, sentinel_permit_key, egress_static_tokens]
     environment:
       <<: *env
       AIAGENT_SENTINEL_DSN_FILE: /run/secrets/sentinel_dsn
@@ -209,6 +212,7 @@ services:
       AIAGENT_SENTINEL_ENDPOINT: tcp:0.0.0.0:7103
       AIAGENT_EGRESS_LISTEN: 0.0.0.0:3128
       AIAGENT_EGRESS_CONFIG_FILE: /run/aiagent/egress.json
+      AIAGENT_EGRESS_STATIC_TOKENS_FILE: /run/secrets/egress_static_tokens
     volumes:
       - /etc/aiagent/isolation.json:/run/aiagent/isolation.json:ro
       - ./egress.json:/run/aiagent/egress.json:ro

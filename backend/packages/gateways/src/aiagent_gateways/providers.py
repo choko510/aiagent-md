@@ -165,8 +165,25 @@ class AnthropicProvider:
 
     URL = "https://api.anthropic.com/v1/messages"
 
-    def __init__(self, key: Secret, proxy: str | None, *, timeout_s: float = 120.0) -> None:
+    def __init__(
+        self,
+        key: Secret,
+        proxy: str | None,
+        *,
+        proxy_token: Secret | None = None,
+        url: str | None = None,
+        timeout_s: float = 120.0,
+    ) -> None:
         self.key, self.proxy, self.timeout_s = key, proxy, timeout_s
+        self.proxy_token = proxy_token  # identifies the Model Gateway to the Trusted Egress (standing destination)
+        self.url = url or self.URL
+
+    def _client(self) -> httpx.AsyncClient:
+        proxy = None
+        if self.proxy:
+            tok = self.proxy_token.reveal() if self.proxy_token is not None else ""
+            proxy = httpx.Proxy(self.proxy, headers={"Proxy-Authorization": f"Aiagent model_gateway:{tok}"})
+        return httpx.AsyncClient(proxy=proxy, timeout=self.timeout_s, trust_env=False)
 
     def capability(self, model: str) -> Capability:
         return Capability(True, True, 600_000, "anthropic", True)
@@ -217,8 +234,8 @@ class AnthropicProvider:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        async with httpx.AsyncClient(proxy=self.proxy, timeout=self.timeout_s, trust_env=False) as client:
-            async with client.stream("POST", self.URL, headers=headers, json=body) as resp:
+        async with self._client() as client:
+            async with client.stream("POST", self.url, headers=headers, json=body) as resp:
                 if resp.status_code in (429, 529):
                     raise ProviderError("RATE_LIMITED", True)
                 if resp.status_code >= 500:

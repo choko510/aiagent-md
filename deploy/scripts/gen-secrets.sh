@@ -16,6 +16,7 @@ RM=$(r); RT=$(r); TS=$(r); OPS=$(r)
 w model_gateway_rpc_keys "runtime=$RM"; w runtime_model_rpc_key "$RM"
 w tool_gateway_rpc_keys "runtime=$RT,ops=$OPS"; w runtime_tool_rpc_key "$RT"
 w sentinel_rpc_keys "tool_gateway=$TS"; w tool_sentinel_client_key "$TS"
+EM=$(r); w egress_model_token "$EM"; w egress_static_tokens "model_gateway=$EM"
 w sentinel_permit_key "$(r)"; w sandbox_rpc_key "$(r)"; w sandbox_grant_key "$(r)"; w receiver_token "$(r)"
 [ -f "$D/anthropic_api_key" ] || w anthropic_api_key ""
 echo "secrets written to $D (add your provider key to anthropic_api_key)"

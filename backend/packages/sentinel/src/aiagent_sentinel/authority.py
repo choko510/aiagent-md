@@ -198,8 +198,25 @@ class Sentinel:
 
 
 def load_config() -> EgressConfig:
-    from aiagent_core.config import profile
+    """Destinations from AIAGENT_EGRESS_CONFIG_FILE (non-secret); standing-destination proxy tokens from the secret
+    AIAGENT_EGRESS_STATIC_TOKENS (`identity=token,...`), never from the config file."""
+    from aiagent_core.config import profile, secret
 
     path = os.environ.get("AIAGENT_EGRESS_CONFIG_FILE")
-    text = open(path, encoding="utf-8").read() if path else os.environ.get("AIAGENT_EGRESS_CONFIG", "{}")  # noqa: SIM115
-    return EgressConfig.from_json(text, production=profile() == "production")
+    if path:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = os.environ.get("AIAGENT_EGRESS_CONFIG", "{}")
+    cfg = EgressConfig.from_json(text, production=profile() == "production")
+    if cfg.static_tokens and profile() == "production":
+        raise ValueError("static proxy tokens must come from AIAGENT_EGRESS_STATIC_TOKENS_FILE, not the config file")
+    tokens = secret("AIAGENT_EGRESS_STATIC_TOKENS", required=False)
+    if tokens is not None:
+        for part in tokens.reveal().replace("\n", ",").split(","):
+            ident, _, tok = part.strip().partition("=")
+            if ident and tok:
+                if len(tok) < 32:
+                    raise ValueError("static proxy tokens must be >= 32 characters")
+                cfg.static_tokens[ident] = tok
+    return cfg

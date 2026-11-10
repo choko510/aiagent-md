@@ -120,7 +120,11 @@ def main_model() -> None:
     if anth is not None:
         register_secret(anth.reveal())
         secrets.append(anth.reveal())
-        providers["anthropic"] = AnthropicProvider(anth, os.environ.get("AIAGENT_EGRESS_PROXY_MODEL"))
+        providers["anthropic"] = AnthropicProvider(
+            anth,
+            os.environ.get("AIAGENT_EGRESS_PROXY_MODEL"),
+            proxy_token=config.secret("AIAGENT_EGRESS_MODEL_TOKEN", required=False),
+        )
         routes["claude-sonnet-5-5"] = [Route("anthropic", "claude-sonnet-5-5"), Route("anthropic", "claude-haiku-5-5")]
     if config.profile() == "production" and providers.keys() == {"fake"}:
         print(

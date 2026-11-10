@@ -217,6 +217,14 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 
 **STEP 3の採用条件（未達ならADR-038を再審）**: CIで`agent-runtime-conformance`を必須化し、PYRT-T00〜T18を常時合格（Runtime・Checkpoint・Tool・Queue・QAの正本仕様の変更でも起動する）。ADR-039確定のため、QueuePortのheartbeat延長・dead-letter・Outbox relay同一Tx・JQ-T系を実装し試験する。`LANGGRAPH_STRICT_MSGPACK`相当のallowlistを有効化して試験追加。HarnessProfile無効化が効かないModelを使ったら失敗する試験（Tool表面のsnapshot）。checkpoint表を専用schema・専用DB roleへ分離し、Retention/GCを実装。依存監査（Provider SDKを読み込まないことのimport監査）。本番Gateway/Sentinel/VM配置での再実行。
 
+### ADR-038/039 STEP 3 実装結果（2026-11-10、`backend/`。Owner review前、NOT LOCKED）
+
+**状態**: コード実装完了・本番実機（KVM 2VM）検証未完了。以下は開発機（Windows + Docker Desktop の Linux VM）と CI 構成での実行結果であり、本番 Verified ではない。
+
+- **ADR-038（DeepAgents＋LangGraph、SELECTED維持）**: 正式スキーマ・独立 Model/Tool Gateway プロセス・認証付き RPC 上で PYRT-T 相当 25 件（Worker/Gateway kill、ACK 喪失、UNKNOWN、承認拒否/失効、Steer、checkpoint 破損・型注入、Subagent ChildResult admission、圧縮、並行 Run/Tenant、Cancel）合格（`backend/tests/test_runtime_faults.py`）。STEP 2 採用条件のうち、`LANGGRAPH_STRICT_MSGPACK` 相当（明示 allowlist＋**拒否時は例外で fail closed**。ライブラリ既定は blocked 型を生データで返すため不十分）、Tool 表面 snapshot（`read_file/search/send_message/task` のみ）、checkpoint の専用 schema（`lg_checkpoint`）・専用 DB role（DDL なし、`setup()` 不使用）・Retention/GC、Provider SDK の import 監査を実装・試験した。既存 `conformance/agent_runtime`（PoC）は回帰として維持。
+- **ADR-039（自作 PostgreSQL QueuePort）: PROVISIONAL 維持・採用確定を推奨**。STEP 2 時点の未達項目（heartbeat 延長、dead-letter、Outbox relay と同一 Tx、JQ-T 系）を実装し、JQ-T01〜T07/T10/T11/T13/T15 と attempt fence・poison 隔離・公平性・再起動後の Scheduler 再生を実 PostgreSQL で合格。JQ-T12 相当の負荷（50,000 件、relay 8・consumer 8、途中 5 秒 queue 停止）で重複 ACK 0・未配送 0・DB 接続上限 35（開発機、SLO ではない）。**確定前の残条件**: JQ-T12 の 1M 件・本番相当環境での再測定、JQ-T14（稼働中の非互換 queue schema upgrade drill）、JQ-T16（deadline 超過時の利用者向け状態）の完全実施。
+- **既知の制約**: `deepagents` が未使用の Provider SDK（anthropic / google-genai）を推移依存として持ち込む（import はされない、監査試験あり）。開発 Compose の Cell はコンテナであり別 VM ではない。
+
 ### ADR-040 根拠（Python version）
 
 - `requires_python`: openhands-sdk 1.60.2 `>=3.12`、pydantic-ai/deepagents/SQLAlchemy 2.1 `>=3.11`、その他候補の多く`>=3.10`。→**下限は3.12**。

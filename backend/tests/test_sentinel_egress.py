@@ -296,3 +296,99 @@ def test_sentinel_refuses_unadmitted_or_stale(pg: PgEnv, dbs: dict[str, Database
     control.claim_run(dbs["runtime"], sentinel_env["claim"].tenant_id, sentinel_env["ids"]["runId"], "w2")
     with pytest.raises(RpcError, match="FENCED"):  # stale worker's claim
         sen.authorize(sentinel_env["claim"], sentinel_env["intent"], "http", "receiver.test", 9, "POST")
+
+
+# ---------------------------------------------------------------- Model Gateway provider path (standing destination)
+SSE = (
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":11}}}\n\n'
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n'
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret plan"}}\n\n'
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu1","name":"search"}}\n\n'
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":"}}\n\n'
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\\"w\\"}"}}\n\n'
+    'data: {"type":"content_block_stop","index":1}\n\n'
+    'data: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
+    'data: {"type":"message_stop"}\n\n'
+)
+
+
+async def _provider_case(token: str) -> tuple[list, list[bytes]]:
+    from aiagent_core.config import Secret
+    from aiagent_gateways.providers import AnthropicProvider, ProviderError
+
+    hits: list[bytes] = []
+
+    async def h(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        head = await r.readuntil(b"\r\n\r\n")
+        n = int(next(ln.split(b":")[1] for ln in head.split(b"\r\n") if ln.lower().startswith(b"content-length")))
+        hits.append(head + await r.readexactly(n))
+        body = SSE.encode()
+        w.write(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: %d\r\n\r\n%s" % (len(body), body)
+        )
+        await w.drain()
+        w.close()
+
+    up = await asyncio.start_server(h, "127.0.0.1", 0)
+    port = up.sockets[0].getsockname()[1]
+    good = "m" * 40
+    cfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "anthropic": {
+                        "scheme": "http",
+                        "host": "provider.test",
+                        "port": port,
+                        "methods": ["POST"],
+                        "identities": ["model_gateway"],
+                        "needs_permit": False,
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
+    cfg.static_tokens["model_gateway"] = good
+
+    class NoDb:
+        def receipt(self, *a: object) -> None:
+            return None
+
+    async def resolver(host: str, p: int) -> list[str]:
+        return ["127.0.0.1"]
+
+    proxy = EgressProxy(NoDb(), cfg, resolver=resolver)  # type: ignore[arg-type]
+    pport = await proxy.start("127.0.0.1", 0)
+    prov = AnthropicProvider(
+        Secret("sk-test-key-000000"),
+        f"http://127.0.0.1:{pport}",
+        proxy_token=Secret(token),
+        url=f"http://provider.test:{port}/v1/messages",
+    )
+    events: list = []
+    try:
+        async for ev in prov.stream("m", "sys", [{"kind": "user", "content": "hi"}], []):
+            events.append(ev)
+    except ProviderError as e:
+        events.append(("error", e.code))
+    finally:
+        await proxy.close()
+        up.close()
+    return events, hits
+
+
+def test_model_provider_streams_through_egress_with_identity() -> None:
+    events, hits = run(_provider_case("m" * 40))
+    kinds = [e.type for e in events]
+    assert "text" in kinds and "reasoning" in kinds and "tool_end" in kinds and kinds[-1] == "stop"
+    assert any(e.type == "usage" and e.usage.get("input_tokens") == 11 for e in events)
+    assert len(hits) == 1 and b"x-api-key: sk-test-key" in hits[0].lower()  # key reaches the provider only
+    assert b"proxy-authorization" not in hits[0].lower()
+
+
+def test_model_provider_wrong_proxy_identity_refused() -> None:
+    events, hits = run(_provider_case("wrong-token-" + "x" * 30))
+    assert hits == [] and events == [("error", "HTTP_403")]
