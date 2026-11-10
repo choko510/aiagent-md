@@ -163,7 +163,11 @@ class Supervisor:
                 os.killpg(proc.pid, signal.SIGKILL)  # no surviving children after the execution ends
         rc = proc.returncode
         if rc == 98:
-            return {"status": "REFUSED", "reason": "FS_ISOLATION_UNAVAILABLE", "detail": err[:400].decode("utf-8", "replace")}
+            return {
+                "status": "REFUSED",
+                "reason": "FS_ISOLATION_UNAVAILABLE",
+                "detail": err[:400].decode("utf-8", "replace"),
+            }
         if rc == 97 and self.require_netns:
             return {"status": "REFUSED", "reason": "NETNS_UNAVAILABLE"}
         return {
