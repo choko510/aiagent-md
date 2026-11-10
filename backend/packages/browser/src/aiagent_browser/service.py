@@ -174,7 +174,9 @@ class BrowserSessionService:
         entry = self._entry(session_id, current)
         await self._authority.authorize(current, "takeover", session_id)
         if (current.tenant_id, current.owner_user_id, current.task_id) != (
-            human.tenant_id, human.owner_user_id, human.task_id
+            human.tenant_id,
+            human.owner_user_id,
+            human.task_id,
         ):
             raise BrowserError("AUTHORITY_MISMATCH")
         await self._authority.authorize(human, "human_takeover", session_id)
@@ -199,7 +201,9 @@ class BrowserSessionService:
                 raise BrowserError("RECOVERY_NOT_REQUIRED")
             await self._fence.check(session_id, current)
             if (current.tenant_id, current.owner_user_id, current.task_id) != (
-                renewed.tenant_id, renewed.owner_user_id, renewed.task_id
+                renewed.tenant_id,
+                renewed.owner_user_id,
+                renewed.task_id,
             ):
                 raise BrowserError("AUTHORITY_MISMATCH")
             await self._authority.authorize(renewed, "recover_renewed", session_id)
