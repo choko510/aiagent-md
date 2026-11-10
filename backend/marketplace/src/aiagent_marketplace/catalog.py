@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import base64
 import binascii
-import math
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -281,7 +281,7 @@ class CatalogService:
             raise CatalogError("MCP_QUERY_TOO_SHORT", 422)
         selected = [
             s for s in ("mcp", "clawhub")
-            if (source == "all" or source == s)
+            if (source in ("all", s))
             and (kind == "all" or (kind == "MCP") == (s == "mcp"))
             and not (s == "mcp" and short_mcp_query)
         ]
@@ -384,14 +384,13 @@ class CatalogService:
                 else:
                     warnings.append({"source": s, "code": exc.code})
         next_token = None
-        if any(not v["done"] for v in state.values()):
-            # Even an empty filtered page can have a valid upstream nextCursor.
-            # Do not issue an unchanged token when all sources failed.
-            if progressed:
-                next_token = self._seal({
-                    "filters": fingerprint, "state": state,
-                    "page": page_number + 1, "exp": int(time.time()) + CURSOR_TTL_SECONDS,
-                })
+        # Even an empty filtered page can have a valid upstream nextCursor.
+        # Do not issue an unchanged token when all sources failed.
+        if progressed and any(not v["done"] for v in state.values()):
+            next_token = self._seal({
+                "filters": fingerprint, "state": state,
+                "page": page_number + 1, "exp": int(time.time()) + CURSOR_TTL_SECONDS,
+            })
         if warnings and not entries and not next_token:
             # Source outages must not masquerade as an empty successful catalog.
             return {"items": [], "nextCursor": None, "warnings": warnings, "partial": True}
