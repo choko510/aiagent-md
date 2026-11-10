@@ -33,6 +33,12 @@ def _pointer(tenant: dict[str, str], ids: dict[str, str]) -> dict:
 
 
 def _job(dbs: dict[str, Database], tenant: dict[str, str], ids: dict[str, str]) -> object:
+    # Other tests share the ephemeral database; make sure unrelated leased jobs
+    # cannot exhaust the queue's small default global concurrency budget.
+    dbs["owner"].one(
+        "UPDATE queue.queues SET paused=false, global_active_limit=100,"
+        " per_tenant_active_limit=100 WHERE name='run' RETURNING 1"
+    )
     queue = QueuePort(dbs["relay"])
     assert queue.enqueue("run", tenant["tenantId"], f"state-{uuid7()}", _pointer(tenant, ids))
     job = QueuePort(dbs["runtime"]).dequeue("run", "state-worker")
@@ -78,7 +84,9 @@ async def test_running_pause_then_resume_acks_without_retry_or_dlq(
     assert await worker.handle(job2) == "SUCCEEDED"
     assert _run_state(dbs, ids["runId"]) == "SUCCEEDED"
     assert _queue_state(dbs, job2.id) == "DONE"
-    assert dbs["owner"].one("SELECT count(*) n FROM queue.dead_letters")["n"] == 0
+    assert dbs["owner"].one(
+        "SELECT count(*) n FROM queue.dead_letters WHERE job_id IN (%s,%s)", (job1.id, job2.id)
+    )["n"] == 0
 
 
 @pytest.mark.asyncio
@@ -100,7 +108,9 @@ async def test_revoked_before_claim_acks_with_audit_not_dlq(dbs: dict[str, Datab
     assert await worker.handle(job) == "CANCELLED"
     assert _run_state(dbs, ids["runId"]) == "CANCELLED"
     assert _queue_state(dbs, job.id) == "DONE"
-    assert dbs["owner"].one("SELECT count(*) n FROM queue.dead_letters")["n"] == 0
+    assert dbs["owner"].one(
+        "SELECT count(*) n FROM queue.dead_letters WHERE job_id=%s", (job.id,)
+    )["n"] == 0
     audit = dbs["owner"].all(
         "SELECT payload_json FROM agent.domain_events WHERE run_id=%s AND event_kind='run.state_changed'",
         (ids["runId"],),
