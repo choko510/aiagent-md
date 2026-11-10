@@ -1,0 +1,48 @@
+name: Marketplace Ruff format bootstrap (temporary)
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/marketplace-ruff-bootstrap.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'feat/marketplace-mkt1-catalog-ui'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.3"
+      - run: uv sync --locked
+      - name: Apply repository Ruff rules to Marketplace only
+        run: |
+          uv run ruff check --fix --unsafe-fixes marketplace
+          uv run ruff format marketplace
+          uv run ruff check marketplace
+          uv run ruff format --check marketplace
+      - name: Output formatter-verified source files for PR update
+        run: |
+          python3 - <<'PY'
+          import base64
+          from pathlib import Path
+          paths = {
+              "MARKET_API": "marketplace/src/aiagent_marketplace/api.py",
+              "MARKET_APP": "marketplace/src/aiagent_marketplace/app.py",
+              "MARKET_CATALOG": "marketplace/src/aiagent_marketplace/catalog.py",
+              "MARKET_INIT": "marketplace/src/aiagent_marketplace/__init__.py",
+              "MARKET_TEST": "marketplace/tests/test_catalog.py",
+          }
+          for label, path in paths.items():
+              value = base64.b64encode(Path(path).read_bytes()).decode()
+              print(f"{label}_BEGIN")
+              for offset in range(0, len(value), 120):
+                  print(value[offset:offset + 120])
+              print(f"{label}_END")
+          PY
