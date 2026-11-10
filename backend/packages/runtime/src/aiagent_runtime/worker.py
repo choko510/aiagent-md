@@ -127,13 +127,18 @@ class RuntimeWorker:
                 await asyncio.to_thread(self.queue.ack, job, "SCOPE_REVOKED")
             return state
         except control.NotClaimable as e:
-            if str(e) == "paused":
+            if str(e) in ("paused", "cancelling"):
                 state = await asyncio.to_thread(control.settle_stopped, self.db, p.tenant_id, p.run_id, revoked=False)
                 if state == "PAUSE_CLEARED":
                     await asyncio.to_thread(self.queue.nack, job, "PAUSE_CLEARED")
                 else:
-                    await asyncio.to_thread(self.queue.ack, job, "PAUSED")
+                    await asyncio.to_thread(self.queue.ack, job, state)
                 return state
+            if str(e) in ("PAUSED", "WAITING_RECONCILIATION"):
+                # This delivery has no runnable segment. Resume/reconciliation
+                # is owned by a future command; retrying would only fill the DLQ.
+                await asyncio.to_thread(self.queue.ack, job, str(e))
+                return str(e)
             await asyncio.to_thread(self.queue.nack, job, e.code)
             return e.code
         except control.FencedOut as e:
