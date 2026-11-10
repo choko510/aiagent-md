@@ -210,8 +210,6 @@ def test_same_uid_process_inspection_blocked_across_exec(tmp_path: Path) -> None
 
 def test_task_pid_namespace_blocks_cross_task_signals_and_preserves_child_management(tmp_path: Path) -> None:
     """Real simultaneous child processes: SIGKILL -1 from Task A cannot reach Task B."""
-    import signal
-
     s = sup(tmp_path, netns=False)
     attack = (
         "import os, signal, time\n"
