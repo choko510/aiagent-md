@@ -400,3 +400,98 @@ def test_cross_tenant_forged_pointer_rejected_by_consumer_check(
         control.claim_run(dbs["runtime"], other["tenantId"], ids["runId"], "w")
     with pytest.raises(psycopg.errors.InsufficientPrivilege):  # and the API role cannot reach queue tables at all
         dbs["api"].one("SELECT * FROM queue.jobs")
+
+def test_concurrent_claim_respects_global_and_tenant_limit(
+    dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str], pg: PgEnv
+) -> None:
+    """Release eight independent PostgreSQL workers at once: only one slot may be claimed."""
+    dbs["owner"].one(
+        "UPDATE queue.queues SET global_active_limit=1, per_tenant_active_limit=1"
+        " WHERE name='run' RETURNING 1"
+    )
+    rq = QueuePort(dbs["relay"])
+    for i in range(24):
+        rq.enqueue("run", tenant["tenantId"], f"limit-race-{i}", pointer(tenant["tenantId"]))
+    barrier = threading.Barrier(9)
+    results: list[int] = []
+    errors: list[Exception] = []
+    lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        db = Database(pg.dsn["runtime"], max_size=1)
+        try:
+            barrier.wait(timeout=15)
+            job = QueuePort(db).dequeue("run", f"racer-{i}")
+            if job:
+                with lock:
+                    results.append(job.id)
+        except Exception as exc:
+            with lock:
+                errors.append(exc)
+        finally:
+            db.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    barrier.wait(timeout=15)
+    for t in threads:
+        t.join(timeout=20)
+    assert not errors and all(not t.is_alive() for t in threads), errors
+    assert len(results) == 1, results
+    assert dbs["owner"].one(
+        "SELECT count(*) AS n FROM queue.jobs WHERE status='CLAIMED' AND locked_until>now()"
+    )["n"] == 1
+
+
+def test_unhandled_outbox_topic_never_marked_dispatched(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    from aiagent_domain import sha256_hex
+
+    ids = _submit(dbs, tenant)
+    event = dbs["owner"].one(
+        "SELECT id FROM agent.domain_events WHERE run_id=%s ORDER BY delivery_offset LIMIT 1",
+        (ids["runId"],),
+    )["id"]
+    oid = uuid7()
+    dbs["owner"].one(
+        "INSERT INTO agent.outbox_messages(tenant_id,id,topic,dedupe_key,event_id,safe_payload_json,payload_sha256)"
+        " VALUES (%s,%s,'notification',%s,%s,'{}'::jsonb,%s) RETURNING id",
+        (tenant["tenantId"], oid, f"notice-{oid}", event, sha256_hex({})),
+    )
+    relay = OutboxRelay(dbs["relay"], "topic-filter")
+    assert all(m.topic == "run" for m in relay.claim_batch())
+    relay.run_once()
+    row = dbs["owner"].one("SELECT dispatched_at, dispatch_attempts FROM agent.outbox_messages WHERE id=%s", (oid,))
+    assert row["dispatched_at"] is None and row["dispatch_attempts"] == 0
+
+
+def test_cron_latest_and_all_bounded_after_more_than_1000_missed_slots() -> None:
+    from aiagent_core.scheduler import due_slots
+
+    now = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+    start = now - timedelta(days=60)
+    latest = due_slots("* * * * *", "UTC", None, start, now, limit=1)
+    bounded = due_slots("* * * * *", "UTC", None, start, now, limit=3)
+    assert latest == [now]
+    assert bounded == [now - timedelta(minutes=2), now - timedelta(minutes=1), now]
+
+
+def test_revoked_workspace_disables_scheduler_without_new_task(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    sid = create_schedule(
+        dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"], goal="do not run",
+        run_at=datetime.now(UTC) - timedelta(seconds=2),
+    )
+    dbs["owner"].one(
+        "UPDATE agent.workspaces SET disabled_at=now() WHERE tenant_id=%s AND id=%s RETURNING 1",
+        (tenant["tenantId"], tenant["workspaceId"]),
+    )
+    assert not [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid]
+    assert dbs["owner"].one("SELECT enabled FROM agent.schedules WHERE id=%s", (sid,))["enabled"] is False
+    assert dbs["owner"].one(
+        "SELECT count(*) n FROM agent.tasks WHERE created_from_schedule_id=%s", (sid,)
+    )["n"] == 0
