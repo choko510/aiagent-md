@@ -153,18 +153,21 @@ def test_mock_kvm_evidence_never_host_verified(hv: ModuleType, tmp_path: Path) -
 def test_host_checks_require_real_host_and_exact_digest(hv: ModuleType, tmp_path: Path) -> None:
     entries = [add_evidence(hv, tmp_path, k) for k in hv.BASE + hv.CI]
     entries += [add_evidence(hv, tmp_path, k, execution="REAL_HOST") for k in hv.HOST]
-    assert hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)["status"] == "HOST_VERIFIED"
+    assert hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)["hostEvidenceCompleteNotAttested"] is True
     live = {**fake_live(hv), "topologyDigest": "sha256:" + "f" * 64}
-    assert hv.evaluate_evidence({"checks": entries}, live, tmp_path)["status"] == "INTEGRATED"
+    assert hv.evaluate_evidence({"checks": entries}, live, tmp_path)["hostEvidenceCompleteNotAttested"] is False
 
 
 def test_production_requires_manual_operator_signoff(hv: ModuleType, tmp_path: Path) -> None:
     entries = [add_evidence(hv, tmp_path, k) for k in hv.BASE + hv.CI]
     entries += [add_evidence(hv, tmp_path, k, execution="REAL_HOST") for k in hv.HOST + hv.PROD[:-1]]
-    assert hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)["status"] == "HOST_VERIFIED"
+    assert hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)["status"] == "INTEGRATED"
     entries += [add_evidence(hv, tmp_path, hv.PROD[-1], execution="OPERATOR")]
     result = hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)
-    assert result["status"] == "PRODUCTION_READY"
+    assert result["status"] == "INTEGRATED"
+    assert result["hostEvidenceCompleteNotAttested"] is True
+    assert result["productionEvidenceCompleteNotAttested"] is True
+    assert result["gates"]["PRODUCTION_READY"] is False
     assert result["productionCutoverAuthorized"] is False
 
 
@@ -233,3 +236,14 @@ def test_python_syntax_all_host_scripts() -> None:
     for name in ("acceptance", "queue_gate", "restore_probe"):
         path = SCRIPTS / (name + ".py")
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+
+def test_synthetic_artifacts_cannot_automatically_attest_host_or_production(hv: ModuleType, tmp_path: Path) -> None:
+    entries = [add_evidence(hv, tmp_path, k) for k in hv.BASE + hv.CI]
+    entries += [add_evidence(hv, tmp_path, k, execution="REAL_HOST") for k in hv.HOST + hv.PROD[:-1]]
+    entries += [add_evidence(hv, tmp_path, hv.PROD[-1], execution="OPERATOR")]
+    result = hv.evaluate_evidence({"checks": entries}, fake_live(hv), tmp_path)
+    assert result["hostEvidenceCompleteNotAttested"] is True
+    assert result["productionEvidenceCompleteNotAttested"] is True
+    assert result["gates"]["HOST_VERIFIED"] is False
+    assert result["gates"]["PRODUCTION_READY"] is False
