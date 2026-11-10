@@ -66,6 +66,18 @@ def _syscall(libc: ctypes.CDLL, nr: int, *args: object) -> int:
     return int(result)
 
 
+def disable_dumpability() -> None:
+    """Block same-UID ptrace after all credential and namespace changes.
+
+    Linux can reset PR_SET_DUMPABLE on a UID/GID transition. Applying it before
+    setuid is insufficient to isolate sibling Task processes sharing a UID.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE = 4
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
 def restrict_to_workspace(workspace: Path) -> None:
     """Invoke in the already-forked child before exec; raises if confinement cannot be applied.
 
@@ -119,11 +131,6 @@ def restrict_to_workspace(workspace: Path) -> None:
         if abi >= 5:
             rights |= _IOCTL_DEV
         allow(workspace, rights)
-        # Sibling cells share a numeric UID; block ptrace/process_vm_readv even if
-        # their PIDs can be guessed, independently of the host's Yama policy.
-        if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE = 4
-            err = ctypes.get_errno()
-            raise OSError(err, os.strerror(err))
         if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
