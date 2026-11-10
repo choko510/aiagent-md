@@ -19,12 +19,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install only MKT-1 test dependencies
-        run: python -m pip install -e "./backend/marketplace[test]"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.3"
+      - name: Install frozen Python graph
+        run: uv sync --project backend/marketplace --locked --extra test
       - name: Compile and test offline (no external registry calls)
         run: |
-          python -m compileall -q backend/marketplace/src
-          python -m pytest backend/marketplace/tests -q
+          uv run --project backend/marketplace --locked --extra test python -m compileall -q backend/marketplace/src
+          uv run --project backend/marketplace --locked --extra test python -m pytest backend/marketplace/tests -q
 
   web:
     name: Marketplace UI TypeScript build
@@ -37,7 +40,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install pinned direct dependencies
-        run: npm install --no-audit --no-fund
+      - name: Install lockfile-pinned dependencies
+        run: npm ci --no-audit --no-fund
       - name: Strict typecheck and build
         run: npm run build
