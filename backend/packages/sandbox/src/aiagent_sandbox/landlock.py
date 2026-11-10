@@ -37,8 +37,16 @@ _IOCTL_DEV = 1 << 15  # ABI 5
 
 _READ = _READ_FILE | _READ_DIR
 _WRITE = (
-    _WRITE_FILE | _REMOVE_DIR | _REMOVE_FILE | _MAKE_CHAR | _MAKE_DIR |
-    _MAKE_REG | _MAKE_SOCK | _MAKE_FIFO | _MAKE_BLOCK | _MAKE_SYM
+    _WRITE_FILE
+    | _REMOVE_DIR
+    | _REMOVE_FILE
+    | _MAKE_CHAR
+    | _MAKE_DIR
+    | _MAKE_REG
+    | _MAKE_SOCK
+    | _MAKE_FIFO
+    | _MAKE_BLOCK
+    | _MAKE_SYM
 )
 
 
@@ -76,10 +84,9 @@ def restrict_to_workspace(workspace: Path) -> None:
     if abi >= 5:
         handled |= _IOCTL_DEV
     ruleset = _RulesetAttr(handled)
-    fd = _syscall(
-        libc, _SYS_CREATE, ctypes.byref(ruleset), ctypes.sizeof(ruleset), ctypes.c_uint32(0)
-    )
+    fd = _syscall(libc, _SYS_CREATE, ctypes.byref(ruleset), ctypes.sizeof(ruleset), ctypes.c_uint32(0))
     try:
+
         def allow(path: Path, rights: int) -> None:
             if not path.exists():
                 return
@@ -88,8 +95,12 @@ def restrict_to_workspace(workspace: Path) -> None:
             try:
                 attr = _PathBeneathAttr(rights, pfd)
                 _syscall(
-                    libc, _SYS_ADD, ctypes.c_int(fd), ctypes.c_int(_RULE_PATH_BENEATH),
-                    ctypes.byref(attr), ctypes.c_uint32(0)
+                    libc,
+                    _SYS_ADD,
+                    ctypes.c_int(fd),
+                    ctypes.c_int(_RULE_PATH_BENEATH),
+                    ctypes.byref(attr),
+                    ctypes.c_uint32(0),
                 )
             finally:
                 os.close(pfd)
