@@ -305,6 +305,89 @@ def check_current(
     return row
 
 
+def settle_stopped(db: Database, tenant_id: str, run_id: str, *, revoked: bool) -> str:
+    """Settle a paused/revoked run when no claim could be minted.
+
+    A transient queue pointer is not authority. Revocation is terminal for new
+    work, except for effects that need reconciliation. The task and run state,
+    audit event, and lease fencing are committed atomically.
+    """
+    with db.tx() as c:
+        pointer = c.execute(
+            "SELECT task_id FROM agent.runs WHERE tenant_id=%s AND id=%s",
+            (tenant_id, run_id),
+        ).fetchone()
+        if pointer is None:
+            return "STALE_NOT_FOUND"
+        task = c.execute(
+            "SELECT id, owner_user_id, workspace_id, status_code FROM agent.tasks"
+            " WHERE tenant_id=%s AND id=%s FOR UPDATE",
+            (tenant_id, pointer["task_id"]),
+        ).fetchone()
+        run = c.execute(
+            "SELECT status_code, pause_requested, cancel_requested FROM agent.runs"
+            " WHERE tenant_id=%s AND id=%s FOR UPDATE",
+            (tenant_id, run_id),
+        ).fetchone()
+        if task is None or run is None:
+            return "STALE_NOT_FOUND"
+        if run["status_code"] in TERMINAL:
+            return str(run["status_code"])
+        if revoked:
+            if scope_active(c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"])):
+                return "SCOPE_RESTORED"
+            pending = c.execute(
+                "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s"
+                " AND status_code IN ('SENDING','UNKNOWN')",
+                (tenant_id, run_id),
+            ).fetchone()
+            target = "WAITING_RECONCILIATION" if pending and pending["n"] else "CANCELLED"
+            error = "SCOPE_REVOKED"
+        else:
+            if not run["pause_requested"]:
+                return "PAUSE_CLEARED"
+            if run["cancel_requested"]:
+                return "CANCELLING"
+            target = "PAUSED"
+            error = None
+        if run["status_code"] == target and (not revoked or run["cancel_requested"]):
+            return target
+        c.execute(
+            "UPDATE agent.runs SET status_code=%s, error_code=%s,"
+            " cancel_requested=cancel_requested OR %s, lease_epoch=lease_epoch+1,"
+            " lease_expires_at=now()-interval '1 millisecond',"
+            " ended_at=CASE WHEN %s THEN now() ELSE ended_at END,"
+            " record_version=record_version+1, updated_at=now()"
+            " WHERE tenant_id=%s AND id=%s",
+            (target, error, revoked, target in TERMINAL, tenant_id, run_id),
+        )
+        if task["status_code"] not in TERMINAL:
+            c.execute(
+                "UPDATE agent.tasks SET status_code=%s, record_version=record_version+1,"
+                " updated_at=now() WHERE tenant_id=%s AND id=%s",
+                (target, tenant_id, task["id"]),
+            )
+        if revoked:
+            c.execute(
+                "UPDATE agent.approval_records SET decision_code='REVOKED', decided_at=now(),"
+                " record_version=record_version+1 WHERE tenant_id=%s AND run_id=%s AND decision_code='PENDING'",
+                (tenant_id, run_id),
+            )
+        append_event(
+            c,
+            tenant_id=tenant_id,
+            aggregate_type="run",
+            aggregate_id=run_id,
+            kind="run.state_changed",
+            payload={"from": run["status_code"], "to": target, "cause": error or "pause_at_admission"},
+            actor=SERVICE_ACTOR,
+            owner_user_id=task["owner_user_id"],
+            task_id=task["id"],
+            run_id=run_id,
+        )
+        return target
+
+
 # ------------------------------------------------------------------------------------------------ HEAD
 def append_head(
     c: psycopg.Connection[Row],
@@ -559,6 +642,7 @@ def finish_segment(
         terminal = target in TERMINAL
         c.execute(
             "UPDATE agent.runs SET status_code=%s, result_text=coalesce(%s, result_text), error_code=%s,"
+            " cancel_requested = cancel_requested OR %s,"
             " lease_expires_at = CASE WHEN %s THEN NULL ELSE now() - interval '1 millisecond' END,"
             " ended_at = CASE WHEN %s THEN now() ELSE ended_at END, record_version=record_version+1, updated_at=now()"
             " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
@@ -566,6 +650,7 @@ def finish_segment(
                 target,
                 result_text if target in ("SUCCEEDED", "PARTIAL") else None,
                 error_code,
+                revoked,
                 terminal,
                 terminal,
                 claim.tenant_id,
