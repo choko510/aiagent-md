@@ -124,10 +124,12 @@ def block_cross_task_process_access() -> None:
             (0x06, 0, 0, 0x80000000),
         ]
     for number in blocked:
-        prog.extend([
-            (0x15, 0, 1, number),  # if syscall matches -> EPERM
-            (0x06, 0, 0, 0x00050000 | errno.EPERM),  # SECCOMP_RET_ERRNO
-        ])
+        prog.extend(
+            [
+                (0x15, 0, 1, number),  # if syscall matches -> EPERM
+                (0x06, 0, 0, 0x00050000 | errno.EPERM),  # SECCOMP_RET_ERRNO
+            ]
+        )
     prog.append((0x06, 0, 0, 0x7FFF0000))  # SECCOMP_RET_ALLOW
 
     filters = (_SockFilter * len(prog))(*(_SockFilter(*entry) for entry in prog))
