@@ -62,7 +62,7 @@ MCP公式Registryはpreviewのため、互換性/一時停止/データ更新の
 | `backend/packages/domain/src/aiagent_domain/tools.py`の`packaged_skill_texts` | 同梱Markdownを一括・read-only読み込み | DB保管Bundleの有効Skillを必要時だけ読み、run単位にdigestを固定。同梱Skillはbuiltinとして維持 |
 | `backend/packages/api/src/aiagent_api/app.py` | STEP3のTask/Run/Approval中心 | カタログとインストールのRESTのみ追加。APIが拡張機能のコードを直接実行しない |
 | `backend/migrations/0001_core.up.sql`、`0005_roles_grants_rls.up.sql` | Tenant/Owner/Run/Approval/Effect/RLSの正式スキーマ、Extension表なし | PR82マージ後に新migration、厳格なRLS/列GRANT/restore世代対応。既存migrationを変更しない |
-| `web/src/api/generated/domain.ts` | Canonical JSON Schemaから生成したTS型 | Wire DTOをJSON Schema→Pydantic/TS生成。新Shared型を手書き二重定義しない |
+| `web/src/api/generated/domain.ts` | Canonical JSON Schemaから生成したUI型 | Wire DTOをJSON Schema→Pydantic/フロントエンド型生成。新Shared型を手書き二重定義しない |
 
 **P0統合上の問題**：PR82のTrusted EgressはTool用HTTP `CONNECT`を禁止する。Remote MCPはHTTPS先が普通なので、**MCP Adapterを独立Trusted ConnectorとしてTLS終端・方法/宛先をSentinelが検査できる経路**を設計・実証するまで「接続可能」と扱わない。通常`httpx`で直接外向き通信する近道は禁止。既存のSchema固定/最終Admission/Side-Effect Ledgerを迂回しない。
 
@@ -70,7 +70,7 @@ PR #82は本番KVM 2VMや実Provider等の残試験がある。Marketplaceが動
 
 ## 3. 責務とデータ設計
 
-`UI (React/TS)` → `FastAPI Marketplace API` → `Extension Manager (Python/Control Plane)`、以下の独立境界を必須とする。
+`UI (React + 型生成)` → `FastAPI Marketplace API` → `Extension Manager (Python/Control Plane)`、以下の独立境界を必須とする。
 
 - **SourceAdapter**: Official Registry / ClawHub / GitHub。検索・詳細・version解決・ダウンロード。外部入力は常に非信頼。HTTPはSentinel/Trusted Egress経由。
 - **Artifact Quarantine**: サイズ/圧縮比/ファイル数/パス/Manifest/リンク/署名/digestを検証。検査中にコード実行ゼロ。
@@ -135,7 +135,7 @@ Source重複は`catalogKey`で別管理。ClawHub+GitHubの同一Skillはcommit/
 - `POST /api/v1/extensions/installations/{id}/connections`：接続開始。OAuth CallbackはUser/Connection/nonce/PKCE/expiryを照合し、Credential BrokerのOpaque handleだけ保存。`disconnect`はローカル失効と外部revocationの可否を区別。
 - `AUTH_REQUIRED` / `POLICY_DENIED` / `UNSUPPORTED_TRANSPORT` / `REGISTRY_UNAVAILABLE` / `PACKAGE_UNSAFE` / `STALE_REVISION` / `CONNECTION_FAILED` / `TOOL_SCHEMA_CHANGED` / `UNKNOWN_SIDE_EFFECT`は共有Error正本の型へ後続実装で写像する。未承認の新Shared Enumを確定しない。
 
-**DB**（CHAT_10、PR82マージ後に新migration）：`extension_sources`、`extension_catalog_cache`、`extension_releases`、`extension_installations`、`extension_activations`、`extension_connections`、`extension_jobs`、`extension_receipts`。Catalog/Releaseは共通、Installation以降はtenant/owner/workspace RLS・専用Role・列GRANT。`credentialBindingId`以外のTokenを保存しない。リトライ/重複Jobを`(tenant,actor,idempotencyKey,requestHash)`で収束させる。restore世代が違う旧Job/Permitを拒否。Artifact GCは参照数とRun pinを尊重、監査は削除不可。Generated JSON Schema→Pydantic/TSの正本を守る。
+**DB**（CHAT_10、PR82マージ後に新migration）：`extension_sources`、`extension_catalog_cache`、`extension_releases`、`extension_installations`、`extension_activations`、`extension_connections`、`extension_jobs`、`extension_receipts`。Catalog/Releaseは共通、Installation以降はtenant/owner/workspace RLS・専用Role・列GRANT。`credentialBindingId`以外のTokenを保存しない。リトライ/重複Jobを`(tenant,actor,idempotencyKey,requestHash)`で収束させる。restore世代が違う旧Job/Permitを拒否。Artifact GCは参照数とRun pinを尊重、監査は削除不可。Generated JSON Schema→Pydantic/フロントエンド型の正本を守る。
 
 **UI**：`/marketplace`で全て/Skills/MCP/追加済み、検索、source/kind/リスク/利用可否、出典、Version、導入・更新状態。`/marketplace/{id}`でPublisher/Source/Digest/License/通信先/要求権限/スキャンの限界/依存/OAuth/費用リスクを表示。`/settings/extensions`でInstalled/Enabled/Connected/Usable、Profile割当、PIN、更新、Rollback、Disable、Remove、Disconnect。削除と認証情報失効は別の確認。OAuthはHuman Browser Handoff。Windows11/Fluent風の落ち着いたUI、320px対応、キーボード、スクリーンリーダー、disabled理由、focus復帰。Registry停止中も既存インストール一覧はDBから表示。「未取得」を0件/安全/無料と誤表示しない。
 
