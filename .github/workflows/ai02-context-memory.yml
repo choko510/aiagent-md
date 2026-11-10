@@ -31,6 +31,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install isolated local packages and pytest
         run: python -m pip install -e backend/packages/context -e backend/packages/memory 'pytest==9.2.0' 'pytest-asyncio==1.4.1.post1' 'pytest-timeout>=2.4.0' 'ruff>=0.14.0'
+      - name: Export Ruff autofix preview (temporary, source-only)
+        run: |
+          ruff check --fix backend/packages/context backend/packages/memory || true
+          ruff format backend/packages/context backend/packages/memory
+          python - <<'PYCODE'
+          import base64, json, pathlib
+          for root in ('backend/packages/context', 'backend/packages/memory'):
+              for path in sorted(pathlib.Path(root).rglob('*.py')):
+                  print('AI02_FMT:' + json.dumps({'path': str(path), 'body': base64.b64encode(path.read_bytes()).decode()}))
+          PYCODE
       - name: Ruff lint and format
         run: |
           ruff check backend/packages/context backend/packages/memory
