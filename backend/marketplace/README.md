@@ -11,6 +11,7 @@ Python 3.12 / 3.13、Node.js 22以上。依存をインストールして次を�
 
 ```bash
 python -m pip install -e './backend/marketplace[test]'
+export AIAGENT_MARKETPLACE_DEV_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 AIAGENT_MARKETPLACE_DEV_MODE=1 uvicorn aiagent_marketplace.app:app --host 127.0.0.1 --port 8001
 # 別のターミナルで
 cd web
@@ -23,10 +24,13 @@ Windows PowerShell:
 ```powershell
 py -m pip install -e "./backend/marketplace[test]"
 $env:AIAGENT_MARKETPLACE_DEV_MODE="1"
+$env:AIAGENT_MARKETPLACE_DEV_TOKEN=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 py -m uvicorn aiagent_marketplace.app:app --host 127.0.0.1 --port 8001
 ```
 
-ブラウザは Vite が表示するローカルURL（通常 `http://localhost:5173`）。`/api` はローカルの8001ポートにのみプロキシされます。
+ブラウザは Vite が表示するローカルURL（通常 `http://127.0.0.1:5173`）。**Viteを起動する別ターミナルにも、同じ `AIAGENT_MARKETPLACE_DEV_TOKEN` を設定**してください（トークンを共有しないとViteは起動を拒否）。ViteはTokenをブラウザへ送らず、ローカルAPIへのProxyでだけAuthorizationヘッダを付けます。
+
+開発用APIは環境変数だけでなく、実際のTCP接続元アドレスがloopback、HTTP Hostがlocalhost/127.0.0.1/::1、Bearer Tokenが一致することを**サーバー側で検証**します。誤って `--host 0.0.0.0` で起動しても外部IPからのアクセスは403です。外部Origin/クロスサイトFetchも拒否します。**Vite/バックエンドを外部公開しないこと**。
 
 ## API
 - `GET /api/v1/marketplace/items?q=&source=all|mcp|clawhub&kind=all|MCP|SKILL&limit=20&cursor=`
