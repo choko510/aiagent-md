@@ -15,11 +15,7 @@ export default defineConfig(({ command, mode }) => {
       proxy: {
         "/api": {
           target: "http://127.0.0.1:8001",
-          configure(proxy) {
-            proxy.on("proxyReq", (proxyReq) => {
-              if (token) proxyReq.setHeader("Authorization", "Bearer " + token);
-            });
-          },
+          headers: token ? { Authorization: "Bearer " + token } : {},
         },
       },
     },
