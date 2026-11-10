@@ -1,0 +1,27 @@
+name: AI-06 Device Windows Rust and Tauri
+on:
+  pull_request:
+    paths:
+      - 'device-client/**'
+      - '.github/workflows/ai06-device-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: device-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Core and desktop tests
+        run: cargo test --workspace
+      - name: Windows Tauri compile
+        run: cargo check --workspace
+      - name: Build Windows desktop executable (no installer or signing)
+        run: cargo build -p aiagent-device-desktop
