@@ -1,0 +1,17 @@
+[project]
+name = "aiagent-browser"
+version = "0.1.0"
+description = "Fail-closed fixture-only Browser Worker for STEP 4"
+requires-python = ">=3.12,<3.14"
+dependencies = ["playwright>=1.55,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=9,<10", "pytest-asyncio>=1,<2"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
+
+# Production workspace registration and pinned uv.lock are AI-07-owned.
+[tool.uv]
+managed = false

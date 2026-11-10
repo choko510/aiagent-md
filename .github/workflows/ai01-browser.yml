@@ -1,0 +1,31 @@
+name: AI-01 Browser fixture contract tests
+on:
+  pull_request:
+    paths:
+      - 'backend/packages/browser/**'
+      - '.github/workflows/ai01-browser.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mock-and-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install isolated Browser dependencies
+        run: python -m pip install -e 'backend/packages/browser[test]' 'ruff>=0.14'
+      - name: Code and style
+        run: |
+          python -m compileall -q backend/packages/browser/src backend/packages/browser/tests
+          ruff check backend/packages/browser/src backend/packages/browser/tests
+          ruff format --check backend/packages/browser/src backend/packages/browser/tests
+      - name: Offline fixture / session / trust-boundary tests
+        run: python -m pytest -q -ra -p no:cacheprovider backend/packages/browser/tests
