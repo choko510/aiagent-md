@@ -107,7 +107,7 @@ fn restarted_started_is_unknown_and_never_auto_retried() {
     let r = request("A", "one", Operation::DesktopClick);
     {
         let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
-        assert_eq!(journal.begin(&r.tool_intent_id, &r.args_sha256, "7", "permit").unwrap(),
+        assert_eq!(journal.begin(&r.tool_intent_id, &r.journal_fingerprint(), "7", "permit").unwrap(),
                    aiagent_device_core::BeginResult::StartedNew);
         assert_eq!(journal.state("one").unwrap(), Some(EffectState::Started));
     }
@@ -177,4 +177,35 @@ fn same_intent_with_mutated_arguments_is_conflict_not_repeat() {
     assert_eq!(a.execute(&r2, &mock_grant(&r2, "n2", 200), 100),
                Decision::IntentConflict);
     assert_eq!(a.adapters.calls, 1);
+}
+
+#[test]
+fn same_intent_with_changed_target_cannot_replay_completion() {
+    let dir = tempdir().unwrap(); let path = dir.path().join("journal.db");
+    let mut a = new_agent(&path, "A");
+    let r1 = request("A", "one", Operation::DesktopClick);
+    assert_eq!(a.execute(&r1, &mock_grant(&r1, "n1", 200), 100), Decision::LocalCompleted);
+    let mut r2 = request("A", "one", Operation::DesktopClick);
+    if let Target::Desktop { window_token, .. } = &mut r2.target {
+        *window_token = "new-window".into();
+    }
+    assert_eq!(a.execute(&r2, &mock_grant(&r2, "n2", 200), 100),
+               Decision::IntentConflict);
+    assert_eq!(a.adapters.calls, 1);
+}
+#[test]
+fn stale_and_disconnect_fail_closed_even_if_transport_is_online() {
+    let dir = tempdir().unwrap(); let path = dir.path().join("journal.db");
+    let mut a = new_agent(&path, "A");
+    let r = request("A", "one", Operation::DesktopClick);
+    let g = mock_grant(&r, "n1", 200);
+    a.mark_stale();
+    assert_eq!(a.execute(&r, &g, 100), Decision::Denied("OFFLINE"));
+    a.disconnect();
+    assert_eq!(a.execute(&r, &g, 100), Decision::Denied("OFFLINE"));
+    let mut next = fence();
+    next.connection_generation = Epoch(10);
+    a.reconnect_mock(next).unwrap();
+    assert_eq!(a.execute(&r, &g, 100), Decision::Denied("STALE_SCOPE_OR_FENCE"));
+    assert_eq!(a.adapters.calls, 0);
 }
