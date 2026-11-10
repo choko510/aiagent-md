@@ -308,9 +308,7 @@ def test_pause_blocks_new_gateway_admission(dbs: dict[str, Database], tenant: di
         control.check_current(c, current)
 
 
-def test_revoked_run_is_stopped_and_audited_before_claim(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+def test_revoked_run_is_stopped_and_audited_before_claim(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     ids = submit(dbs, tenant)
     dbs["owner"].one(
         "UPDATE agent.workspaces SET disabled_at=now() WHERE tenant_id=%s AND id=%s RETURNING 1",
@@ -322,10 +320,12 @@ def test_revoked_run_is_stopped_and_audited_before_claim(
     run = run_row(dbs, ids["runId"])
     assert run["status_code"] == "CANCELLED" and run["cancel_requested"]
     assert run["error_code"] == "SCOPE_REVOKED"
-    assert dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"] == "CANCELLED"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"]
+        == "CANCELLED"
+    )
     audit = dbs["owner"].all(
-        "SELECT payload_json FROM agent.domain_events WHERE run_id=%s"
-        " AND event_kind='run.state_changed'",
+        "SELECT payload_json FROM agent.domain_events WHERE run_id=%s AND event_kind='run.state_changed'",
         (ids["runId"],),
     )
     assert len(audit) == 1 and audit[0]["payload_json"]["cause"] == "SCOPE_REVOKED"
@@ -333,9 +333,7 @@ def test_revoked_run_is_stopped_and_audited_before_claim(
         control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker")
 
 
-def test_pause_at_admission_is_ackable_and_resume_can_claim(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+def test_pause_at_admission_is_ackable_and_resume_can_claim(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     ids = submit(dbs, tenant)
     c = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker")
     commands.pause(dbs["api"], scope(tenant), ids["taskId"])
@@ -348,12 +346,12 @@ def test_pause_at_admission_is_ackable_and_resume_can_claim(
     assert control.finish_segment(dbs["runtime"], resumed, "SUCCEEDED", result_text="ok") == "SUCCEEDED"
 
 
-def test_pause_prevents_failed_segment_outcome(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+def test_pause_prevents_failed_segment_outcome(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     ids = submit(dbs, tenant)
     c = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker")
     commands.pause(dbs["api"], scope(tenant), ids["taskId"])
     assert control.finish_segment(dbs["runtime"], c, "FAILED", error_code="MODEL_ERROR") == "PAUSED"
     assert run_row(dbs, ids["runId"])["status_code"] == "PAUSED"
-    assert dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"] == "PAUSED"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"] == "PAUSED"
+    )
