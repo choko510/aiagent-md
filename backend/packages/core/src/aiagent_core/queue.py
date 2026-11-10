@@ -112,10 +112,10 @@ class QueuePort:
     def dequeue(self, queue: str, worker: str) -> Job | None:
         self.dead_letter_exhausted(queue)
         with self.db.tx() as c:
-            # Serialize slot accounting across ALL workers. Locking only the candidate
-            # job rows lets simultaneous workers both see a zero active count.
-            # Under READ COMMITTED the subsequent statement sees the prior claim's commit.
-            c.execute("SELECT name FROM queue.queues WHERE name=%s FOR UPDATE", (queue,))
+            # Serialize slot accounting across all workers without granting the runtime
+            # permission to UPDATE the queue's policy/limit row. The next statement takes a
+            # fresh READ COMMITTED snapshot after the preceding claimer committed.
+            c.execute("SELECT pg_advisory_xact_lock(73162, hashtext(%s))", (queue,))
             row = c.execute(_DEQUEUE, {"q": queue, "w": worker}).fetchone()
             if row is None:
                 return None
