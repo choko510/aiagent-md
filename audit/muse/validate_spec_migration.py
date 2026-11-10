@@ -93,6 +93,52 @@ for path in companion_paths:
     if not cp.is_file() or len(cp.read_text(encoding="utf-8")) < 600:
         errors.append(f"Missing/thin audited companion: {path}")
 
+# LDC-COMPANION-STATIC: spec/provenance contract only. Not a runtime safety test.
+# COMP-02 must be cataloged beside COMP-01, without changing 88 canonical modules.
+ldc_path = "docs/16-app-development/local-device-rust-client.md"
+ldc_pairs = [pair for pair in companion_records if pair[1] == ldc_path]
+if ldc_pairs != [("COMP-02", ldc_path)]:
+    errors.append("COMP-02 must register exact LDC companion path in spec-index")
+elif not (ROOT / ldc_path).is_file():
+    errors.append("COMP-02 missing Rust Local Device Client specification")
+else:
+    ldc_text = (ROOT / ldc_path).read_text(encoding="utf-8")
+    expected_ldc = [f"{n:02d}" for n in range(1, 33)]
+    # A requirement must own exactly one test cell, using the same suffix.
+    # This catches a dropped row, a duplicate, a swapped mapping and a stray ID.
+    ldc_matrix = re.findall(
+        r"^\|\s*LDC-REQ-(\d{2})\b[^|\n]*\|\s*LDC-T(\d{2})\s*\|",
+        ldc_text, re.M,
+    )
+    if [req for req, _ in ldc_matrix] != expected_ldc:
+        errors.append("LDC-REQ-01..32 missing, duplicated or out of order in trace matrix")
+    if [test for _, test in ldc_matrix] != expected_ldc:
+        errors.append("LDC-T01..32 does not map 1:1 to LDC-REQ-01..32")
+    ldc_sections = re.findall(r"^## (\d+)\. ", ldc_text, re.M)
+    if ldc_sections != [str(n) for n in range(1, 24)]:
+        errors.append(f"LDC spec section inventory must be 1..23: {ldc_sections}")
+    for marker in (
+        "deviceClaimEpoch", "START_PERMIT", "WAITING_RECONCILIATION",
+        "semanticEffectKey", "RISK_ACCEPTED_RETRY", "reconcile_existing_intent",
+        "RECEIPT_CONFLICT", "core.fsmonitor", "UNKNOWN_DIRTY_STATE",
+        "Desktop Cua runtime", "Browser runtime", "include_screenshot: false",
+        "consentPayloadSha256", "ACCOUNT_SWITCH_PREPARE",
+        "ZEROIZE_A_ACTIVE_MEMORY", "NOT RUN",
+        "LDC-NT01", "LDC-NT02", "LDC-NT03", "LDC-NT04",
+        "LDC-NT05", "LDC-NT06", "LDC-NT07",
+    ):
+        if marker not in ldc_text:
+            errors.append(f"COMP-02 LDC safety boundary or negative test missing: {marker}")
+    # Catch concrete regressions to legacy unsafe rules.
+    for forbidden in (
+        "Local成功をCloudの`CONFIRMED`へ反映する前に、Cloud側の現行run lease",
+        "Git: `git rev-parse`、commit/branch/dirty summary",
+    ):
+        if forbidden.replace("\\`", "`") in ldc_text:
+            errors.append(f"COMP-02 reverted a reviewed security boundary: {forbidden}")
+    if "COMP-02" not in text:
+        errors.append("LDC companion is missing from the canonical spec-index")
+
 # Do not mistake historical Round6/Round7 pinned-85 provenance workflows
 # for the updated 88-module design validation.
 
