@@ -221,10 +221,13 @@ def evaluate_evidence(
 
     code = passed(BASE, "CI")
     integrated = code and passed(CI, "CI")
-    host = integrated and live.get("status") == "TOPOLOGY_READONLY_PASS" and passed(HOST, "REAL_HOST")
-    prod = host and passed(PROD[:-1], "REAL_HOST") and passed(PROD[-1:], "OPERATOR")
+    host_evidence = integrated and live.get("status") == "TOPOLOGY_READONLY_PASS" and passed(HOST, "REAL_HOST")
+    production_evidence = host_evidence and passed(PROD[:-1], "REAL_HOST") and passed(PROD[-1:], "OPERATOR")
+    # Artifact hashes prove integrity only, not provenance, execution or independent review.
+    # Synthetic files with a matching hostId/digest must NEVER promote these gates.
+    # A separately authenticated operator/attestation service owns final host/product acceptance.
     gates = {"CODE_READY": code, "INTEGRATED": integrated,
-             "HOST_VERIFIED": host, "PRODUCTION_READY": prod}
+             "HOST_VERIFIED": False, "PRODUCTION_READY": False}
     reached = next((g for g in reversed(tuple(gates)) if gates[g]), "NOT_RUN")
     required_execution = {**dict.fromkeys(BASE + CI, "CI"), **dict.fromkeys(HOST + PROD[:-1], "REAL_HOST"),
                           PROD[-1]: "OPERATOR"}
@@ -234,6 +237,8 @@ def evaluate_evidence(
         "kind": "acceptance_gate",
         "status": reached,
         "gates": gates,
+        "hostEvidenceCompleteNotAttested": host_evidence,
+        "productionEvidenceCompleteNotAttested": production_evidence,
         "missingOrInvalid": pending,
         "hostId": identity,
         "topologyDigest": digest,
