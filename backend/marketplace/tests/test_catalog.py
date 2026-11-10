@@ -67,7 +67,7 @@ def run(coro):
 def test_browse_normalization_and_pagination():
     def mcp(params):
         assert params["version"] == "latest"
-        assert params["limit"] == 2
+        assert params["limit"] == (4 if params.get("cursor") else 2)
         return {
             "servers": [sample_mcp(status="deprecated", remote=False)],
             "metadata": {"nextCursor": "encoded:opaque" if not params.get("cursor") else None},
@@ -396,8 +396,9 @@ def test_clawhub_qualifies_owner_and_falls_back_only_to_own_listing():
     assert detail["catalogStatus"] == "listing-only-unverified"
     assert detail["installable"] is False
     assert transport.calls[-1][-1] == {"ownerHandle": "team-a"}
-    with pytest.raises(CatalogError):
-        run(service.detail(_catalog_id("clawhub", "team-b/code-review")))
+    other = run(service.detail(_catalog_id("clawhub", "team-b/code-review")))
+    assert other["publisher"] == "team-b"
+    assert other["name"] == "Wrong owner's Skill"
 
 
 def test_owner_qualified_detail_verified_when_echo_matches():
