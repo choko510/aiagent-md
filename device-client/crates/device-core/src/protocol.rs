@@ -75,6 +75,13 @@ pub struct Fence {
     pub goal_revision: Epoch,
     pub policy_revision: Epoch,
 }
+impl Fence {
+    pub fn valid(&self) -> bool {
+        [self.device_claim_epoch, self.lease_epoch, self.restore_incarnation,
+         self.connection_generation, self.goal_revision, self.policy_revision]
+            .iter().all(|value| value.0 <= i64::MAX as u64)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +137,9 @@ impl ActionRequest {
         !self.tool_intent_id.trim().is_empty() && self.tool_intent_id.len() <= 256
             && self.args.len() <= 64 * 1024
             && self.scope.valid()
+            && self.args_sha256 == hex_digest(&Sha256::digest(&self.args))
+            && self.attempt_fence.0 <= i64::MAX as u64
+            && self.fence.valid()
     }
 }
 
