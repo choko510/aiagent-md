@@ -1,0 +1,31 @@
+name: AI-04 Automation isolated Mock
+on:
+  pull_request:
+    paths:
+      - 'backend/packages/automation/**'
+      - '.github/workflows/ai04-automation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/packages/automation/**'
+      - '.github/workflows/ai04-automation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bounded-campaign:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test and lint dependencies
+        run: python -m pip install 'pytest==9.2.0' 'ruff>=0.14.0'
+      - name: Bounded campaign, outbox, DST and restart Mock tests
+        run: bash backend/packages/automation/scripts/ci.sh
