@@ -147,3 +147,40 @@ def test_no_network_inside_cell(tmp_path: Path) -> None:
         pytest.skip("user+net namespaces unavailable here; fail-closed refusal verified, isolation not exercised")
     assert "CONNECTED" not in out["stdout"] and "BLOCKED" in out["stdout"], out
     assert out["stdout"].strip().splitlines()[-1] == "1"  # only the loopback interface exists
+
+def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
+    """Real child process, same UID, sibling Task and Tenant paths, symlink and /proc escape."""
+    s = sup(tmp_path, netns=False)
+    own, _ = s.workspace("t1", "task1", ".")
+    other_task, _ = s.workspace("t1", "task2", ".")
+    other_tenant, _ = s.workspace("t2", "task1", ".")
+    (other_task / "private").write_text("SIBLING_SECRET")
+    (other_tenant / "private").write_text("TENANT_SECRET")
+    (own / "escape").symlink_to(other_task / "private")
+    targets = [
+        str(other_task / "private"), str(other_tenant / "private"),
+        str(own / "escape"), str(s.root / ".consumed-grants"),
+        "/proc/self/environ", "/etc/passwd",
+    ]
+    import json
+
+    script = (
+        "from pathlib import Path\n"
+        "paths = " + repr(targets) + "\n"
+        "for p in paths:\n"
+        " try:\n"
+        "  Path(p).read_bytes(); print('LEAK', p)\n"
+        " except OSError:\n"
+        "  print('BLOCKED', p)\n"
+        "Path('mine').write_text('OK')\n"
+        "print(Path('mine').read_text())\n"
+    )
+    argv = [sys.executable, "-c", script]
+    out = run(s.execute(grant(argv), argv, "."))
+    if out["status"] == "REFUSED":
+        assert out["reason"] == "FS_ISOLATION_UNAVAILABLE"
+        pytest.skip("Landlock is unavailable: execution failed closed; no filesystem isolation claim")
+    assert out["exitCode"] == 0, out
+    assert "LEAK" not in out["stdout"], out
+    assert out["stdout"].count("BLOCKED") == len(targets), out
+    assert "OK" in out["stdout"] and (own / "mine").read_text() == "OK"
