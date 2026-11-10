@@ -145,7 +145,7 @@ def test_no_network_inside_cell(tmp_path: Path) -> None:
     argv = [sys.executable, "-c", code]
     out = run(s.execute(grant(argv), argv, "."))
     if out["status"] == "REFUSED":  # kernel refused namespaces: the command did NOT run (fail closed)
-        assert out["reason"] == "NETNS_UNAVAILABLE"
+        assert out["reason"] == "PID_OR_NETNS_UNAVAILABLE"
         pytest.skip("user+net namespaces unavailable here; fail-closed refusal verified, isolation not exercised")
     assert "CONNECTED" not in out["stdout"] and "BLOCKED" in out["stdout"], out
     assert "PROC_DENIED" in out["stdout"] and "PROC_LEAK" not in out["stdout"], out
@@ -206,3 +206,66 @@ def test_same_uid_process_inspection_blocked_across_exec(tmp_path: Path) -> None
     out = run(s.execute(grant(argv), argv, "."))
     assert out["status"] == "EXITED" and out["exitCode"] == 0, out
     assert out["stdout"].strip() == "(-1, 1)" or out["stdout"].strip() == "-1 1", out
+
+
+def test_task_pid_namespace_blocks_cross_task_signals_and_preserves_child_management(tmp_path: Path) -> None:
+    """Real simultaneous child processes: SIGKILL -1 from Task A cannot reach Task B."""
+    import signal
+
+    s = sup(tmp_path, netns=False)
+    attack = (
+        "import os, signal, time\n"
+        "assert os.getpid() == 1, os.getpid()\n"
+        "time.sleep(0.2)\n"
+        "try:\n os.kill(-1, signal.SIGKILL)\n"
+        "except OSError: pass\n"
+        "print('ATTACK_FINISHED', flush=True)\n"
+    )
+    victim = (
+        "import os, time\n"
+        "assert os.getpid() == 1, os.getpid()\n"
+        "time.sleep(1.0)\n"
+        "print('VICTIM_ALIVE', flush=True)\n"
+    )
+    a_argv, b_argv = [sys.executable, "-c", attack], [sys.executable, "-c", victim]
+
+    def task_grant(task: str, argv: list[str]) -> dict:
+        return sign(
+            KEY,
+            Grant(
+                uuid.uuid4().hex,
+                "t1",
+                task,
+                "run1",
+                "intent1",
+                3,
+                tuple(argv),
+                ".",
+                5000,
+                256 * 1024 * 1024,
+                int(time.time()) + 60,
+            ),
+        )
+
+    async def concurrently() -> tuple[dict, dict]:
+        a, b = await asyncio.gather(
+            s.execute(task_grant("task-a", a_argv), a_argv, "."),
+            s.execute(task_grant("task-b", b_argv), b_argv, "."),
+        )
+        return a, b
+
+    a, b = run(concurrently())
+    assert a["status"] == "EXITED" and a["exitCode"] == 0, a
+    assert b["status"] == "EXITED" and b["exitCode"] == 0 and "VICTIM_ALIVE" in b["stdout"], b
+
+    manage = (
+        "import os, signal, subprocess\n"
+        "p = subprocess.Popen(['/bin/sleep', '10'])\n"
+        "os.kill(p.pid, signal.SIGTERM)\n"
+        "assert p.wait(timeout=2) == -signal.SIGTERM\n"
+        "print('OWN_CHILD_STOPPED')\n"
+    )
+    args = [sys.executable, "-c", manage]
+    result = run(s.execute(task_grant("task-c", args), args, "."))
+    assert result["status"] == "EXITED" and result["exitCode"] == 0, result
+    assert "OWN_CHILD_STOPPED" in result["stdout"], result
