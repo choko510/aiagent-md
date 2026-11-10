@@ -14,7 +14,7 @@ python -m pip install -e './backend/marketplace[test]'
 AIAGENT_MARKETPLACE_DEV_MODE=1 uvicorn aiagent_marketplace.app:app --host 127.0.0.1 --port 8001
 # 別のターミナルで
 cd web
-npm ci
+npm install --no-audit --no-fund
 npm run dev
 ```
 
