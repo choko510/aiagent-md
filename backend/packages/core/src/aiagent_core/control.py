@@ -61,6 +61,27 @@ class TenantMismatch(ControlError):
     code = "TENANT"
 
 
+class ScopeRevoked(ControlError):
+    code = "SCOPE_REVOKED"
+
+
+class Paused(ControlError):
+    code = "PAUSED"
+
+
+def scope_active(c: psycopg.Connection[Row], tenant_id: str, owner_id: str, workspace_id: str) -> bool:
+    """Current authority, not the membership snapshot at task creation."""
+    return c.execute(
+        "SELECT 1 FROM agent.tenants t"
+        " JOIN agent.tenant_memberships m ON m.tenant_id=t.id AND m.user_id=%s"
+        " JOIN agent.users u ON u.id=m.user_id"
+        " JOIN agent.workspaces w ON w.tenant_id=t.id AND w.owner_user_id=m.user_id AND w.id=%s"
+        " WHERE t.id=%s AND t.disabled_at IS NULL AND u.disabled_at IS NULL"
+        " AND m.disabled_at IS NULL AND w.disabled_at IS NULL",
+        (owner_id, workspace_id, tenant_id),
+    ).fetchone() is not None
+
+
 @dataclass(frozen=True)
 class Claim:
     tenant_id: str
@@ -124,7 +145,7 @@ def claim_run(
         if run is None:
             raise TenantMismatch(run_id)
         task = c.execute(
-            "SELECT id, owner_user_id, goal_revision, active_run_id, status_code FROM agent.tasks"
+            "SELECT id, owner_user_id, workspace_id, goal_revision, active_run_id, status_code FROM agent.tasks"
             " WHERE tenant_id=%s AND id=%s FOR UPDATE",
             (tenant_id, run["task_id"]),
         ).fetchone()
@@ -135,13 +156,15 @@ def claim_run(
             (tenant_id, run_id),
         ).fetchone()
         assert task is not None and r is not None
+        if not scope_active(c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"])):
+            raise ScopeRevoked(run_id)
         if r["status_code"] in TERMINAL:
             raise (Cancelled if r["status_code"] == "CANCELLED" else RunTerminal)(r["status_code"])
         if task["active_run_id"] != run_id:
             raise NotClaimable("run is not the task's active run")
         if r["status_code"] not in CLAIMABLE:
             raise NotClaimable(r["status_code"])
-        if r["status_code"] == "PAUSED" and r["pause_requested"]:
+        if r["pause_requested"]:
             raise NotClaimable("paused")
         if r["restore_incarnation"] != inc["restore_incarnation"]:
             raise RestoreFenced(run_id)
@@ -192,7 +215,7 @@ def mark_running(db: Database, claim: Claim) -> None:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET status_code='RUNNING', updated_at=now() WHERE tenant_id=%s AND id=%s"
-            " AND lease_epoch=%s AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested",
+            " AND lease_epoch=%s AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested AND NOT pause_requested",
             (claim.tenant_id, claim.run_id, claim.lease_epoch),
         )
         if cur.rowcount != 1:
@@ -247,7 +270,7 @@ def check_current(
     row = c.execute(
         "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation,"
         " r.head_revision, r.allowed_models, r.token_budget, r.tokens_reserved, r.tokens_used, r.max_model_calls,"
-        " r.model_calls, t.goal_revision, t.owner_user_id, s.restore_incarnation AS current_incarnation"
+        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, s.restore_incarnation AS current_incarnation"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " CROSS JOIN agent.schema_control s"
         " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s" + (" FOR UPDATE OF r" if for_update else ""),
@@ -255,6 +278,10 @@ def check_current(
     ).fetchone()
     if row is None or row["owner_user_id"] != claim.owner_user_id:
         raise TenantMismatch(claim.run_id)
+    if not scope_active(c, claim.tenant_id, claim.owner_user_id, str(row["workspace_id"])):
+        raise ScopeRevoked(claim.run_id)
+    if row["pause_requested"] or row["status_code"] == "PAUSED":
+        raise Paused(claim.run_id)
     if (
         claim.restore_incarnation != row["current_incarnation"]
         or row["restore_incarnation"] != row["current_incarnation"]
