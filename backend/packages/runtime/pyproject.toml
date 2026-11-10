@@ -1,0 +1,10 @@
+[project]
+name = "aiagent-runtime"
+version = "0.3.0"
+description = "Agent Runtime Worker: AgentRuntimePort with DeepAgents + LangGraph (ADR-038)"
+requires-python = ">=3.12,<3.14"
+dependencies = ["aiagent-core", "deepagents==0.7.34", "langgraph==1.2.20", "langgraph-checkpoint==4.3.1", "langgraph-checkpoint-postgres==3.2.0", "langchain==1.4.9", "langchain-core==1.7.6"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"

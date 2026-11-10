@@ -1,0 +1,27 @@
+<!-- Untrusted Execution VM: generated code ONLY. Separate guest kernel. NO network interface; vsock CID 3 is its only
+     channel (to the Tool Gateway in the control VM). No shared folders, no host devices, no secrets. -->
+<domain type='kvm'>
+  <name>aiagent-exec</name>
+  <memory unit='GiB'>4</memory>
+  <vcpu>2</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-model'/>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='/var/lib/libvirt/images/aiagent-exec.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <source file='/var/lib/libvirt/images/aiagent-exec-seed.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <vsock model='virtio'>
+      <cid auto='no' address='3'/>
+    </vsock>
+    <console type='pty'/>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>

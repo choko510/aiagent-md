@@ -190,4 +190,4 @@ Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-de
 
 ## 2026-11-10 Extension Marketplace — audited Companion Spec (COMP-03)
 
-Skills・MCPの検索、ワンクリック導入/無効化/削除/更新、Registry連携、認証、Tool Gateway/PR #82との統合境界を [Extension Marketplace](../08-interfaces/extension-marketplace.md) にまとめる。**補足仕様・NOT IMPLEMENTED / NOT TESTED**であり、既存88基礎モジュール数、Owner、Shared契約、PR #82の実装状態を変更しない。
+Skills・MCPの検索、ワンクリック導入/無効化/削除/更新、Registry連携、認証、Tool Gateway/マージ済みPR #82との統合境界を [Extension Marketplace](../08-interfaces/extension-marketplace.md) にまとめる。**補足仕様・NOT IMPLEMENTED / NOT TESTED**であり、既存88基礎モジュール数、Owner、Shared契約、PR #82の実装状態を変更しない。

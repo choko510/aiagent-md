@@ -1,0 +1,36 @@
+#cloud-config
+# Untrusted Execution VM: execution supervisor only. No NIC (libvirt), no SSH, no secrets other than the two supervisor
+# keys installed by the operator (/etc/aiagent/{grant,rpc}.key, mode 0400 root). Generated code runs as uid 10002.
+users:
+  - name: cell
+    uid: "10002"
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+ssh_pwauth: false
+write_files:
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    content: |
+      include "/etc/aiagent/untrusted-execution-vm.nft"
+  - path: /etc/systemd/system/aiagent-cell.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=aiagent Execution Supervisor (vsock)
+      After=nftables.service
+      Requires=nftables.service
+      [Service]
+      Environment=AIAGENT_SANDBOX_LISTEN=vsock:4294967295:7000
+      Environment=AIAGENT_SANDBOX_CELL_UID=10002
+      Environment=AIAGENT_SANDBOX_REQUIRE_NETNS=1
+      Environment=AIAGENT_SANDBOX_GRANT_KEY_FILE=/etc/aiagent/grant.key
+      Environment=AIAGENT_SANDBOX_RPC_KEY_FILE=/etc/aiagent/rpc.key
+      ExecStart=/opt/aiagent/venv/bin/python -m aiagent_sandbox.supervisor
+      ProtectHome=yes
+      PrivateDevices=yes
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [systemctl, enable, --now, nftables]
+  - [systemctl, enable, aiagent-cell]

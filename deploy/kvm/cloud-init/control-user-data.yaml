@@ -1,0 +1,18 @@
+#cloud-config
+# Trusted Control VM: Docker Engine (local socket only, never mounted into containers) + nftables default-deny egress.
+packages:
+  - docker.io
+  - docker-compose-v2
+  - nftables
+ssh_pwauth: false
+write_files:
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: '{"icc": false, "userland-proxy": false, "no-new-privileges": true, "live-restore": true}'
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    content: |
+      include "/etc/aiagent/trusted-control-vm.nft"
+runcmd:
+  - [systemctl, enable, --now, nftables]
+  - [systemctl, restart, docker]

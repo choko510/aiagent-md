@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/tool-proposal.schema.json",
+  "title": "ToolProposalV1",
+  "description": "Untrusted tool call proposed by a model; validated by the Tool Gateway against the registry schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "toolCallId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "toolKey": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.]{0,63}$"
+    },
+    "arguments": {
+      "$ref": "common.schema.json#/$defs/JsonObject"
+    }
+  },
+  "required": [
+    "toolCallId",
+    "toolKey",
+    "arguments"
+  ]
+}

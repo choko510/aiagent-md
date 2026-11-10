@@ -1,0 +1,12 @@
+# Execution Supervisor image for the UNTRUSTED Execution VM. Contains no DB driver, no gateway, no credential.
+# The supervisor runs as root only to drop each command to the unprivileged cell uid (10002) with rlimits and a new
+# user+network namespace; the VM itself has no Internet route (deploy/nftables/untrusted-execution-vm.nft).
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+FROM ${PYTHON_IMAGE}
+RUN groupadd -g 10002 cell && useradd -u 10002 -g 10002 -M -s /usr/sbin/nologin cell
+COPY backend/packages/domain /src/domain
+COPY backend/packages/sandbox /src/sandbox
+RUN pip install --no-cache-dir pydantic==2.14.3 "jsonschema>=4.25.0" && \
+    pip install --no-cache-dir --no-deps /src/domain /src/sandbox && rm -rf /src
+ENV AIAGENT_SANDBOX_CELL_UID=10002 AIAGENT_SANDBOX_REQUIRE_NETNS=1 AIAGENT_SANDBOX_ROOT=/var/lib/aiagent/cells
+ENTRYPOINT ["python", "-m", "aiagent_sandbox.supervisor"]

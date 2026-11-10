@@ -1,0 +1,61 @@
+# DEVELOPMENT ONLY (single machine, no VM split). NOT equivalent to production safety:
+#   - the execution cell runs as a container on this host, not in a separate Untrusted Execution VM;
+#   - AIAGENT_PROFILE=development disables the production fail-closed attestation gate;
+#   - FakeModel provider, mock message receiver (on a private address allow-listed for development only).
+# Network separation (internal db/rpc networks, egress only via sentinel) is the same as production.
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d
+services:
+  migrate: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
+  api: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
+  edge: {image: "aiagent/all:${TAG:-dev}"}
+  relay: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
+  runtime:
+    image: "aiagent/all:${TAG:-dev}"
+    volumes: !reset []
+    environment: {AIAGENT_PROFILE: development, AIAGENT_MODEL: fake-gateway}
+    deploy: {replicas: 1}
+  model-gateway:
+    image: "aiagent/all:${TAG:-dev}"
+    volumes: !reset []
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, egress_model_token]
+    environment: {AIAGENT_PROFILE: development, AIAGENT_ANTHROPIC_API_KEY_FILE: ""}
+  tool-gateway:
+    image: "aiagent/all:${TAG:-dev}"
+    volumes: !reset []
+    environment:
+      AIAGENT_PROFILE: development
+      AIAGENT_SANDBOX_ENDPOINT: tcp:cell:7000
+      AIAGENT_MESSAGE_RECEIVER_URL: http://receiver:8099/messages
+      AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST: receiver
+  sentinel:
+    image: "aiagent/all:${TAG:-dev}"
+    networks: [db, rpc, egress, devsim]
+    volumes: !override ["./egress.dev.json:/run/aiagent/egress.json:ro"]
+    environment: {AIAGENT_PROFILE: development}
+  receiver:  # fake external world, reachable ONLY through sentinel (devsim network)
+    image: "aiagent/all:${TAG:-dev}"
+    networks: {devsim: {ipv4_address: 10.250.250.10}}
+    read_only: true
+    user: "10001:10001"
+    tmpfs: ["/tmp"]
+    volumes: ["../../backend/tests/mock_receiver.py:/opt/mock_receiver.py:ro"]
+    environment: {MOCK_RECEIVER_HOST: 0.0.0.0}
+    command: ["python", "/opt/mock_receiver.py", "8099", "/tmp/receiver.jsonl", "ok"]
+  cell:  # development stand-in for the Untrusted Execution VM
+    image: "aiagent/cell:${TAG:-dev}"
+    networks: [rpc]
+    read_only: true
+    tmpfs: ["/var/lib/aiagent/cells:exec,mode=1777"]
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, SYS_ADMIN, CHOWN, KILL]
+    security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
+    deploy: {resources: {limits: {pids: 256, memory: 1g}}}
+    secrets: [sandbox_rpc_key, sandbox_grant_key]
+    environment:
+      AIAGENT_SANDBOX_RPC_KEY_FILE: /run/secrets/sandbox_rpc_key
+      AIAGENT_SANDBOX_GRANT_KEY_FILE: /run/secrets/sandbox_grant_key
+      AIAGENT_SANDBOX_LISTEN: tcp:0.0.0.0:7000
+networks:
+  devsim:
+    internal: true
+    ipam: {config: [{subnet: 10.250.250.0/24}]}
