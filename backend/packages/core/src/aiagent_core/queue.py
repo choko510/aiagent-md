@@ -112,6 +112,10 @@ class QueuePort:
     def dequeue(self, queue: str, worker: str) -> Job | None:
         self.dead_letter_exhausted(queue)
         with self.db.tx() as c:
+            # Serialize slot accounting across ALL workers. Locking only the candidate
+            # job rows lets simultaneous workers both see a zero active count.
+            # Under READ COMMITTED the subsequent statement sees the prior claim's commit.
+            c.execute("SELECT name FROM queue.queues WHERE name=%s FOR UPDATE", (queue,))
             row = c.execute(_DEQUEUE, {"q": queue, "w": worker}).fetchone()
             if row is None:
                 return None
