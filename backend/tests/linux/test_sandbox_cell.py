@@ -148,6 +148,7 @@ def test_no_network_inside_cell(tmp_path: Path) -> None:
     assert "CONNECTED" not in out["stdout"] and "BLOCKED" in out["stdout"], out
     assert out["stdout"].strip().splitlines()[-1] == "1"  # only the loopback interface exists
 
+
 def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
     """Real child process, same UID, sibling Task and Tenant paths, symlink and /proc escape."""
     s = sup(tmp_path, netns=False)
@@ -158,9 +159,12 @@ def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
     (other_tenant / "private").write_text("TENANT_SECRET")
     (own / "escape").symlink_to(other_task / "private")
     targets = [
-        str(other_task / "private"), str(other_tenant / "private"),
-        str(own / "escape"), str(s.root / ".consumed-grants"),
-        "/proc/self/environ", "/etc/passwd",
+        str(other_task / "private"),
+        str(other_tenant / "private"),
+        str(own / "escape"),
+        str(s.root / ".consumed-grants"),
+        "/proc/self/environ",
+        "/etc/passwd",
     ]
     script = (
         "from pathlib import Path\n"
