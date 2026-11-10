@@ -280,6 +280,7 @@ def test_pause_resume(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     commands.resume(dbs["api"], scope(tenant), ids["taskId"])
     assert control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w2").lease_epoch == 2
 
+
 def test_revoked_scope_refuses_new_tasks_run_claims_and_gateway_admission(
     dbs: dict[str, Database], tenant: dict[str, str]
 ) -> None:
@@ -299,9 +300,7 @@ def test_revoked_scope_refuses_new_tasks_run_claims_and_gateway_admission(
         control.check_current(c, current)
 
 
-def test_pause_blocks_new_gateway_admission(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+def test_pause_blocks_new_gateway_admission(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     ids = submit(dbs, tenant)
     current = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "w")
     commands.pause(dbs["api"], scope(tenant), ids["taskId"])
