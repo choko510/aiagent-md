@@ -9,6 +9,8 @@ development only and will refuse to run without AIAGENT_MARKETPLACE_DEV_MODE=1.
 from __future__ import annotations
 
 import base64
+import binascii
+import math
 import hashlib
 import hmac
 import json
@@ -82,7 +84,7 @@ class FixedSourceHTTP:
             ) as response:
                 if response.status_code == 429:
                     value = response.headers.get("Retry-After", "")
-                    retry = min(int(value), 120) if value.isdigit() else None
+                    retry = min(int(value), 120) if len(value) <= 5 and value.isascii() and value.isdigit() else None
                     raise CatalogError("RATE_LIMITED", 503, retry)
                 if response.status_code == 404:
                     raise CatalogError("ITEM_NOT_FOUND", 404)
@@ -144,10 +146,17 @@ def _read_id(value: str) -> tuple[str, str]:
         raise CatalogError("INVALID_ITEM_ID", 400)
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-        source, identity = json.loads(raw)
-    except (ValueError, TypeError, UnicodeError) as exc:
+        payload = json.loads(raw)
+    except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
         raise CatalogError("INVALID_ITEM_ID", 400) from exc
-    if source not in BASE_URLS or not isinstance(identity, str) or not (1 <= len(identity) <= 200):
+    # JSON arrays/maps are unhashable: never use unvalidated data in dict membership.
+    if (
+        not isinstance(payload, list) or len(payload) != 2
+        or not isinstance(payload[0], str) or not isinstance(payload[1], str)
+    ):
+        raise CatalogError("INVALID_ITEM_ID", 400)
+    source, identity = payload
+    if source not in BASE_URLS or not (1 <= len(identity) <= 200):
         raise CatalogError("INVALID_ITEM_ID", 400)
     if source == "clawhub":
         parts = identity.split("/")
@@ -233,6 +242,8 @@ class CatalogService:
     def __init__(self, transport: JSONTransport, *, secret: bytes | None = None) -> None:
         self.transport = transport
         self._secret = secret or secrets.token_bytes(32)
+        # One source's upstream 429 must not suppress the other catalog.
+        self._source_retry_at: dict[str, float] = {}
         # Public, read-only owner-qualified list snapshots for ambiguous slug-only detail APIs.
         self._list_snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -294,7 +305,7 @@ class CatalogService:
                 if cur is not None and (not isinstance(cur, str) or len(cur) > 1024):
                     raise CatalogError("INVALID_CURSOR", 400)
         entries: list[dict[str, Any]] = []
-        warnings: list[dict[str, str]] = (
+        warnings: list[dict[str, str | int]] = (
             [{"source": "mcp", "code": "MCP_QUERY_TOO_SHORT"}] if short_mcp_query else []
         )
         progressed = False
@@ -306,6 +317,13 @@ class CatalogService:
             offset = (index - page_number) % len(active)
             quota = base_quota + (1 if offset < extra else 0)
             if quota == 0:
+                continue
+            remaining = self._source_retry_at.get(s, 0) - time.monotonic()
+            if remaining > 0:
+                warnings.append({
+                    "source": s, "code": "RATE_LIMITED",
+                    "retryAfterSeconds": min(120, max(1, math.ceil(remaining))),
+                })
                 continue
             try:
                 if s == "mcp":
@@ -359,7 +377,12 @@ class CatalogService:
                             self._list_snapshots.pop(next(iter(self._list_snapshots)))
                         self._list_snapshots[item["id"]] = (now + 300, dict(item))
             except CatalogError as exc:
-                warnings.append({"source": s, "code": exc.code})
+                if exc.code == "RATE_LIMITED":
+                    seconds = min(120, max(1, exc.retry_after if exc.retry_after is not None else 30))
+                    self._source_retry_at[s] = time.monotonic() + seconds
+                    warnings.append({"source": s, "code": exc.code, "retryAfterSeconds": seconds})
+                else:
+                    warnings.append({"source": s, "code": exc.code})
         next_token = None
         if any(not v["done"] for v in state.values()):
             # Even an empty filtered page can have a valid upstream nextCursor.
