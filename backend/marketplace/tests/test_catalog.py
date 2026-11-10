@@ -323,3 +323,123 @@ def test_malformed_external_identifiers_are_not_truncated_to_valid_ones():
     }) is not None
     from aiagent_marketplace.catalog import _clawhub_item
     assert _clawhub_item({"slug": "review", "ownerHandle": "a" * 200}) is None
+
+
+def test_limit_one_keeps_paging_after_other_source_finishes():
+    def mcp_page(params):
+        cursor = params.get("cursor")
+        if cursor == "third":
+            return {"servers": [sample_mcp()], "metadata": {"nextCursor": None}}
+        return {"servers": [sample_mcp()], "metadata": {"nextCursor": "third" if cursor == "second" else "second"}}
+
+    def skill_page(params):
+        return {"items": [sample_skill()], "nextCursor": None}
+
+    transport = FakeTransport(pages={
+        ("mcp", "/v0.1/servers"): mcp_page,
+        ("clawhub", "/api/v1/skills"): skill_page,
+    })
+    service = CatalogService(transport)
+    pages = []
+    cursor = None
+    for _ in range(4):
+        response = run(service.list_items(limit=1, cursor=cursor))
+        pages.append(response)
+        cursor = response["nextCursor"]
+        if cursor is None:
+            break
+    assert [page["items"][0]["source"] for page in pages] == [
+        "mcp", "clawhub", "mcp", "mcp"
+    ]
+    assert pages[2]["nextCursor"] is not None
+    assert pages[3]["nextCursor"] is None
+
+
+def test_bad_upstream_cursor_never_leaks_uncommitted_items():
+    def mcp_page(params):
+        assert params.get("cursor") is None
+        return {"servers": [sample_mcp()], "metadata": {"nextCursor": 42}}
+
+    def skill_page(params):
+        return {"items": [sample_skill()], "nextCursor": "skill-next" if not params.get("cursor") else None}
+
+    transport = FakeTransport(pages={
+        ("mcp", "/v0.1/servers"): mcp_page,
+        ("clawhub", "/api/v1/skills"): skill_page,
+    })
+    service = CatalogService(transport)
+    first = run(service.list_items(limit=4))
+    assert [i["kind"] for i in first["items"]] == ["SKILL"]
+    assert first["warnings"] == [{"source": "mcp", "code": "UPSTREAM_INVALID_SCHEMA"}]
+    assert first["nextCursor"]
+    second = run(service.list_items(limit=4, cursor=first["nextCursor"]))
+    assert all(i["kind"] != "MCP" for i in second["items"])
+    assert second["warnings"] == [{"source": "mcp", "code": "UPSTREAM_INVALID_SCHEMA"}]
+
+
+def test_clawhub_qualifies_owner_and_falls_back_only_to_own_listing():
+    transport = FakeTransport(pages={
+        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
+        ("clawhub", "/api/v1/skills/code-review"): {
+            "skill": {"slug": "code-review", "displayName": "Wrong owner's Skill"},
+            "owner": {"handle": "team-b"},
+            "latestVersion": {"version": "9.0.0"},
+        },
+    })
+    service = CatalogService(transport)
+    listing = run(service.list_items(kind="SKILL"))
+    item = listing["items"][0]
+    detail = run(service.detail(item["id"]))
+    assert detail["publisher"] == "team-a"
+    assert detail["name"] == "Code Review"
+    assert detail["version"] == "2.0.0"
+    assert detail["catalogStatus"] == "listing-only-unverified"
+    assert detail["installable"] is False
+    assert transport.calls[-1][-1] == {"ownerHandle": "team-a"}
+    with pytest.raises(CatalogError):
+        run(service.detail(_catalog_id("clawhub", "team-b/code-review")))
+
+
+def test_owner_qualified_detail_verified_when_echo_matches():
+    transport = FakeTransport(pages={
+        ("clawhub", "/api/v1/skills/code-review"): {
+            "skill": {"slug": "code-review", "displayName": "Owned skill", "summary": "Current"},
+            "owner": {"handle": "team-a"},
+            "latestVersion": {"version": "3.0.0"},
+        },
+    })
+    item = run(CatalogService(transport).detail(_catalog_id("clawhub", "team-a/code-review")))
+    assert item["name"] == "Owned skill"
+    assert item["version"] == "3.0.0"
+    assert item["catalogStatus"] == "public-unverified"
+
+
+def test_development_preview_blocks_nonlocal_even_with_token(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("AIAGENT_MARKETPLACE_DEV_MODE", "1")
+    token = "z" * 64
+    monkeypatch.setenv("AIAGENT_MARKETPLACE_DEV_TOKEN", token)
+    mod = importlib.import_module("aiagent_marketplace.app")
+    app = mod.create_development_app()
+    headers = {"Host": "127.0.0.1:8001", "Authorization": "Bearer " + token}
+
+    with TestClient(app, client=("127.0.0.1", 4711)) as local:
+        assert local.get("/health", headers=headers).status_code == 200
+        assert local.get("/health", headers={"Host": "127.0.0.1:8001"}).status_code == 401
+        assert local.get("/health", headers={**headers, "Host": "example.org"}).status_code == 400
+        assert local.get("/health", headers={**headers, "Origin": "https://evil.example"}).status_code == 403
+        assert local.get("/health", headers={**headers, "Sec-Fetch-Site": "cross-site"}).status_code == 403
+
+    with TestClient(app, client=("198.51.100.4", 4711)) as external:
+        assert external.get("/health", headers=headers).status_code == 403
+        assert external.get("/api/v1/marketplace/items", headers=headers).status_code == 403
+
+
+def test_development_preview_rejects_missing_token(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("AIAGENT_MARKETPLACE_DEV_MODE", "1")
+    monkeypatch.delenv("AIAGENT_MARKETPLACE_DEV_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="DEV_TOKEN"):
+        importlib.import_module("aiagent_marketplace.app").create_development_app()
