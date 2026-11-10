@@ -11,7 +11,6 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
 
 from .catalog import CatalogError, CatalogService
 
