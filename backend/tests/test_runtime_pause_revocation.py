@@ -82,9 +82,7 @@ async def test_running_pause_then_resume_acks_without_retry_or_dlq(
 
 
 @pytest.mark.asyncio
-async def test_revoked_before_claim_acks_with_audit_not_dlq(
-    dbs: dict[str, Database], tenant: dict[str, str]
-) -> None:
+async def test_revoked_before_claim_acks_with_audit_not_dlq(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     ids = commands.submit_task(
         dbs["api"], Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "test revocation"
     )
