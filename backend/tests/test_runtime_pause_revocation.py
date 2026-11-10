@@ -162,12 +162,14 @@ async def test_paused_redelivery_preserves_unresolved_effect_and_acks(
     worker = RuntimeWorker(dbs["runtime"], NeverRun(), worker_id="state-worker")
     assert await worker.handle(job) == "WAITING_RECONCILIATION"
     assert _run_state(dbs, ids["runId"]) == "WAITING_RECONCILIATION"
-    assert dbs["owner"].one(
-        "SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],)
-    )["status_code"] == "WAITING_RECONCILIATION"
-    assert dbs["owner"].one("SELECT lease_epoch FROM agent.runs WHERE id=%s", (ids["runId"],))[
-        "lease_epoch"
-    ] > claim.lease_epoch
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"]
+        == "WAITING_RECONCILIATION"
+    )
+    assert (
+        dbs["owner"].one("SELECT lease_epoch FROM agent.runs WHERE id=%s", (ids["runId"],))["lease_epoch"]
+        > claim.lease_epoch
+    )
     assert _queue_state(dbs, job.id) == "DONE"
 
 
@@ -242,12 +244,10 @@ asyncio.run(main())
 
     # Real queue and Run lease expiry after the OS worker is gone.
     dbs["owner"].one(
-        "UPDATE queue.jobs SET locked_until=now()-interval '1 millisecond'"
-        " WHERE id=%s RETURNING 1", (job_id,)
+        "UPDATE queue.jobs SET locked_until=now()-interval '1 millisecond' WHERE id=%s RETURNING 1", (job_id,)
     )
     dbs["owner"].one(
-        "UPDATE agent.runs SET lease_expires_at=now()-interval '1 millisecond'"
-        " WHERE id=%s RETURNING 1", (ids["runId"],)
+        "UPDATE agent.runs SET lease_expires_at=now()-interval '1 millisecond' WHERE id=%s RETURNING 1", (ids["runId"],)
     )
 
     class NeverRun:
@@ -261,13 +261,11 @@ asyncio.run(main())
     expected = "WAITING_RECONCILIATION" if effect else "CANCELLED"
     assert await worker.handle(redelivered) == expected
     assert _run_state(dbs, ids["runId"]) == expected
-    assert dbs["owner"].one(
-        "SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],)
-    )["status_code"] == expected
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tasks WHERE id=%s", (ids["taskId"],))["status_code"] == expected
+    )
     assert _queue_state(dbs, job_id) == "DONE"
-    assert dbs["owner"].one(
-        "SELECT count(*) AS n FROM queue.dead_letters WHERE job_id=%s", (job_id,)
-    )["n"] == 0
+    assert dbs["owner"].one("SELECT count(*) AS n FROM queue.dead_letters WHERE job_id=%s", (job_id,))["n"] == 0
     audit = dbs["owner"].all(
         "SELECT payload_json FROM agent.domain_events WHERE run_id=%s"
         " AND event_kind='run.state_changed' ORDER BY delivery_offset",
