@@ -43,7 +43,7 @@ class DerivedStateMismatch(Exception):
 @dataclass
 class SegmentOutcome:
     status: (
-        str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | BUDGET | ERROR
+        str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | PAUSED | REVOKED | BUDGET | ERROR
     )
     text: str | None = None
     approval_ids: list[str] = field(default_factory=list)
@@ -56,6 +56,8 @@ _CODE_TO_STATUS = {
     "TENANT": "FENCEDOUT",
     "STALE_GOAL": "STALEGOAL",
     "CANCELLED": "CANCELLED",
+    "PAUSED": "PAUSED",
+    "SCOPE_REVOKED": "REVOKED",
     "TERMINAL": "CANCELLED",
     "BUDGET_EXHAUSTED": "BUDGET",
 }
