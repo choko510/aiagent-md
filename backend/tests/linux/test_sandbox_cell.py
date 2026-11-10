@@ -188,3 +188,13 @@ def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
     assert "LEAK" not in out["stdout"], out
     assert out["stdout"].count("BLOCKED") == len(targets), out
     assert "OK" in out["stdout"] and (own / "mine").read_text() == "OK"
+
+
+def test_same_uid_ptrace_blocked_after_exec(tmp_path: Path) -> None:
+    """Credential changes must not reset PR_SET_DUMPABLE to 1."""
+    s = sup(tmp_path, netns=False)
+    script = "import ctypes; print(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0))"
+    argv = [sys.executable, "-c", script]
+    out = run(s.execute(grant(argv), argv, "."))
+    assert out["status"] == "EXITED" and out["exitCode"] == 0, out
+    assert out["stdout"].strip() == "0", out
