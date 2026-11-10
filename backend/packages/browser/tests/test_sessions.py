@@ -7,7 +7,6 @@ import re
 from dataclasses import replace
 
 import pytest
-
 from aiagent_browser import Authority, BrowserError, BrowserSessionService, FixtureResponse, State
 
 
