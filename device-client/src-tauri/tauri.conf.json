@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.aiagent.device.simulator",
   "build": {
-    "frontendDist": "../app/ui",
-    "withGlobalTauri": true
+    "frontendDist": "../app/ui"
   },
   "app": {
     "windows": [
@@ -19,8 +18,9 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'"
-    }
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'"
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": false
