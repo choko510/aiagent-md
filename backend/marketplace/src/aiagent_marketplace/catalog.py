@@ -233,6 +233,8 @@ class CatalogService:
     def __init__(self, transport: JSONTransport, *, secret: bytes | None = None) -> None:
         self.transport = transport
         self._secret = secret or secrets.token_bytes(32)
+        # Public, read-only owner-qualified list snapshots for ambiguous slug-only detail APIs.
+        self._list_snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _seal(self, payload: dict[str, Any]) -> str:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
@@ -296,10 +298,14 @@ class CatalogService:
             [{"source": "mcp", "code": "MCP_QUERY_TOO_SHORT"}] if short_mcp_query else []
         )
         progressed = False
-        base_quota, extra = divmod(limit, len(selected))
-        for index, s in enumerate(selected):
-            quota = base_quota + (1 if extra and index == page_number % len(selected) else 0)
-            if state[s]["done"] or quota == 0:
+        # Divide the entire quota among unfinished sources only. Rotation
+        # over finished sources would drop the final live source with limit=1.
+        active = [name for name in selected if not state[name]["done"]]
+        base_quota, extra = divmod(limit, len(active)) if active else (0, 0)
+        for index, s in enumerate(active):
+            offset = (index - page_number) % len(active)
+            quota = base_quota + (1 if offset < extra else 0)
+            if quota == 0:
                 continue
             try:
                 if s == "mcp":
@@ -312,7 +318,7 @@ class CatalogService:
                     raw = result.get("servers")
                     if not isinstance(raw, list):
                         raise CatalogError("UPSTREAM_INVALID_SCHEMA")
-                    entries.extend(filter(None, (_mcp_item(x) for x in raw)))
+                    pending_items = list(filter(None, (_mcp_item(x) for x in raw)))
                     meta = result.get("metadata") or {}
                     next_cursor = meta.get("nextCursor") if isinstance(meta, dict) else None
                 else:
@@ -329,14 +335,29 @@ class CatalogService:
                         raw = result.get("items")
                     if not isinstance(raw, list):
                         raise CatalogError("UPSTREAM_INVALID_SCHEMA")
-                    entries.extend(filter(None, (_clawhub_item(x) for x in raw)))
+                    pending_items = list(filter(None, (_clawhub_item(x) for x in raw)))
                     next_cursor = None if q else result.get("nextCursor")
-                if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 1024):
+                # Validate the entire page before exposing records or
+                # advancing a source cursor (transactional page admission).
+                if next_cursor is not None and (
+                    not isinstance(next_cursor, str) or not next_cursor or len(next_cursor) > 1024
+                ):
                     raise CatalogError("UPSTREAM_INVALID_SCHEMA")
                 if next_cursor and next_cursor == state[s]["cursor"]:
                     raise CatalogError("UPSTREAM_CURSOR_LOOP")
+                if not isinstance(raw, list):
+                    raise CatalogError("UPSTREAM_INVALID_SCHEMA")
+                if len(raw) > quota and not (s == "clawhub" and q):
+                    raise CatalogError("UPSTREAM_INVALID_SCHEMA")
+                entries.extend(pending_items)
                 state[s] = {"cursor": next_cursor, "done": not bool(next_cursor)}
                 progressed = True
+                if s == "clawhub":
+                    now = time.monotonic()
+                    for item in pending_items:
+                        if len(self._list_snapshots) >= 512:
+                            self._list_snapshots.pop(next(iter(self._list_snapshots)))
+                        self._list_snapshots[item["id"]] = (now + 300, dict(item))
             except CatalogError as exc:
                 warnings.append({"source": s, "code": exc.code})
         next_token = None
@@ -361,17 +382,34 @@ class CatalogService:
             item = _mcp_item(result)
         else:
             handle, slug = identity.split("/", 1)
-            result = await self.transport.get("clawhub", f"/api/v1/skills/{quote(slug, safe='')}", {})
+            # The public detail endpoint uses a slug. Pass ownerHandle for
+            # registries that support qualification, but DO NOT assume an
+            # ignored query parameter proves the owner. Verify echoed owner.
+            result = await self.transport.get(
+                "clawhub", f"/api/v1/skills/{quote(slug, safe='')}", {"ownerHandle": handle}
+            )
             skill = result.get("skill")
             owner = result.get("owner") if isinstance(result.get("owner"), dict) else {}
-            # Slugs are not unique across publishers; never return a different
-            # owner's skill just because its slug matches.
-            if not isinstance(skill, dict) or owner.get("handle") != handle:
-                raise CatalogError("ITEM_NOT_FOUND", 404)
-            item = _clawhub_item({**skill, "latestVersion": result.get("latestVersion")}, detail_owner=handle)
-            moderation = result.get("moderation")
-            if item and isinstance(moderation, dict) and moderation.get("isMalwareBlocked"):
-                raise CatalogError("ITEM_NOT_FOUND", 404)
+            if isinstance(skill, dict) and owner.get("handle") == handle and skill.get("slug") == slug:
+                moderation = result.get("moderation")
+                if isinstance(moderation, dict) and moderation.get("isMalwareBlocked"):
+                    raise CatalogError("ITEM_NOT_FOUND", 404)
+                item = _clawhub_item(
+                    {**skill, "latestVersion": result.get("latestVersion")}, detail_owner=handle
+                )
+            else:
+                # Safe read-only fallback from the exact publisher-qualified
+                # listing: never substitute another publisher's detail/version.
+                # This snapshot is NOT usable as an installation receipt.
+                snapshot = self._list_snapshots.get(item_id)
+                if snapshot is None or snapshot[0] < time.monotonic():
+                    raise CatalogError("ITEM_NOT_FOUND", 404)
+                item = dict(snapshot[1])
+                item["notice"] = (
+                    "発行者を特定した詳細を取得できないため、以前の一覧の情報だけを表示しています。"
+                    "最新版・安全性・配布物の所有者は未検証です。"
+                )
+                item["catalogStatus"] = "listing-only-unverified"
         if item is None or item["id"] != item_id:
             raise CatalogError("ITEM_NOT_FOUND", 404)
         return item
