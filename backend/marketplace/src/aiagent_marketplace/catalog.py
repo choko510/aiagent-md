@@ -61,9 +61,7 @@ class FixedSourceHTTP:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         if os.environ.get("AIAGENT_MARKETPLACE_DEV_MODE") != "1":
             raise RuntimeError("direct catalog HTTP disabled: use a Sentinel transport in production")
-        self._client = client or httpx.AsyncClient(
-            follow_redirects=False, timeout=httpx.Timeout(5.0), trust_env=False
-        )
+        self._client = client or httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(5.0), trust_env=False)
         self._owns_client = client is None
 
     async def close(self) -> None:
@@ -151,8 +149,10 @@ def _read_id(value: str) -> tuple[str, str]:
         raise CatalogError("INVALID_ITEM_ID", 400) from exc
     # JSON arrays/maps are unhashable: never use unvalidated data in dict membership.
     if (
-        not isinstance(payload, list) or len(payload) != 2
-        or not isinstance(payload[0], str) or not isinstance(payload[1], str)
+        not isinstance(payload, list)
+        or len(payload) != 2
+        or not isinstance(payload[0], str)
+        or not isinstance(payload[1], str)
     ):
         raise CatalogError("INVALID_ITEM_ID", 400)
     source, identity = payload
@@ -173,8 +173,10 @@ def _mcp_item(entry: Any) -> dict[str, Any] | None:
     server = entry["server"]
     name = server.get("name")
     if (
-        not isinstance(name, str) or not (2 <= len(name) <= 200)
-        or "/" not in name or any(ord(char) < 32 for char in name)
+        not isinstance(name, str)
+        or not (2 <= len(name) <= 200)
+        or "/" not in name
+        or any(ord(char) < 32 for char in name)
     ):
         return None
     metadata = entry.get("_meta") if isinstance(entry.get("_meta"), dict) else {}
@@ -204,7 +206,8 @@ def _mcp_item(entry: Any) -> dict[str, Any] | None:
         "catalogStatus": _text(info.get("status")) or "unknown",
         "installable": False,
         "notice": "MKT-1は閲覧専用です。接続・追加は後続実装です。"
-        if has_remote else "MKT-1は閲覧専用です。このMCPの実行方式は未対応です。",
+        if has_remote
+        else "MKT-1は閲覧専用です。このMCPの実行方式は未対応です。",
     }
 
 
@@ -215,8 +218,10 @@ def _clawhub_item(entry: Any, *, detail_owner: str | None = None) -> dict[str, A
     handle = detail_owner or entry.get("ownerHandle") or owner.get("handle")
     slug = entry.get("slug")
     if (
-        not isinstance(handle, str) or not isinstance(slug, str)
-        or not _SLUG.fullmatch(handle) or not _SLUG.fullmatch(slug)
+        not isinstance(handle, str)
+        or not isinstance(slug, str)
+        or not _SLUG.fullmatch(handle)
+        or not _SLUG.fullmatch(slug)
     ):
         return None
     version = entry.get("latestVersion")
@@ -268,11 +273,15 @@ class CatalogService:
             raise CatalogError("INVALID_CURSOR", 400) from exc
 
     async def list_items(
-        self, *, q: str = "", kind: str = "all", source: str = "all",
-        limit: int = 20, cursor: str | None = None
+        self, *, q: str = "", kind: str = "all", source: str = "all", limit: int = 20, cursor: str | None = None
     ) -> dict[str, Any]:
         q = q.strip()
-        if len(q) > MAX_QUERY_LENGTH or kind not in ("all", "MCP", "SKILL") or source not in ("all", "mcp", "clawhub") or not 1 <= limit <= 50:
+        if (
+            len(q) > MAX_QUERY_LENGTH
+            or kind not in ("all", "MCP", "SKILL")
+            or source not in ("all", "mcp", "clawhub")
+            or not 1 <= limit <= 50
+        ):
             raise CatalogError("INVALID_FILTER", 422)
         if (kind == "SKILL" and source == "mcp") or (kind == "MCP" and source == "clawhub"):
             raise CatalogError("INVALID_FILTER", 422)
@@ -280,7 +289,8 @@ class CatalogService:
         if short_mcp_query and (source == "mcp" or kind == "MCP"):
             raise CatalogError("MCP_QUERY_TOO_SHORT", 422)
         selected = [
-            s for s in ("mcp", "clawhub")
+            s
+            for s in ("mcp", "clawhub")
             if (source in ("all", s))
             and (kind == "all" or (kind == "MCP") == (s == "mcp"))
             and not (s == "mcp" and short_mcp_query)
@@ -320,10 +330,13 @@ class CatalogService:
                 continue
             remaining = self._source_retry_at.get(s, 0) - time.monotonic()
             if remaining > 0:
-                warnings.append({
-                    "source": s, "code": "RATE_LIMITED",
-                    "retryAfterSeconds": min(120, max(1, math.ceil(remaining))),
-                })
+                warnings.append(
+                    {
+                        "source": s,
+                        "code": "RATE_LIMITED",
+                        "retryAfterSeconds": min(120, max(1, math.ceil(remaining))),
+                    }
+                )
                 continue
             try:
                 if s == "mcp":
@@ -387,10 +400,14 @@ class CatalogService:
         # Even an empty filtered page can have a valid upstream nextCursor.
         # Do not issue an unchanged token when all sources failed.
         if progressed and any(not v["done"] for v in state.values()):
-            next_token = self._seal({
-                "filters": fingerprint, "state": state,
-                "page": page_number + 1, "exp": int(time.time()) + CURSOR_TTL_SECONDS,
-            })
+            next_token = self._seal(
+                {
+                    "filters": fingerprint,
+                    "state": state,
+                    "page": page_number + 1,
+                    "exp": int(time.time()) + CURSOR_TTL_SECONDS,
+                }
+            )
         if warnings and not entries and not next_token:
             # Source outages must not masquerade as an empty successful catalog.
             return {"items": [], "nextCursor": None, "warnings": warnings, "partial": True}
@@ -416,9 +433,7 @@ class CatalogService:
                 moderation = result.get("moderation")
                 if isinstance(moderation, dict) and moderation.get("isMalwareBlocked"):
                     raise CatalogError("ITEM_NOT_FOUND", 404)
-                item = _clawhub_item(
-                    {**skill, "latestVersion": result.get("latestVersion")}, detail_owner=handle
-                )
+                item = _clawhub_item({**skill, "latestVersion": result.get("latestVersion")}, detail_owner=handle)
             else:
                 # Safe read-only fallback from the exact publisher-qualified
                 # listing: never substitute another publisher's detail/version.

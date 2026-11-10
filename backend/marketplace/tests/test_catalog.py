@@ -1,4 +1,5 @@
 """MKT-1 offline tests: no real remote API, no installation or execution."""
+
 import asyncio
 import base64
 import json
@@ -32,7 +33,11 @@ class FakeTransport:
         value = self.pages.get((source, path))
         if callable(value):
             return value(dict(params))
-        return value if value is not None else ({"servers": [], "metadata": {}} if source == "mcp" else {"items": [], "nextCursor": None})
+        return (
+            value
+            if value is not None
+            else ({"servers": [], "metadata": {}} if source == "mcp" else {"items": [], "nextCursor": None})
+        )
 
 
 def sample_mcp(*, status="active", remote=True):
@@ -45,18 +50,16 @@ def sample_mcp(*, status="active", remote=True):
             "remotes": [{"type": "streamable-http", "url": "https://tools.example/mcp"}] if remote else [],
             "packages": [{"registryType": "npm"}],
         },
-        "_meta": {
-            "io.modelcontextprotocol.registry/official": {
-                "status": status, "isLatest": True
-            }
-        },
+        "_meta": {"io.modelcontextprotocol.registry/official": {"status": status, "isLatest": True}},
     }
 
 
 def sample_skill():
     return {
-        "slug": "code-review", "ownerHandle": "team-a",
-        "displayName": "Code Review", "summary": "Review source code",
+        "slug": "code-review",
+        "ownerHandle": "team-a",
+        "displayName": "Code Review",
+        "summary": "Review source code",
         "latestVersion": {"version": "2.0.0"},
     }
 
@@ -74,10 +77,12 @@ def test_browse_normalization_and_pagination():
             "metadata": {"nextCursor": "encoded:opaque" if not params.get("cursor") else None},
         }
 
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers"): mcp,
-        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
-    })
+    transport = FakeTransport(
+        pages={
+            ("mcp", "/v0.1/servers"): mcp,
+            ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
+        }
+    )
     service = CatalogService(transport, secret=b"test-signing-secret")
     first = run(service.list_items(limit=4))
     assert len(first["items"]) == 2
@@ -93,13 +98,21 @@ def test_browse_normalization_and_pagination():
 
 
 def test_clawhub_search_is_one_page_and_not_automatically_trusted():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/search"): {
-            "results": [
-                {"slug": "code-review", "ownerHandle": "team-a", "displayName": "Review", "version": "2.0.0", "summary": "Hello"}
-            ]
+    transport = FakeTransport(
+        pages={
+            ("clawhub", "/api/v1/search"): {
+                "results": [
+                    {
+                        "slug": "code-review",
+                        "ownerHandle": "team-a",
+                        "displayName": "Review",
+                        "version": "2.0.0",
+                        "summary": "Hello",
+                    }
+                ]
+            }
         }
-    })
+    )
     service = CatalogService(transport)
     result = run(service.list_items(q="review", kind="SKILL"))
     assert result["items"][0]["url"] == "https://clawhub.ai/team-a/skills/code-review"
@@ -109,9 +122,7 @@ def test_clawhub_search_is_one_page_and_not_automatically_trusted():
 
 
 def test_one_and_two_character_query_skips_only_mcp():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/search"): {"results": [sample_skill()]}
-    })
+    transport = FakeTransport(pages={("clawhub", "/api/v1/search"): {"results": [sample_skill()]}})
     service = CatalogService(transport)
     result = run(service.list_items(q="AI", source="all"))
     assert len(result["items"]) == 1
@@ -133,13 +144,21 @@ def test_upstream_failure_is_partial_not_empty_success():
 def test_deleted_and_invalid_rows_filtered():
     assert _mcp_item(sample_mcp(status="deleted")) is None
     assert _mcp_item({"server": {"name": "broken"}}) is None
-    assert _mcp_item({"server": {"name": "foo/bar"}, "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}}})["transport"] == "unsupported"
+    assert (
+        _mcp_item(
+            {
+                "server": {"name": "foo/bar"},
+                "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+            }
+        )["transport"]
+        == "unsupported"
+    )
 
 
 def test_cursor_cannot_be_changed_or_reused_for_another_filter():
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {"nextCursor": "nextpage"}}
-    })
+    transport = FakeTransport(
+        pages={("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {"nextCursor": "nextpage"}}}
+    )
     service = CatalogService(transport, secret=b"a-secret-for-cursor")
     first = run(service.list_items(source="mcp"))
     token = first["nextCursor"]
@@ -154,13 +173,15 @@ def test_cursor_cannot_be_changed_or_reused_for_another_filter():
 
 
 def test_detail_validates_owner_and_does_not_mix_slugs():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/skills/code-review"): {
-            "skill": {"slug": "code-review", "displayName": "Review"},
-            "owner": {"handle": "team-b"},
-            "latestVersion": {"version": "1.0.0"},
-        },
-    })
+    transport = FakeTransport(
+        pages={
+            ("clawhub", "/api/v1/skills/code-review"): {
+                "skill": {"slug": "code-review", "displayName": "Review"},
+                "owner": {"handle": "team-b"},
+                "latestVersion": {"version": "1.0.0"},
+            },
+        }
+    )
     service = CatalogService(transport)
     with pytest.raises(CatalogError) as error:
         run(service.detail(_catalog_id("clawhub", "team-a/code-review")))
@@ -169,9 +190,7 @@ def test_detail_validates_owner_and_does_not_mix_slugs():
 
 def test_detail_mcp_returns_same_identity():
     mcp = sample_mcp()
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers/io.github.sample%2Fgithub-tools/versions/latest"): mcp
-    })
+    transport = FakeTransport(pages={("mcp", "/v0.1/servers/io.github.sample%2Fgithub-tools/versions/latest"): mcp})
     service = CatalogService(transport)
     result = run(service.detail(_catalog_id("mcp", "io.github.sample/github-tools")))
     assert result["name"] == "GitHub Tools"
@@ -180,13 +199,13 @@ def test_detail_mcp_returns_same_identity():
 
 
 def test_api_read_only_and_auth_dependency_required():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/search"): {"results": [sample_skill()]}
-    })
+    transport = FakeTransport(pages={("clawhub", "/api/v1/search"): {"results": [sample_skill()]}})
     service = CatalogService(transport)
     app = FastAPI()
+
     def require_user():
         return "test-user"
+
     app.include_router(create_router(service, authenticate=require_user))
     with TestClient(app) as client:
         response = client.get("/api/v1/marketplace/items", params={"q": "review", "kind": "SKILL"})
@@ -256,19 +275,25 @@ def test_dev_app_fail_closed_without_flag(monkeypatch):
     # app.py is deliberately not imported on package import in normal runtime.
     import subprocess
     import sys
+
     proc = subprocess.run(
         [sys.executable, "-c", "import aiagent_marketplace.app"],
-        capture_output=True, text=True, env={**os.environ, "AIAGENT_MARKETPLACE_DEV_MODE": "0"}, check=False
+        capture_output=True,
+        text=True,
+        env={**os.environ, "AIAGENT_MARKETPLACE_DEV_MODE": "0"},
+        check=False,
     )
     assert proc.returncode != 0
     assert "standalone server is disabled" in proc.stderr
 
 
 def test_odd_page_limit_rotates_sources_without_dropping_items():
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {"nextCursor": "more-mcp"}},
-        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": "more-skills"},
-    })
+    transport = FakeTransport(
+        pages={
+            ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {"nextCursor": "more-mcp"}},
+            ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": "more-skills"},
+        }
+    )
     service = CatalogService(transport)
     one = run(service.list_items(limit=1))
     assert [item["source"] for item in one["items"]] == ["mcp"]
@@ -310,19 +335,24 @@ def test_bounded_cache_keeps_responses_and_never_caches_failures():
 
 
 def test_malformed_external_identifiers_are_not_truncated_to_valid_ones():
-    assert _mcp_item({
-        "server": {"name": "evil/" + "a" * 300},
-        "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": True}}
-    }) is None
-    assert _mcp_item({
-        "server": {"name": "foo/bar"},
-        "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": False}}
-    }) is None
-    assert _mcp_item({
-        "server": {"name": "foo/bar"},
-        "_meta": ["not-a-mapping"]
-    }) is not None
+    assert (
+        _mcp_item(
+            {
+                "server": {"name": "evil/" + "a" * 300},
+                "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": True}},
+            }
+        )
+        is None
+    )
+    assert (
+        _mcp_item(
+            {"server": {"name": "foo/bar"}, "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": False}}}
+        )
+        is None
+    )
+    assert _mcp_item({"server": {"name": "foo/bar"}, "_meta": ["not-a-mapping"]}) is not None
     from aiagent_marketplace.catalog import _clawhub_item
+
     assert _clawhub_item({"slug": "review", "ownerHandle": "a" * 200}) is None
 
 
@@ -336,10 +366,12 @@ def test_limit_one_keeps_paging_after_other_source_finishes():
     def skill_page(params):
         return {"items": [sample_skill()], "nextCursor": None}
 
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers"): mcp_page,
-        ("clawhub", "/api/v1/skills"): skill_page,
-    })
+    transport = FakeTransport(
+        pages={
+            ("mcp", "/v0.1/servers"): mcp_page,
+            ("clawhub", "/api/v1/skills"): skill_page,
+        }
+    )
     service = CatalogService(transport)
     pages = []
     cursor = None
@@ -349,9 +381,7 @@ def test_limit_one_keeps_paging_after_other_source_finishes():
         cursor = response["nextCursor"]
         if cursor is None:
             break
-    assert [page["items"][0]["source"] for page in pages] == [
-        "mcp", "clawhub", "mcp", "mcp"
-    ]
+    assert [page["items"][0]["source"] for page in pages] == ["mcp", "clawhub", "mcp", "mcp"]
     assert pages[2]["nextCursor"] is not None
     assert pages[3]["nextCursor"] is None
 
@@ -364,10 +394,12 @@ def test_bad_upstream_cursor_never_leaks_uncommitted_items():
     def skill_page(params):
         return {"items": [sample_skill()], "nextCursor": "skill-next" if not params.get("cursor") else None}
 
-    transport = FakeTransport(pages={
-        ("mcp", "/v0.1/servers"): mcp_page,
-        ("clawhub", "/api/v1/skills"): skill_page,
-    })
+    transport = FakeTransport(
+        pages={
+            ("mcp", "/v0.1/servers"): mcp_page,
+            ("clawhub", "/api/v1/skills"): skill_page,
+        }
+    )
     service = CatalogService(transport)
     first = run(service.list_items(limit=4))
     assert [i["kind"] for i in first["items"]] == ["SKILL"]
@@ -379,14 +411,16 @@ def test_bad_upstream_cursor_never_leaks_uncommitted_items():
 
 
 def test_clawhub_qualifies_owner_and_falls_back_only_to_own_listing():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
-        ("clawhub", "/api/v1/skills/code-review"): {
-            "skill": {"slug": "code-review", "displayName": "Wrong owner's Skill"},
-            "owner": {"handle": "team-b"},
-            "latestVersion": {"version": "9.0.0"},
-        },
-    })
+    transport = FakeTransport(
+        pages={
+            ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
+            ("clawhub", "/api/v1/skills/code-review"): {
+                "skill": {"slug": "code-review", "displayName": "Wrong owner's Skill"},
+                "owner": {"handle": "team-b"},
+                "latestVersion": {"version": "9.0.0"},
+            },
+        }
+    )
     service = CatalogService(transport)
     listing = run(service.list_items(kind="SKILL"))
     item = listing["items"][0]
@@ -403,13 +437,15 @@ def test_clawhub_qualifies_owner_and_falls_back_only_to_own_listing():
 
 
 def test_owner_qualified_detail_verified_when_echo_matches():
-    transport = FakeTransport(pages={
-        ("clawhub", "/api/v1/skills/code-review"): {
-            "skill": {"slug": "code-review", "displayName": "Owned skill", "summary": "Current"},
-            "owner": {"handle": "team-a"},
-            "latestVersion": {"version": "3.0.0"},
-        },
-    })
+    transport = FakeTransport(
+        pages={
+            ("clawhub", "/api/v1/skills/code-review"): {
+                "skill": {"slug": "code-review", "displayName": "Owned skill", "summary": "Current"},
+                "owner": {"handle": "team-a"},
+                "latestVersion": {"version": "3.0.0"},
+            },
+        }
+    )
     item = run(CatalogService(transport).detail(_catalog_id("clawhub", "team-a/code-review")))
     assert item["name"] == "Owned skill"
     assert item["version"] == "3.0.0"
@@ -483,9 +519,11 @@ def test_429_warning_includes_bounded_retry_and_prevents_repeat_upstream_calls()
                 raise CatalogError("RATE_LIMITED", 503, 13)
             return await super().get(source, path, params)
 
-    transport = LimitedTransport(pages={
-        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
-    })
+    transport = LimitedTransport(
+        pages={
+            ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None},
+        }
+    )
     service = CatalogService(transport)
     first = run(service.list_items())
     assert first["partial"] is True
@@ -539,9 +577,11 @@ def test_cooldown_expiry_allows_the_source_again(monkeypatch):
                 raise CatalogError("RATE_LIMITED", 503, 5)
             return await super().get(source, path, params)
 
-    transport = OnceLimited(pages={
-        ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {}},
-    })
+    transport = OnceLimited(
+        pages={
+            ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {}},
+        }
+    )
     service = CatalogService(transport)
     first = run(service.list_items(source="mcp"))
     assert first["warnings"][0]["retryAfterSeconds"] == 5
