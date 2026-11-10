@@ -190,11 +190,19 @@ def test_landlock_blocks_other_workspaces_and_proc(tmp_path: Path) -> None:
     assert "OK" in out["stdout"] and (own / "mine").read_text() == "OK"
 
 
-def test_same_uid_ptrace_blocked_after_exec(tmp_path: Path) -> None:
-    """Credential changes must not reset PR_SET_DUMPABLE to 1."""
+def test_same_uid_process_inspection_blocked_across_exec(tmp_path: Path) -> None:
+    """seccomp, unlike dumpability, persists across execve of normal binaries."""
     s = sup(tmp_path, netns=False)
-    script = "import ctypes; print(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0))"
-    argv = [sys.executable, "-c", script]
+    code = (
+        "import ctypes, errno, os, platform\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "arch = platform.machine()\n"
+        "nr = 310 if arch == 'x86_64' else 270\n"
+        "ctypes.set_errno(0)\n"
+        "ret = libc.syscall(nr, os.getpid(), 0, 1, 0, 1, 0)\n"
+        "print(ret, ctypes.get_errno())\n"
+    )
+    argv = [sys.executable, "-c", code]
     out = run(s.execute(grant(argv), argv, "."))
     assert out["status"] == "EXITED" and out["exitCode"] == 0, out
-    assert out["stdout"].strip() == "0", out
+    assert out["stdout"].strip() == "(-1, 1)" or out["stdout"].strip() == "-1 1", out
