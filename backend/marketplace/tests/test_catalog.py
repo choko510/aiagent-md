@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from aiagent_marketplace.api import create_router
 from aiagent_marketplace.catalog import (
+    CachedJSONTransport,
     CatalogError,
     CatalogService,
     FixedSourceHTTP,
@@ -260,3 +261,65 @@ def test_dev_app_fail_closed_without_flag(monkeypatch):
     )
     assert proc.returncode != 0
     assert "standalone server is disabled" in proc.stderr
+
+
+def test_odd_page_limit_rotates_sources_without_dropping_items():
+    transport = FakeTransport(pages={
+        ("mcp", "/v0.1/servers"): {"servers": [sample_mcp()], "metadata": {"nextCursor": "more-mcp"}},
+        ("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": "more-skills"},
+    })
+    service = CatalogService(transport)
+    one = run(service.list_items(limit=1))
+    assert [item["source"] for item in one["items"]] == ["mcp"]
+    assert one["nextCursor"] is not None
+    two = run(service.list_items(limit=1, cursor=one["nextCursor"]))
+    assert [item["source"] for item in two["items"]] == ["clawhub"]
+    assert transport.calls[1][0] == "clawhub"
+
+
+def test_sparse_filtered_page_preserves_opaque_next_cursor():
+    def source(params):
+        if params.get("cursor") == "next-opaque":
+            return {"items": [sample_skill()], "nextCursor": None}
+        return {"items": [], "nextCursor": "next-opaque"}
+
+    transport = FakeTransport(pages={("clawhub", "/api/v1/skills"): source})
+    service = CatalogService(transport)
+    first = run(service.list_items(kind="SKILL"))
+    assert first["items"] == []
+    assert first["nextCursor"]
+    second = run(service.list_items(kind="SKILL", cursor=first["nextCursor"]))
+    assert second["items"][0]["identity"] == "team-a/code-review"
+
+
+def test_bounded_cache_keeps_responses_and_never_caches_failures():
+    transport = FakeTransport(pages={("clawhub", "/api/v1/skills"): {"items": [sample_skill()], "nextCursor": None}})
+    cached = CachedJSONTransport(transport, ttl_seconds=60, max_entries=2)
+    service = CatalogService(cached)
+    run(service.list_items(kind="SKILL"))
+    run(service.list_items(kind="SKILL"))
+    assert len(transport.calls) == 1
+    transport.failures["clawhub"] = "UPSTREAM_UNAVAILABLE"
+    # Different parameters intentionally miss the cache; an error is not persisted.
+    result = run(service.list_items(kind="SKILL", limit=11))
+    assert result["partial"] is True
+    transport.failures.clear()
+    result = run(service.list_items(kind="SKILL", limit=11))
+    assert result["items"][0]["kind"] == "SKILL"
+
+
+def test_malformed_external_identifiers_are_not_truncated_to_valid_ones():
+    assert _mcp_item({
+        "server": {"name": "evil/" + "a" * 300},
+        "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": True}}
+    }) is None
+    assert _mcp_item({
+        "server": {"name": "foo/bar"},
+        "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": False}}
+    }) is None
+    assert _mcp_item({
+        "server": {"name": "foo/bar"},
+        "_meta": ["not-a-mapping"]
+    }) is not None
+    from aiagent_marketplace.catalog import _clawhub_item
+    assert _clawhub_item({"slug": "review", "ownerHandle": "a" * 200}) is None
