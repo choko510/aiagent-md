@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiagent_automation.campaign import FakeClock
@@ -23,7 +23,7 @@ def test_dst_gap_skip():
     from datetime import date
     w = watch('America/New_York')
     assert local_slot(date(2026, 3, 8), w) is None
-    after = datetime(2026, 3, 8, 6, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 3, 8, 6, 0, tzinfo=UTC)
     assert next_daily(w, after).date().isoformat() == '2026-03-09'
 
 
@@ -31,12 +31,12 @@ def test_dst_fold_first_only():
     from datetime import date
     w = watch('America/New_York', hour=1, minute=30)
     first = local_slot(date(2026, 11, 1), w)
-    assert first == datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc)
+    assert first == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
     assert next_daily(w, first) > first + timedelta(hours=1)
 
 
 def test_tokyo_timezone_and_max_slots(tmp_path: Path):
-    clock = FakeClock(datetime(2026, 11, 11, 0, 30, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 11, 11, 0, 30, tzinfo=UTC))
     queue = MockQueue()
     store = SqliteWatchHarness(tmp_path / 'watch.sqlite')
     ctrl = WatchController(store, clock, queue)
@@ -51,7 +51,7 @@ def test_tokyo_timezone_and_max_slots(tmp_path: Path):
 
 
 def test_no_access_to_external_service(tmp_path: Path):
-    clock = FakeClock(datetime(2026, 11, 11, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 11, 11, tzinfo=UTC))
     queue = MockQueue()
     ctrl = WatchController(SqliteWatchHarness(tmp_path / 'watch.sqlite'), clock, queue)
     assert not ctrl.tick(watch('Asia/Tokyo', hour=10))
