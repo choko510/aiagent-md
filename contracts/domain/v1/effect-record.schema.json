@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/effect-record.schema.json",
+  "title": "EffectRecordV1",
+  "description": "Side-effect ledger row. UNKNOWN is never retried automatically.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "toolIntentId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "effectKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "requestSha256": {
+      "$ref": "common.schema.json#/$defs/Sha256Hex"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "SENDING",
+        "CONFIRMED",
+        "FAILED",
+        "UNKNOWN",
+        "RECONCILED_SENT",
+        "RECONCILED_NOT_SENT"
+      ]
+    },
+    "externalReceiptRef": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/OpaqueRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attemptFence": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "tenantId",
+    "toolIntentId",
+    "effectKey",
+    "requestSha256",
+    "outcome",
+    "externalReceiptRef",
+    "attemptFence"
+  ]
+}

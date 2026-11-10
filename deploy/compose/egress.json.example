@@ -1,0 +1,7 @@
+{
+  "destinations": {
+    "anthropic": {"scheme": "https", "host": "api.anthropic.com", "port": 443, "methods": ["POST"],
+                  "identities": ["model_gateway"], "needs_permit": false},
+    "message-receiver": {"scheme": "https", "host": "hooks.example.com", "port": 443, "methods": ["POST", "GET"]}
+  }
+}

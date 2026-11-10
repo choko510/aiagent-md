@@ -1,0 +1,225 @@
+# aiagent-md Trusted Control VM services (STEP 3). Runs INSIDE the Trusted Control VM provisioned by deploy/kvm.
+# The Untrusted Execution VM (cell supervisor) is a separate VM, reached only over vsock by the Tool Gateway.
+#
+# Network enforcement (kernel/Docker, not Python if-statements):
+#   db, rpc  : `internal: true` -> no route to the Internet for anything attached only to them
+#   egress   : the ONLY network with an outbound route; only `sentinel` is attached (Trusted Egress)
+#   web      : internal network between the API and the edge forwarder
+#   edge     : only the credential-free `edge` forwarder (published on 127.0.0.1 for the host reverse proxy)
+# No service mounts the Docker socket; all run read-only, non-root, cap_drop ALL, no-new-privileges, with limits.
+# Production start-up fails closed without /etc/aiagent/isolation.json (deploy/kvm/verify-topology.sh).
+name: aiagent
+
+x-hardening: &hardening
+  read_only: true
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  restart: unless-stopped
+  stop_grace_period: 30s
+  environment: &env
+    AIAGENT_PROFILE: ${AIAGENT_PROFILE:-production}
+    AIAGENT_HEALTH_HOST: 0.0.0.0
+    AIAGENT_HEALTH_PORT: "9100"
+    AIAGENT_ISOLATION_ATTESTATION_FILE: /run/aiagent/isolation.json
+  volumes:
+    - /etc/aiagent/isolation.json:/run/aiagent/isolation.json:ro
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=3).status == 200 else 1)"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 20s
+
+networks:
+  db: {internal: true}
+  rpc: {internal: true}
+  web: {internal: true}
+  egress:
+    driver_opts: {com.docker.network.bridge.name: br-aiagent-eg}  # matched by deploy/nftables
+  edge: {}
+
+secrets:
+  pg_superuser_password: {file: ./secrets/pg_superuser_password}
+  migrate_dsn: {file: ./secrets/migrate_dsn}
+  api_dsn: {file: ./secrets/api_dsn}
+  runtime_dsn: {file: ./secrets/runtime_dsn}
+  checkpointer_dsn: {file: ./secrets/checkpointer_dsn}
+  model_gateway_dsn: {file: ./secrets/model_gateway_dsn}
+  tool_gateway_dsn: {file: ./secrets/tool_gateway_dsn}
+  relay_dsn: {file: ./secrets/relay_dsn}
+  sentinel_dsn: {file: ./secrets/sentinel_dsn}
+  login_passwords: {file: ./secrets/login_passwords.env}
+  model_gateway_rpc_keys: {file: ./secrets/model_gateway_rpc_keys}
+  tool_gateway_rpc_keys: {file: ./secrets/tool_gateway_rpc_keys}
+  sentinel_rpc_keys: {file: ./secrets/sentinel_rpc_keys}
+  runtime_model_rpc_key: {file: ./secrets/runtime_model_rpc_key}
+  runtime_tool_rpc_key: {file: ./secrets/runtime_tool_rpc_key}
+  tool_sentinel_client_key: {file: ./secrets/tool_sentinel_client_key}
+  sentinel_permit_key: {file: ./secrets/sentinel_permit_key}
+  sandbox_rpc_key: {file: ./secrets/sandbox_rpc_key}
+  sandbox_grant_key: {file: ./secrets/sandbox_grant_key}
+  anthropic_api_key: {file: ./secrets/anthropic_api_key}
+  receiver_token: {file: ./secrets/receiver_token}
+  egress_model_token: {file: ./secrets/egress_model_token}
+  egress_static_tokens: {file: ./secrets/egress_static_tokens}
+
+services:
+  postgres:
+    image: postgres:16@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+    restart: unless-stopped
+    networks: [db]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_password
+      POSTGRES_DB: aiagent
+    secrets: [pg_superuser_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    shm_size: 256m
+    deploy: {resources: {limits: {cpus: "2", memory: 2g, pids: 256}}}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aiagent"]
+      interval: 5s
+      retries: 20
+
+  migrate:  # one-shot: migrations, then per-process login roles. Services start only after it succeeded.
+    <<: *hardening
+    image: aiagent/migrate:${TAG:-dev}
+    restart: "no"
+    networks: [db]
+    depends_on: {postgres: {condition: service_healthy}}
+    secrets: [migrate_dsn, login_passwords]
+    environment:
+      <<: *env
+      AIAGENT_MIGRATE_DSN_FILE: /run/secrets/migrate_dsn
+    entrypoint: ["sh", "-c", "python -m aiagent_core.migrate up && set -a && . /run/secrets/login_passwords && set +a && python -m aiagent_core.admin logins"]
+    healthcheck: {disable: true}
+
+  api:
+    <<: *hardening
+    image: aiagent/api:${TAG:-dev}
+    networks: [db, web]  # no route out; reachable only through `edge`
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    secrets: [api_dsn]
+    environment:
+      <<: *env
+      AIAGENT_API_DSN_FILE: /run/secrets/api_dsn
+      AIAGENT_API_HOST: 0.0.0.0
+      AIAGENT_API_PORT: "8080"
+    command: ["python", "-m", "aiagent_api.app"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3).status == 200 else 1)"]
+    deploy: {resources: {limits: {cpus: "1", memory: 512m, pids: 256}}}
+
+  edge:  # dumb TCP forwarder: no secrets, no DB, no agent code
+    <<: *hardening
+    image: aiagent/migrate:${TAG:-dev}
+    networks: [web, edge]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on: {api: {condition: service_healthy}}
+    volumes: !reset []
+    command: ["python", "-m", "aiagent_core.tcpforward", "0.0.0.0:8080", "api:8080"]
+    # A real healthcheck (not `disable`): `docker compose up --wait` fails on services whose healthcheck is disabled.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=3).close()"]
+    deploy: {resources: {limits: {cpus: "0.25", memory: 64m, pids: 64}}}
+
+  relay:  # Outbox relay + Scheduler (QueuePort producer side)
+    <<: *hardening
+    image: aiagent/migrate:${TAG:-dev}
+    networks: [db]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    secrets: [relay_dsn]
+    environment:
+      <<: *env
+      AIAGENT_RELAY_DSN_FILE: /run/secrets/relay_dsn
+    command: ["python", "-m", "aiagent_core.relay_main"]
+    deploy: {resources: {limits: {cpus: "0.5", memory: 256m, pids: 256}}}
+
+  runtime:
+    <<: *hardening
+    image: aiagent/runtime:${TAG:-dev}
+    networks: [db, rpc]  # no egress network: cannot reach the Internet or providers directly
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      model-gateway: {condition: service_healthy}
+      tool-gateway: {condition: service_healthy}
+    secrets: [runtime_dsn, checkpointer_dsn, runtime_model_rpc_key, runtime_tool_rpc_key]
+    environment:
+      <<: *env
+      AIAGENT_RUNTIME_DSN_FILE: /run/secrets/runtime_dsn
+      AIAGENT_CHECKPOINTER_DSN_FILE: /run/secrets/checkpointer_dsn
+      AIAGENT_RUNTIME_MODEL_RPC_KEY_FILE: /run/secrets/runtime_model_rpc_key
+      AIAGENT_RUNTIME_TOOL_RPC_KEY_FILE: /run/secrets/runtime_tool_rpc_key
+      AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:model-gateway:7101
+      AIAGENT_TOOL_GATEWAY_ENDPOINT: tcp:tool-gateway:7102
+      AIAGENT_MODEL: ${AIAGENT_MODEL:-claude-sonnet-5-5}
+      AIAGENT_WORKER_CONCURRENCY: "2"
+    command: ["python", "-m", "aiagent_runtime.worker"]
+    deploy: {replicas: 2, resources: {limits: {cpus: "1", memory: 1g, pids: 256}}}
+
+  model-gateway:
+    <<: *hardening
+    image: aiagent/gateways:${TAG:-dev}
+    networks: [db, rpc]  # provider traffic goes through sentinel's egress proxy on the rpc network
+    depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, anthropic_api_key, egress_model_token]
+    environment:
+      <<: *env
+      AIAGENT_MODEL_GATEWAY_DSN_FILE: /run/secrets/model_gateway_dsn
+      AIAGENT_MODEL_GATEWAY_RPC_KEYS_FILE: /run/secrets/model_gateway_rpc_keys
+      AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:0.0.0.0:7101
+      AIAGENT_ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+      AIAGENT_EGRESS_PROXY_MODEL: http://sentinel:3128
+      AIAGENT_EGRESS_MODEL_TOKEN_FILE: /run/secrets/egress_model_token
+      AIAGENT_MODEL_CONSENT: ${AIAGENT_MODEL_CONSENT:-}
+    command: ["python", "-m", "aiagent_gateways.servers", "model"]
+    deploy: {resources: {limits: {cpus: "1", memory: 512m, pids: 256}}}
+
+  tool-gateway:
+    <<: *hardening
+    image: aiagent/gateways:${TAG:-dev}
+    networks: [db, rpc]
+    depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
+    secrets: [tool_gateway_dsn, tool_gateway_rpc_keys, tool_sentinel_client_key, sandbox_rpc_key, sandbox_grant_key,
+              receiver_token]
+    environment:
+      <<: *env
+      AIAGENT_TOOL_GATEWAY_DSN_FILE: /run/secrets/tool_gateway_dsn
+      AIAGENT_TOOL_GATEWAY_RPC_KEYS_FILE: /run/secrets/tool_gateway_rpc_keys
+      AIAGENT_TOOL_GATEWAY_ENDPOINT: tcp:0.0.0.0:7102
+      AIAGENT_SENTINEL_ENDPOINT: tcp:sentinel:7103
+      AIAGENT_SENTINEL_CLIENT_KEY_FILE: /run/secrets/tool_sentinel_client_key
+      AIAGENT_EGRESS_PROXY: http://sentinel:3128
+      AIAGENT_SANDBOX_ENDPOINT: ${AIAGENT_SANDBOX_ENDPOINT:-vsock:3:7000}  # Untrusted Execution VM (CID 3)
+      AIAGENT_SANDBOX_RPC_KEY_FILE: /run/secrets/sandbox_rpc_key
+      AIAGENT_SANDBOX_GRANT_KEY_FILE: /run/secrets/sandbox_grant_key
+      AIAGENT_MESSAGE_RECEIVER_URL: ${AIAGENT_MESSAGE_RECEIVER_URL:-}
+      AIAGENT_MESSAGE_RECEIVER_TOKEN_FILE: /run/secrets/receiver_token
+      AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST: ${AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST:-}
+    command: ["python", "-m", "aiagent_gateways.servers", "tool"]
+    deploy: {resources: {limits: {cpus: "1", memory: 512m, pids: 256}}}
+
+  sentinel:  # permit authority + Trusted Egress proxy: the only service on the `egress` network
+    <<: *hardening
+    image: aiagent/sentinel:${TAG:-dev}
+    networks: [db, rpc, egress]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    secrets: [sentinel_dsn, sentinel_rpc_keys, sentinel_permit_key, egress_static_tokens]
+    environment:
+      <<: *env
+      AIAGENT_SENTINEL_DSN_FILE: /run/secrets/sentinel_dsn
+      AIAGENT_SENTINEL_RPC_KEYS_FILE: /run/secrets/sentinel_rpc_keys
+      AIAGENT_SENTINEL_PERMIT_KEY_FILE: /run/secrets/sentinel_permit_key
+      AIAGENT_SENTINEL_ENDPOINT: tcp:0.0.0.0:7103
+      AIAGENT_EGRESS_LISTEN: 0.0.0.0:3128
+      AIAGENT_EGRESS_CONFIG_FILE: /run/aiagent/egress.json
+      AIAGENT_EGRESS_STATIC_TOKENS_FILE: /run/secrets/egress_static_tokens
+    volumes:
+      - /etc/aiagent/isolation.json:/run/aiagent/isolation.json:ro
+      - ./egress.json:/run/aiagent/egress.json:ro
+    command: ["python", "-m", "aiagent_sentinel.main"]
+    deploy: {resources: {limits: {cpus: "1", memory: 256m, pids: 256}}}
+
+volumes:
+  pgdata: {}

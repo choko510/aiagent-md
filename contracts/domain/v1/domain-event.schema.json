@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/domain-event.schema.json",
+  "title": "DomainEventEnvelopeV1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "eventId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "eventKind": {
+      "type": "string",
+      "enum": [
+        "task.accepted",
+        "task.state_changed",
+        "task.goal_revised",
+        "run.created",
+        "run.claimed",
+        "run.state_changed",
+        "run.checkpointed",
+        "approval.requested",
+        "approval.decided",
+        "approval.revoked",
+        "tool.intent_recorded",
+        "tool.effect_recorded",
+        "tool.effect_unknown",
+        "result.published"
+      ]
+    },
+    "tenantId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "aggregateType": {
+      "$ref": "common.schema.json#/$defs/AggregateType"
+    },
+    "aggregateId": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "aggregateSequence": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "deliveryOffset": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "taskId": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/Uuid7"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runId": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/Uuid7"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ownerUserId": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/Uuid7"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "audience": {
+      "type": "string",
+      "enum": [
+        "owner_private",
+        "operator_audit"
+      ]
+    },
+    "causationEventId": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/Uuid7"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "traceId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actor": {
+      "$ref": "common.schema.json#/$defs/ActorRef"
+    },
+    "occurredAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    },
+    "committedAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    },
+    "payloadSchemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "payload": {
+      "$ref": "common.schema.json#/$defs/JsonObject"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "eventKind",
+    "tenantId",
+    "aggregateType",
+    "aggregateId",
+    "aggregateSequence",
+    "deliveryOffset",
+    "taskId",
+    "runId",
+    "ownerUserId",
+    "audience",
+    "causationEventId",
+    "correlationId",
+    "traceId",
+    "actor",
+    "occurredAt",
+    "committedAt",
+    "payloadSchemaVersion",
+    "payload"
+  ]
+}

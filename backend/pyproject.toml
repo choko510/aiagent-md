@@ -1,0 +1,98 @@
+[project]
+name = "aiagent-backend"
+version = "0.3.0"
+description = "aiagent-md Python backend workspace (STEP 3). Virtual root: dev tooling only."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "aiagent-domain",
+  "aiagent-core",
+  "aiagent-runtime",
+  "aiagent-gateways",
+  "aiagent-sentinel",
+  "aiagent-api",
+  "aiagent-sandbox",
+]
+
+[dependency-groups]
+dev = [
+  "pytest==9.2.0",
+  "pytest-asyncio==1.4.1.post1",
+  "pytest-timeout>=2.4.0",
+  "ruff>=0.14.0",
+  "mypy>=1.18.0",
+  "jsonschema>=4.25.0",
+  "types-jsonschema",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+aiagent-domain = { workspace = true }
+aiagent-core = { workspace = true }
+aiagent-runtime = { workspace = true }
+aiagent-gateways = { workspace = true }
+aiagent-sentinel = { workspace = true }
+aiagent-api = { workspace = true }
+aiagent-sandbox = { workspace = true }
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["packages/domain/src/aiagent_domain/generated.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "PL", "SIM", "BLE"]
+ignore = [
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004", "PLC0415",
+  "S101",    # asserts are used for internal invariants and in tests
+  "S608",    # SQL is composed only from module constants; values are always bound parameters
+  "RUF001", "RUF002", "RUF003",
+  "BLE001",  # broad catches are deliberate at process/fault boundaries and are always logged or converted
+  "PLW0603",
+  "UP047", "UP046",
+  "E501",    # `ruff format` governs code width; long SQL string literals are kept whole for readability/grep
+  "SIM105", "SIM117",
+  "S110",    # bare `except: pass` only at socket/handler boundaries where the peer may vanish at any byte
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "B", "ASYNC", "RUF", "SIM", "PLW"]
+
+[tool.mypy]
+python_version = "3.12"
+platform = "linux"  # deployment target; Linux-only kernel APIs (rlimits, namespaces, vsock) are used
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = ["packages/domain/src", "packages/core/src", "packages/runtime/src", "packages/gateways/src",
+             "packages/sentinel/src", "packages/api/src", "packages/sandbox/src"]
+explicit_package_bases = true
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = ["deepagents.*", "langgraph.*", "langchain.*", "langchain_core.*", "apscheduler.*", "psycopg_pool.*", "ormsgpack.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["aiagent_runtime.agent", "aiagent_runtime.serde"]
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+timeout = 300
+markers = [
+  "pg: needs PostgreSQL (AIAGENT_TEST_PG_URL)",
+  "linux_only: needs Linux kernel features (rlimits, namespaces)",
+  "kvm: needs /dev/kvm and libvirt (production VM gate; not run in CI)",
+  "compose: needs docker compose (network isolation gate)",
+]
