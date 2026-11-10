@@ -362,7 +362,6 @@ def test_t07c_cancelled_unknown_effect_converges_after_reconciliation(stack: Sta
     )
 
 
-
 def test_t07d_receiver_restart_404_is_not_negative_proof(stack: Stack, api, t, pg: PgEnv) -> None:
     """POST succeeds, tool gateway dies, receiver loses its in-memory receipts:
     its new 404 must never clear UNKNOWN or cause another external POST.
@@ -390,21 +389,25 @@ def test_t07d_receiver_restart_404_is_not_negative_proof(stack: Stack, api, t, p
     result = asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent_id}))
     assert result["status"] == "UNKNOWN", result
     assert state(api, t, task)["run"]["state"] == "WAITING_RECONCILIATION"
-    assert q(pg.owner, "SELECT status_code FROM agent.tool_intents WHERE id=%s", (intent_id,))[0][
-        "status_code"
-    ] == "UNKNOWN"
+    assert (
+        q(pg.owner, "SELECT status_code FROM agent.tool_intents WHERE id=%s", (intent_id,))[0]["status_code"]
+        == "UNKNOWN"
+    )
 
     reply = api.post(f"/v1/tasks/{task}/resume", headers={"Authorization": f"Bearer {t['token']}"})
     assert reply.status_code == 200, reply.text
     stack.drive()
     assert state(api, t, task)["run"]["state"] == "WAITING_RECONCILIATION"
     assert len(sends_for(stack, task, pg)) == 1
-    assert q(
-        pg.owner,
-        "SELECT count(*) AS n FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'"
-        " AND checkpoint_json->>'tool_name'='send_message'",
-        (before["run"]["id"],),
-    )[0]["n"] == 0
+    assert (
+        q(
+            pg.owner,
+            "SELECT count(*) AS n FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='tool'"
+            " AND checkpoint_json->>'tool_name'='send_message'",
+            (before["run"]["id"],),
+        )[0]["n"]
+        == 0
+    )
 
 
 def test_t07b_remote_ack_lost_timeout_is_unknown(pg: PgEnv, api, t, tmp_path) -> None:
