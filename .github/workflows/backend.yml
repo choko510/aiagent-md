@@ -116,7 +116,7 @@ jobs:
       - name: Compose network isolation gate (dev topology)
         working-directory: .
         run: |
-          sh deploy/scripts/gen-secrets.sh
+          sudo sh deploy/scripts/gen-secrets.sh  # root:10001 0440 so non-root services can read bind-mounted secrets
           docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml up -d --wait
           cd backend && AIAGENT_COMPOSE_PROJECT=aiagentdev uv run pytest -q -rA -p no:cacheprovider tests/test_compose_isolation.py
       - name: Compose logs on failure

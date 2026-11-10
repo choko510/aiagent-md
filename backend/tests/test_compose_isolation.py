@@ -3,7 +3,7 @@ only Sentinel has an outbound route; runtime/gateways/cell cannot open sockets t
 names, and cannot reach the fake external world except through Sentinel; no container sees the Docker socket; and the
 whole API -> worker -> approval -> egress -> receiver flow works over the real network layout.
 
-  sh deploy/scripts/gen-secrets.sh && sh deploy/docker/build.sh   # or build aiagent/all + aiagent/cell
+  sudo sh deploy/scripts/gen-secrets.sh && sh deploy/docker/build.sh   # or build aiagent/all + aiagent/cell
   docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml up -d
   AIAGENT_COMPOSE_PROJECT=aiagentdev pytest -m compose tests/test_compose_isolation.py
 """

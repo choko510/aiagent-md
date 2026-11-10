@@ -51,7 +51,7 @@ python -m aiagent_core.admin gc --days 30  # 派生 checkpoint と provisional s
 
 1. Operator Host: `deploy/kvm/provision.sh` で Trusted Control VM と Untrusted Execution VM（NIC なし、vsock のみ）を作成。
 2. Execution VM: `deploy/docker/Dockerfile.cell` 相当の supervisor を `aiagent-cell.service` で起動（専用 uid 10002）。
-3. Control VM: `deploy/scripts/gen-secrets.sh` → `deploy/docker/build.sh` → `deploy/kvm/verify-topology.sh`
+3. Control VM: `sudo deploy/scripts/gen-secrets.sh`（secret を root:10001・0440 で作成） → `deploy/docker/build.sh` → `deploy/kvm/verify-topology.sh`
    （境界を実測して `/etc/aiagent/isolation.json` を作成）→ `docker compose -f deploy/compose/compose.yaml up -d`。
 4. `AIAGENT_PROFILE=production` では attestation 欠如・inline secret・FakeModel のみ・`allow_private` を検知すると
    各プロセスが起動を拒否する（fail closed）。
