@@ -6,9 +6,6 @@ import os
 
 import httpx
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from aiagent_marketplace.api import create_router
 from aiagent_marketplace.catalog import (
     CachedJSONTransport,
@@ -18,6 +15,8 @@ from aiagent_marketplace.catalog import (
     _catalog_id,
     _mcp_item,
 )
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 
 class FakeTransport:
@@ -528,7 +527,7 @@ def test_429_retry_after_is_clamped_and_missing_header_has_backoff():
 
 
 def test_cooldown_expiry_allows_the_source_again(monkeypatch):
-    import aiagent_marketplace.catalog as catalog
+    from aiagent_marketplace import catalog
 
     clock = [1000.0]
     monkeypatch.setattr(catalog.time, "monotonic", lambda: clock[0])
