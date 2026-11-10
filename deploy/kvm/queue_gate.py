@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,11 @@ MAX_SMOKE = 10_000
 MAX_DEDICATED = 1_000_000
 CHILD = """
 import os, runpy, sys
+import psycopg
+with psycopg.connect(os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'], connect_timeout=5) as c:
+    value = c.execute("SELECT current_setting('aiagent.hv_disposable', true)").fetchone()[0]
+    if value != 'aiagent-hv-disposable-v1':
+        sys.exit(17)
 sys.argv = ['bench_queue.py', '--pg', os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'],
             '-n', sys.argv[1], '--relays', sys.argv[2], '--consumers', sys.argv[3],
             '--outage', sys.argv[4]]
@@ -68,6 +75,15 @@ def validate_limits(a: argparse.Namespace) -> list[str]:
         problems.append("max-seconds must be 30..3600")
     if a.dedicated_host and a.rows > MAX_SMOKE and a.max_seconds < 1800:
         problems.append("large benchmark needs explicit longer wall-clock bound")
+    if a.dedicated_host and a.rows > MAX_SMOKE:
+        try:
+            release = Path("/proc/version").read_text(encoding="utf-8").lower()
+        except OSError:
+            release = ""
+        if "microsoft" in release or os.getenv("WSL_INTEROP") or os.getenv("GITHUB_ACTIONS") == "true":
+            problems.append("dedicated 1M mode forbidden on WSL and GitHub-hosted CI")
+    if not sys.platform.startswith("linux"):
+        problems.append("guarded process-group termination requires Linux")
     return problems
 
 
@@ -95,22 +111,34 @@ def main(argv: list[str] | None = None) -> int:
     if not a.execute or result["blockers"]:
         print(json.dumps(result, indent=2))
         return 2 if a.execute or validate_limits(a) else 0
-    # No secret in argv, stdout, JSON report, or exception text.
-    env = {**os.environ}
+    # Never leave the benchmark writing after a timeout: isolate and kill its entire process group.
+    # uv runs the pinned workspace interpreter without putting the DSN on the command line.
+    uv = shutil.which("uv")
+    if not uv:
+        print(json.dumps({"status": "NOT_RUN", "reason": "uv is required for the pinned benchmark environment"}))
+        return 2
+    command = [uv, "run", "--no-sync", "--locked", "python", "-c", CHILD,
+               str(a.rows), str(a.relays), str(a.consumers), str(a.outage)]
     try:
-        done = subprocess.run(
-            [sys.executable, "-c", CHILD, str(a.rows), str(a.relays), str(a.consumers), str(a.outage)],
-            cwd=BACKEND, env=env, capture_output=True, text=True,
-            timeout=a.max_seconds, check=False,
+        process = subprocess.Popen(
+            command, cwd=BACKEND, env={**os.environ}, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        print(json.dumps({"status": "NOT_RUN", "reason": "execution failed or timed out; inspect scratch DB manually"}))
+        try:
+            stdout, _stderr = process.communicate(timeout=a.max_seconds)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            print(json.dumps({"status": "FAILED", "reason": "bounded timeout; scratch DB may remain"}))
+            return 2
+    except OSError:
+        print(json.dumps({"status": "NOT_RUN", "reason": "benchmark could not start"}))
         return 2
-    if done.returncode != 0:
-        print(json.dumps({"status": "FAILED", "reason": "benchmark process failed; stderr intentionally redacted"}))
+    if process.returncode != 0:
+        print(json.dumps({"status": "FAILED", "reason": "target marker missing or benchmark failed; stderr redacted"}))
         return 2
     try:
-        metrics = json.loads(done.stdout)
+        metrics = json.loads(stdout)
     except ValueError:
         print(json.dumps({"status": "FAILED", "reason": "unparseable or incomplete benchmark result"}))
         return 2
