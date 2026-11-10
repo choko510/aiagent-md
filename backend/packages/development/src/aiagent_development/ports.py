@@ -16,8 +16,8 @@ from .contracts import (
     ExecutionRequest,
     PatchArtifact,
     ProjectScope,
-    RunFence,
     ReviewVerdict,
+    RunFence,
 )
 
 

@@ -17,8 +17,8 @@ from .contracts import (
     InvalidEvidence,
     PatchArtifact,
     ProjectScope,
-    RunFence,
     ReviewVerdict,
+    RunFence,
     ScopeDenied,
     StaleReference,
     StateConflict,
@@ -126,7 +126,7 @@ class MockGitProvider:
                 raise ScopeDenied("commit not authorized")
             if self.head(scope) != expected_head_sha or patch.parent_sha != expected_head_sha:
                 raise StaleReference("branch CAS conflict")
-            sha = hashlib.sha1((expected_head_sha + patch.diff_sha256 + patch.artifact_ref).encode()).hexdigest()
+            sha = hashlib.sha256((expected_head_sha + patch.diff_sha256 + patch.artifact_ref).encode()).hexdigest()[:40]
             if sha == expected_head_sha:
                 raise InvalidEvidence("unexpected synthetic SHA collision")
             self.heads[(scope.repository, scope.branch, scope.workspace_id)] = sha

@@ -6,10 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from .contracts import (
-    CommitEvidence,
     Cycle,
     EffectUnknown,
-    ExecutionEvidence,
     ExecutionRequest,
     InvalidEvidence,
     PatchArtifact,

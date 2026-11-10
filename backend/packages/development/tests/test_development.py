@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -10,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from aiagent_development.contracts import (
+    EffectUnknown,
     ExecutionRequest,
     InvalidEvidence,
     InvalidPath,
@@ -20,7 +20,6 @@ from aiagent_development.contracts import (
     ReviewVerdict,
     RunFence,
     ScopeDenied,
-    EffectUnknown,
     StaleReference,
     StateConflict,
     TaskPlan,
@@ -129,7 +128,7 @@ def test_cas_checks_at_write_time_even_after_precheck(env):
 
 
 def test_stale_sha_review_and_branch_change_fail_closed(env):
-    _, scope, _, _, scm, _, _, flow = env
+    _, scope, _, _, scm, _, _, _flow = env
     _prepare(env)
     with pytest.raises(StaleReference):
         _review(env, "functional", sha=scope.base_sha)
@@ -284,7 +283,6 @@ def test_atomic_diff_claim_does_not_leave_orphans(env):
     next_version = replace(c, version=1)
     store.save(c, next_version)
     digest = "f" * 64
-    from aiagent_development.contracts import Phase
     with pytest.raises(StateConflict):
         store.save_with_diff_claim(c, replace(c, version=1, phase=Phase.PATCH_READY), digest)
     assert (scope.tenant_id, scope.project_id, digest) not in store._diffs
