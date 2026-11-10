@@ -17,9 +17,12 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, Any
 
+from aiagent_core.control import Claim
+from aiagent_core.rpc import RpcClient
+from aiagent_domain.rpcwire import RpcError
+from aiagent_domain.tools import PROFILE_TOOLS, SKILLS_DIR, TOOLS
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
@@ -40,14 +43,10 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from langgraph.types import interrupt
 
-from aiagent_core.control import Claim
-from aiagent_core.rpc import RpcClient
-from aiagent_domain.rpcwire import RpcError
-from aiagent_domain.tools import PROFILE_TOOLS, TOOLS
-
-from aiagent_domain.tools import SKILLS_DIR
-SYSTEM_PROMPT = ("You are the aiagent-md agent. Tools are proposals reviewed by a gateway; irreversible actions need the "
-                 "owner's approval. Never claim an action happened unless the tool result confirms it.")
+SYSTEM_PROMPT = (
+    "You are the aiagent-md agent. Tools are proposals reviewed by a gateway; irreversible actions need the "
+    "owner's approval. Never claim an action happened unless the tool result confirms it."
+)
 
 # DeepAgents adds a general-purpose subagent that inherits every main-agent tool unless the harness profile resolved
 # for the model disables it. Profiles are keyed by provider; ours is the model class name.
@@ -110,8 +109,13 @@ def to_neutral(messages: list[BaseMessage]) -> list[dict[str, Any]]:
         if isinstance(m, HumanMessage):
             out.append({"kind": "user", "content": m.text})
         elif isinstance(m, AIMessage):
-            out.append({"kind": "assistant", "content": m.text,
-                        "tool_calls": [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in m.tool_calls]})
+            out.append(
+                {
+                    "kind": "assistant",
+                    "content": m.text,
+                    "tool_calls": [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in m.tool_calls],
+                }
+            )
         elif isinstance(m, ToolMessage):
             out.append({"kind": "tool", "tool_call_id": m.tool_call_id, "tool_name": m.name, "content": m.text})
     return out
@@ -123,16 +127,29 @@ def from_neutral(entries: list[dict[str, Any]]) -> list[BaseMessage]:
         if e["kind"] == "user":
             msgs.append(HumanMessage(e["content"]))
         elif e["kind"] == "assistant":
-            msgs.append(AIMessage(e.get("content", ""), tool_calls=[
-                {"id": t["id"], "name": t["name"], "args": t["args"]} for t in e.get("tool_calls", [])]))
+            msgs.append(
+                AIMessage(
+                    e.get("content", ""),
+                    tool_calls=[{"id": t["id"], "name": t["name"], "args": t["args"]} for t in e.get("tool_calls", [])],
+                )
+            )
         elif e["kind"] == "tool":
             msgs.append(ToolMessage(e["content"], tool_call_id=e["tool_call_id"], name=e.get("tool_name") or "tool"))
     return msgs
 
 
-async def call_model(rc: RunCtx, stream: str, system: str, messages: list[dict[str, Any]], tools: list[str]) -> dict[str, Any]:
-    body = {"claim": rc.claim.to_wire(), "stream": stream, "system": system, "messages": messages, "tools": tools,
-            "model": rc.model, "streamDeltas": rc.on_delta is not None}
+async def call_model(
+    rc: RunCtx, stream: str, system: str, messages: list[dict[str, Any]], tools: list[str]
+) -> dict[str, Any]:
+    body = {
+        "claim": rc.claim.to_wire(),
+        "stream": stream,
+        "system": system,
+        "messages": messages,
+        "tools": tools,
+        "model": rc.model,
+        "streamDeltas": rc.on_delta is not None,
+    }
     try:
         result: dict[str, Any] | None = None
         async for kind, data in rc.gw.model.stream("model.complete", body):
@@ -166,8 +183,13 @@ class GatewayChatModel(BaseChatModel):
     def _generate(self, *a: Any, **k: Any) -> ChatResult:  # pragma: no cover - async only
         raise NotImplementedError
 
-    async def _agenerate(self, messages: list[BaseMessage], stop: Any = None,
-                         run_manager: AsyncCallbackManagerForLLMRun | None = None, **kwargs: Any) -> ChatResult:
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: Any = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
         rc = run_ctx()
         names = sorted(t["function"]["name"] for t in kwargs.get("tools", []))
         system = "\n".join(m.text for m in messages if isinstance(m, SystemMessage))
@@ -177,8 +199,9 @@ class GatewayChatModel(BaseChatModel):
 
 async def submit_tool(rc: RunCtx, tool_call_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
-        out = await rc.gw.tool.call("tool.submit", {"claim": rc.claim.to_wire(), "toolCallId": tool_call_id,
-                                                    "tool": name, "args": args})
+        out = await rc.gw.tool.call(
+            "tool.submit", {"claim": rc.claim.to_wire(), "toolCallId": tool_call_id, "tool": name, "args": args}
+        )
     except RpcError as e:
         raise GatewayRejected(e.code) from None
     except (OSError, EOFError, TimeoutError) as e:
@@ -217,15 +240,20 @@ async def search(query: str, tool_call_id: Annotated[str, InjectedToolCallId], c
 
 
 @tool
-async def send_message(to: str, body: str, tool_call_id: Annotated[str, InjectedToolCallId],
-                       config: RunnableConfig) -> str:
+async def send_message(
+    to: str, body: str, tool_call_id: Annotated[str, InjectedToolCallId], config: RunnableConfig
+) -> str:
     """Send an external message. Irreversible; requires the owner's explicit approval."""
     return await gateway_tool(run_ctx(config), tool_call_id, "send_message", {"to": to, "body": body})
 
 
 @tool
-async def sandbox_exec(argv: list[str], cwdRelative: str, tool_call_id: Annotated[str, InjectedToolCallId],  # noqa: N803
-                       config: RunnableConfig) -> str:
+async def sandbox_exec(
+    argv: list[str],
+    cwdRelative: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    config: RunnableConfig,
+) -> str:
     """Run a command inside the isolated, offline execution cell (never on the control host)."""
     return await gateway_tool(run_ctx(config), tool_call_id, "sandbox_exec", {"argv": argv, "cwdRelative": cwdRelative})
 
@@ -254,14 +282,23 @@ class InternalResultAdmission(AgentMiddleware):
         result = await handler(request)
         if request.tool_call["name"] in TOOLS:
             return result  # gateway tools record their own result
-        msgs = [result] if isinstance(result, ToolMessage) else [
-            m for m in (getattr(result, "update", None) or {}).get("messages", []) if isinstance(m, ToolMessage)]
+        msgs = (
+            [result]
+            if isinstance(result, ToolMessage)
+            else [m for m in (getattr(result, "update", None) or {}).get("messages", []) if isinstance(m, ToolMessage)]
+        )
         rc = run_ctx(request.runtime.config)
         for m in msgs:
             try:
-                res = await rc.gw.tool.call("tool.record_internal", {
-                    "claim": rc.claim.to_wire(), "toolCallId": m.tool_call_id, "tool": request.tool_call["name"],
-                    "content": m.text})
+                res = await rc.gw.tool.call(
+                    "tool.record_internal",
+                    {
+                        "claim": rc.claim.to_wire(),
+                        "toolCallId": m.tool_call_id,
+                        "tool": request.tool_call["name"],
+                        "content": m.text,
+                    },
+                )
             except RpcError as e:
                 raise GatewayRejected(e.code) from None
             except (OSError, EOFError, TimeoutError) as e:
@@ -273,9 +310,11 @@ class InternalResultAdmission(AgentMiddleware):
 def _summarizer(stream: str) -> Callable[[list[BaseMessage]], Any]:
     async def summarize(messages: list[BaseMessage]) -> str:
         rc = run_ctx()
-        resp = await call_model(rc, "summarize" if stream == "main" else stream, "Summarize the conversation.",
-                                to_neutral(messages), [])
+        resp = await call_model(
+            rc, "summarize" if stream == "main" else stream, "Summarize the conversation.", to_neutral(messages), []
+        )
         return str(resp.get("content", ""))
+
     return summarize
 
 
@@ -298,17 +337,20 @@ def build_graph(profile: str, checkpointer: Any, *, max_input_tokens: int = 100_
     specs = []
     if subagents and "search" in PROFILE_TOOLS.get(profile, ()):
         sub_model = GatewayChatModel(gw_stream="subagent:researcher", profile=model_profile)
-        specs.append({
-            "name": "researcher",
-            "description": "Researches facts with read-only search. Cannot send messages or delegate.",
-            "system_prompt": "You research facts using read-only search and report a short answer.",
-            "tools": [t for t in make_tools(profile) if TOOLS[t.name].risk_class == "read"],  # no inheritance
-            "model": sub_model,
-            "middleware": [FilesystemMiddleware(backend=_fs_backend(), tools=["read_file"]),
-                           create_summarization_middleware(sub_model, backend,
-                                                           summarizer=_summarizer("subagent:researcher")),
-                           InternalResultAdmission("subagent:researcher")],
-        })
+        specs.append(
+            {
+                "name": "researcher",
+                "description": "Researches facts with read-only search. Cannot send messages or delegate.",
+                "system_prompt": "You research facts using read-only search and report a short answer.",
+                "tools": [t for t in make_tools(profile) if TOOLS[t.name].risk_class == "read"],  # no inheritance
+                "model": sub_model,
+                "middleware": [
+                    FilesystemMiddleware(backend=_fs_backend(), tools=["read_file"]),
+                    create_summarization_middleware(sub_model, backend, summarizer=_summarizer("subagent:researcher")),
+                    InternalResultAdmission("subagent:researcher"),
+                ],
+            }
+        )
     return create_deep_agent(
         model=model,
         tools=make_tools(profile),
@@ -329,4 +371,3 @@ def tool_surface(graph: Any) -> dict[str, list[str]]:
         if tools:
             out[node_name] = sorted(tools)
     return out
-

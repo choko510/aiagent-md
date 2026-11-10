@@ -17,10 +17,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from psycopg.types.json import Jsonb
-
 from aiagent_domain import TERMINAL_RUN_STATES, sha256_hex, uuid7
 from aiagent_domain.generated import RunClaimV1
+from psycopg.types.json import Jsonb
 
 from .db import Database, Row
 from .events import append_event
@@ -76,9 +75,14 @@ class Claim:
     def to_wire(self) -> dict[str, Any]:
         return RunClaimV1.model_validate(
             {
-                "schemaVersion": "1.0", "tenantId": self.tenant_id, "ownerUserId": self.owner_user_id,
-                "taskId": self.task_id, "runId": self.run_id, "leaseEpoch": str(self.lease_epoch),
-                "goalRevision": str(self.goal_revision), "workerRef": self.worker_ref,
+                "schemaVersion": "1.0",
+                "tenantId": self.tenant_id,
+                "ownerUserId": self.owner_user_id,
+                "taskId": self.task_id,
+                "runId": self.run_id,
+                "leaseEpoch": str(self.lease_epoch),
+                "goalRevision": str(self.goal_revision),
+                "workerRef": self.worker_ref,
                 "restoreIncarnation": str(self.restore_incarnation),
             }
         ).model_dump(mode="json")
@@ -86,13 +90,28 @@ class Claim:
     @classmethod
     def from_wire(cls, data: Any) -> Claim:
         m = RunClaimV1.model_validate(data)
-        return cls(m.tenant_id, m.owner_user_id, m.task_id, m.run_id, m.lease_epoch, m.goal_revision, m.worker_ref,
-                   m.restore_incarnation)
+        return cls(
+            m.tenant_id,
+            m.owner_user_id,
+            m.task_id,
+            m.run_id,
+            m.lease_epoch,
+            m.goal_revision,
+            m.worker_ref,
+            m.restore_incarnation,
+        )
 
 
 # ------------------------------------------------------------------------------------------------ claims
-def claim_run(db: Database, tenant_id: str, run_id: str, worker: str, *, lease_s: float = 30.0,
-              expected_incarnation: int | None = None) -> Claim:
+def claim_run(
+    db: Database,
+    tenant_id: str,
+    run_id: str,
+    worker: str,
+    *,
+    lease_s: float = 30.0,
+    expected_incarnation: int | None = None,
+) -> Claim:
     """Fenced claim: lease_epoch += 1 under row locks (task, then run). Same run id and attempt on reclaim."""
     with db.tx() as c:
         inc = c.execute("SELECT restore_incarnation, dispatch_paused FROM agent.schema_control").fetchone()
@@ -101,9 +120,7 @@ def claim_run(db: Database, tenant_id: str, run_id: str, worker: str, *, lease_s
             raise RestoreFenced(run_id)
         if inc["dispatch_paused"]:
             raise NotClaimable("dispatch paused (schema/queue upgrade)")
-        run = c.execute(
-            "SELECT task_id FROM agent.runs WHERE tenant_id=%s AND id=%s", (tenant_id, run_id)
-        ).fetchone()
+        run = c.execute("SELECT task_id FROM agent.runs WHERE tenant_id=%s AND id=%s", (tenant_id, run_id)).fetchone()
         if run is None:
             raise TenantMismatch(run_id)
         task = c.execute(
@@ -147,12 +164,27 @@ def claim_run(db: Database, tenant_id: str, run_id: str, worker: str, *, lease_s
                 (tenant_id, task["id"]),
             )
         append_event(
-            c, tenant_id=tenant_id, aggregate_type="run", aggregate_id=run_id, kind="run.claimed",
+            c,
+            tenant_id=tenant_id,
+            aggregate_type="run",
+            aggregate_id=run_id,
+            kind="run.claimed",
             payload={"leaseEpoch": str(row["lease_epoch"]), "previousState": r["status_code"]},
-            actor=SERVICE_ACTOR, owner_user_id=task["owner_user_id"], task_id=task["id"], run_id=run_id,
+            actor=SERVICE_ACTOR,
+            owner_user_id=task["owner_user_id"],
+            task_id=task["id"],
+            run_id=run_id,
         )
-        return Claim(tenant_id, task["owner_user_id"], task["id"], run_id, row["lease_epoch"], task["goal_revision"],
-                     worker, inc["restore_incarnation"])
+        return Claim(
+            tenant_id,
+            task["owner_user_id"],
+            task["id"],
+            run_id,
+            row["lease_epoch"],
+            task["goal_revision"],
+            worker,
+            inc["restore_incarnation"],
+        )
 
 
 def mark_running(db: Database, claim: Claim) -> None:
@@ -208,8 +240,9 @@ def _raise_for(c: psycopg.Connection[Row], claim: Claim) -> None:
     raise NotClaimable(row["status_code"])
 
 
-def check_current(c: psycopg.Connection[Row], claim: Claim, *, for_update: bool = False,
-                  allow_cancelling: bool = False) -> Row:
+def check_current(
+    c: psycopg.Connection[Row], claim: Claim, *, for_update: bool = False, allow_cancelling: bool = False
+) -> Row:
     """Gateway admission core: tenant, fence, goal, cancel, terminal and restore incarnation."""
     row = c.execute(
         "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation,"
@@ -222,10 +255,14 @@ def check_current(c: psycopg.Connection[Row], claim: Claim, *, for_update: bool 
     ).fetchone()
     if row is None or row["owner_user_id"] != claim.owner_user_id:
         raise TenantMismatch(claim.run_id)
-    if claim.restore_incarnation != row["current_incarnation"] or row["restore_incarnation"] != row["current_incarnation"]:
+    if (
+        claim.restore_incarnation != row["current_incarnation"]
+        or row["restore_incarnation"] != row["current_incarnation"]
+    ):
         raise RestoreFenced(claim.run_id)
-    if row["status_code"] == "CANCELLED" or (not allow_cancelling and (row["cancel_requested"]
-                                                                      or row["status_code"] == "CANCELLING")):
+    if row["status_code"] == "CANCELLED" or (
+        not allow_cancelling and (row["cancel_requested"] or row["status_code"] == "CANCELLING")
+    ):
         raise Cancelled(claim.run_id)
     if row["status_code"] in TERMINAL:
         raise RunTerminal(row["status_code"])
@@ -271,20 +308,40 @@ def append_head(
     if existing is not None:
         return int(existing["checkpoint_revision"])
     prev = c.execute(
-        "SELECT snapshot_sha256 FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s"
-        " AND checkpoint_revision=%s",
+        "SELECT snapshot_sha256 FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s AND checkpoint_revision=%s",
         (claim.tenant_id, claim.run_id, run["head_revision"]),
     ).fetchone()
     rev = run["head_revision"] + 1
-    snap = sha256_hex({"prev": prev["snapshot_sha256"] if prev else None, "rev": rev, "kind": kind,
-                       "stream": stream, "payload": payload})
+    snap = sha256_hex(
+        {
+            "prev": prev["snapshot_sha256"] if prev else None,
+            "rev": rev,
+            "kind": kind,
+            "stream": stream,
+            "payload": payload,
+        }
+    )
     cid = uuid7()
     c.execute(
         "INSERT INTO agent.run_checkpoints(tenant_id, id, task_id, run_id, checkpoint_revision, stream, entry_kind,"
         " request_key, tool_call_id, writer_ref, writer_lease_epoch, applied_goal_revision, checkpoint_json,"
         " snapshot_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (claim.tenant_id, cid, claim.task_id, claim.run_id, rev, stream, kind, request_key, tool_call_id, writer,
-         claim.lease_epoch, min(claim.goal_revision, run["goal_revision"]), Jsonb(payload), snap),
+        (
+            claim.tenant_id,
+            cid,
+            claim.task_id,
+            claim.run_id,
+            rev,
+            stream,
+            kind,
+            request_key,
+            tool_call_id,
+            writer,
+            claim.lease_epoch,
+            min(claim.goal_revision, run["goal_revision"]),
+            Jsonb(payload),
+            snap,
+        ),
     )
     cur = c.execute(
         "UPDATE agent.runs SET head_revision=%s, current_checkpoint_id=%s, updated_at=now()"
@@ -293,11 +350,18 @@ def append_head(
     )
     if cur.rowcount != 1:
         raise FencedOut("HEAD CAS lost")
-    return rev
+    return int(rev)
 
 
-def _find_entry(c: psycopg.Connection[Row], tenant_id: str, run_id: str, kind: str, stream: str,
-                request_key: str | None, tool_call_id: str | None) -> Row | None:
+def _find_entry(
+    c: psycopg.Connection[Row],
+    tenant_id: str,
+    run_id: str,
+    kind: str,
+    stream: str,
+    request_key: str | None,
+    tool_call_id: str | None,
+) -> Row | None:
     if kind == "assistant" and request_key is not None:
         return c.execute(
             "SELECT checkpoint_revision, checkpoint_json FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s"
@@ -314,8 +378,10 @@ def _find_entry(c: psycopg.Connection[Row], tenant_id: str, run_id: str, kind: s
 
 
 def head_entries(c: psycopg.Connection[Row], tenant_id: str, run_id: str, stream: str | None = None) -> list[Row]:
-    q = ("SELECT checkpoint_revision, stream, entry_kind, request_key, tool_call_id, checkpoint_json, snapshot_sha256,"
-         " applied_goal_revision FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s")
+    q = (
+        "SELECT checkpoint_revision, stream, entry_kind, request_key, tool_call_id, checkpoint_json, snapshot_sha256,"
+        " applied_goal_revision FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s"
+    )
     args: tuple[Any, ...] = (tenant_id, run_id)
     if stream is not None:
         q += " AND stream=%s"
@@ -324,23 +390,35 @@ def head_entries(c: psycopg.Connection[Row], tenant_id: str, run_id: str, stream
 
 
 def transcript(c: psycopg.Connection[Row], tenant_id: str, run_id: str, stream: str = "main") -> list[dict[str, Any]]:
-    return [dict(e["checkpoint_json"]) for e in head_entries(c, tenant_id, run_id, stream)
-            if e["entry_kind"] in ("user", "assistant", "tool")]
+    return [
+        dict(e["checkpoint_json"])
+        for e in head_entries(c, tenant_id, run_id, stream)
+        if e["entry_kind"] in ("user", "assistant", "tool")
+    ]
 
 
 def verify_head_chain(c: psycopg.Connection[Row], tenant_id: str, run_id: str) -> bool:
     """Recompute the hash chain. False = HEAD was modified outside the append path (tamper evidence)."""
     prev = None
     for e in head_entries(c, tenant_id, run_id):
-        snap = sha256_hex({"prev": prev, "rev": e["checkpoint_revision"], "kind": e["entry_kind"],
-                           "stream": e["stream"], "payload": e["checkpoint_json"]})
+        snap = sha256_hex(
+            {
+                "prev": prev,
+                "rev": e["checkpoint_revision"],
+                "kind": e["entry_kind"],
+                "stream": e["stream"],
+                "payload": e["checkpoint_json"],
+            }
+        )
         if snap != e["snapshot_sha256"]:
             return False
         prev = snap
     return True
 
 
-def find_assistant(c: psycopg.Connection[Row], tenant_id: str, run_id: str, stream: str, request_key: str) -> dict[str, Any] | None:
+def find_assistant(
+    c: psycopg.Connection[Row], tenant_id: str, run_id: str, stream: str, request_key: str
+) -> dict[str, Any] | None:
     row = _find_entry(c, tenant_id, run_id, "assistant", stream, request_key, None)
     return dict(row["checkpoint_json"]) if row else None
 
@@ -350,7 +428,9 @@ def find_tool(c: psycopg.Connection[Row], tenant_id: str, run_id: str, tool_call
     return dict(row["checkpoint_json"]) if row else None
 
 
-def find_proposal(c: psycopg.Connection[Row], tenant_id: str, run_id: str, tool_call_id: str) -> tuple[dict[str, Any], str] | None:
+def find_proposal(
+    c: psycopg.Connection[Row], tenant_id: str, run_id: str, tool_call_id: str
+) -> tuple[dict[str, Any], str] | None:
     """The committed assistant proposal for a tool call id (LOOP-004) and the stream it was proposed on."""
     row = c.execute(
         "SELECT tc, stream FROM agent.run_checkpoints, jsonb_array_elements(checkpoint_json->'tool_calls') tc"
@@ -390,14 +470,22 @@ def discard_framework_ref(db: Database, claim: Claim, ref: str | None) -> bool:
 
 # ------------------------------------------------------------------------------------------------ outcomes
 _TASK_FOR_RUN = {
-    "SUCCEEDED": "SUCCEEDED", "PARTIAL": "PARTIAL", "FAILED": "FAILED", "CANCELLED": "CANCELLED",
-    "EXPIRED": "EXPIRED", "BUDGET_EXHAUSTED": "BUDGET_EXHAUSTED", "WAITING_APPROVAL": "WAITING_INPUT",
-    "WAITING_INPUT": "WAITING_INPUT", "PAUSED": "PAUSED", "WAITING_RECONCILIATION": "WAITING_RECONCILIATION",
+    "SUCCEEDED": "SUCCEEDED",
+    "PARTIAL": "PARTIAL",
+    "FAILED": "FAILED",
+    "CANCELLED": "CANCELLED",
+    "EXPIRED": "EXPIRED",
+    "BUDGET_EXHAUSTED": "BUDGET_EXHAUSTED",
+    "WAITING_APPROVAL": "WAITING_INPUT",
+    "WAITING_INPUT": "WAITING_INPUT",
+    "PAUSED": "PAUSED",
+    "WAITING_RECONCILIATION": "WAITING_RECONCILIATION",
 }
 
 
-def finish_segment(db: Database, claim: Claim, outcome: str, *, result_text: str | None = None,
-                   error_code: str | None = None) -> str:
+def finish_segment(
+    db: Database, claim: Claim, outcome: str, *, result_text: str | None = None, error_code: str | None = None
+) -> str:
     """Record the end of a run segment as ONE transaction (run + task + events). Returns the state written.
 
     * SUCCEEDED requires: current fence, current goal, run RUNNING, no cancel/pause request.
@@ -442,8 +530,16 @@ def finish_segment(db: Database, claim: Claim, outcome: str, *, result_text: str
             " lease_expires_at = CASE WHEN %s THEN NULL ELSE now() - interval '1 millisecond' END,"
             " ended_at = CASE WHEN %s THEN now() ELSE ended_at END, record_version=record_version+1, updated_at=now()"
             " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
-            (target, result_text if target in ("SUCCEEDED", "PARTIAL") else None, error_code, terminal, terminal,
-             claim.tenant_id, claim.run_id, claim.lease_epoch),
+            (
+                target,
+                result_text if target in ("SUCCEEDED", "PARTIAL") else None,
+                error_code,
+                terminal,
+                terminal,
+                claim.tenant_id,
+                claim.run_id,
+                claim.lease_epoch,
+            ),
         )
         task_state = _TASK_FOR_RUN.get(target, "RUNNING")
         if task["status_code"] not in TERMINAL and task["status_code"] != task_state:
@@ -453,15 +549,33 @@ def finish_segment(db: Database, claim: Claim, outcome: str, *, result_text: str
                 (task_state, claim.tenant_id, claim.task_id),
             )
         append_event(
-            c, tenant_id=claim.tenant_id, aggregate_type="run", aggregate_id=claim.run_id, kind="run.state_changed",
-            payload={"from": run["status_code"], "to": target, "leaseEpoch": str(claim.lease_epoch),
-                     **({"errorCode": error_code} if error_code else {})},
-            actor=SERVICE_ACTOR, owner_user_id=task["owner_user_id"], task_id=claim.task_id, run_id=claim.run_id,
+            c,
+            tenant_id=claim.tenant_id,
+            aggregate_type="run",
+            aggregate_id=claim.run_id,
+            kind="run.state_changed",
+            payload={
+                "from": run["status_code"],
+                "to": target,
+                "leaseEpoch": str(claim.lease_epoch),
+                **({"errorCode": error_code} if error_code else {}),
+            },
+            actor=SERVICE_ACTOR,
+            owner_user_id=task["owner_user_id"],
+            task_id=claim.task_id,
+            run_id=claim.run_id,
         )
         if target in ("SUCCEEDED", "PARTIAL"):
             append_event(
-                c, tenant_id=claim.tenant_id, aggregate_type="task", aggregate_id=claim.task_id,
-                kind="result.published", payload={"runId": claim.run_id, "state": target},
-                actor=SERVICE_ACTOR, owner_user_id=task["owner_user_id"], task_id=claim.task_id, run_id=claim.run_id,
+                c,
+                tenant_id=claim.tenant_id,
+                aggregate_type="task",
+                aggregate_id=claim.task_id,
+                kind="result.published",
+                payload={"runId": claim.run_id, "state": target},
+                actor=SERVICE_ACTOR,
+                owner_user_id=task["owner_user_id"],
+                task_id=claim.task_id,
+                run_id=claim.run_id,
             )
         return target

@@ -46,8 +46,18 @@ class OutboxRelay:
                 " o.restore_incarnation",
                 (self.batch, self.owner, self.lease_s),
             ).fetchall()
-        return [OutboxClaim(str(r["tenant_id"]), str(r["id"]), r["topic"], r["dedupe_key"], r["relay_lease_epoch"],
-                            dict(r["safe_payload_json"]), r["restore_incarnation"]) for r in rows]
+        return [
+            OutboxClaim(
+                str(r["tenant_id"]),
+                str(r["id"]),
+                r["topic"],
+                r["dedupe_key"],
+                r["relay_lease_epoch"],
+                dict(r["safe_payload_json"]),
+                r["restore_incarnation"],
+            )
+            for r in rows
+        ]
 
     def publish(self, m: OutboxClaim) -> None:
         if m.topic != "run":  # notification / sse topics are delivered by their own workers (not in STEP 3 scope)

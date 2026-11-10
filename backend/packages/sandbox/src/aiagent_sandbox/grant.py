@@ -39,7 +39,9 @@ class Grant:
 
 
 def _mac(key: bytes, payload: dict[str, Any]) -> str:
-    return hmac.new(key, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest()
+    return hmac.new(
+        key, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
+    ).hexdigest()
 
 
 def sign(key: bytes, g: Grant) -> dict[str, Any]:

@@ -24,15 +24,31 @@ KEY = os.urandom(32)
 
 
 def grant(argv: list[str], cwd: str = ".", *, wall_ms: int = 5000, mem: int = 256 * 1024 * 1024, ttl: int = 60) -> dict:
-    return sign(KEY, Grant(uuid.uuid4().hex, "t1", "task1", "run1", "intent1", 3, tuple(argv), cwd, wall_ms, mem,
-                           int(time.time()) + ttl))
+    return sign(
+        KEY,
+        Grant(
+            uuid.uuid4().hex,
+            "t1",
+            "task1",
+            "run1",
+            "intent1",
+            3,
+            tuple(argv),
+            cwd,
+            wall_ms,
+            mem,
+            int(time.time()) + ttl,
+        ),
+    )
 
 
 def sup(tmp_path: Path, netns: bool = True):  # noqa: ANN201
     from aiagent_sandbox.supervisor import Limits, Supervisor
-    uid = 10001 if os.geteuid() == 0 else None
-    return Supervisor(tmp_path / "cells", KEY, limits=Limits(cpu_s=5, nproc=32), require_netns=netns, cell_uid=uid,
-                      cell_gid=uid)
+
+    uid = 20001 if os.geteuid() == 0 else None  # dedicated: RLIMIT_NPROC is per-uid kernel-wide
+    return Supervisor(
+        tmp_path / "cells", KEY, limits=Limits(cpu_s=5, nproc=32), require_netns=netns, cell_uid=uid, cell_gid=uid
+    )
 
 
 def run(c):  # noqa: ANN001, ANN201
@@ -70,6 +86,7 @@ def test_grant_single_use_binding_expiry_signature(tmp_path: Path) -> None:
 
 def test_refuses_root_without_cell_uid(tmp_path: Path) -> None:
     from aiagent_sandbox.supervisor import Supervisor
+
     if os.geteuid() != 0:
         pytest.skip("only meaningful when the supervisor runs as root")
     with pytest.raises(RuntimeError, match="root"):
@@ -100,7 +117,7 @@ def test_timeout_kills_whole_process_group(tmp_path: Path) -> None:
     argv = ["/bin/sh", "-c", f"(sleep 3; touch {marker}) & sleep 30"]
     t0 = time.monotonic()
     out = run(s.execute(grant(argv, wall_ms=500), argv, "."))
-    assert out["timedOut"] and time.monotonic() - t0 < 5
+    assert out["timedOut"] and time.monotonic() - t0 < 5, out
     time.sleep(3.5)
     assert not marker.exists()  # the background child was killed with its group
 
@@ -117,10 +134,12 @@ def test_memory_and_process_limits(tmp_path: Path) -> None:
 
 def test_no_network_inside_cell(tmp_path: Path) -> None:
     s = sup(tmp_path, netns=True)
-    code = ("import socket\n"
-            "try:\n socket.create_connection(('1.1.1.1', 53), timeout=2); print('CONNECTED')\n"
-            "except OSError as e:\n print('BLOCKED', e.errno)\n"
-            "print(open('/proc/net/dev').read().count(':'))")
+    code = (
+        "import socket\n"
+        "try:\n socket.create_connection(('1.1.1.1', 53), timeout=2); print('CONNECTED')\n"
+        "except OSError as e:\n print('BLOCKED', e.errno)\n"
+        "print(open('/proc/net/dev').read().count(':'))"
+    )
     argv = [sys.executable, "-c", code]
     out = run(s.execute(grant(argv), argv, "."))
     if out["status"] == "REFUSED":  # kernel refused namespaces: the command did NOT run (fail closed)

@@ -16,15 +16,34 @@ class RpcSentinel:
         self.client = client
 
     def authorize(self, claim: Claim, intent_id: str, dest: Destination) -> str:
-        res = asyncio.run(self.client.call("sentinel.authorize", {
-            "claim": claim.to_wire(), "intentId": intent_id, "scheme": dest.scheme, "host": dest.host,
-            "port": dest.port, "method": dest.method}))
+        res = asyncio.run(
+            self.client.call(
+                "sentinel.authorize",
+                {
+                    "claim": claim.to_wire(),
+                    "intentId": intent_id,
+                    "scheme": dest.scheme,
+                    "host": dest.host,
+                    "port": dest.port,
+                    "method": dest.method,
+                },
+            )
+        )
         return str(res["permit"])
 
     def authorize_reconcile(self, tenant_id: str, intent_id: str, dest: Destination) -> str:
-        res = asyncio.run(self.client.call("sentinel.authorize_reconcile", {
-            "tenantId": tenant_id, "intentId": intent_id, "scheme": dest.scheme, "host": dest.host,
-            "port": dest.port}))
+        res = asyncio.run(
+            self.client.call(
+                "sentinel.authorize_reconcile",
+                {
+                    "tenantId": tenant_id,
+                    "intentId": intent_id,
+                    "scheme": dest.scheme,
+                    "host": dest.host,
+                    "port": dest.port,
+                },
+            )
+        )
         return str(res["permit"])
 
 

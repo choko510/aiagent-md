@@ -11,7 +11,6 @@ import json
 import time
 
 import pytest
-
 from aiagent_core import admin
 from conftest import PgEnv
 from helpers import approve, q, run_of, state, submit, wait_lease_expiry
@@ -22,14 +21,20 @@ NOTIFY = "Find the widget price and notify alice."
 
 
 def sends_for(stack: Stack, task_id: str, pg: PgEnv) -> list[dict]:
-    keys = {f"{r['tenant_id']}:{r['id']}" for r in q(pg.owner, "SELECT tenant_id, id FROM agent.tool_intents WHERE task_id=%s",
-                                                       (task_id,))}
+    keys = {
+        f"{r['tenant_id']}:{r['id']}"
+        for r in q(pg.owner, "SELECT tenant_id, id FROM agent.tool_intents WHERE task_id=%s", (task_id,))
+    }
     return [s for s in stack.sends() if s["key"] in keys]
 
 
 def model_attempts(pg: PgEnv, task_id: str) -> list[dict]:
-    return q(pg.owner, "SELECT status_code, cached, admitted, reason_code, stream FROM agent.model_attempts WHERE task_id=%s"
-             " ORDER BY created_at", (task_id,))
+    return q(
+        pg.owner,
+        "SELECT status_code, cached, admitted, reason_code, stream FROM agent.model_attempts WHERE task_id=%s"
+        " ORDER BY created_at",
+        (task_id,),
+    )
 
 
 @pytest.fixture()
@@ -68,7 +73,11 @@ def test_t01b_worker_killed_after_read_tool_ack(stack: Stack, api, t, pg: PgEnv)
     wait_lease_expiry(pg.owner, task)
     stack.drive()
     assert state(api, t, task)["run"]["state"] == "WAITING_APPROVAL"
-    search = q(pg.owner, "SELECT submissions, status_code FROM agent.tool_intents WHERE task_id=%s AND tool_key='search'", (task,))
+    search = q(
+        pg.owner,
+        "SELECT submissions, status_code FROM agent.tool_intents WHERE task_id=%s AND tool_key='search'",
+        (task,),
+    )
     assert len(search) == 1 and search[0]["status_code"] == "DONE"
     completed = [a for a in model_attempts(pg, task) if a["status_code"] == "COMPLETED"]
     assert len(completed) == 2  # no re-inference for the answer already in HEAD
@@ -96,11 +105,22 @@ def test_t02a_reject(stack: Stack, api, t, pg: PgEnv) -> None:
 def test_t02b_expired_approval(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
     st = state(api, t, task)
-    q(pg.owner, "UPDATE agent.approval_records SET expires_at = now() - interval '1s' WHERE task_id=%s RETURNING 1", (task,))
+    q(
+        pg.owner,
+        "UPDATE agent.approval_records SET expires_at = now() - interval '1s' WHERE task_id=%s RETURNING 1",
+        (task,),
+    )
     a = st["approvals"][0]
-    r = api.post(f"/v1/approvals/{a['id']}/decision", headers={"Authorization": f"Bearer {t['token']}"}, json={
-        "schemaVersion": "1.0", "decision": "APPROVED", "requestSha256": a["requestSha256"],
-        "expectedRecordVersion": a["recordVersion"]})
+    r = api.post(
+        f"/v1/approvals/{a['id']}/decision",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={
+            "schemaVersion": "1.0",
+            "decision": "APPROVED",
+            "requestSha256": a["requestSha256"],
+            "expectedRecordVersion": a["recordVersion"],
+        },
+    )
     assert r.status_code == 409 and r.json()["error"] == "EXPIRED"
     assert sends_for(stack, task, pg) == []
 
@@ -117,17 +137,27 @@ def test_t02c_resume_without_decision_does_not_execute(stack: Stack, api, t, pg:
 def test_t02d_wrong_request_hash_refused(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
     a = state(api, t, task)["approvals"][0]
-    r = api.post(f"/v1/approvals/{a['id']}/decision", headers={"Authorization": f"Bearer {t['token']}"}, json={
-        "schemaVersion": "1.0", "decision": "APPROVED", "requestSha256": "0" * 64,
-        "expectedRecordVersion": a["recordVersion"]})
+    r = api.post(
+        f"/v1/approvals/{a['id']}/decision",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={
+            "schemaVersion": "1.0",
+            "decision": "APPROVED",
+            "requestSha256": "0" * 64,
+            "expectedRecordVersion": a["recordVersion"],
+        },
+    )
     assert r.status_code == 409 and r.json()["error"] == "REQUEST_HASH_MISMATCH"
 
 
 # ---------------------------------------------------------------- T03 / T14 goal change
 def test_t03a_steer_while_waiting_rejects_old_intent(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
-    r = api.post(f"/v1/tasks/{task}/steer", headers={"Authorization": f"Bearer {t['token']}"},
-                 json={"schemaVersion": "1.0", "goal": "Notify bob instead.", "expectedGoalRevision": "1"})
+    r = api.post(
+        f"/v1/tasks/{task}/steer",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={"schemaVersion": "1.0", "goal": "Notify bob instead.", "expectedGoalRevision": "1"},
+    )
     assert r.status_code == 200, r.text
     stack.drive()
     st = state(api, t, task)
@@ -144,8 +174,11 @@ def test_t03a_steer_while_waiting_rejects_old_intent(stack: Stack, api, t, pg: P
 def test_t14_steer_after_approval_before_dispatch_blocks_send(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
     approve(api, t, task)
-    api.post(f"/v1/tasks/{task}/steer", headers={"Authorization": f"Bearer {t['token']}"},
-             json={"schemaVersion": "1.0", "goal": "Do not send anything; just answer.", "expectedGoalRevision": "1"})
+    api.post(
+        f"/v1/tasks/{task}/steer",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={"schemaVersion": "1.0", "goal": "Do not send anything; just answer.", "expectedGoalRevision": "1"},
+    )
     stack.drive()
     assert sends_for(stack, task, pg) == []
     st = q(pg.owner, "SELECT status_code FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,))
@@ -156,15 +189,20 @@ def test_t14_steer_after_approval_before_dispatch_blocks_send(stack: Stack, api,
 def test_t04_corrupted_framework_checkpoint_rebuilt_from_head(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
     rid = run_of(pg.owner, task)["id"]
-    q(pg.owner, "UPDATE lg_checkpoint.checkpoint_blobs SET blob = '\\xc70500deadbeef'::bytea, type='msgpack'"
-      " WHERE thread_id LIKE %s AND channel='messages' RETURNING 1", (rid + "%",))
+    q(
+        pg.owner,
+        "UPDATE lg_checkpoint.checkpoint_blobs SET blob = '\\xc70500deadbeef'::bytea, type='msgpack'"
+        " WHERE thread_id LIKE %s AND channel='messages' RETURNING 1",
+        (rid + "%",),
+    )
     approve(api, t, task)
     stack.drive()
     st = state(api, t, task)
     assert st["run"]["result"] == "done:CONFIRMED" and len(sends_for(stack, task, pg)) == 1
     ref = run_of(pg.owner, task)["framework_ref"]
-    assert ref is not None and not q(pg.owner, "SELECT 1 FROM lg_checkpoint.checkpoints WHERE thread_id=%s AND %s=''",
-                                     (ref, "x"))
+    assert ref is not None and not q(
+        pg.owner, "SELECT 1 FROM lg_checkpoint.checkpoints WHERE thread_id=%s AND %s=''", (ref, "x")
+    )
 
 
 def test_t04b_injected_type_in_checkpoint_rejected(stack: Stack, api, t, pg: PgEnv) -> None:
@@ -173,12 +211,17 @@ def test_t04b_injected_type_in_checkpoint_rejected(stack: Stack, api, t, pg: PgE
     from langgraph.checkpoint.serde.jsonplus import EXT_CONSTRUCTOR_POS_ARGS
 
     marker = stack.tmp / "pwned.txt"
-    evil = ormsgpack.packb([ormsgpack.Ext(EXT_CONSTRUCTOR_POS_ARGS, ormsgpack.packb(
-        ["os", "system", [f"echo x > {marker}"]]))])
+    evil = ormsgpack.packb(
+        [ormsgpack.Ext(EXT_CONSTRUCTOR_POS_ARGS, ormsgpack.packb(["os", "system", [f"echo x > {marker}"]]))]
+    )
     task = to_approval(stack, api, t)
     rid = run_of(pg.owner, task)["id"]
-    q(pg.owner, "UPDATE lg_checkpoint.checkpoint_blobs SET blob = %s, type='msgpack' WHERE thread_id LIKE %s"
-      " AND channel='messages' RETURNING 1", (evil, rid + "%"))
+    q(
+        pg.owner,
+        "UPDATE lg_checkpoint.checkpoint_blobs SET blob = %s, type='msgpack' WHERE thread_id LIKE %s"
+        " AND channel='messages' RETURNING 1",
+        (evil, rid + "%"),
+    )
     approve(api, t, task)
     stack.drive()
     assert not marker.exists()
@@ -188,6 +231,7 @@ def test_t04b_injected_type_in_checkpoint_rejected(stack: Stack, api, t, pg: PgE
 def test_t04c_altered_head_detected(stack: Stack, api, t, pg: PgEnv) -> None:
     from aiagent_core import control
     from aiagent_core.db import Database
+
     task = submit(api, t, "search the widget price")
     stack.drive()
     rid = run_of(pg.owner, task)["id"]
@@ -195,8 +239,11 @@ def test_t04c_altered_head_detected(stack: Stack, api, t, pg: PgEnv) -> None:
     with db.conn() as c:
         assert control.verify_head_chain(c, t["tenantId"], rid)
         c.execute("ALTER TABLE agent.run_checkpoints DISABLE TRIGGER run_checkpoints_append_only")
-        c.execute("UPDATE agent.run_checkpoints SET checkpoint_json = jsonb_set(checkpoint_json, '{content}', '\"evil\"')"
-                  " WHERE run_id=%s AND entry_kind='tool'", (rid,))
+        c.execute(
+            "UPDATE agent.run_checkpoints SET checkpoint_json = jsonb_set(checkpoint_json, '{content}', '\"evil\"')"
+            " WHERE run_id=%s AND entry_kind='tool'",
+            (rid,),
+        )
         c.execute("ALTER TABLE agent.run_checkpoints ENABLE TRIGGER run_checkpoints_append_only")
         assert not control.verify_head_chain(c, t["tenantId"], rid)
     db.close()
@@ -232,7 +279,10 @@ def test_t07_tool_gateway_killed_between_send_and_confirm_is_unknown(stack: Stac
     import asyncio
 
     from aiagent_core.rpc import RpcClient
-    intent = q(pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,))[0]["id"]
+
+    intent = q(pg.owner, "SELECT id FROM agent.tool_intents WHERE task_id=%s AND tool_key='send_message'", (task,))[0][
+        "id"
+    ]
     ops = RpcClient(f"tcp:127.0.0.1:{stack.ports['tool']}", "ops", bytes.fromhex(stack.keys["ops_tool"]))
     res = asyncio.run(ops.call("tool.reconcile", {"tenantId": t["tenantId"], "intentId": intent}))
     assert res["status"] == "CONFIRMED"
@@ -261,8 +311,12 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
     st = state(api, t, task)
     assert st["run"]["result"] == "done:delegated", st
     rid = st["run"]["id"]
-    rows = q(pg.owner, "SELECT stream, entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY"
-             " checkpoint_revision", (rid,))
+    rows = q(
+        pg.owner,
+        "SELECT stream, entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY"
+        " checkpoint_revision",
+        (rid,),
+    )
     streams = {r["stream"] for r in rows}
     assert "subagent:researcher" in streams
     task_results = [r for r in rows if r["entry_kind"] == "tool" and r["checkpoint_json"].get("tool_name") == "task"]
@@ -312,8 +366,11 @@ def test_t13_answer_replayed_from_head_after_fresh_admission(stack: Stack, api, 
 def test_t13b_replay_with_old_goal_claim_is_stale(stack: Stack, api, t, pg: PgEnv) -> None:
     task = submit(api, t, NOTIFY)
     assert stack.worker(fault="runtime_after_model").returncode == 137
-    api.post(f"/v1/tasks/{task}/steer", headers={"Authorization": f"Bearer {t['token']}"},
-             json={"schemaVersion": "1.0", "goal": "just answer", "expectedGoalRevision": "1"})
+    api.post(
+        f"/v1/tasks/{task}/steer",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={"schemaVersion": "1.0", "goal": "just answer", "expectedGoalRevision": "1"},
+    )
     wait_lease_expiry(pg.owner, task)
     stack.drive()
     st = state(api, t, task)
@@ -338,10 +395,20 @@ def test_t15_concurrent_runs_and_tenants_in_one_process(stack: Stack, api, pg: P
 def test_t17a_cancel_while_waiting_approval(stack: Stack, api, t, pg: PgEnv) -> None:
     task = to_approval(stack, api, t)
     a = state(api, t, task)["approvals"][0]
-    assert api.post(f"/v1/tasks/{task}/cancel", headers={"Authorization": f"Bearer {t['token']}"}).json()["state"] == "CANCELLED"
-    r = api.post(f"/v1/approvals/{a['id']}/decision", headers={"Authorization": f"Bearer {t['token']}"}, json={
-        "schemaVersion": "1.0", "decision": "APPROVED", "requestSha256": a["requestSha256"],
-        "expectedRecordVersion": a["recordVersion"]})
+    assert (
+        api.post(f"/v1/tasks/{task}/cancel", headers={"Authorization": f"Bearer {t['token']}"}).json()["state"]
+        == "CANCELLED"
+    )
+    r = api.post(
+        f"/v1/approvals/{a['id']}/decision",
+        headers={"Authorization": f"Bearer {t['token']}"},
+        json={
+            "schemaVersion": "1.0",
+            "decision": "APPROVED",
+            "requestSha256": a["requestSha256"],
+            "expectedRecordVersion": a["recordVersion"],
+        },
+    )
     assert r.status_code == 409
     stack.drive()
     assert state(api, t, task)["state"] == "CANCELLED" and sends_for(stack, task, pg) == []
@@ -366,11 +433,17 @@ def test_t16_dlq_replay_of_cancelled_run_does_nothing(stack: Stack, api, t, pg: 
     api.post(f"/v1/tasks/{task}/cancel", headers={"Authorization": f"Bearer {t['token']}"})
     stack.relay()
     rid = run_of(pg.owner, task)["id"]
-    job = q(pg.owner, "UPDATE queue.jobs SET status='DEAD', locked_until=NULL WHERE payload->>'runId'=%s RETURNING id", (rid,))
+    job = q(
+        pg.owner,
+        "UPDATE queue.jobs SET status='DEAD', locked_until=NULL WHERE payload->>'runId'=%s RETURNING id",
+        (rid,),
+    )
     from aiagent_core.db import Database
     from aiagent_core.queue import QueuePort
-    QueuePort(Database(pg.dsn["ops"])).replay_dead_letter(job[0]["id"], "ops-test") if False else \
-        q(pg.owner, "UPDATE queue.jobs SET status='READY', attempts=0 WHERE id=%s RETURNING 1", (job[0]["id"],))
+
+    QueuePort(Database(pg.dsn["ops"])).replay_dead_letter(job[0]["id"], "ops-test") if False else q(
+        pg.owner, "UPDATE queue.jobs SET status='READY', attempts=0 WHERE id=%s RETURNING 1", (job[0]["id"],)
+    )
     stack.drive()
     out = q(pg.owner, "SELECT status, outcome_code FROM queue.jobs WHERE id=%s", (job[0]["id"],))[0]
     assert out["status"] == "DONE" and out["outcome_code"] == "STALE_TERMINAL"

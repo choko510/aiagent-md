@@ -35,23 +35,51 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 TOOLS: dict[str, ToolSpec] = {
     "search": ToolSpec(
-        "search", "Read-only web search. Returns short result snippets.",
+        "search",
+        "Read-only web search. Returns short result snippets.",
         _obj({"query": {"type": "string", "minLength": 1, "maxLength": 500}}, ["query"]),
-        "read", False, "mock_search",
+        "read",
+        False,
+        "mock_search",
     ),
     "send_message": ToolSpec(
-        "send_message", "Send an external message. Irreversible; requires the owner's explicit approval.",
-        _obj({"to": {"type": "string", "pattern": "^[a-z0-9_.@-]{1,64}$"},
-              "body": {"type": "string", "minLength": 1, "maxLength": 2000}}, ["to", "body"]),
-        "external_irreversible", True, "http_message", ("message-receiver",),
+        "send_message",
+        "Send an external message. Irreversible; requires the owner's explicit approval.",
+        _obj(
+            {
+                "to": {"type": "string", "pattern": "^[a-z0-9_.@-]{1,64}$"},
+                "body": {"type": "string", "minLength": 1, "maxLength": 2000},
+            },
+            ["to", "body"],
+        ),
+        "external_irreversible",
+        True,
+        "http_message",
+        ("message-receiver",),
     ),
     "sandbox_exec": ToolSpec(
-        "sandbox_exec", "Run a command inside the isolated, offline execution cell (never on the control host).",
-        _obj({"argv": {"type": "array", "minItems": 1, "maxItems": 64,
-                       "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-              "cwdRelative": {"type": "string", "minLength": 1, "maxLength": 512,
-                              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000]+$"}}, ["argv", "cwdRelative"]),
-        "write_reversible", False, "sandbox_cell",
+        "sandbox_exec",
+        "Run a command inside the isolated, offline execution cell (never on the control host).",
+        _obj(
+            {
+                "argv": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                },
+                "cwdRelative": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000]+$",
+                },
+            },
+            ["argv", "cwdRelative"],
+        ),
+        "write_reversible",
+        False,
+        "sandbox_cell",
     ),
 }
 

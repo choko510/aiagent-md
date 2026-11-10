@@ -172,7 +172,7 @@ def check_compatible(conn: psycopg.Connection[Row], *, writer: bool = True) -> N
     if row["schema_version"] < APP_SCHEMA_VERSION:
         raise MigrationError(f"schema version {row['schema_version']} < required {APP_SCHEMA_VERSION}")
     floor = row["min_compatible_writer"] if writer else row["min_compatible_reader"]
-    if APP_SCHEMA_VERSION < floor:
+    if floor > APP_SCHEMA_VERSION:
         raise MigrationError("application is older than the schema's minimum compatible version")
 
 

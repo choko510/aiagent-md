@@ -14,10 +14,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from psycopg.types.json import Jsonb
-
 from aiagent_domain import sha256_hex
 from aiagent_domain.generated import RunJobPointerV1
+from psycopg.types.json import Jsonb
 
 from .db import Database, Row
 
@@ -54,8 +53,16 @@ def _check(queue: str, payload: dict[str, Any]) -> None:
         RunJobPointerV1.model_validate(payload)  # strict contract; unknown keys / types rejected
 
 
-def enqueue(c: psycopg.Connection[Row], queue: str, tenant_id: str, dedupe_key: str, payload: dict[str, Any],
-            *, delay_s: float = 0.0, priority: int = 0) -> int | None:
+def enqueue(
+    c: psycopg.Connection[Row],
+    queue: str,
+    tenant_id: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    *,
+    delay_s: float = 0.0,
+    priority: int = 0,
+) -> int | None:
     """Insert unless (queue, dedupe_key) exists. Returns the new job id or None for a duplicate."""
     _check(queue, payload)
     row = c.execute(
@@ -112,8 +119,17 @@ class QueuePort:
                 "INSERT INTO queue.job_attempts(job_id, attempt_fence, worker_ref) VALUES (%s,%s,%s)",
                 (row["id"], row["attempt_fence"], worker),
             )
-            return Job(row["id"], row["queue_name"], str(row["tenant_id"]), row["dedupe_key"], dict(row["payload"]),
-                       row["attempts"], row["max_attempts"], row["attempt_fence"], worker)
+            return Job(
+                row["id"],
+                row["queue_name"],
+                str(row["tenant_id"]),
+                row["dedupe_key"],
+                dict(row["payload"]),
+                row["attempts"],
+                row["max_attempts"],
+                row["attempt_fence"],
+                worker,
+            )
 
     def heartbeat(self, job: Job, extend_s: float | None = None) -> bool:
         """Extend visibility only for the current attempt. False = this attempt lost the job (stop at next boundary)."""
@@ -135,21 +151,31 @@ class QueuePort:
                 " WHERE id=%s AND attempt_fence=%s AND status='CLAIMED'",
                 (outcome, job.id, job.attempt_fence),
             )
-            c.execute("UPDATE queue.job_attempts SET ended_at=now(), outcome_code=%s WHERE job_id=%s AND attempt_fence=%s",
-                      (outcome, job.id, job.attempt_fence))
+            c.execute(
+                "UPDATE queue.job_attempts SET ended_at=now(), outcome_code=%s WHERE job_id=%s AND attempt_fence=%s",
+                (outcome, job.id, job.attempt_fence),
+            )
             return cur.rowcount == 1
 
     def nack(self, job: Job, error_code: str, *, retryable: bool = True, min_delay_s: float = 0.0) -> str:
         """Retry with bounded exponential backoff + full jitter, or dead-letter (non-retryable / exhausted)."""
         with self.db.tx() as c:
-            q = c.execute("SELECT base_backoff_ms, max_backoff_ms FROM queue.queues WHERE name=%s", (job.queue,)).fetchone()
+            q = c.execute(
+                "SELECT base_backoff_ms, max_backoff_ms FROM queue.queues WHERE name=%s", (job.queue,)
+            ).fetchone()
             assert q is not None
-            c.execute("UPDATE queue.job_attempts SET ended_at=now(), outcome_code=%s WHERE job_id=%s AND attempt_fence=%s",
-                      (error_code, job.id, job.attempt_fence))
+            c.execute(
+                "UPDATE queue.job_attempts SET ended_at=now(), outcome_code=%s WHERE job_id=%s AND attempt_fence=%s",
+                (error_code, job.id, job.attempt_fence),
+            )
             if not retryable or job.attempts >= job.max_attempts:
                 return "DEAD" if self._dead(c, job.id, job.attempt_fence, error_code) else "STALE"
-            delay_ms = max(min_delay_s * 1000, random.uniform(  # noqa: S311
-                0, min(q["max_backoff_ms"], q["base_backoff_ms"] * 2 ** (job.attempts - 1))))
+            delay_ms = max(
+                min_delay_s * 1000,
+                random.uniform(  # noqa: S311
+                    0, min(q["max_backoff_ms"], q["base_backoff_ms"] * 2 ** (job.attempts - 1))
+                ),
+            )
             cur = c.execute(
                 "UPDATE queue.jobs SET status='READY', locked_until=NULL, locked_by=NULL, last_error_code=%s,"
                 " run_after = now() + make_interval(secs => %s / 1000.0), updated_at=now()"
@@ -159,7 +185,9 @@ class QueuePort:
             return "RETRY" if cur.rowcount == 1 else "STALE"
 
     def _dead(self, c: psycopg.Connection[Row], job_id: int, fence: int | None, reason: str) -> bool:
-        cond = " AND attempt_fence=%s AND status='CLAIMED'" if fence is not None else " AND status IN ('READY','CLAIMED')"
+        cond = (
+            " AND attempt_fence=%s AND status='CLAIMED'" if fence is not None else " AND status IN ('READY','CLAIMED')"
+        )
         args: tuple[Any, ...] = (reason, job_id) + ((fence,) if fence is not None else ())
         row = c.execute(
             "UPDATE queue.jobs SET status='DEAD', last_error_code=%s, locked_until=NULL, finished_at=now(), updated_at=now()"
@@ -210,8 +238,10 @@ class QueuePort:
                 " WHERE id=%s AND status='DEAD'",
                 (job_id,),
             )
-            c.execute("UPDATE queue.dead_letters SET replayed_at=now(), replay_decision=%s WHERE job_id=%s",
-                      (f"replayed_by:{operator}", job_id))
+            c.execute(
+                "UPDATE queue.dead_letters SET replayed_at=now(), replay_decision=%s WHERE job_id=%s",
+                (f"replayed_by:{operator}", job_id),
+            )
             return cur.rowcount == 1
 
     def stats(self, queue: str) -> dict[str, int]:

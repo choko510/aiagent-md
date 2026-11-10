@@ -56,7 +56,9 @@ class Supervisor:
     grant_key: bytes
     limits: Limits = field(default_factory=Limits)
     require_netns: bool = True
-    cell_uid: int | None = None  # unprivileged identity for generated code (RLIMIT_NPROC is not enforced for root)
+    # Unprivileged identity for generated code. Must be DEDICATED to cells on this kernel: RLIMIT_NPROC is not enforced
+    # for root and is counted per uid kernel-wide, so sharing a uid with any service would let either exhaust the other.
+    cell_uid: int | None = None
     cell_gid: int | None = None
     consumed_path: Path | None = None
     _consumed: set[str] = field(default_factory=set)
@@ -118,6 +120,7 @@ class Supervisor:
                     os.unshare(CLONE_NEWUSER | CLONE_NEWNET)  # empty network namespace: loopback down, no route
                 except OSError:
                     os._exit(97)  # fail closed: never run without network isolation when it is required
+
         return fn
 
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
@@ -127,8 +130,14 @@ class Supervisor:
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(cwd), env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, preexec_fn=self._preexec(g.wall_ms, g.memory_bytes), close_fds=True,
+            *argv,
+            cwd=str(cwd),
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes),
+            close_fds=True,
         )
         timed_out = False
         try:
@@ -144,9 +153,15 @@ class Supervisor:
         rc = proc.returncode
         if rc == 97 and self.require_netns:
             return {"status": "REFUSED", "reason": "NETNS_UNAVAILABLE"}
-        return {"status": "EXITED", "exitCode": rc, "timedOut": timed_out, "wallMs": int((time.monotonic() - started) * 1000),
-                "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"), "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
-                "truncated": len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT}
+        return {
+            "status": "EXITED",
+            "exitCode": rc,
+            "timedOut": timed_out,
+            "wallMs": int((time.monotonic() - started) * 1000),
+            "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
+            "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
+            "truncated": len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT,
+        }
 
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
@@ -198,10 +213,18 @@ def main() -> None:
     key_hex = Path(os.environ["AIAGENT_SANDBOX_GRANT_KEY_FILE"]).read_text().strip()
     rpc = Path(os.environ["AIAGENT_SANDBOX_RPC_KEY_FILE"]).read_text().strip()
     uid = os.environ.get("AIAGENT_SANDBOX_CELL_UID")
-    sup = Supervisor(Path(os.environ.get("AIAGENT_SANDBOX_ROOT", "/var/lib/aiagent/cells")), bytes.fromhex(key_hex),
-                     require_netns=os.environ.get("AIAGENT_SANDBOX_REQUIRE_NETNS", "1") == "1",
-                     cell_uid=int(uid) if uid else None, cell_gid=int(uid) if uid else None)
-    asyncio.run(serve(sup, {"tool_gateway": bytes.fromhex(rpc)}, os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000")))
+    sup = Supervisor(
+        Path(os.environ.get("AIAGENT_SANDBOX_ROOT", "/var/lib/aiagent/cells")),
+        bytes.fromhex(key_hex),
+        require_netns=os.environ.get("AIAGENT_SANDBOX_REQUIRE_NETNS", "1") == "1",
+        cell_uid=int(uid) if uid else None,
+        cell_gid=int(uid) if uid else None,
+    )
+    asyncio.run(
+        serve(
+            sup, {"tool_gateway": bytes.fromhex(rpc)}, os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000")
+        )
+    )
 
 
 if __name__ == "__main__":

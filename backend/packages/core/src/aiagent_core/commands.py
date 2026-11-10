@@ -7,9 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from psycopg.types.json import Jsonb
-
 from aiagent_domain import sha256_hex, uuid7
+from psycopg.types.json import Jsonb
 
 from .control import TERMINAL
 from .db import Database, Row
@@ -67,8 +66,16 @@ def _idem_end(c: psycopg.Connection[Row], s: Scope, op: str, key: str | None, re
 
 
 def create_task_tx(
-    c: psycopg.Connection[Row], *, tenant_id: str, owner_user_id: str, workspace_id: str, goal: str,
-    profile: str = "default", actor: dict[str, str], schedule_id: str | None = None, trigger_key: str | None = None,
+    c: psycopg.Connection[Row],
+    *,
+    tenant_id: str,
+    owner_user_id: str,
+    workspace_id: str,
+    goal: str,
+    profile: str = "default",
+    actor: dict[str, str],
+    schedule_id: str | None = None,
+    trigger_key: str | None = None,
     occurrence_id: str | None = None,
 ) -> dict[str, str]:
     """Task + goal revision 1 + Run attempt 1 + seed HEAD entry + events + run.start outbox, inside caller's TX."""
@@ -88,8 +95,14 @@ def create_task_tx(
     c.execute(
         "INSERT INTO agent.runs(tenant_id, id, task_id, attempt_no, input_goal_revision, status_code, allowed_models,"
         " restore_incarnation, head_revision, current_checkpoint_id) VALUES (%s,%s,%s,1,1,'CREATED',%s,%s,1,%s)",
-        (tenant_id, run_id, task_id, DEFAULT_MODELS.get(profile, DEFAULT_MODELS["default"]),
-         inc["restore_incarnation"], cp_id),
+        (
+            tenant_id,
+            run_id,
+            task_id,
+            DEFAULT_MODELS.get(profile, DEFAULT_MODELS["default"]),
+            inc["restore_incarnation"],
+            cp_id,
+        ),
     )
     entry = {"kind": "user", "content": goal, "tool_calls": []}
     snap = sha256_hex({"prev": None, "rev": 1, "kind": "user", "stream": "main", "payload": entry})
@@ -100,18 +113,46 @@ def create_task_tx(
         (tenant_id, cp_id, task_id, run_id, Jsonb(entry), snap),
     )
     c.execute("UPDATE agent.tasks SET active_run_id=%s WHERE tenant_id=%s AND id=%s", (run_id, tenant_id, task_id))
-    append_event(c, tenant_id=tenant_id, aggregate_type="task", aggregate_id=task_id, kind="task.accepted",
-                 payload={"goalRevision": "1", "profile": profile}, actor=actor, owner_user_id=owner_user_id,
-                 task_id=task_id)
-    ev = append_event(c, tenant_id=tenant_id, aggregate_type="run", aggregate_id=run_id, kind="run.created",
-                      payload={"attemptNo": 1}, actor=actor, owner_user_id=owner_user_id, task_id=task_id,
-                      run_id=run_id)
-    enqueue_run_job(c, tenant_id=tenant_id, task_id=task_id, run_id=run_id, kind="run.start", goal_revision=1,
-                    dedupe_key=f"run:{run_id}:start", event_id=ev, schedule_occurrence_id=occurrence_id)
+    append_event(
+        c,
+        tenant_id=tenant_id,
+        aggregate_type="task",
+        aggregate_id=task_id,
+        kind="task.accepted",
+        payload={"goalRevision": "1", "profile": profile},
+        actor=actor,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
+    )
+    ev = append_event(
+        c,
+        tenant_id=tenant_id,
+        aggregate_type="run",
+        aggregate_id=run_id,
+        kind="run.created",
+        payload={"attemptNo": 1},
+        actor=actor,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
+        run_id=run_id,
+    )
+    enqueue_run_job(
+        c,
+        tenant_id=tenant_id,
+        task_id=task_id,
+        run_id=run_id,
+        kind="run.start",
+        goal_revision=1,
+        dedupe_key=f"run:{run_id}:start",
+        event_id=ev,
+        schedule_occurrence_id=occurrence_id,
+    )
     return {"taskId": task_id, "runId": run_id}
 
 
-def submit_task(db: Database, s: Scope, goal: str, *, profile: str | None = None, idempotency_key: str | None = None) -> dict[str, str]:
+def submit_task(
+    db: Database, s: Scope, goal: str, *, profile: str | None = None, idempotency_key: str | None = None
+) -> dict[str, str]:
     profile = profile or "default"
     if profile not in DEFAULT_MODELS:
         raise CommandError("UNKNOWN_PROFILE", 422)
@@ -127,8 +168,15 @@ def submit_task(db: Database, s: Scope, goal: str, *, profile: str | None = None
         ).fetchone()
         if ws is None:
             raise CommandError("FORBIDDEN", 403)
-        out = create_task_tx(c, tenant_id=s.tenant_id, owner_user_id=s.user_id, workspace_id=s.workspace_id,
-                             goal=goal, profile=profile, actor=s.actor)
+        out = create_task_tx(
+            c,
+            tenant_id=s.tenant_id,
+            owner_user_id=s.user_id,
+            workspace_id=s.workspace_id,
+            goal=goal,
+            profile=profile,
+            actor=s.actor,
+        )
         _idem_end(c, s, "task.submit", idempotency_key, out)
         return out
 
@@ -187,20 +235,54 @@ def steer(db: Database, s: Scope, task_id: str, goal: str, expected_goal_revisio
             "INSERT INTO agent.run_checkpoints(tenant_id, id, task_id, run_id, checkpoint_revision, stream, entry_kind,"
             " request_key, writer_ref, writer_lease_epoch, applied_goal_revision, checkpoint_json, snapshot_sha256)"
             " VALUES (%s,%s,%s,%s,%s,'main','user',%s,'api',%s,%s,%s,%s)",
-            (s.tenant_id, cp, task_id, run["id"], hrev, f"seed-{hrev}", run["lease_epoch"], rev, Jsonb(entry),
-             sha256_hex({"prev": prev["snapshot_sha256"] if prev else None, "rev": hrev, "kind": "user",
-                         "stream": "main", "payload": entry})),
+            (
+                s.tenant_id,
+                cp,
+                task_id,
+                run["id"],
+                hrev,
+                f"seed-{hrev}",
+                run["lease_epoch"],
+                rev,
+                Jsonb(entry),
+                sha256_hex(
+                    {
+                        "prev": prev["snapshot_sha256"] if prev else None,
+                        "rev": hrev,
+                        "kind": "user",
+                        "stream": "main",
+                        "payload": entry,
+                    }
+                ),
+            ),
         )
         c.execute(
             "UPDATE agent.runs SET head_revision=%s, current_checkpoint_id=%s, updated_at=now()"
             " WHERE tenant_id=%s AND id=%s AND head_revision=%s",
             (hrev, cp, s.tenant_id, run["id"], run["head_revision"]),
         )
-        ev = append_event(c, tenant_id=s.tenant_id, aggregate_type="task", aggregate_id=task_id,
-                          kind="task.goal_revised", payload={"goalRevision": str(rev)}, actor=s.actor,
-                          owner_user_id=s.user_id, task_id=task_id, run_id=run["id"])
-        enqueue_run_job(c, tenant_id=s.tenant_id, task_id=task_id, run_id=run["id"], kind="run.resume",
-                        goal_revision=rev, dedupe_key=f"run:{run['id']}:steer:{rev}", event_id=ev)
+        ev = append_event(
+            c,
+            tenant_id=s.tenant_id,
+            aggregate_type="task",
+            aggregate_id=task_id,
+            kind="task.goal_revised",
+            payload={"goalRevision": str(rev)},
+            actor=s.actor,
+            owner_user_id=s.user_id,
+            task_id=task_id,
+            run_id=run["id"],
+        )
+        enqueue_run_job(
+            c,
+            tenant_id=s.tenant_id,
+            task_id=task_id,
+            run_id=run["id"],
+            kind="run.resume",
+            goal_revision=rev,
+            dedupe_key=f"run:{run['id']}:steer:{rev}",
+            event_id=ev,
+        )
         return {"taskId": task_id, "goalRevision": str(rev)}
 
 
@@ -209,7 +291,7 @@ def cancel(db: Database, s: Scope, task_id: str) -> dict[str, str]:
     passed final admission keep their ledger state. With SENDING/UNKNOWN effects the run goes to
     WAITING_RECONCILIATION instead of CANCELLED (01-03)."""
     with db.tx(tenant=s.tenant_id) as c:
-        task, run = _lock_owned(c, s, task_id)
+        _task, run = _lock_owned(c, s, task_id)
         if run["status_code"] in TERMINAL:
             return {"taskId": task_id, "state": run["status_code"]}
         pending = c.execute(
@@ -218,10 +300,11 @@ def cancel(db: Database, s: Scope, task_id: str) -> dict[str, str]:
             (s.tenant_id, run["id"]),
         ).fetchone()
         assert pending is not None
-        leased = run["status_code"] in ("CLAIMED", "RUNNING") and c.execute(
-            "SELECT lease_expires_at > now() AS live FROM agent.runs WHERE tenant_id=%s AND id=%s",
+        live = c.execute(
+            "SELECT coalesce(lease_expires_at > now(), false) AS live FROM agent.runs WHERE tenant_id=%s AND id=%s",
             (s.tenant_id, run["id"]),
-        ).fetchone()["live"]  # type: ignore[index]
+        ).fetchone()
+        leased = run["status_code"] in ("CLAIMED", "RUNNING") and bool(live and live["live"])
         if leased:
             target = "CANCELLING"
         elif pending["n"]:
@@ -238,12 +321,26 @@ def cancel(db: Database, s: Scope, task_id: str) -> dict[str, str]:
             " WHERE tenant_id=%s AND run_id=%s AND decision_code='PENDING'",
             (s.tenant_id, run["id"]),
         )
-        tstate = {"CANCELLING": "CANCELLING", "WAITING_RECONCILIATION": "WAITING_RECONCILIATION"}.get(target, "CANCELLED")
-        c.execute("UPDATE agent.tasks SET status_code=%s, record_version=record_version+1, updated_at=now()"
-                  " WHERE tenant_id=%s AND id=%s", (tstate, s.tenant_id, task_id))
-        append_event(c, tenant_id=s.tenant_id, aggregate_type="run", aggregate_id=run["id"], kind="run.state_changed",
-                     payload={"from": run["status_code"], "to": target, "cause": "user_cancel"}, actor=s.actor,
-                     owner_user_id=s.user_id, task_id=task_id, run_id=run["id"])
+        tstate = {"CANCELLING": "CANCELLING", "WAITING_RECONCILIATION": "WAITING_RECONCILIATION"}.get(
+            target, "CANCELLED"
+        )
+        c.execute(
+            "UPDATE agent.tasks SET status_code=%s, record_version=record_version+1, updated_at=now()"
+            " WHERE tenant_id=%s AND id=%s",
+            (tstate, s.tenant_id, task_id),
+        )
+        append_event(
+            c,
+            tenant_id=s.tenant_id,
+            aggregate_type="run",
+            aggregate_id=run["id"],
+            kind="run.state_changed",
+            payload={"from": run["status_code"], "to": target, "cause": "user_cancel"},
+            actor=s.actor,
+            owner_user_id=s.user_id,
+            task_id=task_id,
+            run_id=run["id"],
+        )
         return {"taskId": task_id, "state": target}
 
 
@@ -252,15 +349,32 @@ def pause(db: Database, s: Scope, task_id: str) -> dict[str, str]:
         _task, run = _lock_owned(c, s, task_id)
         if run["status_code"] in TERMINAL or run["cancel_requested"]:
             raise CommandError("NOT_PAUSABLE", 409)
-        target = "PAUSED" if run["status_code"] in ("CREATED", "WAITING_APPROVAL", "WAITING_INPUT") else run["status_code"]
-        c.execute("UPDATE agent.runs SET pause_requested=true, status_code=%s, record_version=record_version+1,"
-                  " updated_at=now() WHERE tenant_id=%s AND id=%s", (target, s.tenant_id, run["id"]))
+        target = (
+            "PAUSED" if run["status_code"] in ("CREATED", "WAITING_APPROVAL", "WAITING_INPUT") else run["status_code"]
+        )
+        c.execute(
+            "UPDATE agent.runs SET pause_requested=true, status_code=%s, record_version=record_version+1,"
+            " updated_at=now() WHERE tenant_id=%s AND id=%s",
+            (target, s.tenant_id, run["id"]),
+        )
         if target == "PAUSED":
-            c.execute("UPDATE agent.tasks SET status_code='PAUSED', record_version=record_version+1, updated_at=now()"
-                      " WHERE tenant_id=%s AND id=%s", (s.tenant_id, task_id))
-        append_event(c, tenant_id=s.tenant_id, aggregate_type="run", aggregate_id=run["id"], kind="run.state_changed",
-                     payload={"from": run["status_code"], "to": target, "cause": "user_pause"}, actor=s.actor,
-                     owner_user_id=s.user_id, task_id=task_id, run_id=run["id"])
+            c.execute(
+                "UPDATE agent.tasks SET status_code='PAUSED', record_version=record_version+1, updated_at=now()"
+                " WHERE tenant_id=%s AND id=%s",
+                (s.tenant_id, task_id),
+            )
+        append_event(
+            c,
+            tenant_id=s.tenant_id,
+            aggregate_type="run",
+            aggregate_id=run["id"],
+            kind="run.state_changed",
+            payload={"from": run["status_code"], "to": target, "cause": "user_pause"},
+            actor=s.actor,
+            owner_user_id=s.user_id,
+            task_id=task_id,
+            run_id=run["id"],
+        )
         return {"taskId": task_id, "state": target}
 
 
@@ -269,20 +383,39 @@ def resume(db: Database, s: Scope, task_id: str) -> dict[str, str]:
         task, run = _lock_owned(c, s, task_id)
         if run["status_code"] in TERMINAL or run["cancel_requested"]:
             raise CommandError("NOT_RESUMABLE", 409)
-        c.execute("UPDATE agent.runs SET pause_requested=false, record_version=record_version+1, updated_at=now()"
-                  " WHERE tenant_id=%s AND id=%s", (s.tenant_id, run["id"]))
-        ev = append_event(c, tenant_id=s.tenant_id, aggregate_type="run", aggregate_id=run["id"],
-                          kind="run.state_changed", payload={"from": run["status_code"], "to": run["status_code"],
-                                                              "cause": "user_resume"},
-                          actor=s.actor, owner_user_id=s.user_id, task_id=task_id, run_id=run["id"])
-        enqueue_run_job(c, tenant_id=s.tenant_id, task_id=task_id, run_id=run["id"], kind="run.resume",
-                        goal_revision=task["goal_revision"], dedupe_key=f"run:{run['id']}:resume:{run['record_version']}",
-                        event_id=ev)
+        c.execute(
+            "UPDATE agent.runs SET pause_requested=false, record_version=record_version+1, updated_at=now()"
+            " WHERE tenant_id=%s AND id=%s",
+            (s.tenant_id, run["id"]),
+        )
+        ev = append_event(
+            c,
+            tenant_id=s.tenant_id,
+            aggregate_type="run",
+            aggregate_id=run["id"],
+            kind="run.state_changed",
+            payload={"from": run["status_code"], "to": run["status_code"], "cause": "user_resume"},
+            actor=s.actor,
+            owner_user_id=s.user_id,
+            task_id=task_id,
+            run_id=run["id"],
+        )
+        enqueue_run_job(
+            c,
+            tenant_id=s.tenant_id,
+            task_id=task_id,
+            run_id=run["id"],
+            kind="run.resume",
+            goal_revision=task["goal_revision"],
+            dedupe_key=f"run:{run['id']}:resume:{run['record_version']}",
+            event_id=ev,
+        )
         return {"taskId": task_id, "state": run["status_code"]}
 
 
-def decide_approval(db: Database, s: Scope, approval_id: str, decision: str, request_sha256: str,
-                    expected_record_version: int) -> dict[str, str]:
+def decide_approval(
+    db: Database, s: Scope, approval_id: str, decision: str, request_sha256: str, expected_record_version: int
+) -> dict[str, str]:
     """Owner decision bound to the frozen request hash and record version; the decision and the resume job are
     committed atomically (outbox). Self-approval by a model is impossible: only an authenticated owner reaches this."""
     if decision not in ("APPROVED", "REJECTED"):
@@ -303,8 +436,11 @@ def decide_approval(db: Database, s: Scope, approval_id: str, decision: str, req
         if a["request_sha256"] != request_sha256:
             raise CommandError("REQUEST_HASH_MISMATCH", 409)
         if a["expired"]:
-            c.execute("UPDATE agent.approval_records SET decision_code='EXPIRED', record_version=record_version+1"
-                      " WHERE tenant_id=%s AND id=%s", (s.tenant_id, approval_id))
+            c.execute(
+                "UPDATE agent.approval_records SET decision_code='EXPIRED', record_version=record_version+1"
+                " WHERE tenant_id=%s AND id=%s",
+                (s.tenant_id, approval_id),
+            )
             raise CommandError("EXPIRED", 409)
         if a["goal_revision"] != a["task_goal"]:
             raise CommandError("STALE_GOAL", 409)
@@ -313,10 +449,26 @@ def decide_approval(db: Database, s: Scope, approval_id: str, decision: str, req
             " record_version=record_version+1 WHERE tenant_id=%s AND id=%s AND record_version=%s",
             (decision, Jsonb(s.actor), s.tenant_id, approval_id, expected_record_version),
         )
-        ev = append_event(c, tenant_id=s.tenant_id, aggregate_type="approval", aggregate_id=approval_id,
-                          kind="approval.decided", payload={"decision": decision}, actor=s.actor,
-                          owner_user_id=s.user_id, task_id=a["task_id"], run_id=a["run_id"])
-        enqueue_run_job(c, tenant_id=s.tenant_id, task_id=a["task_id"], run_id=a["run_id"], kind="run.resume",
-                        goal_revision=a["goal_revision"], dedupe_key=f"run:{a['run_id']}:approval:{approval_id}",
-                        event_id=ev)
+        ev = append_event(
+            c,
+            tenant_id=s.tenant_id,
+            aggregate_type="approval",
+            aggregate_id=approval_id,
+            kind="approval.decided",
+            payload={"decision": decision},
+            actor=s.actor,
+            owner_user_id=s.user_id,
+            task_id=a["task_id"],
+            run_id=a["run_id"],
+        )
+        enqueue_run_job(
+            c,
+            tenant_id=s.tenant_id,
+            task_id=a["task_id"],
+            run_id=a["run_id"],
+            kind="run.resume",
+            goal_revision=a["goal_revision"],
+            dedupe_key=f"run:{a['run_id']}:approval:{approval_id}",
+            event_id=ev,
+        )
         return {"approvalId": approval_id, "decision": decision}

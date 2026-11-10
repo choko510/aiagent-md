@@ -51,8 +51,15 @@ class EgressConfig:
             if allow_private and production:
                 raise ValueError(f"destination {name}: allow_private is forbidden in production")
             out.destinations[name] = DestinationPolicy(
-                name, d["scheme"], normalize_host(d["host"]), int(d["port"]), frozenset(d["methods"]), allow_private,
-                frozenset(d.get("identities", ["tool_gateway"])), bool(d.get("needs_permit", True)))
+                name,
+                d["scheme"],
+                normalize_host(d["host"]),
+                int(d["port"]),
+                frozenset(d["methods"]),
+                allow_private,
+                frozenset(d.get("identities", ["tool_gateway"])),
+                bool(d.get("needs_permit", True)),
+            )
         out.static_tokens = dict(raw.get("static_tokens", {}))
         return out
 
@@ -90,7 +97,8 @@ class Sentinel:
                 "SELECT i.tool_key, i.status_code, i.goal_revision, a.decision_code, a.goal_revision AS apr_goal"
                 " FROM agent.tool_intents i LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id"
                 " AND a.tool_intent_id=i.id WHERE i.tenant_id=%s AND i.id=%s AND i.run_id=%s",
-                (claim.tenant_id, intent_id, claim.run_id)).fetchone()
+                (claim.tenant_id, intent_id, claim.run_id),
+            ).fetchone()
             if it is None:
                 raise RpcError("INTENT_NOT_FOUND")
             spec = TOOLS.get(it["tool_key"])
@@ -99,15 +107,19 @@ class Sentinel:
             allowed_states = ("SENDING", "UNKNOWN") if method == "GET" else ("SENDING",)
             if it["status_code"] not in allowed_states:
                 raise RpcError("INTENT_NOT_ADMITTED")
-            if spec.approval_required and method != "GET" and (
-                    it["decision_code"] != "APPROVED" or it["apr_goal"] != claim.goal_revision):
+            if (
+                spec.approval_required
+                and method != "GET"
+                and (it["decision_code"] != "APPROVED" or it["apr_goal"] != claim.goal_revision)
+            ):
                 raise RpcError("APPROVAL_INVALID")
             pid = uuid7()
             expires = int(time.time()) + PERMIT_TTL_S
             c.execute(
                 "INSERT INTO agent.egress_permits(tenant_id, id, tool_intent_id, run_id, run_lease_epoch, scheme, host,"
                 " port, method, max_uses, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1, to_timestamp(%s))",
-                (claim.tenant_id, pid, intent_id, claim.run_id, claim.lease_epoch, scheme, host, port, method, expires))
+                (claim.tenant_id, pid, intent_id, claim.run_id, claim.lease_epoch, scheme, host, port, method, expires),
+            )
         return f"{claim.tenant_id}.{pid}.{expires}.{_mac(self.key, claim.tenant_id, pid, scheme, host, port, method, expires)}"
 
     def authorize_reconcile(self, tenant_id: str, intent_id: str, scheme: str, host: str, port: int) -> str:
@@ -117,8 +129,10 @@ class Sentinel:
         if dest is None or "GET" not in dest.methods:
             raise RpcError("DESTINATION_NOT_ALLOWED")
         with self.db.tx() as c:
-            it = c.execute("SELECT tool_key, status_code, run_id FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
-                           (tenant_id, intent_id)).fetchone()
+            it = c.execute(
+                "SELECT tool_key, status_code, run_id FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
+                (tenant_id, intent_id),
+            ).fetchone()
             if it is None or it["status_code"] not in ("UNKNOWN", "SENDING"):
                 raise RpcError("INTENT_NOT_RECONCILABLE")
             spec = TOOLS.get(it["tool_key"])
@@ -130,7 +144,8 @@ class Sentinel:
                 "INSERT INTO agent.egress_permits(tenant_id, id, tool_intent_id, run_id, run_lease_epoch, scheme, host,"
                 " port, method, max_uses, expires_at) SELECT %s,%s,%s,%s, greatest(1, r.lease_epoch), %s,%s,%s,'GET',1,"
                 " to_timestamp(%s) FROM agent.runs r WHERE r.tenant_id=%s AND r.id=%s",
-                (tenant_id, pid, intent_id, it["run_id"], scheme, host, port, expires, tenant_id, it["run_id"]))
+                (tenant_id, pid, intent_id, it["run_id"], scheme, host, port, expires, tenant_id, it["run_id"]),
+            )
         return f"{tenant_id}.{pid}.{expires}.{_mac(self.key, tenant_id, pid, scheme, host, port, 'GET', expires)}"
 
     def verify_and_consume(self, token: str, scheme: str, host: str, port: int, method: str) -> tuple[str, str]:
@@ -157,16 +172,29 @@ class Sentinel:
                 " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN'))"
                 " AND NOT EXISTS (SELECT 1 FROM agent.approval_records a WHERE a.tenant_id=i.tenant_id"
                 "   AND a.tool_intent_id=i.id AND a.decision_code <> 'APPROVED' AND p.method <> 'GET')"
-                " RETURNING p.id", (tenant, pid, method, host, port, scheme)).fetchone()
+                " RETURNING p.id",
+                (tenant, pid, method, host, port, scheme),
+            ).fetchone()
         if row is None:
             raise EgressDenied("PERMIT_INVALID_AT_SEND")
         return tenant, pid
 
-    def receipt(self, tenant: str | None, pid: str | None, decision: str, reason: str, host: str | None,
-                port: int | None, ip: str | None) -> None:
+    def receipt(
+        self,
+        tenant: str | None,
+        pid: str | None,
+        decision: str,
+        reason: str,
+        host: str | None,
+        port: int | None,
+        ip: str | None,
+    ) -> None:
         with self.db.conn() as c:
-            c.execute("INSERT INTO agent.egress_receipts(tenant_id, permit_id, decision, reason_code, host, port,"
-                      " resolved_ip) VALUES (%s,%s,%s,%s,%s,%s,%s)", (tenant, pid, decision, reason, host, port, ip))
+            c.execute(
+                "INSERT INTO agent.egress_receipts(tenant_id, permit_id, decision, reason_code, host, port,"
+                " resolved_ip) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (tenant, pid, decision, reason, host, port, ip),
+            )
 
 
 def load_config() -> EgressConfig:

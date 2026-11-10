@@ -1,0 +1,124 @@
+name: backend
+# STEP 3 Python backend: lint/type/contracts, PostgreSQL integration (migrations, Run control, QueuePort/Outbox/
+# Scheduler, gateways, Sentinel, E2E), runtime fault suite (PYRT-T on the formal stack), Linux cell enforcement,
+# and the Compose network-isolation gate. KVM two-VM topology tests are NOT run here (no /dev/kvm on hosted runners).
+on:
+  pull_request:
+    paths: ['backend/**', 'contracts/**', 'web/src/api/generated/**', 'deploy/**', '.github/workflows/backend.yml']
+  push:
+    branches: [main]
+    paths: ['backend/**', 'contracts/**', 'web/src/api/generated/**', 'deploy/**', '.github/workflows/backend.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    working-directory: backend
+env:
+  UV_PYTHON_DOWNLOADS: automatic
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - run: uv sync --locked
+      - name: Generated contracts are up to date (canonical JSON Schema -> Pydantic / TS)
+        run: uv run python tools/gen_contracts.py --check
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src
+
+  integration:
+    name: integration (py${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.13', '3.12']
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_PASSWORD: ci}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_TEST_PG_URL: postgresql://postgres:ci@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - run: uv sync --locked --python ${{ matrix.python }}
+      - name: Contracts, migrations, Run control, QueuePort/Outbox/Scheduler, gateways, Sentinel, E2E, production gates
+        run: >
+          uv run --python ${{ matrix.python }} pytest -q -rA -p no:cacheprovider tests
+          --ignore=tests/test_runtime_faults.py --ignore=tests/linux --ignore=tests/test_compose_isolation.py
+          --ignore=tests/test_cell_e2e.py
+
+  runtime-faults:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_PASSWORD: ci}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_TEST_PG_URL: postgresql://postgres:ci@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - run: uv sync --locked
+      - name: PYRT-T on the formal stack (real gateway/Sentinel processes, worker kills)
+        run: uv run pytest -q -rA -p no:cacheprovider tests/test_runtime_faults.py
+
+  cell-and-compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_PASSWORD: ci}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_TEST_PG_URL: postgresql://postgres:ci@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - run: uv sync --locked
+      - name: Allow unprivileged user namespaces for the cell's network namespace (Ubuntu 24.04 AppArmor default)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Runtime Cell enforcement (rlimits, process group kill, netns, uid drop, single-use grants)
+        run: |
+          python3 -m pip install --target .linuxdeps pydantic==2.14.3 'jsonschema>=4.25.0' pytest
+          sudo -E env PYTHONPATH=.linuxdeps:packages/domain/src:packages/sandbox/src AIAGENT_EXPECT_NETNS=1 \
+            python3 -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux
+      - name: Generated code runs only in the cell container (cross-kernel RPC with grants)
+        run: uv run pytest -q -rA -p no:cacheprovider tests/test_cell_e2e.py
+      - name: Build images
+        working-directory: .
+        run: |
+          docker build -q -f deploy/docker/Dockerfile --target runtime-base \
+            --build-arg PACKAGES="aiagent-gateways aiagent-sentinel aiagent-api aiagent-runtime" -t aiagent/all:dev .
+          docker build -q -f deploy/docker/Dockerfile.cell -t aiagent/cell:dev .
+      - name: Compose network isolation gate (dev topology)
+        working-directory: .
+        run: |
+          sh deploy/scripts/gen-secrets.sh
+          docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml up -d --wait
+          cd backend && AIAGENT_COMPOSE_PROJECT=aiagentdev uv run pytest -q -rA -p no:cacheprovider tests/test_compose_isolation.py
+      - name: Compose logs on failure
+        if: failure()
+        working-directory: .
+        run: docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml logs --no-color | tail -300

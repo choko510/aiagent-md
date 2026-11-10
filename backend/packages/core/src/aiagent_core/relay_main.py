@@ -29,8 +29,11 @@ async def main_async() -> None:
         check_compatible(c)
     owner = os.environ.get("AIAGENT_WORKER_ID", f"relay:{socket.gethostname()}:{os.getpid()}")
     relay, sched, queue = OutboxRelay(db, owner), Scheduler(db), QueuePort(db)
-    life = Lifecycle("relay", health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
-                     health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"))
+    life = Lifecycle(
+        "relay",
+        health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
+        health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"),
+    )
 
     async def ready() -> tuple[bool, str]:
         return await asyncio.to_thread(db.ping), "db"

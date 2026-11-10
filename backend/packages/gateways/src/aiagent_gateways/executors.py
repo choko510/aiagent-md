@@ -12,7 +12,6 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
-
 from aiagent_core.config import Secret
 
 
@@ -55,13 +54,21 @@ class HttpMessageExecutor:
     """Sends a message to a receiver over HTTP *through the Trusted Egress proxy* (with a Sentinel permit). The
     receiver credential is injected here only when the destination equals its bound recipient host."""
 
-    def __init__(self, url: str, *, proxy: str | None, credential: Secret | None = None,
-                 credential_recipient: str | None = None, timeout_s: float = 10.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        proxy: str | None,
+        credential: Secret | None = None,
+        credential_recipient: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> None:
         self.url, self.proxy, self.timeout_s = url, proxy, timeout_s
         self.credential, self.credential_recipient = credential, credential_recipient
         p = urlsplit(url)
-        self._dest = Destination(p.scheme, (p.hostname or "").lower(), p.port or (443 if p.scheme == "https" else 80),
-                                 "POST")
+        self._dest = Destination(
+            p.scheme, (p.hostname or "").lower(), p.port or (443 if p.scheme == "https" else 80), "POST"
+        )
 
     def destination(self) -> Destination | None:
         return self._dest
@@ -81,8 +88,9 @@ class HttpMessageExecutor:
     async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
         try:
             async with self._client(permit) as client:
-                r = await client.post(self.url, json={"to": args["to"], "body": args["body"]},
-                                      headers=self._headers(effect_key))
+                r = await client.post(
+                    self.url, json={"to": args["to"], "body": args["body"]}, headers=self._headers(effect_key)
+                )
         except httpx.ConnectError as e:
             raise ExecutorFailed("connect") from e  # nothing was sent: connection never established
         except httpx.HTTPError as e:
@@ -115,8 +123,15 @@ class SandboxCellExecutor:
     bound to the admitted argv/cwd/run/lease/intent; the supervisor (no DB, no secrets, no network) verifies it. A lost
     connection after the request was delivered is UNKNOWN (the command may have run)."""
 
-    def __init__(self, endpoint: str, rpc_key: bytes, grant_key: bytes, *, wall_ms: int = 60_000,
-                 memory_bytes: int = 512 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        rpc_key: bytes,
+        grant_key: bytes,
+        *,
+        wall_ms: int = 60_000,
+        memory_bytes: int = 512 * 1024 * 1024,
+    ) -> None:
         self.endpoint, self.rpc_key, self.grant_key = endpoint, rpc_key, grant_key
         self.wall_ms, self.memory_bytes = wall_ms, memory_bytes
         self.context: dict[str, Any] = {}
@@ -135,13 +150,24 @@ class SandboxCellExecutor:
         ctx = self.context.get(effect_key)
         if ctx is None:
             raise ExecutorFailed("no admission context")
-        g = Grant(uuid.uuid4().hex, ctx["tenant_id"], ctx["task_id"], ctx["run_id"], ctx["intent_id"],
-                  ctx["lease_epoch"], tuple(args["argv"]), args["cwdRelative"], self.wall_ms, self.memory_bytes,
-                  int(time.time()) + 120)
+        g = Grant(
+            uuid.uuid4().hex,
+            ctx["tenant_id"],
+            ctx["task_id"],
+            ctx["run_id"],
+            ctx["intent_id"],
+            ctx["lease_epoch"],
+            tuple(args["argv"]),
+            args["cwdRelative"],
+            self.wall_ms,
+            self.memory_bytes,
+            int(time.time()) + 120,
+        )
         client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
         try:
-            res = await client.call("exec.run", {"grant": sign(self.grant_key, g), "argv": args["argv"],
-                                                 "cwdRelative": args["cwdRelative"]})
+            res = await client.call(
+                "exec.run", {"grant": sign(self.grant_key, g), "argv": args["argv"], "cwdRelative": args["cwdRelative"]}
+            )
         except RpcError as e:
             raise ExecutorFailed(e.code) from e  # refused before execution (grant/auth)
         except ConnectionRefusedError as e:
@@ -150,8 +176,12 @@ class SandboxCellExecutor:
             raise ExecutorUnknown(type(e).__name__) from e
         if res.get("status") == "REFUSED":
             raise ExecutorFailed(str(res.get("reason")))
-        return {"exitCode": res["exitCode"], "timedOut": res["timedOut"], "stdout": res["stdout"][:8000],
-                "stderr": res["stderr"][:4000]}
+        return {
+            "exitCode": res["exitCode"],
+            "timedOut": res["timedOut"],
+            "stdout": res["stdout"][:8000],
+            "stderr": res["stderr"][:4000],
+        }
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
         return None
@@ -164,7 +194,8 @@ def from_env() -> dict[str, Executor]:
     url = os.environ.get("AIAGENT_MESSAGE_RECEIVER_URL")
     if url:
         out["http_message"] = HttpMessageExecutor(
-            url, proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
+            url,
+            proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
             credential=secret("AIAGENT_MESSAGE_RECEIVER_TOKEN", required=False),
             credential_recipient=os.environ.get("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST"),
         )

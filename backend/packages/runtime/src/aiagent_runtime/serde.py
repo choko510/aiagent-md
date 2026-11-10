@@ -14,9 +14,9 @@ from typing import Any
 
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 
-import ormsgpack  # noqa: E402
-from langgraph.checkpoint.serde import _msgpack as lg_msgpack  # noqa: E402
-from langgraph.checkpoint.serde.jsonplus import (  # noqa: E402
+import ormsgpack
+from langgraph.checkpoint.serde import _msgpack as lg_msgpack
+from langgraph.checkpoint.serde.jsonplus import (
     EXT_CONSTRUCTOR_KW_ARGS,
     EXT_CONSTRUCTOR_POS_ARGS,
     EXT_CONSTRUCTOR_SINGLE_ARG,
@@ -34,27 +34,31 @@ class CheckpointRejected(Exception):
 
 
 # Types our graph state legitimately contains (messages, interrupts, sends, deepagents state). Nothing else.
-ALLOWED_TYPES: frozenset[tuple[str, str]] = frozenset({
-    ("langchain_core.messages.human", "HumanMessage"),
-    ("langchain_core.messages.ai", "AIMessage"),
-    ("langchain_core.messages.tool", "ToolMessage"),
-    ("langchain_core.messages.system", "SystemMessage"),
-    ("langchain_core.messages.base", "BaseMessage"),
-    ("langchain_core.messages.modifier", "RemoveMessage"),
-    ("langgraph.types", "Interrupt"),
-    ("langgraph.types", "Send"),
-    ("langgraph.types", "Command"),
-    ("datetime", "datetime"),
-    ("datetime", "timezone"),
-    ("datetime", "timedelta"),
-    ("uuid", "UUID"),
-    ("builtins", "set"),
-    ("builtins", "frozenset"),
-    ("collections", "deque"),
-})
-ALLOWED_METHODS: frozenset[tuple[str, str, str]] = frozenset({
-    ("datetime", "datetime", "fromisoformat"),
-})
+ALLOWED_TYPES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("langchain_core.messages.human", "HumanMessage"),
+        ("langchain_core.messages.ai", "AIMessage"),
+        ("langchain_core.messages.tool", "ToolMessage"),
+        ("langchain_core.messages.system", "SystemMessage"),
+        ("langchain_core.messages.base", "BaseMessage"),
+        ("langchain_core.messages.modifier", "RemoveMessage"),
+        ("langgraph.types", "Interrupt"),
+        ("langgraph.types", "Send"),
+        ("langgraph.types", "Command"),
+        ("datetime", "datetime"),
+        ("datetime", "timezone"),
+        ("datetime", "timedelta"),
+        ("uuid", "UUID"),
+        ("builtins", "set"),
+        ("builtins", "frozenset"),
+        ("collections", "deque"),
+    }
+)
+ALLOWED_METHODS: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("datetime", "datetime", "fromisoformat"),
+    }
+)
 ALLOWED_ENVELOPES = frozenset({"null", "msgpack", "bytes", "bytearray"})
 
 
@@ -65,9 +69,8 @@ def _peek(data: bytes) -> Any:
 
 class StrictSerializer(JsonPlusSerializer):
     def __init__(self) -> None:
-        super().__init__(pickle_fallback=False, allowed_json_modules=None,
-                         allowed_msgpack_modules=list(ALLOWED_TYPES))  # type: ignore[arg-type]
-        inner = self._unpack_ext_hook
+        super().__init__(pickle_fallback=False, allowed_json_modules=None, allowed_msgpack_modules=list(ALLOWED_TYPES))  # type: ignore[arg-type]
+        inner = self._unpack_ext_hook  # type: ignore[has-type]
 
         def guarded(code: int, data: bytes) -> Any:
             if code == EXT_DELTA_SNAPSHOT:
@@ -90,15 +93,19 @@ class StrictSerializer(JsonPlusSerializer):
             else:
                 raise CheckpointRejected(f"unknown ext code {code}")
             out = inner(code, data)
-            if isinstance(out, (dict, list)) and code != EXT_PYDANTIC_V2 and key not in lg_msgpack.SAFE_MSGPACK_TYPES \
-                    and key not in ALLOWED_TYPES:
+            if (
+                isinstance(out, (dict, list))
+                and code != EXT_PYDANTIC_V2
+                and key not in lg_msgpack.SAFE_MSGPACK_TYPES
+                and key not in ALLOWED_TYPES
+            ):
                 raise CheckpointRejected("blocked type returned as raw data")
             return out
 
         self._unpack_ext_hook = guarded
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
-        type_, payload = data
+        type_, _payload = data
         if type_ not in ALLOWED_ENVELOPES:
             raise CheckpointRejected(f"envelope {type_!r} not allowed")
         try:

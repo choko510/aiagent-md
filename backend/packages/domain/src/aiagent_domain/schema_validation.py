@@ -23,10 +23,11 @@ def _range(kind: str) -> Any:
             n, b = int(instance), int(bound)
             if (kind == "min" and n < b) or (kind == "max" and n > b):
                 yield jsonschema.ValidationError(f"{instance} outside int64 {kind} {bound}")
+
     return check
 
 
-Int64Validator = validators.extend(
+Int64Validator = validators.extend(  # type: ignore[no-untyped-call]
     jsonschema.Draft202012Validator, {"x-int64-min": _range("min"), "x-int64-max": _range("max")}
 )
 

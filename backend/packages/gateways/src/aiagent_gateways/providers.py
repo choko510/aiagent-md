@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-
 from aiagent_core.config import Secret
 
 
@@ -70,10 +69,16 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
         if "search" in r:
             return {"content": "child-result: widget price is 42"}
         return _call("search", query="widget price")
-    steer_idx = max((i for i, m in enumerate(messages) if m.get("kind") == "user" and "goal revised" in
-                     str(m.get("content", "")).lower()), default=None)
+    steer_idx = max(
+        (
+            i
+            for i, m in enumerate(messages)
+            if m.get("kind") == "user" and "goal revised" in str(m.get("content", "")).lower()
+        ),
+        default=None,
+    )
     if steer_idx is not None:
-        after = _results(messages[steer_idx + 1:])
+        after = _results(messages[steer_idx + 1 :])
         if "bob" in str(messages[steer_idx].get("content", "")).lower():
             if "send_message" in after:
                 return {"content": f"done:{after['send_message'].get('status')}"}
@@ -88,8 +93,13 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
     if "parallel" in first:
         if any(m.get("kind") == "tool" for m in messages):
             return {"content": "done:parallel"}
-        return {"content": "", "tool_calls": [{"name": "send_message", "args": {"to": "alice", "body": "hi"}},
-                                               {"name": "send_message", "args": {"to": "bob", "body": "hi"}}]}
+        return {
+            "content": "",
+            "tool_calls": [
+                {"name": "send_message", "args": {"to": "alice", "body": "hi"}},
+                {"name": "send_message", "args": {"to": "bob", "body": "hi"}},
+            ],
+        }
     if "sandbox" in first:
         if "sandbox_exec" in r:
             return {"content": f"done:sandbox:{r['sandbox_exec'].get('status')}"}
@@ -114,24 +124,34 @@ class FakeModelProvider:
     def capability(self, model: str) -> Capability:
         return Capability(True, True, 400_000, "fake", False)
 
-    async def stream(self, model: str, system: str, messages: list[dict[str, Any]],
-                     tools: list[dict[str, Any]], *, stream: str = "main") -> AsyncIterator[ProviderEvent]:
+    async def stream(
+        self,
+        model: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: str = "main",
+    ) -> AsyncIterator[ProviderEvent]:
         msgs = messages
         names = [t["name"] for t in tools]
         out = fake_policy(stream, msgs, names)
         if os.environ.get("AIAGENT_FAKE_PROVIDER_FAIL"):
             code = os.environ["AIAGENT_FAKE_PROVIDER_FAIL"]
             raise ProviderError(code, code in ("RATE_LIMITED", "UNAVAILABLE"))
-        yield ProviderEvent("reasoning", text="(private chain of thought: user=" + (msgs[0].get("content", "")[:20] if msgs else "") + ")")
+        yield ProviderEvent(
+            "reasoning",
+            text="(private chain of thought: user=" + (msgs[0].get("content", "")[:20] if msgs else "") + ")",
+        )
         text = out.get("content", "")
         for i in range(0, len(text), 8):
-            yield ProviderEvent("text", text=text[i:i + 8])
+            yield ProviderEvent("text", text=text[i : i + 8])
         for tc in out.get("tool_calls", []):
             tid = "call_" + uuid.uuid4().hex[:16]
             raw = json.dumps(tc["args"])
             yield ProviderEvent("tool_start", tool_id=tid, tool_name=tc["name"])
             for i in range(0, len(raw), 5):
-                yield ProviderEvent("tool_args", tool_id=tid, text=raw[i:i + 5])
+                yield ProviderEvent("tool_args", tool_id=tid, text=raw[i : i + 5])
             yield ProviderEvent("tool_end", tool_id=tid)
         chars = sum(len(str(m.get("content", ""))) for m in msgs)
         yield ProviderEvent("usage", usage={"input_tokens": chars // 4 + 1, "output_tokens": len(text) // 4 + 1})
@@ -159,21 +179,44 @@ class AnthropicProvider:
                 out.append({"role": "user", "content": m["content"]})
             elif m["kind"] == "assistant":
                 blocks: list[dict[str, Any]] = [{"type": "text", "text": m["content"]}] if m.get("content") else []
-                blocks += [{"type": "tool_use", "id": t["id"], "name": t["name"], "input": t["args"]}
-                           for t in m.get("tool_calls", [])]
+                blocks += [
+                    {"type": "tool_use", "id": t["id"], "name": t["name"], "input": t["args"]}
+                    for t in m.get("tool_calls", [])
+                ]
                 out.append({"role": "assistant", "content": blocks})
             elif m["kind"] == "tool":
-                out.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": m["tool_call_id"],
-                                                         "content": m["content"]}]})
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"]}],
+                    }
+                )
         return out
 
-    async def stream(self, model: str, system: str, messages: list[dict[str, Any]],
-                     tools: list[dict[str, Any]], *, stream: str = "main") -> AsyncIterator[ProviderEvent]:
-        body = {"model": model, "max_tokens": 4096, "stream": True, "system": system,
-                "messages": self._messages(messages),
-                "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
-                          for t in tools]}
-        headers = {"x-api-key": self.key.reveal(), "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    async def stream(
+        self,
+        model: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: str = "main",
+    ) -> AsyncIterator[ProviderEvent]:
+        body = {
+            "model": model,
+            "max_tokens": 4096,
+            "stream": True,
+            "system": system,
+            "messages": self._messages(messages),
+            "tools": [
+                {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in tools
+            ],
+        }
+        headers = {
+            "x-api-key": self.key.reveal(),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
         async with httpx.AsyncClient(proxy=self.proxy, timeout=self.timeout_s, trust_env=False) as client:
             async with client.stream("POST", self.URL, headers=headers, json=body) as resp:
                 if resp.status_code in (429, 529):
@@ -190,8 +233,9 @@ class AnthropicProvider:
                     t = ev.get("type")
                     if t == "content_block_start" and ev["content_block"]["type"] == "tool_use":
                         current[ev["index"]] = ev["content_block"]["id"]
-                        yield ProviderEvent("tool_start", tool_id=ev["content_block"]["id"],
-                                            tool_name=ev["content_block"]["name"])
+                        yield ProviderEvent(
+                            "tool_start", tool_id=ev["content_block"]["id"], tool_name=ev["content_block"]["name"]
+                        )
                     elif t == "content_block_delta":
                         d = ev["delta"]
                         if d["type"] == "text_delta":

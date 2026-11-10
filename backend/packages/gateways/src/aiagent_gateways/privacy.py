@@ -14,9 +14,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
 from aiagent_domain.tools import TOOLS, ToolSpec
+from jsonschema import Draft202012Validator
 
 from .providers import ProviderEvent
 

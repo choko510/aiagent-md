@@ -4,16 +4,11 @@ Sentinel permit -> Trusted Egress -> receiver -> Effect Ledger -> HEAD -> SUCCEE
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
-
 import pytest
-from fastapi.testclient import TestClient
-
-from aiagent_api.app import create_app
 from aiagent_core import admin, control
 from aiagent_core.db import Database
 from conftest import PgEnv
+from fastapi.testclient import TestClient
 from stack import Stack
 
 pytestmark = pytest.mark.pg
@@ -46,17 +41,24 @@ def test_e2e_approval_resume_tool_complete(stack: Stack, api: TestClient, pg: Pg
     assert sent[0]["authorized"] is True  # recipient-bound credential injected by the Tool Gateway only
     with Database(pg.owner).conn() as c:
         assert control.verify_head_chain(c, t["tenantId"], st["run"]["id"])
-        eff = c.execute("SELECT outcome_code, external_receipt_ref FROM agent.side_effect_records e JOIN agent.tool_intents i"
-                        " ON i.tenant_id=e.tenant_id AND i.id=e.tool_intent_id WHERE i.run_id=%s", (st["run"]["id"],)).fetchall()
+        eff = c.execute(
+            "SELECT outcome_code, external_receipt_ref FROM agent.side_effect_records e JOIN agent.tool_intents i"
+            " ON i.tenant_id=e.tenant_id AND i.id=e.tool_intent_id WHERE i.run_id=%s",
+            (st["run"]["id"],),
+        ).fetchall()
         assert [e["outcome_code"] for e in eff] == ["CONFIRMED"] and eff[0]["external_receipt_ref"].startswith("rcpt_")
-        rc = c.execute("SELECT decision, reason_code FROM agent.egress_receipts WHERE tenant_id=%s", (t["tenantId"],)).fetchall()
+        rc = c.execute(
+            "SELECT decision, reason_code FROM agent.egress_receipts WHERE tenant_id=%s", (t["tenantId"],)
+        ).fetchall()
         assert [x["decision"] for x in rc] == ["ALLOWED"]
         # the provider credential never left the Model Gateway: not in HEAD, framework checkpoints, events, ledger
-        for q in ("SELECT checkpoint_json::text AS x FROM agent.run_checkpoints",
-                  "SELECT payload_json::text AS x FROM agent.domain_events",
-                  "SELECT coalesce(result_json::text,'') AS x FROM agent.tool_intents",
-                  "SELECT encode(blob, 'escape') AS x FROM lg_checkpoint.checkpoint_blobs",
-                  "SELECT checkpoint::text AS x FROM lg_checkpoint.checkpoints"):
+        for q in (
+            "SELECT checkpoint_json::text AS x FROM agent.run_checkpoints",
+            "SELECT payload_json::text AS x FROM agent.domain_events",
+            "SELECT coalesce(result_json::text,'') AS x FROM agent.tool_intents",
+            "SELECT encode(blob, 'escape') AS x FROM lg_checkpoint.checkpoint_blobs",
+            "SELECT checkpoint::text AS x FROM lg_checkpoint.checkpoints",
+        ):
             assert not any(stack.provider_secret in (row["x"] or "") for row in c.execute(q).fetchall()), q
     assert stack.provider_secret not in r.stderr + stack.logs()
     assert stack.receiver_token not in r.stderr + stack.logs()

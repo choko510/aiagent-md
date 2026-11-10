@@ -29,19 +29,30 @@ async def main(port: int, log: str, hang: bool, token: str) -> None:
                 rcpt = "rcpt_" + hashlib.sha256(key.encode()).hexdigest()[:12]
                 seen[key] = rcpt
                 with open(log, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"key": key, "body": json.loads(body), "authorized":
-                                        h.get("authorization") == f"Bearer {token}" if token else None,
-                                        "via_proxy_auth": "proxy-authorization" in h}) + "\n")
+                    f.write(
+                        json.dumps(
+                            {
+                                "key": key,
+                                "body": json.loads(body),
+                                "authorized": h.get("authorization") == f"Bearer {token}" if token else None,
+                                "via_proxy_auth": "proxy-authorization" in h,
+                            }
+                        )
+                        + "\n"
+                    )
                 if hang:
                     await asyncio.sleep(3600)
                 out, code = json.dumps({"receipt": rcpt}).encode(), 200
             elif method == "GET" and path.startswith("/receipts/"):
-                k = path[len("/receipts/"):]
+                k = path[len("/receipts/") :]
                 out, code = (json.dumps({"receipt": seen[k]}).encode(), 200) if k in seen else (b"{}", 404)
             else:
                 out, code = b"{}", 404
-            w.write(f"HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {len(out)}\r\n"
-                    "connection: close\r\n\r\n".encode() + out)
+            w.write(
+                f"HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {len(out)}\r\n"
+                "connection: close\r\n\r\n".encode()
+                + out
+            )
             await w.drain()
         except Exception:
             pass
@@ -54,5 +65,11 @@ async def main(port: int, log: str, hang: bool, token: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(int(sys.argv[1]), sys.argv[2], len(sys.argv) > 3 and sys.argv[3] == "hang",
-                     sys.argv[4] if len(sys.argv) > 4 else ""))
+    asyncio.run(
+        main(
+            int(sys.argv[1]),
+            sys.argv[2],
+            len(sys.argv) > 3 and sys.argv[3] == "hang",
+            sys.argv[4] if len(sys.argv) > 4 else "",
+        )
+    )

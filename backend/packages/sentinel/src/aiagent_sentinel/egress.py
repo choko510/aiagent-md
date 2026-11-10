@@ -38,8 +38,15 @@ async def system_resolver(host: str, port: int) -> list[str]:
 
 
 class EgressProxy:
-    def __init__(self, sentinel: Sentinel, config: EgressConfig, *, resolver: Resolver = system_resolver,
-                 connect_timeout_s: float = 10.0, idle_timeout_s: float = 120.0) -> None:
+    def __init__(
+        self,
+        sentinel: Sentinel,
+        config: EgressConfig,
+        *,
+        resolver: Resolver = system_resolver,
+        connect_timeout_s: float = 10.0,
+        idle_timeout_s: float = 120.0,
+    ) -> None:
         self.sentinel, self.config, self.resolver = sentinel, config, resolver
         self.connect_timeout_s, self.idle_timeout_s = connect_timeout_s, idle_timeout_s
         self._server: asyncio.base_events.Server | None = None
@@ -57,8 +64,11 @@ class EgressProxy:
     @staticmethod
     async def _deny(w: asyncio.StreamWriter, code: str) -> None:
         body = f'{{"denied":"{code}"}}'.encode()
-        w.write(b"HTTP/1.1 403 Forbidden\r\nx-aiagent-egress: denied\r\ncontent-type: application/json\r\n"
-                + f"content-length: {len(body)}\r\nconnection: close\r\n\r\n".encode() + body)
+        w.write(
+            b"HTTP/1.1 403 Forbidden\r\nx-aiagent-egress: denied\r\ncontent-type: application/json\r\n"
+            + f"content-length: {len(body)}\r\nconnection: close\r\n\r\n".encode()
+            + body
+        )
         with contextlib.suppress(Exception):
             await w.drain()
 
@@ -97,8 +107,9 @@ class EgressProxy:
                 raise EgressDenied("IDENTITY_NOT_ALLOWED")
             if dest.needs_permit:
                 bound_method = method if method != "CONNECT" else next(iter(sorted(dest.methods - {"GET"})), "POST")
-                tenant, pid = await asyncio.to_thread(self.sentinel.verify_and_consume, token, scheme, host, port,
-                                                      bound_method)
+                tenant, pid = await asyncio.to_thread(
+                    self.sentinel.verify_and_consume, token, scheme, host, port, bound_method
+                )
             else:
                 expected = self.config.static_tokens.get(identity, "")
                 if not expected or not hmac.compare_digest(expected, token):
@@ -115,7 +126,15 @@ class EgressProxy:
                 w.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await w.drain()
             else:
-                hop = {"proxy-authorization", "proxy-connection", "connection", "keep-alive", "te", "trailer", "upgrade"}
+                hop = {
+                    "proxy-authorization",
+                    "proxy-connection",
+                    "connection",
+                    "keep-alive",
+                    "te",
+                    "trailer",
+                    "upgrade",
+                }
                 out = [f"{method} {inner} {version}", f"Host: {host}:{port}", "Connection: close"]
                 out += [f"{k}: {v}" for k, v in headers if k.lower() not in hop and k.lower() != "host"]
                 uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
@@ -137,8 +156,14 @@ class EgressProxy:
             with contextlib.suppress(Exception):
                 w.close()
 
-    async def _splice(self, cr: asyncio.StreamReader, cw: asyncio.StreamWriter, ur: asyncio.StreamReader,
-                      uw: asyncio.StreamWriter, both: bool) -> None:
+    async def _splice(
+        self,
+        cr: asyncio.StreamReader,
+        cw: asyncio.StreamWriter,
+        ur: asyncio.StreamReader,
+        uw: asyncio.StreamWriter,
+        both: bool,
+    ) -> None:
         async def pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
             with contextlib.suppress(Exception):
                 while data := await asyncio.wait_for(src.read(65536), timeout=self.idle_timeout_s):

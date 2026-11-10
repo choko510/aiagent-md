@@ -32,7 +32,12 @@ GRANT SELECT, INSERT ON agent.domain_events TO aiagent_api, aiagent_runtime, aia
 GRANT SELECT, INSERT ON agent.outbox_messages TO aiagent_api, aiagent_runtime, aiagent_tool_gateway, aiagent_relay;
 
 -- API: user commands. Tenant isolation by RLS (below) + owner checks in SQL.
-GRANT SELECT, INSERT, UPDATE ON agent.tasks, agent.runs, agent.api_idempotency, agent.schedules TO aiagent_api;
+GRANT SELECT, INSERT ON agent.tasks, agent.runs TO aiagent_api;
+GRANT SELECT, INSERT, UPDATE ON agent.api_idempotency, agent.schedules TO aiagent_api;
+-- Column grants: user commands change state/goal/control flags only, never budget, model policy or fences.
+GRANT UPDATE (status_code, goal_revision, active_run_id, record_version, updated_at) ON agent.tasks TO aiagent_api;
+GRANT UPDATE (status_code, cancel_requested, pause_requested, ended_at, head_revision, current_checkpoint_id,
+  record_version, updated_at) ON agent.runs TO aiagent_api;
 GRANT SELECT, INSERT ON agent.task_goal_revisions, agent.run_checkpoints, agent.audit_records TO aiagent_api;
 GRANT SELECT, UPDATE ON agent.approval_records TO aiagent_api;
 GRANT SELECT ON agent.tool_intents, agent.side_effect_records, agent.model_attempts, agent.run_stream_chunks,
@@ -41,7 +46,11 @@ GRANT SELECT ON agent.tool_intents, agent.side_effect_records, agent.model_attem
 -- Runtime worker: claims/state, reads HEAD; never writes HEAD, ledger, approvals or framework schema.
 GRANT SELECT ON agent.tasks, agent.task_goal_revisions, agent.run_checkpoints, agent.tool_intents,
   agent.approval_records TO aiagent_runtime;
-GRANT SELECT, UPDATE ON agent.runs TO aiagent_runtime;
+GRANT SELECT ON agent.runs TO aiagent_runtime;
+-- Column grants: the worker owns lease/state/derived-cache pointer; it can NOT touch budget, model policy, HEAD
+-- pointers or restore generation (those belong to the gateways / operator).
+GRANT UPDATE (status_code, lease_epoch, lease_owner_ref, lease_expires_at, heartbeat_at, started_at, ended_at,
+  framework_ref, result_text, error_code, record_version, updated_at) ON agent.runs TO aiagent_runtime;
 GRANT UPDATE (status_code, active_run_id, record_version, updated_at) ON agent.tasks TO aiagent_runtime;
 GRANT SELECT, UPDATE ON queue.jobs TO aiagent_runtime;
 GRANT SELECT ON queue.queues TO aiagent_runtime;

@@ -10,6 +10,7 @@ import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -20,8 +21,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from aiagent_core import admin, migrate  # noqa: E402
 from aiagent_core.db import Database, connect  # noqa: E402
 
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
+    from stack import Stack
+
 PG = os.environ.get("AIAGENT_TEST_PG_URL")
 ROLE_PW = "test-" + secrets.token_hex(8)
+SESSION = secrets.token_hex(3)
 
 
 def _with_db(url: str, dbname: str, user: str | None = None, password: str | None = None) -> str:
@@ -50,7 +56,8 @@ def make_database(prefix: str = "aiagent_t") -> PgEnv:
         c.execute(f'CREATE DATABASE "{name}"')
     owner = _with_db(PG, name)
     migrate.up(owner)
-    logins = admin.create_logins(owner, {k: ROLE_PW for k in admin.GROUPS})
+    # login roles are cluster-wide: a per-session prefix keeps concurrent test sessions from clobbering each other
+    logins = admin.create_logins(owner, {k: ROLE_PW for k in admin.GROUPS}, prefix=f"aiagent_t{SESSION}_")
     dsn = {k: _with_db(PG, name, v, ROLE_PW) for k, v in logins.items()}
     return PgEnv(owner, dsn, name)
 
@@ -86,7 +93,7 @@ def tenant(pg: PgEnv) -> dict[str, str]:
 
 # ------------------------------------------------------------------ multi-process stack + API client (E2E suites)
 @pytest.fixture(scope="session")
-def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator["Stack"]:
+def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
     from stack import Stack
 
     s = Stack(pg.dsn, tmp_path_factory.mktemp("stack"), owner_dsn=pg.owner).start_all()
@@ -95,10 +102,9 @@ def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator["Stac
 
 
 @pytest.fixture()
-def api(pg: PgEnv) -> Iterator["TestClient"]:
-    from fastapi.testclient import TestClient
-
+def api(pg: PgEnv) -> Iterator[TestClient]:
     from aiagent_api.app import create_app
+    from fastapi.testclient import TestClient
 
     db = Database(pg.dsn["api"], max_size=4)
     with TestClient(create_app(db)) as c:

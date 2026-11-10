@@ -8,18 +8,30 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
-from psycopg.types.json import Jsonb
-
 from aiagent_domain import sha256_hex, utc_instant, uuid7
 from aiagent_domain.generated import RunJobPointerV1
+from psycopg.types.json import Jsonb
 
 from .db import Row
 
-EVENT_KINDS = frozenset({
-    "task.accepted", "task.state_changed", "task.goal_revised", "run.created", "run.claimed", "run.state_changed",
-    "run.checkpointed", "approval.requested", "approval.decided", "approval.revoked", "tool.intent_recorded",
-    "tool.effect_recorded", "tool.effect_unknown", "result.published",
-})
+EVENT_KINDS = frozenset(
+    {
+        "task.accepted",
+        "task.state_changed",
+        "task.goal_revised",
+        "run.created",
+        "run.claimed",
+        "run.state_changed",
+        "run.checkpointed",
+        "approval.requested",
+        "approval.decided",
+        "approval.revoked",
+        "tool.intent_recorded",
+        "tool.effect_recorded",
+        "tool.effect_unknown",
+        "result.published",
+    }
+)
 _FORBIDDEN_PAYLOAD_KEYS = frozenset({"arguments", "args", "content", "secret", "token", "cookie", "password", "prompt"})
 
 
@@ -52,9 +64,7 @@ def append_event(
         " WHERE tenant_id=%s AND aggregate_type=%s AND aggregate_id=%s RETURNING next_aggregate_sequence - 1 AS s",
         (tenant_id, aggregate_type, aggregate_id),
     ).fetchone()
-    conn.execute(
-        "INSERT INTO agent.tenant_event_counters(tenant_id) VALUES (%s) ON CONFLICT DO NOTHING", (tenant_id,)
-    )
+    conn.execute("INSERT INTO agent.tenant_event_counters(tenant_id) VALUES (%s) ON CONFLICT DO NOTHING", (tenant_id,))
     off = conn.execute(
         "UPDATE agent.tenant_event_counters SET next_delivery_offset = next_delivery_offset + 1 WHERE tenant_id=%s"
         " RETURNING next_delivery_offset - 1 AS o",
@@ -67,9 +77,21 @@ def append_event(
         " delivery_offset, event_kind, payload_json, actor_json, audience_code, owner_user_id, task_id, run_id,"
         " causation_event_id, correlation_id, occurred_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         (
-            tenant_id, event_id, aggregate_type, aggregate_id, seq["s"], off["o"], kind, Jsonb(payload), Jsonb(actor),
-            "owner_private" if owner_user_id else "operator_audit", owner_user_id, task_id, run_id,
-            causation_event_id, correlation_id or (task_id or aggregate_id),
+            tenant_id,
+            event_id,
+            aggregate_type,
+            aggregate_id,
+            seq["s"],
+            off["o"],
+            kind,
+            Jsonb(payload),
+            Jsonb(actor),
+            "owner_private" if owner_user_id else "operator_audit",
+            owner_user_id,
+            task_id,
+            run_id,
+            causation_event_id,
+            correlation_id or (task_id or aggregate_id),
         ),
     )
     return event_id

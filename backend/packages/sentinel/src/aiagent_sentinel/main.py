@@ -29,14 +29,28 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
     async def authorize(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
             claim = Claim.from_wire(body["claim"])
-            args = (str(body["intentId"]), str(body["scheme"]), str(body["host"]), int(body["port"]), str(body["method"]))
+            args = (
+                str(body["intentId"]),
+                str(body["scheme"]),
+                str(body["host"]),
+                int(body["port"]),
+                str(body["method"]),
+            )
         except Exception:
             raise RpcError("BAD_REQUEST") from None
         return {"permit": await asyncio.to_thread(s.authorize, claim, *args)}
 
     async def authorize_reconcile(caller: str, body: dict[str, Any]) -> dict[str, Any]:
-        return {"permit": await asyncio.to_thread(s.authorize_reconcile, str(body["tenantId"]), str(body["intentId"]),
-                                                  str(body["scheme"]), str(body["host"]), int(body["port"]))}
+        return {
+            "permit": await asyncio.to_thread(
+                s.authorize_reconcile,
+                str(body["tenantId"]),
+                str(body["intentId"]),
+                str(body["scheme"]),
+                str(body["host"]),
+                int(body["port"]),
+            )
+        }
 
     srv.register("sentinel.authorize", authorize, {"tool_gateway"})
     srv.register("sentinel.authorize_reconcile", authorize_reconcile, {"tool_gateway"})
@@ -51,11 +65,17 @@ async def serve() -> None:
     key = bytes.fromhex(config.secret("AIAGENT_SENTINEL_PERMIT_KEY").reveal())  # type: ignore[union-attr]
     db = Database(config.secret("AIAGENT_SENTINEL_DSN").reveal(), max_size=8, name="sentinel")  # type: ignore[union-attr]
     s = Sentinel(db, cfg, key)
-    srv = build_server(parse_keys(config.secret("AIAGENT_SENTINEL_RPC_KEYS").reveal()),  # type: ignore[union-attr]
-                       config.env("AIAGENT_SENTINEL_ENDPOINT"), s)
+    srv = build_server(
+        parse_keys(config.secret("AIAGENT_SENTINEL_RPC_KEYS").reveal()),  # type: ignore[union-attr]
+        config.env("AIAGENT_SENTINEL_ENDPOINT"),
+        s,
+    )
     proxy = EgressProxy(s, cfg)
-    life = Lifecycle("sentinel", health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
-                     health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"))
+    life = Lifecycle(
+        "sentinel",
+        health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
+        health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"),
+    )
     life.install_signals()
     await srv.start()
     host, _, port = config.env("AIAGENT_EGRESS_LISTEN", "127.0.0.1:3128").rpartition(":")

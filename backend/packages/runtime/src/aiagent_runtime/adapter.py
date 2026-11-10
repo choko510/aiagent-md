@@ -12,15 +12,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from langgraph.errors import GraphInterrupt
-from langgraph.types import Command
-
 from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_domain import sha256_hex
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import TOOLS
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 
 from .agent import (
     AwaitingApproval,
@@ -43,15 +42,23 @@ class DerivedStateMismatch(Exception):
 
 @dataclass
 class SegmentOutcome:
-    status: str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | BUDGET | ERROR
+    status: (
+        str  # FINAL | AWAITING_APPROVAL | UNKNOWN_EFFECT | REBUILD | FENCEDOUT | STALEGOAL | CANCELLED | BUDGET | ERROR
+    )
     text: str | None = None
     approval_ids: list[str] = field(default_factory=list)
     detail: str | None = None
 
 
-_CODE_TO_STATUS = {"FENCED": "FENCEDOUT", "RESTORE_FENCED": "FENCEDOUT", "TENANT": "FENCEDOUT",
-                   "STALE_GOAL": "STALEGOAL", "CANCELLED": "CANCELLED", "TERMINAL": "CANCELLED",
-                   "BUDGET_EXHAUSTED": "BUDGET"}
+_CODE_TO_STATUS = {
+    "FENCED": "FENCEDOUT",
+    "RESTORE_FENCED": "FENCEDOUT",
+    "TENANT": "FENCEDOUT",
+    "STALE_GOAL": "STALEGOAL",
+    "CANCELLED": "CANCELLED",
+    "TERMINAL": "CANCELLED",
+    "BUDGET_EXHAUSTED": "BUDGET",
+}
 
 
 def normalize_order(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -63,7 +70,8 @@ def normalize_order(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for e in entries:
         if e["kind"] == "tool":
             if e["tool_call_id"] not in placed and not any(
-                    t["id"] == e["tool_call_id"] for a in out if a["kind"] == "assistant" for t in a.get("tool_calls", [])):
+                t["id"] == e["tool_call_id"] for a in out if a["kind"] == "assistant" for t in a.get("tool_calls", [])
+            ):
                 out.append(e)
                 placed.add(e["tool_call_id"])
             continue
@@ -77,9 +85,12 @@ def normalize_order(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _norm(m: dict[str, Any]) -> dict[str, Any]:
-    return {"kind": m.get("kind"), "content": m.get("content") or "",
-            "tool_call_id": m.get("tool_call_id") if m.get("kind") == "tool" else None,
-            "tool_calls": [[tc.get("id"), tc.get("name"), tc.get("args")] for tc in m.get("tool_calls") or []]}
+    return {
+        "kind": m.get("kind"),
+        "content": m.get("content") or "",
+        "tool_call_id": m.get("tool_call_id") if m.get("kind") == "tool" else None,
+        "tool_calls": [[tc.get("id"), tc.get("name"), tc.get("args")] for tc in m.get("tool_calls") or []],
+    }
 
 
 def verify_against_head(framework: list[dict[str, Any]], head: list[dict[str, Any]], *, complete: bool = False) -> int:
@@ -91,8 +102,9 @@ def verify_against_head(framework: list[dict[str, Any]], head: list[dict[str, An
         raise DerivedStateMismatch(f"framework ahead of HEAD ({len(f)} > {len(h)})")
     for i, (a, b) in enumerate(zip(f, h, strict=False)):
         if a != b:
-            raise DerivedStateMismatch(f"message {i} differs: kind={a['kind']}/{b['kind']} "
-                                       f"fw={sha256_hex(a)[:16]} head={sha256_hex(b)[:16]}")
+            raise DerivedStateMismatch(
+                f"message {i} differs: kind={a['kind']}/{b['kind']} fw={sha256_hex(a)[:16]} head={sha256_hex(b)[:16]}"
+            )
     if complete and len(f) != len(h):
         raise DerivedStateMismatch(f"framework final transcript shorter than HEAD ({len(f)} < {len(h)})")
     return len(f)
@@ -111,8 +123,15 @@ def final_in_head(head: list[dict[str, Any]]) -> bool:
 class DeepAgentsRuntime:
     name = "deepagents+langgraph"
 
-    def __init__(self, db: Database, checkpointer_dsn: str, gateways: Gateways, *, model: str = "fake-gateway",
-                 max_input_tokens: int = 100_000) -> None:
+    def __init__(
+        self,
+        db: Database,
+        checkpointer_dsn: str,
+        gateways: Gateways,
+        *,
+        model: str = "fake-gateway",
+        max_input_tokens: int = 100_000,
+    ) -> None:
         self.db, self.checkpointer_dsn, self.gw = db, checkpointer_dsn, gateways
         self.model, self.max_input_tokens = model, max_input_tokens
         self.graphs: dict[str, Any] = {}
@@ -126,8 +145,13 @@ class DeepAgentsRuntime:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
 
-        self.pool = AsyncConnectionPool(self.checkpointer_dsn, min_size=1, max_size=8, open=False, kwargs={
-            "autocommit": True, "prepare_threshold": 0, "row_factory": dict_row})
+        self.pool = AsyncConnectionPool(
+            self.checkpointer_dsn,
+            min_size=1,
+            max_size=8,
+            open=False,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
         await self.pool.open()
         self.saver = AsyncPostgresSaver(self.pool, serde=StrictSerializer())  # type: ignore[arg-type]
 
@@ -170,9 +194,15 @@ class DeepAgentsRuntime:
                     # an internal call (sub-agent / read_file) interrupted by a crash: record an explicit, ungrounded
                     # result so HEAD and framework agree; the model may re-delegate.
                     try:
-                        await rc.gw.tool.call("tool.record_internal", {
-                            "claim": rc.claim.to_wire(), "toolCallId": tc["id"], "tool": tc["name"],
-                            "content": "[interrupted before completion; no result]"})
+                        await rc.gw.tool.call(
+                            "tool.record_internal",
+                            {
+                                "claim": rc.claim.to_wire(),
+                                "toolCallId": tc["id"],
+                                "tool": tc["name"],
+                                "content": "[interrupted before completion; no result]",
+                            },
+                        )
                     except RpcError as err:
                         raise GatewayRejected(err.code) from None
 
@@ -211,8 +241,9 @@ class DeepAgentsRuntime:
                 cfg = self._cfg(ref, rc)
             result = await graph.ainvoke(inp, cfg, durability="sync")
             if result.get("__interrupt__"):
-                return SegmentOutcome("AWAITING_APPROVAL",
-                                      approval_ids=[str(i.value.get("approval_id")) for i in result["__interrupt__"]])
+                return SegmentOutcome(
+                    "AWAITING_APPROVAL", approval_ids=[str(i.value.get("approval_id")) for i in result["__interrupt__"]]
+                )
             fault("before_segment_return")
             head = self._head(claim)
             verify_against_head(to_neutral(result.get("messages", [])), head, complete=True)

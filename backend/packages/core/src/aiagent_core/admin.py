@@ -13,18 +13,22 @@ import argparse
 import secrets
 from typing import Any
 
-from psycopg import sql
-
 from aiagent_domain import uuid7
 from aiagent_domain.canonical import sha256_bytes
+from psycopg import sql
 
 from .config import secret
 from .db import connect
 
 GROUPS = {
-    "api": "aiagent_api", "runtime": "aiagent_runtime", "checkpointer": "aiagent_checkpointer",
-    "model_gateway": "aiagent_model_gateway", "tool_gateway": "aiagent_tool_gateway", "relay": "aiagent_relay",
-    "sentinel": "aiagent_sentinel", "ops": "aiagent_ops",
+    "api": "aiagent_api",
+    "runtime": "aiagent_runtime",
+    "checkpointer": "aiagent_checkpointer",
+    "model_gateway": "aiagent_model_gateway",
+    "tool_gateway": "aiagent_tool_gateway",
+    "relay": "aiagent_relay",
+    "sentinel": "aiagent_sentinel",
+    "ops": "aiagent_ops",
 }
 
 
@@ -38,8 +42,11 @@ def create_logins(owner_dsn: str, passwords: dict[str, str], *, prefix: str = "a
             login = f"{prefix}{short}"
             exists = c.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (login,)).fetchone()
             verb = sql.SQL("ALTER") if exists else sql.SQL("CREATE")
-            c.execute(sql.SQL("{} ROLE {} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD {}").format(
-                verb, sql.Identifier(login), sql.Literal(passwords[short])))
+            c.execute(
+                sql.SQL("{} ROLE {} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD {}").format(
+                    verb, sql.Identifier(login), sql.Literal(passwords[short])
+                )
+            )
             c.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(group), sql.Identifier(login)))
             path = "lg_checkpoint" if short == "checkpointer" else "agent"
             c.execute(sql.SQL("ALTER ROLE {} SET search_path = {}").format(sql.Identifier(login), sql.Identifier(path)))
@@ -55,8 +62,10 @@ def provision_tenant(owner_dsn: str) -> dict[str, Any]:
         c.execute("INSERT INTO agent.users(id) VALUES (%s)", (u,))
         c.execute("INSERT INTO agent.tenant_memberships(tenant_id, user_id) VALUES (%s,%s)", (t, u))
         c.execute("INSERT INTO agent.workspaces(tenant_id, id, owner_user_id) VALUES (%s,%s,%s)", (t, w, u))
-        c.execute("INSERT INTO agent.api_credentials(token_sha256, tenant_id, user_id, workspace_id) VALUES (%s,%s,%s,%s)",
-                  (sha256_bytes(token.encode()), t, u, w))
+        c.execute(
+            "INSERT INTO agent.api_credentials(token_sha256, tenant_id, user_id, workspace_id) VALUES (%s,%s,%s,%s)",
+            (sha256_bytes(token.encode()), t, u, w),
+        )
     return {"tenantId": t, "userId": u, "workspaceId": w, "token": token}
 
 
@@ -68,8 +77,10 @@ def add_user(owner_dsn: str, tenant_id: str) -> dict[str, Any]:
         c.execute("INSERT INTO agent.users(id) VALUES (%s)", (u,))
         c.execute("INSERT INTO agent.tenant_memberships(tenant_id, user_id) VALUES (%s,%s)", (tenant_id, u))
         c.execute("INSERT INTO agent.workspaces(tenant_id, id, owner_user_id) VALUES (%s,%s,%s)", (tenant_id, w, u))
-        c.execute("INSERT INTO agent.api_credentials(token_sha256, tenant_id, user_id, workspace_id) VALUES (%s,%s,%s,%s)",
-                  (sha256_bytes(token.encode()), tenant_id, u, w))
+        c.execute(
+            "INSERT INTO agent.api_credentials(token_sha256, tenant_id, user_id, workspace_id) VALUES (%s,%s,%s,%s)",
+            (sha256_bytes(token.encode()), tenant_id, u, w),
+        )
     return {"tenantId": tenant_id, "userId": u, "workspaceId": w, "token": token}
 
 
@@ -90,7 +101,9 @@ def adopt_runs_after_restore(owner_dsn: str) -> int:
     cleared; SENDING tool effects become UNKNOWN (they may or may not have happened) and are never auto-resent."""
     with connect(owner_dsn) as c, c.transaction():
         c.execute("UPDATE agent.tool_intents SET status_code='UNKNOWN', updated_at=now() WHERE status_code='SENDING'")
-        c.execute("UPDATE agent.side_effect_records SET outcome_code='UNKNOWN', updated_at=now() WHERE outcome_code='SENDING'")
+        c.execute(
+            "UPDATE agent.side_effect_records SET outcome_code='UNKNOWN', updated_at=now() WHERE outcome_code='SENDING'"
+        )
         cur = c.execute(
             "UPDATE agent.runs r SET restore_incarnation = s.restore_incarnation, lease_expires_at = NULL,"
             " framework_ref = NULL FROM agent.schema_control s WHERE r.status_code NOT IN"

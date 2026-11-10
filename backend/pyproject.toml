@@ -47,13 +47,16 @@ extend-exclude = ["packages/domain/src/aiagent_domain/generated.py"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "PL", "SIM", "BLE"]
 ignore = [
-  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004", "PLC0415",
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004", "PLC0415",
   "S101",    # asserts are used for internal invariants and in tests
   "S608",    # SQL is composed only from module constants; values are always bound parameters
   "RUF001", "RUF002", "RUF003",
   "BLE001",  # broad catches are deliberate at process/fault boundaries and are always logged or converted
   "PLW0603",
   "UP047", "UP046",
+  "E501",    # `ruff format` governs code width; long SQL string literals are kept whole for readability/grep
+  "SIM105", "SIM117",
+  "S110",    # bare `except: pass` only at socket/handler boundaries where the peer may vanish at any byte
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -61,6 +64,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
+platform = "linux"  # deployment target; Linux-only kernel APIs (rlimits, namespaces, vsock) are used
 strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = ["packages/domain/src", "packages/core/src", "packages/runtime/src", "packages/gateways/src",
@@ -76,6 +80,7 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = ["aiagent_runtime.agent", "aiagent_runtime.serde"]
 disallow_subclassing_any = false
+disallow_untyped_decorators = false
 disallow_untyped_calls = false
 warn_return_any = false
 

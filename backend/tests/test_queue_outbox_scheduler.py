@@ -13,7 +13,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-
 from aiagent_core import admin, commands
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
@@ -28,17 +27,29 @@ HERE = Path(__file__).parent
 
 
 def pointer(tenant_id: str, run_id: str | None = None) -> dict:
-    return {"schemaVersion": "1.0", "kind": "run.start", "tenantId": tenant_id, "taskId": uuid7(),
-            "runId": run_id or uuid7(), "expectedGoalRevision": "1", "restoreIncarnation": "1",
-            "scheduleOccurrenceId": None, "expiresAt": "2099-01-01T00:00:00.000Z"}
+    return {
+        "schemaVersion": "1.0",
+        "kind": "run.start",
+        "tenantId": tenant_id,
+        "taskId": uuid7(),
+        "runId": run_id or uuid7(),
+        "expectedGoalRevision": "1",
+        "restoreIncarnation": "1",
+        "scheduleOccurrenceId": None,
+        "expiresAt": "2099-01-01T00:00:00.000Z",
+    }
 
 
 @pytest.fixture()
 def q(dbs: dict[str, Database]) -> QueuePort:
     owner = dbs["owner"]
-    owner.one("UPDATE queue.jobs SET status='CANCELLED', locked_until=NULL WHERE status IN ('READY','CLAIMED') RETURNING 1")
-    owner.one("UPDATE queue.queues SET paused=false, visibility_ms=30000, per_tenant_active_limit=2,"
-              " global_active_limit=8, max_attempts=5, base_backoff_ms=2000 WHERE name='run' RETURNING 1")
+    owner.one(
+        "UPDATE queue.jobs SET status='CANCELLED', locked_until=NULL WHERE status IN ('READY','CLAIMED') RETURNING 1"
+    )
+    owner.one(
+        "UPDATE queue.queues SET paused=false, visibility_ms=30000, per_tenant_active_limit=2,"
+        " global_active_limit=8, max_attempts=5, base_backoff_ms=2000 WHERE name='run' RETURNING 1"
+    )
     return QueuePort(dbs["runtime"])
 
 
@@ -47,8 +58,13 @@ def expire(dbs: dict[str, Database], job_id: int) -> None:
 
 
 def py(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, str(HERE / "proc_helpers.py"), *args], capture_output=True, text=True,
-                          env={**os.environ, **(env or {})}, timeout=60)
+    return subprocess.run(
+        [sys.executable, str(HERE / "proc_helpers.py"), *args],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+        timeout=60,
+    )
 
 
 # ------------------------------------------------------------------------------------------------ QueuePort
@@ -74,10 +90,10 @@ def test_attempt_fence_stale_ack_is_noop(dbs: dict[str, Database], q: QueuePort,
     b = q.dequeue("run", "B")
     assert b is not None and b.id == a.id and b.attempt_fence == 2 and b.attempts == 2
     assert not q.heartbeat(a)
-    assert not q.ack(a)          # stale attempt cannot complete (pg-boss #925 class)
+    assert not q.ack(a)  # stale attempt cannot complete (pg-boss #925 class)
     assert q.nack(a, "X") == "STALE"
     assert q.ack(b)
-    assert not q.ack(b)          # double ack is a no-op
+    assert not q.ack(b)  # double ack is a no-op
 
 
 def test_heartbeat_prevents_redelivery(dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]) -> None:
@@ -115,8 +131,9 @@ def test_non_retryable_goes_to_dlq_immediately(dbs: dict[str, Database], q: Queu
     assert dbs["owner"].one("SELECT status FROM queue.jobs WHERE id=%s", (jid,))["status"] == "DEAD"
 
 
-def test_worker_kill_redelivery_and_poison_quarantine(pg: PgEnv, dbs: dict[str, Database], q: QueuePort,
-                                                     tenant: dict[str, str]) -> None:
+def test_worker_kill_redelivery_and_poison_quarantine(
+    pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]
+) -> None:
     dbs["owner"].one("UPDATE queue.queues SET max_attempts=2, visibility_ms=1000 WHERE name='run' RETURNING 1")
     jid = QueuePort(dbs["relay"]).enqueue("run", tenant["tenantId"], "kill", pointer(tenant["tenantId"]))
     for _ in range(2):  # the job kills its worker every time
@@ -124,8 +141,10 @@ def test_worker_kill_redelivery_and_poison_quarantine(pg: PgEnv, dbs: dict[str, 
         assert r.returncode == 137 and r.stdout.strip() == str(jid)
         expire(dbs, jid)
     assert q.dequeue("run", "next") is None  # exhausted + expired -> quarantined, not delivered a 3rd time
-    assert dbs["owner"].one("SELECT reason_code FROM queue.dead_letters WHERE job_id=%s", (jid,))["reason_code"] == \
-        "ATTEMPTS_EXHAUSTED_LEASE_EXPIRED"
+    assert (
+        dbs["owner"].one("SELECT reason_code FROM queue.dead_letters WHERE job_id=%s", (jid,))["reason_code"]
+        == "ATTEMPTS_EXHAUSTED_LEASE_EXPIRED"
+    )
 
 
 def test_pause_resume_and_cancel(dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]) -> None:
@@ -140,8 +159,12 @@ def test_pause_resume_and_cancel(dbs: dict[str, Database], q: QueuePort, tenant:
     assert got is not None and got.id == j2
 
 
-def test_concurrent_workers_each_job_once(dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str], pg: PgEnv) -> None:
-    dbs["owner"].one("UPDATE queue.queues SET per_tenant_active_limit=100, global_active_limit=100 WHERE name='run' RETURNING 1")
+def test_concurrent_workers_each_job_once(
+    dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str], pg: PgEnv
+) -> None:
+    dbs["owner"].one(
+        "UPDATE queue.queues SET per_tenant_active_limit=100, global_active_limit=100 WHERE name='run' RETURNING 1"
+    )
     rq = QueuePort(dbs["relay"])
     ids = {rq.enqueue("run", tenant["tenantId"], f"c{i}", pointer(tenant["tenantId"])) for i in range(200)}
     seen: Counter[int] = Counter()
@@ -193,7 +216,9 @@ def test_relay_publishes_once_and_marks(dbs: dict[str, Database], q: QueuePort, 
     assert len(_jobs_for(dbs, ids["runId"])) == 1
 
 
-def test_jq_t02_relay_killed_after_claim(pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]) -> None:
+def test_jq_t02_relay_killed_after_claim(
+    pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]
+) -> None:
     ids = _submit(dbs, tenant)
     r = py("relay_once", pg.dsn["relay"], "dying", env={"AIAGENT_FAULT": "relay_after_claim"})
     assert r.returncode == 137
@@ -203,13 +228,16 @@ def test_jq_t02_relay_killed_after_claim(pg: PgEnv, dbs: dict[str, Database], q:
     assert len(_jobs_for(dbs, ids["runId"])) == 1
 
 
-def test_jq_t03_relay_killed_after_publish_before_mark(pg: PgEnv, dbs: dict[str, Database], q: QueuePort,
-                                                     tenant: dict[str, str]) -> None:
+def test_jq_t03_relay_killed_after_publish_before_mark(
+    pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]
+) -> None:
     ids = _submit(dbs, tenant)
     r = py("relay_once", pg.dsn["relay"], "dying", env={"AIAGENT_FAULT": "relay_after_publish"})
     assert r.returncode == 137
     assert len(_jobs_for(dbs, ids["runId"])) == 1
-    ob = dbs["owner"].one("SELECT dispatched_at FROM agent.outbox_messages WHERE safe_payload_json->>'runId'=%s", (ids["runId"],))
+    ob = dbs["owner"].one(
+        "SELECT dispatched_at FROM agent.outbox_messages WHERE safe_payload_json->>'runId'=%s", (ids["runId"],)
+    )
     assert ob["dispatched_at"] is None
     time.sleep(1.1)
     OutboxRelay(dbs["relay"], "r2").run_once()  # republish is deduplicated by the queue key
@@ -224,7 +252,7 @@ def test_jq_t04_two_relays_one_valid_fence(dbs: dict[str, Database], q: QueuePor
     time.sleep(0.6)
     c2 = r2.claim_batch()
     assert {m.id for m in c2} >= {m.id for m in c1}
-    assert not r1.mark(c1[0])       # old relay's fence is invalid
+    assert not r1.mark(c1[0])  # old relay's fence is invalid
     assert r2.mark([m for m in c2 if m.id == c1[0].id][0])
 
 
@@ -234,7 +262,10 @@ def test_jq_t13_queue_outage_keeps_outbox(dbs: dict[str, Database], q: QueuePort
         ids = _submit(dbs, tenant)  # Domain API commit works while workers can't consume
         OutboxRelay(dbs["relay"], "r1").run_once()
         assert q.dequeue("run", "w") is None
-        assert dbs["owner"].one("SELECT status_code FROM agent.runs WHERE id=%s", (ids["runId"],))["status_code"] == "CREATED"
+        assert (
+            dbs["owner"].one("SELECT status_code FROM agent.runs WHERE id=%s", (ids["runId"],))["status_code"]
+            == "CREATED"
+        )
         assert len(_jobs_for(dbs, ids["runId"])) == 1  # pointer retained in the (paused) queue, outbox dispatched
     finally:
         QueuePort(dbs["relay"]).set_paused("run", False)
@@ -242,14 +273,17 @@ def test_jq_t13_queue_outage_keeps_outbox(dbs: dict[str, Database], q: QueuePort
     assert j is not None
 
 
-def test_restore_stale_outbox_never_dispatched(pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]) -> None:
+def test_restore_stale_outbox_never_dispatched(
+    pg: PgEnv, dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]
+) -> None:
     ids = _submit(dbs, tenant)
     admin.restore_bump(pg.owner)
     try:
         OutboxRelay(dbs["relay"], "r1").run_once()
         assert _jobs_for(dbs, ids["runId"]) == []
-        row = dbs["owner"].one("SELECT last_error_code FROM agent.outbox_messages WHERE safe_payload_json->>'runId'=%s",
-                               (ids["runId"],))
+        row = dbs["owner"].one(
+            "SELECT last_error_code FROM agent.outbox_messages WHERE safe_payload_json->>'runId'=%s", (ids["runId"],)
+        )
         assert row["last_error_code"] == "RESTORE_STALE"
     finally:
         admin.adopt_runs_after_restore(pg.owner)
@@ -257,14 +291,22 @@ def test_restore_stale_outbox_never_dispatched(pg: PgEnv, dbs: dict[str, Databas
 
 # ------------------------------------------------------------------------------------------------ Scheduler
 def _past(dbs: dict[str, Database], sid: str, minutes: int) -> None:
-    dbs["owner"].one("UPDATE agent.schedules SET created_at = now() - make_interval(mins => %s),"
-                     " next_fire_at = now() - interval '1s' WHERE id=%s RETURNING 1", (minutes, sid))
+    dbs["owner"].one(
+        "UPDATE agent.schedules SET created_at = now() - make_interval(mins => %s),"
+        " next_fire_at = now() - interval '1s' WHERE id=%s RETURNING 1",
+        (minutes, sid),
+    )
 
 
 def test_one_shot_fires_once_under_concurrency(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
-    sid = create_schedule(dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-                          workspace_id=tenant["workspaceId"], goal="remind me",
-                          run_at=datetime.now(UTC) - timedelta(seconds=1))
+    sid = create_schedule(
+        dbs["api"],
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"],
+        goal="remind me",
+        run_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
     results: list[int] = []
     ts = [threading.Thread(target=lambda: results.append(len(Scheduler(dbs["relay"]).tick()))) for _ in range(4)]
     [t.start() for t in ts]
@@ -279,9 +321,16 @@ def test_one_shot_fires_once_under_concurrency(dbs: dict[str, Database], tenant:
 
 @pytest.mark.parametrize("policy,expected", [("latest", 1), ("all_bounded", 3), ("skip", 0)])
 def test_cron_catchup_policies(dbs: dict[str, Database], tenant: dict[str, str], policy: str, expected: int) -> None:
-    sid = create_schedule(dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-                          workspace_id=tenant["workspaceId"], goal="every minute", cron="* * * * *",
-                          catchup=policy, max_catchup=3)
+    sid = create_schedule(
+        dbs["api"],
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"],
+        goal="every minute",
+        cron="* * * * *",
+        catchup=policy,
+        max_catchup=3,
+    )
     _past(dbs, sid, 10)  # scheduler was down for 10 minutes
     fired = [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid]
     # 'skip' may legitimately fire the newest slot if it is within the grace window
@@ -295,32 +344,56 @@ def test_cron_timezone_and_disable(dbs: dict[str, Database], tenant: dict[str, s
     after = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
     nxt = next_after("0 9 * * *", "Asia/Tokyo", after)
     assert nxt is not None and nxt.astimezone(UTC) == datetime(2026, 11, 11, 0, 0, tzinfo=UTC)
-    sid = create_schedule(dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-                          workspace_id=tenant["workspaceId"], goal="x", cron="* * * * *")
+    sid = create_schedule(
+        dbs["api"],
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"],
+        goal="x",
+        cron="* * * * *",
+    )
     Scheduler(dbs["relay"]).disable(tenant["tenantId"], sid)
     _past(dbs, sid, 5)
     dbs["owner"].one("UPDATE agent.schedules SET enabled=false WHERE id=%s RETURNING 1", (sid,))
     assert [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid] == []
     with pytest.raises(Exception):
-        create_schedule(dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-                        workspace_id=tenant["workspaceId"], goal="x", cron="* * * * *", timezone="Mars/Olympus")
+        create_schedule(
+            dbs["api"],
+            tenant_id=tenant["tenantId"],
+            owner_user_id=tenant["userId"],
+            workspace_id=tenant["workspaceId"],
+            goal="x",
+            cron="* * * * *",
+            timezone="Mars/Olympus",
+        )
 
 
 def test_scheduler_relay_and_queue_chain(dbs: dict[str, Database], q: QueuePort, tenant: dict[str, str]) -> None:
-    create_schedule(dbs["api"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"],
-                    workspace_id=tenant["workspaceId"], goal="chain", run_at=datetime.now(UTC) - timedelta(seconds=1))
+    create_schedule(
+        dbs["api"],
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        workspace_id=tenant["workspaceId"],
+        goal="chain",
+        run_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
     fired = Scheduler(dbs["relay"]).tick()
     OutboxRelay(dbs["relay"], "r").run_once()
-    run_ids = {dbs["owner"].one("SELECT active_run_id FROM agent.tasks WHERE id=%s", (f.task_id,))["active_run_id"]
-               for f in fired}
+    run_ids = {
+        dbs["owner"].one("SELECT active_run_id FROM agent.tasks WHERE id=%s", (f.task_id,))["active_run_id"]
+        for f in fired
+    }
     for rid in run_ids:
         jobs = _jobs_for(dbs, rid)
         assert len(jobs) == 1 and jobs[0]["payload"]["scheduleOccurrenceId"] is not None
 
 
-def test_cross_tenant_forged_pointer_rejected_by_consumer_check(dbs: dict[str, Database], tenant: dict[str, str], pg: PgEnv) -> None:
+def test_cross_tenant_forged_pointer_rejected_by_consumer_check(
+    dbs: dict[str, Database], tenant: dict[str, str], pg: PgEnv
+) -> None:
     """JQ-T10: a pointer naming tenant X but run of tenant Y cannot be claimed."""
     from aiagent_core import control
+
     ids = _submit(dbs, tenant)
     other = admin.provision_tenant(pg.owner)
     with pytest.raises(control.TenantMismatch):

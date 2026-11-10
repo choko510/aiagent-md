@@ -65,13 +65,18 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
 
     async def submit(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         args = body.get("args")
-        if not isinstance(args, dict) or not isinstance(body.get("toolCallId"), str) or not isinstance(body.get("tool"), str):
+        if (
+            not isinstance(args, dict)
+            or not isinstance(body.get("toolCallId"), str)
+            or not isinstance(body.get("tool"), str)
+        ):
             raise RpcError("BAD_REQUEST")
         return await gw.submit(claim_of(body), body["toolCallId"], body["tool"], args)
 
     async def record_internal(caller: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(gw.record_internal, claim_of(body), str(body["toolCallId"]), str(body["tool"]),
-                                       str(body["content"]))
+        return await asyncio.to_thread(
+            gw.record_internal, claim_of(body), str(body["toolCallId"]), str(body["tool"]), str(body["content"])
+        )
 
     async def reconcile(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         return await gw.reconcile(str(body["tenantId"]), str(body["intentId"]))
@@ -90,6 +95,7 @@ async def _serve(name: str, srv: RpcServer, db: Database, health_port: int | Non
             with db.conn() as c:
                 check_compatible(c)
             return True, "ok"
+
         return await asyncio.to_thread(check)
 
     life.checks["database"] = db_ready
@@ -117,8 +123,10 @@ def main_model() -> None:
         providers["anthropic"] = AnthropicProvider(anth, os.environ.get("AIAGENT_EGRESS_PROXY_MODEL"))
         routes["claude-sonnet-5-5"] = [Route("anthropic", "claude-sonnet-5-5"), Route("anthropic", "claude-haiku-5-5")]
     if config.profile() == "production" and providers.keys() == {"fake"}:
-        print("model_gateway: no real provider configured (FakeModel only) - refusing to start in production",
-              file=sys.stderr)
+        print(
+            "model_gateway: no real provider configured (FakeModel only) - refusing to start in production",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     consent = {tuple(x.split(":", 1)) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x}
     db = Database(dsn, max_size=8, name="model_gateway")
@@ -137,10 +145,13 @@ def main_tool() -> None:
     if os.environ.get("AIAGENT_SENTINEL_ENDPOINT"):
         skey = bytes.fromhex(config.secret("AIAGENT_SENTINEL_CLIENT_KEY").reveal())  # type: ignore[union-attr]
         sentinel = RpcSentinel(RpcClient(os.environ["AIAGENT_SENTINEL_ENDPOINT"], "tool_gateway", skey))
-    config.require_production_safety("tool_gateway", {
-        "Sentinel endpoint configured": sentinel is not None,
-        "egress proxy configured": bool(os.environ.get("AIAGENT_EGRESS_PROXY")),
-    })
+    config.require_production_safety(
+        "tool_gateway",
+        {
+            "Sentinel endpoint configured": sentinel is not None,
+            "egress proxy configured": bool(os.environ.get("AIAGENT_EGRESS_PROXY")),
+        },
+    )
     db = Database(dsn, max_size=8, name="tool_gateway")
     gw = ToolGateway(db, executors_from_env(), sentinel=sentinel)
     srv = build_tool_server(keys, config.env("AIAGENT_TOOL_GATEWAY_ENDPOINT"), gw)

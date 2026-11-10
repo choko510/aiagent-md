@@ -16,9 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from apscheduler.triggers.cron import CronTrigger
-
 from aiagent_domain import uuid7
+from apscheduler.triggers.cron import CronTrigger
 
 from .commands import create_task_tx
 from .db import Database
@@ -67,9 +66,19 @@ class Fired:
     task_id: str
 
 
-def create_schedule(db: Database, *, tenant_id: str, owner_user_id: str, workspace_id: str, goal: str,
-                    cron: str | None = None, run_at: datetime | None = None, timezone: str = "UTC",
-                    catchup: str = "latest", max_catchup: int = 3) -> str:
+def create_schedule(
+    db: Database,
+    *,
+    tenant_id: str,
+    owner_user_id: str,
+    workspace_id: str,
+    goal: str,
+    cron: str | None = None,
+    run_at: datetime | None = None,
+    timezone: str = "UTC",
+    catchup: str = "latest",
+    max_catchup: int = 3,
+) -> str:
     ZoneInfo(timezone)  # validates the IANA name
     sid = uuid7()
     with db.tx(tenant=tenant_id) as c:
@@ -78,8 +87,20 @@ def create_schedule(db: Database, *, tenant_id: str, owner_user_id: str, workspa
         c.execute(
             "INSERT INTO agent.schedules(tenant_id, id, owner_user_id, workspace_id, kind, cron_expr, timezone_id, run_at,"
             " goal_text, catchup_policy, max_catchup, next_fire_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (tenant_id, sid, owner_user_id, workspace_id, "cron" if cron else "one_shot", cron, timezone, run_at, goal,
-             catchup, max_catchup, nxt),
+            (
+                tenant_id,
+                sid,
+                owner_user_id,
+                workspace_id,
+                "cron" if cron else "one_shot",
+                cron,
+                timezone,
+                run_at,
+                goal,
+                catchup,
+                max_catchup,
+                nxt,
+            ),
         )
     return sid
 
@@ -102,8 +123,12 @@ class Scheduler:
                     slots = [s["run_at"]] if s["last_slot_at"] is None else []
                     nxt = None
                 else:
-                    slots = choose(due_slots(s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now),
-                                   s["catchup_policy"], s["max_catchup"], now)
+                    slots = choose(
+                        due_slots(s["cron_expr"], s["timezone_id"], s["last_slot_at"], s["created_at"], now),
+                        s["catchup_policy"],
+                        s["max_catchup"],
+                        now,
+                    )
                     nxt = next_after(s["cron_expr"], s["timezone_id"], now)
                 for slot in slots:
                     occ = uuid7()
@@ -114,16 +139,29 @@ class Scheduler:
                     if exists:
                         continue
                     out = create_task_tx(
-                        c, tenant_id=str(s["tenant_id"]), owner_user_id=str(s["owner_user_id"]),
-                        workspace_id=str(s["workspace_id"]), goal=s["goal_text"], profile=s["profile_code"],
-                        actor={"type": "service", "id": "scheduler"}, schedule_id=str(s["id"]),
-                        trigger_key=f"{slot.isoformat()}#r{s['definition_revision']}", occurrence_id=occ,
+                        c,
+                        tenant_id=str(s["tenant_id"]),
+                        owner_user_id=str(s["owner_user_id"]),
+                        workspace_id=str(s["workspace_id"]),
+                        goal=s["goal_text"],
+                        profile=s["profile_code"],
+                        actor={"type": "service", "id": "scheduler"},
+                        schedule_id=str(s["id"]),
+                        trigger_key=f"{slot.isoformat()}#r{s['definition_revision']}",
+                        occurrence_id=occ,
                     )
                     c.execute(
                         "INSERT INTO agent.schedule_occurrences(tenant_id, id, schedule_id, definition_revision, slot_at,"
                         " task_id, late_by_ms) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                        (s["tenant_id"], occ, s["id"], s["definition_revision"], slot, out["taskId"],
-                         int((now - slot).total_seconds() * 1000)),
+                        (
+                            s["tenant_id"],
+                            occ,
+                            s["id"],
+                            s["definition_revision"],
+                            slot,
+                            out["taskId"],
+                            int((now - slot).total_seconds() * 1000),
+                        ),
                     )
                     fired.append(Fired(str(s["id"]), slot, out["taskId"]))
                 last = max([*slots, s["last_slot_at"]] if s["last_slot_at"] else slots, default=None)

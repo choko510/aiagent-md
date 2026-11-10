@@ -56,6 +56,8 @@ class Lifecycle:
             try:
                 line = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("latin-1")
                 path = line.split(" ")[1] if " " in line else "/"
+                code: int
+                body: dict[str, object]
                 if path == "/healthz":
                     code, body = 200, {"status": "alive", "service": self.name}
                 elif path == "/readyz":
@@ -64,8 +66,11 @@ class Lifecycle:
                 else:
                     code, body = 404, {"error": "not found"}
                 data = json.dumps(body).encode()
-                writer.write(f"HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {len(data)}\r\n"
-                             "connection: close\r\n\r\n".encode() + data)
+                writer.write(
+                    f"HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {len(data)}\r\n"
+                    "connection: close\r\n\r\n".encode()
+                    + data
+                )
                 await writer.drain()
             except Exception:
                 pass

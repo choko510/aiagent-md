@@ -8,7 +8,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-
 from aiagent_core import admin, migrate
 from aiagent_core.db import connect
 from conftest import PgEnv, drop_database, make_database
@@ -50,12 +49,15 @@ def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path
         # simulate an old deployment at version 3, then upgrade
         migrate_dir = migrate.default_dir()
         import os
+
         os.environ["AIAGENT_ALLOW_DOWN"] = "1"
         assert migrate.down(env.owner, 3) == [5, 4]
         assert migrate.up(env.owner) == [4, 5]
         with connect(env.owner) as c:
-            c.execute("INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
-                      " app_min_writer) VALUES (99, repeat('a',64), 'future', 99, 99)")
+            c.execute(
+                "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
+                " app_min_writer) VALUES (99, repeat('a',64), 'future', 99, 99)"
+            )
         with pytest.raises(migrate.MigrationError, match="unknown to this code"):
             migrate.up(env.owner, migrate_dir)
     finally:
@@ -64,12 +66,15 @@ def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path
 
 
 def test_concurrent_runners_apply_once() -> None:
-    from conftest import PG
     import secrets
+
+    from conftest import PG
+
     name = f"aiagent_cc_{secrets.token_hex(4)}"
     with connect(PG) as c:  # type: ignore[arg-type]
         c.execute(f'CREATE DATABASE "{name}"')
     from conftest import _with_db
+
     dsn = _with_db(PG, name)  # type: ignore[arg-type]
     results: list[list[int]] = []
     errors: list[BaseException] = []
@@ -97,6 +102,7 @@ def test_down_requires_explicit_opt_in(pg: PgEnv) -> None:
 
 def test_framework_migrations_pinned() -> None:
     from langgraph.checkpoint.postgres.base import MIGRATIONS
+
     assert len(MIGRATIONS) == 10, "langgraph-checkpoint-postgres changed its schema: add a new aiagent migration"
 
 
@@ -111,18 +117,30 @@ def test_least_privilege(pg: PgEnv, tenant: dict[str, str]) -> None:
         _deny(d[role], "CREATE TABLE agent.x(i int)")
     _deny(d["checkpointer"], "CREATE TABLE lg_checkpoint.x(i int)")
     _deny(d["runtime"], "CREATE TABLE lg_checkpoint.x(i int)")
-    _deny(d["checkpointer"], "SELECT * FROM agent.runs")                       # framework login sees no canonical data
-    _deny(d["runtime"], "SELECT * FROM lg_checkpoint.checkpoints")             # and runtime login no framework blobs
+    _deny(d["checkpointer"], "SELECT * FROM agent.runs")  # framework login sees no canonical data
+    _deny(d["runtime"], "SELECT * FROM lg_checkpoint.checkpoints")  # and runtime login no framework blobs
     _deny(d["runtime"], "INSERT INTO agent.run_checkpoints(tenant_id) VALUES (gen_random_uuid())")  # HEAD by gateways
-    _deny(d["runtime"], "UPDATE agent.approval_records SET decision_code='APPROVED'")             # no self-approval
-    _deny(d["runtime"], "UPDATE agent.tool_intents SET status_code='DONE'")                       # ledger by Tool GW
-    _deny(d["model_gateway"], "UPDATE agent.runs SET status_code='SUCCEEDED'")                    # column grants
+    _deny(d["runtime"], "UPDATE agent.approval_records SET decision_code='APPROVED'")  # no self-approval
+    _deny(d["runtime"], "UPDATE agent.tool_intents SET status_code='DONE'")  # ledger by Tool GW
+    _deny(d["model_gateway"], "UPDATE agent.runs SET status_code='SUCCEEDED'")
+    # a compromised worker or API cannot raise its own budget, widen model policy or move fences/HEAD
+    for col in (
+        "token_budget = 10000000",
+        "tokens_used = 0",
+        "allowed_models = '{x}'",
+        "restore_incarnation = 99",
+        "max_model_calls = 9999",
+    ):
+        _deny(d["runtime"], f"UPDATE agent.runs SET {col}")
+        _deny(d["api"], f"UPDATE agent.runs SET {col}")
+    _deny(d["runtime"], "UPDATE agent.runs SET head_revision = 0")
+    _deny(d["api"], "UPDATE agent.runs SET lease_epoch = 0")  # column grants
     _deny(d["model_gateway"], "SELECT * FROM agent.approval_records")
     _deny(d["sentinel"], "UPDATE agent.tool_intents SET status_code='DONE'")
     _deny(d["api"], "UPDATE agent.tool_intents SET status_code='DONE'")
     _deny(d["api"], "SELECT * FROM queue.jobs")
     _deny(d["tool_gateway"], "SELECT * FROM agent.api_credentials")
-    _deny(d["api"], "SELECT * FROM agent.api_credentials")                   # only via resolve_api_token()
+    _deny(d["api"], "SELECT * FROM agent.api_credentials")  # only via resolve_api_token()
 
 
 def test_rls_api_without_tenant_sees_nothing(pg: PgEnv, tenant: dict[str, str]) -> None:
@@ -132,13 +150,16 @@ def test_rls_api_without_tenant_sees_nothing(pg: PgEnv, tenant: dict[str, str]) 
         assert c.execute("SELECT count(*) AS n FROM agent.workspaces").fetchone()["n"] == 1
         other = admin.provision_tenant(pg.owner)
         with pytest.raises(psycopg.errors.InsufficientPrivilege):  # WITH CHECK: cannot write into another tenant
-            c.execute("INSERT INTO agent.audit_records(tenant_id, id, action_code, target_type) VALUES (%s, gen_random_uuid(), 'x', 'y')",
-                      (other["tenantId"],))
+            c.execute(
+                "INSERT INTO agent.audit_records(tenant_id, id, action_code, target_type) VALUES (%s, gen_random_uuid(), 'x', 'y')",
+                (other["tenantId"],),
+            )
 
 
 def test_append_only_head_and_events_even_for_owner(pg: PgEnv, tenant: dict[str, str]) -> None:
     from aiagent_core.commands import Scope, submit_task
     from aiagent_core.db import Database
+
     api = Database(pg.dsn["api"])
     submit_task(api, Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "seed")
     api.close()

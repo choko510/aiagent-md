@@ -38,6 +38,12 @@ def profile() -> str:
     return p
 
 
+def require_secret(name: str) -> str:
+    s = secret(name)
+    assert s is not None
+    return s.reveal()
+
+
 def env(name: str, default: str | None = None) -> str:
     v = os.environ.get(name, default)
     if v is None:
@@ -102,11 +108,16 @@ def isolation_attestation() -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-REQUIRED_ATTESTATION = ("trusted_control_vm", "untrusted_execution_vm_separate_kernel", "egress_only_via_sentinel",
-                        "no_docker_socket")
+REQUIRED_ATTESTATION = (
+    "trusted_control_vm",
+    "untrusted_execution_vm_separate_kernel",
+    "egress_only_via_sentinel",
+    "no_docker_socket",
+)
 
 
 def require_isolation(component: str) -> None:
     att = isolation_attestation()
-    require_production_safety(component, {f"isolation attestation: {k}": att.get(k) is True
-                                          for k in REQUIRED_ATTESTATION})
+    require_production_safety(
+        component, {f"isolation attestation: {k}": att.get(k) is True for k in REQUIRED_ATTESTATION}
+    )

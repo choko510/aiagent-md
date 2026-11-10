@@ -16,8 +16,6 @@ import socket
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import ValidationError
-
 from aiagent_core import config, control
 from aiagent_core.db import Database
 from aiagent_core.logging import log, setup
@@ -25,17 +23,26 @@ from aiagent_core.migrate import check_compatible
 from aiagent_core.queue import Job, QueuePort
 from aiagent_core.rpc import RpcClient
 from aiagent_core.service import Lifecycle
+from pydantic import ValidationError
 
-from .adapter import DeepAgentsRuntime, SegmentOutcome, fault
-from .agent import Gateways
+from .adapter import DeepAgentsRuntime, SegmentOutcome
+from .agent import Gateways, fault
 
 logger = logging.getLogger("aiagent.worker")
 MAX_REBUILDS = 2
 
 
 class RuntimeWorker:
-    def __init__(self, db: Database, runtime: DeepAgentsRuntime, *, worker_id: str, concurrency: int = 2,
-                 lease_s: float = 30.0, poll_s: float = 0.5) -> None:
+    def __init__(
+        self,
+        db: Database,
+        runtime: DeepAgentsRuntime,
+        *,
+        worker_id: str,
+        concurrency: int = 2,
+        lease_s: float = 30.0,
+        poll_s: float = 0.5,
+    ) -> None:
         self.db, self.runtime, self.worker_id = db, runtime, worker_id
         self.queue = QueuePort(db)
         self.sem = asyncio.Semaphore(concurrency)
@@ -100,8 +107,15 @@ class RuntimeWorker:
             await asyncio.to_thread(self.queue.ack, job, stale)
             return stale
         try:
-            claim = await asyncio.to_thread(control.claim_run, self.db, p.tenant_id, p.run_id, self.worker_id,
-                                            lease_s=self.lease_s, expected_incarnation=p.restore_incarnation)
+            claim = await asyncio.to_thread(
+                control.claim_run,
+                self.db,
+                p.tenant_id,
+                p.run_id,
+                self.worker_id,
+                lease_s=self.lease_s,
+                expected_incarnation=p.restore_incarnation,
+            )
         except (control.RunTerminal, control.TenantMismatch, control.RestoreFenced) as e:
             await asyncio.to_thread(self.queue.ack, job, f"STALE_{e.code}")
             return f"STALE_{e.code}"
@@ -131,11 +145,20 @@ class RuntimeWorker:
         fault("worker_before_ack")
         if result == "RETRY":
             code = "".join(ch if ch.isalnum() else "_" for ch in (outcome.detail or "SEGMENT_ERROR").upper())[:60]
-            await asyncio.to_thread(self.queue.nack, job, code,
-                                    min_delay_s=5.0 if outcome.detail == "GATEWAY_UNAVAILABLE" else 0.0)
+            await asyncio.to_thread(
+                self.queue.nack, job, code, min_delay_s=5.0 if outcome.detail == "GATEWAY_UNAVAILABLE" else 0.0
+            )
         else:
             await asyncio.to_thread(self.queue.ack, job, result)
-        log(logger, logging.INFO, "segment done", run=claim.run_id, outcome=outcome.status, result=result, detail=outcome.detail)
+        log(
+            logger,
+            logging.INFO,
+            "segment done",
+            run=claim.run_id,
+            outcome=outcome.status,
+            result=result,
+            detail=outcome.detail,
+        )
         return result
 
     def _stale_reason(self, p: Any) -> str | None:
@@ -144,7 +167,9 @@ class RuntimeWorker:
         row = self.db.one(
             "SELECT r.status_code, t.goal_revision, s.restore_incarnation FROM agent.runs r JOIN agent.tasks t"
             " ON t.tenant_id=r.tenant_id AND t.id=r.task_id CROSS JOIN agent.schema_control s"
-            " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s", (p.tenant_id, p.run_id, p.task_id))
+            " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s",
+            (p.tenant_id, p.run_id, p.task_id),
+        )
         if row is None:
             return "STALE_NOT_FOUND"
         if row["status_code"] in control.TERMINAL:
@@ -156,8 +181,9 @@ class RuntimeWorker:
         return None
 
     def _profile(self, claim: control.Claim) -> str:
-        row = self.db.one("SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s",
-                          (claim.tenant_id, claim.task_id))
+        row = self.db.one(
+            "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s", (claim.tenant_id, claim.task_id)
+        )
         assert row is not None
         return str(row["profile_code"])
 
@@ -202,17 +228,26 @@ class RuntimeWorker:
 
 
 def build_from_env() -> tuple[RuntimeWorker, Database, DeepAgentsRuntime]:
-    keys = {k: bytes.fromhex(config.secret(f"AIAGENT_RUNTIME_{k.upper()}_RPC_KEY").reveal())  # type: ignore[union-attr]
-            for k in ("model", "tool")}
-    gws = Gateways(RpcClient(config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"), "runtime", keys["model"]),
-                   RpcClient(config.env("AIAGENT_TOOL_GATEWAY_ENDPOINT"), "runtime", keys["tool"]))
-    db = Database(config.secret("AIAGENT_RUNTIME_DSN").reveal(), max_size=16, name="runtime")  # type: ignore[union-attr]
-    rt = DeepAgentsRuntime(db, config.secret("AIAGENT_CHECKPOINTER_DSN").reveal(), gws,  # type: ignore[union-attr]
-                           model=os.environ.get("AIAGENT_MODEL", "fake-gateway"),
-                           max_input_tokens=config.env_int("AIAGENT_MAX_INPUT_TOKENS", 100_000))
-    w = RuntimeWorker(db, rt, worker_id=os.environ.get("AIAGENT_WORKER_ID", f"{socket.gethostname()}:{os.getpid()}"),
-                      concurrency=config.env_int("AIAGENT_WORKER_CONCURRENCY", 2),
-                      lease_s=float(config.env_int("AIAGENT_LEASE_S", 30)))
+    keys = {k: bytes.fromhex(config.require_secret(f"AIAGENT_RUNTIME_{k.upper()}_RPC_KEY")) for k in ("model", "tool")}
+    gws = Gateways(
+        RpcClient(config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"), "runtime", keys["model"]),
+        RpcClient(config.env("AIAGENT_TOOL_GATEWAY_ENDPOINT"), "runtime", keys["tool"]),
+    )
+    db = Database(config.require_secret("AIAGENT_RUNTIME_DSN"), max_size=16, name="runtime")
+    rt = DeepAgentsRuntime(
+        db,
+        config.require_secret("AIAGENT_CHECKPOINTER_DSN"),
+        gws,
+        model=os.environ.get("AIAGENT_MODEL", "fake-gateway"),
+        max_input_tokens=config.env_int("AIAGENT_MAX_INPUT_TOKENS", 100_000),
+    )
+    w = RuntimeWorker(
+        db,
+        rt,
+        worker_id=os.environ.get("AIAGENT_WORKER_ID", f"{socket.gethostname()}:{os.getpid()}"),
+        concurrency=config.env_int("AIAGENT_WORKER_CONCURRENCY", 2),
+        lease_s=float(config.env_int("AIAGENT_LEASE_S", 30)),
+    )
     return w, db, rt
 
 
@@ -222,8 +257,11 @@ async def main_async() -> None:
     w, db, rt = build_from_env()
     with db.conn() as c:
         check_compatible(c)
-    life = Lifecycle("runtime_worker", health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
-                     health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"))
+    life = Lifecycle(
+        "runtime_worker",
+        health_port=config.env_int("AIAGENT_HEALTH_PORT", 0) or None,
+        health_host=os.environ.get("AIAGENT_HEALTH_HOST", "127.0.0.1"),
+    )
     life.install_signals()
     await rt.launch()
     await life.start_health()

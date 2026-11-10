@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from aiagent_core import config
 
 ENTRY = {
@@ -30,16 +29,26 @@ def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str
 
 @pytest.mark.parametrize("service", sorted(ENTRY))
 def test_refuses_without_isolation_attestation(service: str, tmp_path: Path) -> None:
-    r = run(ENTRY[service], {"AIAGENT_PROFILE": "production",
-                             "AIAGENT_ISOLATION_ATTESTATION_FILE": str(tmp_path / "missing.json")})
+    r = run(
+        ENTRY[service],
+        {"AIAGENT_PROFILE": "production", "AIAGENT_ISOLATION_ATTESTATION_FILE": str(tmp_path / "missing.json")},
+    )
     assert r.returncode != 0
     assert "production safety requirements not met" in r.stderr and "isolation attestation" in r.stderr, r.stderr[-800:]
 
 
 def test_attestation_must_be_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     f = tmp_path / "iso.json"
-    f.write_text(json.dumps({"trusted_control_vm": True, "untrusted_execution_vm_separate_kernel": True,
-                             "egress_only_via_sentinel": True, "no_docker_socket": False}))
+    f.write_text(
+        json.dumps(
+            {
+                "trusted_control_vm": True,
+                "untrusted_execution_vm_separate_kernel": True,
+                "egress_only_via_sentinel": True,
+                "no_docker_socket": False,
+            }
+        )
+    )
     monkeypatch.setenv("AIAGENT_PROFILE", "production")
     monkeypatch.setenv("AIAGENT_ISOLATION_ATTESTATION_FILE", str(f))
     with pytest.raises(config.ConfigError, match="no_docker_socket"):
@@ -65,8 +74,14 @@ def test_model_gateway_refuses_fake_only_in_production(tmp_path: Path) -> None:
     att.write_text(json.dumps({k: True for k in config.REQUIRED_ATTESTATION}))
     for name, val in (("keys", "runtime=" + "11" * 32), ("dsn", "postgresql://x:y@127.0.0.1:1/z")):
         (tmp_path / name).write_text(val)
-    r = run(ENTRY["model_gateway"], {
-        "AIAGENT_PROFILE": "production", "AIAGENT_ISOLATION_ATTESTATION_FILE": str(att),
-        "AIAGENT_MODEL_GATEWAY_RPC_KEYS_FILE": str(tmp_path / "keys"), "AIAGENT_MODEL_GATEWAY_DSN_FILE": str(tmp_path / "dsn"),
-        "AIAGENT_MODEL_GATEWAY_ENDPOINT": "tcp:127.0.0.1:0"})
+    r = run(
+        ENTRY["model_gateway"],
+        {
+            "AIAGENT_PROFILE": "production",
+            "AIAGENT_ISOLATION_ATTESTATION_FILE": str(att),
+            "AIAGENT_MODEL_GATEWAY_RPC_KEYS_FILE": str(tmp_path / "keys"),
+            "AIAGENT_MODEL_GATEWAY_DSN_FILE": str(tmp_path / "dsn"),
+            "AIAGENT_MODEL_GATEWAY_ENDPOINT": "tcp:127.0.0.1:0",
+        },
+    )
     assert r.returncode == 2 and "FakeModel only" in r.stderr, r.stderr[-800:]

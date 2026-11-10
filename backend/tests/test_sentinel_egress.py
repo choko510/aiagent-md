@@ -10,7 +10,6 @@ import secrets
 
 import httpx
 import pytest
-
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
@@ -22,12 +21,33 @@ from conftest import PgEnv
 
 
 # ---------------------------------------------------------------- pure address policy
-@pytest.mark.parametrize("ip", [
-    "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
-    "255.255.255.255", "198.18.0.1", "::1", "::", "fe80::1", "fd00::1", "fc00::1", "::ffff:127.0.0.1",
-    "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe", "2002:7f00:1::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
-    "ff02::1", "2001:db8::1",
-])
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.1.1",
+        "169.254.169.254",
+        "100.64.0.1",
+        "0.0.0.0",
+        "224.0.0.1",
+        "255.255.255.255",
+        "198.18.0.1",
+        "::1",
+        "::",
+        "fe80::1",
+        "fd00::1",
+        "fc00::1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "2002:7f00:1::1",
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        "ff02::1",
+        "2001:db8::1",
+    ],
+)
 def test_private_and_special_addresses_blocked(ip: str) -> None:
     assert not is_public(ipaddress.ip_address(ip))
 
@@ -37,8 +57,21 @@ def test_public_addresses_allowed(ip: str) -> None:
     assert is_public(ipaddress.ip_address(ip))
 
 
-@pytest.mark.parametrize("host", ["user@evil.com", "evil.com.", "2130706433", "0x7f000001", "evil.com/x",
-                                  "ex%61mple.com", "exämple.com", "a..b", "-bad.com", "a b"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "user@evil.com",
+        "evil.com.",
+        "2130706433",
+        "0x7f000001",
+        "evil.com/x",
+        "ex%61mple.com",
+        "exämple.com",
+        "a..b",
+        "-bad.com",
+        "a b",
+    ],
+)
 def test_bad_hostnames_rejected(host: str) -> None:
     with pytest.raises(EgressDenied):
         normalize_host(host)
@@ -53,8 +86,17 @@ def test_one_private_answer_rejects_whole_destination() -> None:
 
 
 def test_allow_private_forbidden_in_production() -> None:
-    cfg = {"destinations": {"x": {"scheme": "http", "host": "127.0.0.1", "port": 80, "methods": ["POST"],
-                                  "allow_private": ["127.0.0.1"]}}}
+    cfg = {
+        "destinations": {
+            "x": {
+                "scheme": "http",
+                "host": "127.0.0.1",
+                "port": 80,
+                "methods": ["POST"],
+                "allow_private": ["127.0.0.1"],
+            }
+        }
+    }
     with pytest.raises(ValueError, match="production"):
         EgressConfig.from_json(json.dumps(cfg), production=True)
 
@@ -67,14 +109,18 @@ class Upstream:
     async def start(self) -> int:
         async def h(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             data = await r.readuntil(b"\r\n\r\n")
-            n = int(next((ln.split(b":")[1] for ln in data.split(b"\r\n") if ln.lower().startswith(b"content-length")),
-                         b"0"))
+            n = int(
+                next(
+                    (ln.split(b":")[1] for ln in data.split(b"\r\n") if ln.lower().startswith(b"content-length")), b"0"
+                )
+            )
             body = await r.readexactly(n) if n else b""
             self.hits.append(data + body)
             out = b'{"receipt":"r1"}'
             w.write(b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n\r\n%s" % (len(out), out))
             await w.drain()
             w.close()
+
         self.srv = await asyncio.start_server(h, "127.0.0.1", 0)
         return int(self.srv.sockets[0].getsockname()[1])
 
@@ -88,26 +134,52 @@ def sentinel_env(pg: PgEnv, dbs: dict[str, Database], tenant: dict[str, str]) ->
     intent, apr = None, None
     with dbs["owner"].tx() as c:
         from aiagent_domain import uuid7
+
         intent, apr = uuid7(), uuid7()
-        c.execute("INSERT INTO agent.tool_intents(tenant_id, id, task_id, run_id, tool_key, invocation_key, request_sha256,"
-                  " safe_arguments_json, risk_class, goal_revision, status_code) VALUES (%s,%s,%s,%s,'send_message','c1',"
-                  " repeat('a',64), '{}', 'external_irreversible', 1, 'SENDING')",
-                  (tenant["tenantId"], intent, ids["taskId"], ids["runId"]))
-        c.execute("INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id, tool_key,"
-                  " request_sha256, goal_revision, safe_summary, decision_code, expires_at) VALUES"
-                  " (%s,%s,%s,%s,%s,%s,'send_message',repeat('a',64),1,'x','APPROVED', now() + interval '1h')",
-                  (tenant["tenantId"], apr, intent, ids["taskId"], ids["runId"], tenant["userId"]))
+        c.execute(
+            "INSERT INTO agent.tool_intents(tenant_id, id, task_id, run_id, tool_key, invocation_key, request_sha256,"
+            " safe_arguments_json, risk_class, goal_revision, status_code) VALUES (%s,%s,%s,%s,'send_message','c1',"
+            " repeat('a',64), '{}', 'external_irreversible', 1, 'SENDING')",
+            (tenant["tenantId"], intent, ids["taskId"], ids["runId"]),
+        )
+        c.execute(
+            "INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id, tool_key,"
+            " request_sha256, goal_revision, safe_summary, decision_code, expires_at) VALUES"
+            " (%s,%s,%s,%s,%s,%s,'send_message',repeat('a',64),1,'x','APPROVED', now() + interval '1h')",
+            (tenant["tenantId"], apr, intent, ids["taskId"], ids["runId"], tenant["userId"]),
+        )
     return {"claim": claim, "intent": intent, "approval": apr, "ids": ids}
 
 
-async def _proxy_case(pg: PgEnv, env: dict, *, resolver_answers: list[str] | None = None,
-                      mutate: str | None = None, reuse: bool = False, other_port: bool = False,
-                      connect: bool = False, no_auth: bool = False) -> tuple[int, list[bytes], str]:
+async def _proxy_case(
+    pg: PgEnv,
+    env: dict,
+    *,
+    resolver_answers: list[str] | None = None,
+    mutate: str | None = None,
+    reuse: bool = False,
+    other_port: bool = False,
+    connect: bool = False,
+    no_auth: bool = False,
+) -> tuple[int, list[bytes], str]:
     up = Upstream()
     port = await up.start()
-    cfg = EgressConfig.from_json(json.dumps({"destinations": {"message-receiver": {
-        "scheme": "http", "host": "receiver.test", "port": port, "methods": ["POST", "GET"],
-        "allow_private": ["127.0.0.1"]}}}), production=False)
+    cfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "message-receiver": {
+                        "scheme": "http",
+                        "host": "receiver.test",
+                        "port": port,
+                        "methods": ["POST", "GET"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
     db = Database(pg.dsn["sentinel"], max_size=4)
     sen = Sentinel(db, cfg, secrets.token_bytes(32))
 
@@ -119,15 +191,18 @@ async def _proxy_case(pg: PgEnv, env: dict, *, resolver_answers: list[str] | Non
     permit = await asyncio.to_thread(sen.authorize, env["claim"], env["intent"], "http", "receiver.test", port, "POST")
     owner = Database(pg.owner, max_size=1)
     if mutate == "revoke":
-        owner.one("UPDATE agent.approval_records SET decision_code='REVOKED' WHERE id=%s RETURNING 1", (env["approval"],))
+        owner.one(
+            "UPDATE agent.approval_records SET decision_code='REVOKED' WHERE id=%s RETURNING 1", (env["approval"],)
+        )
     if mutate == "cancel":
         owner.one("UPDATE agent.runs SET cancel_requested=true WHERE id=%s RETURNING 1", (env["ids"]["runId"],))
     status, body = 0, ""
     target_port = port + 1 if other_port else port
     headers = {} if no_auth else {"Proxy-Authorization": f"Aiagent tool_gateway:{permit}"}
     try:
-        async with httpx.AsyncClient(proxy=httpx.Proxy(f"http://127.0.0.1:{pport}", headers=headers),
-                                     timeout=10, trust_env=False) as c:
+        async with httpx.AsyncClient(
+            proxy=httpx.Proxy(f"http://127.0.0.1:{pport}", headers=headers), timeout=10, trust_env=False
+        ) as c:
             for _ in range(2 if reuse else 1):
                 url = f"{'https' if connect else 'http'}://receiver.test:{target_port}/messages"
                 try:
@@ -195,17 +270,29 @@ def test_unauthenticated_and_tunnel_denied(pg: PgEnv, sentinel_env: dict) -> Non
 
 @pytest.mark.pg
 def test_sentinel_refuses_unadmitted_or_stale(pg: PgEnv, dbs: dict[str, Database], sentinel_env: dict) -> None:
-    cfg = EgressConfig.from_json(json.dumps({"destinations": {"message-receiver": {
-        "scheme": "http", "host": "receiver.test", "port": 9, "methods": ["POST"]}}}), production=False)
+    cfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "message-receiver": {"scheme": "http", "host": "receiver.test", "port": 9, "methods": ["POST"]}
+                }
+            }
+        ),
+        production=False,
+    )
     sen = Sentinel(dbs["sentinel"], cfg, secrets.token_bytes(32))
     with pytest.raises(RpcError, match="DESTINATION_NOT_ALLOWED"):
         sen.authorize(sentinel_env["claim"], sentinel_env["intent"], "http", "evil.test", 9, "POST")
-    dbs["owner"].one("UPDATE agent.tool_intents SET status_code='PENDING_APPROVAL' WHERE id=%s RETURNING 1",
-                     (sentinel_env["intent"],))
+    dbs["owner"].one(
+        "UPDATE agent.tool_intents SET status_code='PENDING_APPROVAL' WHERE id=%s RETURNING 1",
+        (sentinel_env["intent"],),
+    )
     with pytest.raises(RpcError, match="INTENT_NOT_ADMITTED"):
         sen.authorize(sentinel_env["claim"], sentinel_env["intent"], "http", "receiver.test", 9, "POST")
-    dbs["owner"].one("UPDATE agent.runs SET lease_expires_at = now() - interval '1s' WHERE id=%s RETURNING 1",
-                     (sentinel_env["ids"]["runId"],))
+    dbs["owner"].one(
+        "UPDATE agent.runs SET lease_expires_at = now() - interval '1s' WHERE id=%s RETURNING 1",
+        (sentinel_env["ids"]["runId"],),
+    )
     control.claim_run(dbs["runtime"], sentinel_env["claim"].tenant_id, sentinel_env["ids"]["runId"], "w2")
     with pytest.raises(RpcError, match="FENCED"):  # stale worker's claim
         sen.authorize(sentinel_env["claim"], sentinel_env["intent"], "http", "receiver.test", 9, "POST")

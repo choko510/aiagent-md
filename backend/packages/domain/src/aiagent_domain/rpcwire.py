@@ -48,14 +48,16 @@ def decode_length(header: bytes) -> int:
     (n,) = struct.unpack(">I", header)
     if n > MAX_FRAME:
         raise RpcError("FRAME_TOO_LARGE")
-    return n
+    return int(n)
 
 
 def _mac(key: bytes, obj: dict[str, Any]) -> str:
     return hmac.new(key, _canon(obj), hashlib.sha256).hexdigest()
 
 
-def sign_request(key: bytes, caller: str, method: str, body: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+def sign_request(
+    key: bytes, caller: str, method: str, body: dict[str, Any], *, now_ms: int | None = None
+) -> dict[str, Any]:
     env = {
         "v": PROTOCOL,
         "caller": caller,

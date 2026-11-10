@@ -8,18 +8,34 @@ import sys
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
-
 from aiagent_domain import INTERNAL, format_int64_wire, is_uuid7, parse_int64_wire, uuid7
-from aiagent_domain.schema_validation import validator_for
 from aiagent_domain.generated import MODELS, SCHEMA_FILES, RunClaimV1, RunJobPointerV1, TaskV1
+from aiagent_domain.schema_validation import validator_for
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS = ROOT / "contracts" / "domain" / "v1"
 
 ACCEPT = ["0", "1", "-1", "9007199254740993", "9223372036854775807", "-9223372036854775808"]
-REJECT = [9007199254740993, 1, True, 1.0, None, "9223372036854775808", "-9223372036854775809", "01", "+1", "-0",
-          " 1", "1 ", "1e3", "１", "", "0x10", "1_000"]
+REJECT = [
+    9007199254740993,
+    1,
+    True,
+    1.0,
+    None,
+    "9223372036854775808",
+    "-9223372036854775809",
+    "01",
+    "+1",
+    "-0",
+    " 1",
+    "1 ",
+    "1e3",
+    "１",
+    "",
+    "0x10",
+    "1_000",
+]
 
 
 def _validator(fname: str):
@@ -27,8 +43,11 @@ def _validator(fname: str):
 
 
 def test_generated_code_is_up_to_date() -> None:
-    r = subprocess.run([sys.executable, str(ROOT / "backend" / "tools" / "gen_contracts.py"), "--check"],
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "backend" / "tools" / "gen_contracts.py"), "--check"],
+        capture_output=True,
+        text=True,
+    )
     assert r.returncode == 0, r.stderr
 
 
@@ -44,8 +63,17 @@ def test_int64_reject(v: object) -> None:
 
 
 def _claim(**over: object) -> dict[str, object]:
-    base = {"schemaVersion": "1.0", "tenantId": uuid7(), "ownerUserId": uuid7(), "taskId": uuid7(), "runId": uuid7(),
-            "leaseEpoch": "9007199254740993", "goalRevision": "1", "workerRef": "w1", "restoreIncarnation": "1"}
+    base = {
+        "schemaVersion": "1.0",
+        "tenantId": uuid7(),
+        "ownerUserId": uuid7(),
+        "taskId": uuid7(),
+        "runId": uuid7(),
+        "leaseEpoch": "9007199254740993",
+        "goalRevision": "1",
+        "workerRef": "w1",
+        "restoreIncarnation": "1",
+    }
     base.update(over)
     return base
 
@@ -59,17 +87,20 @@ def test_models_match_schema_structure() -> None:
         assert req == set(s.get("required", [])), title
 
 
-@pytest.mark.parametrize("case,ok", [
-    ({}, True),
-    ({"leaseEpoch": 9007199254740993}, False),            # JSON number
-    ({"leaseEpoch": "0"}, False),                         # positive int64
-    ({"leaseEpoch": "9223372036854775808"}, False),       # out of int64
-    ({"extra": 1}, False),                                # unknown field
-    ({"tenantId": "019a2fc0-4b21-4af0-9c22-34f78b6a1d04"}, False),  # UUIDv4 not v7
-    ({"tenantId": "019A2FC0-4B21-7AF0-9C22-34F78B6A1D04"}, False),  # not canonical lowercase
-    ({"schemaVersion": "2.0"}, False),                    # unknown major
-    ({"goalRevision": "01"}, False),
-])
+@pytest.mark.parametrize(
+    "case,ok",
+    [
+        ({}, True),
+        ({"leaseEpoch": 9007199254740993}, False),  # JSON number
+        ({"leaseEpoch": "0"}, False),  # positive int64
+        ({"leaseEpoch": "9223372036854775808"}, False),  # out of int64
+        ({"extra": 1}, False),  # unknown field
+        ({"tenantId": "019a2fc0-4b21-4af0-9c22-34f78b6a1d04"}, False),  # UUIDv4 not v7
+        ({"tenantId": "019A2FC0-4B21-7AF0-9C22-34F78B6A1D04"}, False),  # not canonical lowercase
+        ({"schemaVersion": "2.0"}, False),  # unknown major
+        ({"goalRevision": "01"}, False),
+    ],
+)
 def test_pydantic_and_jsonschema_agree(case: dict[str, object], ok: bool) -> None:
     data = _claim(**case)
     schema_ok = _validator("run-claim.schema.json").is_valid(data)
@@ -106,9 +137,17 @@ def test_models_are_frozen_and_strict() -> None:
 
 
 def test_queue_pointer_rejects_injected_fields() -> None:
-    bad = {"schemaVersion": "1.0", "kind": "admin", "tenantId": uuid7(), "taskId": uuid7(), "runId": uuid7(),
-           "expectedGoalRevision": "1", "restoreIncarnation": "1", "scheduleOccurrenceId": None,
-           "expiresAt": "2026-11-10T00:00:00.000Z"}
+    bad = {
+        "schemaVersion": "1.0",
+        "kind": "admin",
+        "tenantId": uuid7(),
+        "taskId": uuid7(),
+        "runId": uuid7(),
+        "expectedGoalRevision": "1",
+        "restoreIncarnation": "1",
+        "scheduleOccurrenceId": None,
+        "expiresAt": "2026-11-10T00:00:00.000Z",
+    }
     with pytest.raises(ValidationError):
         RunJobPointerV1.model_validate(bad)
     assert not _validator("queue-job.schema.json").is_valid(bad)

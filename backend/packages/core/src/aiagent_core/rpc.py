@@ -65,8 +65,8 @@ class Endpoint:
 def parse_keys(spec: str) -> dict[str, bytes]:
     """`caller=hexkey,caller2=hexkey2` (from a secret file). Keys must be >= 32 bytes."""
     out: dict[str, bytes] = {}
-    for part in spec.replace("\n", ",").split(","):
-        part = part.strip()
+    for raw in spec.replace("\n", ",").split(","):
+        part = raw.strip()
         if not part:
             continue
         name, _, hexkey = part.partition("=")
@@ -151,13 +151,15 @@ class RpcServer:
                 return
             uid = _peer_uid(writer)
             if caller in self.allowed_uids and (uid is None or uid not in self.allowed_uids[caller]):
-                writer.write(encode_frame(sign_response(self.keys[caller], nonce,
-                                                        {"type": "error", "code": "PEER_IDENTITY"})))
+                writer.write(
+                    encode_frame(sign_response(self.keys[caller], nonce, {"type": "error", "code": "PEER_IDENTITY"}))
+                )
                 return
             m = self.methods.get(method)
             if m is None or caller not in m.callers:
-                writer.write(encode_frame(sign_response(self.keys[caller], nonce,
-                                                        {"type": "error", "code": "FORBIDDEN_METHOD"})))
+                writer.write(
+                    encode_frame(sign_response(self.keys[caller], nonce, {"type": "error", "code": "FORBIDDEN_METHOD"}))
+                )
                 return
             key = self.keys[caller]
             try:
@@ -165,19 +167,27 @@ class RpcServer:
                     agen = m.handler(caller, body)
                     assert hasattr(agen, "__aiter__")
                     async for item in agen:  # type: ignore[union-attr]
-                        frame = {"type": "chunk", "data": item} if item.get("__final__") is None else \
-                            {"type": "result", "data": {k: v for k, v in item.items() if k != "__final__"}}
+                        frame = (
+                            {"type": "chunk", "data": item}
+                            if item.get("__final__") is None
+                            else {"type": "result", "data": {k: v for k, v in item.items() if k != "__final__"}}
+                        )
                         writer.write(encode_frame(sign_response(key, nonce, frame)))
                         await writer.drain()
                 else:
                     res = await m.handler(caller, body)  # type: ignore[misc]
                     writer.write(encode_frame(sign_response(key, nonce, {"type": "result", "data": res})))
             except RpcError as e:
-                writer.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": e.code,
-                                                                     "message": e.message[:500]})))
+                writer.write(
+                    encode_frame(
+                        sign_response(key, nonce, {"type": "error", "code": e.code, "message": e.message[:500]})
+                    )
+                )
             except Exception as e:
-                log.exception("rpc handler failed", extra={"fields": {"server": self.name, "method": method,
-                                                                      "exc": type(e).__name__}})
+                log.exception(
+                    "rpc handler failed",
+                    extra={"fields": {"server": self.name, "method": method, "exc": type(e).__name__}},
+                )
                 writer.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "INTERNAL"})))
             await writer.drain()
         except (asyncio.IncompleteReadError, TimeoutError, ConnectionError, RpcError):
@@ -195,10 +205,10 @@ class RpcClient:
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self.endpoint.kind == "vsock":  # Trusted Control VM -> Untrusted Execution VM (no IP route needed)
-            cid, port = self.endpoint.path.split(":")
-            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)  # type: ignore[attr-defined]
+            cid, vport = self.endpoint.path.split(":")
+            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             sock.setblocking(False)
-            await asyncio.get_running_loop().sock_connect(sock, (int(cid), int(port)))
+            await asyncio.get_running_loop().sock_connect(sock, (int(cid), int(vport)))
             return await asyncio.open_connection(sock=sock)
         if self.endpoint.kind == "unix":
             return await asyncio.open_unix_connection(self.endpoint.path)  # type: ignore[attr-defined,no-any-return]
