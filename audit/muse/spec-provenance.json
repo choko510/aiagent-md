@@ -95,9 +95,10 @@
     "docs/14-adaptive-experience/feedback-learning.md": "55d8255b15a82604abd0d036098f18b850d52ac9",
     "docs/15-multimodal/multimodal-ingestion.md": "c933491f0a3d128d40f27bcea6ceb03b3218f45f"
   },
-  "companionCount": 2,
+  "companionCount": 3,
   "companionSpecs": {
     "docs/08-interfaces/browser-live-observation.md": "689f81e3ec33f44141a501a263d11e4c70f1206e",
-    "docs/16-app-development/local-device-rust-client.md": "7be7b43cffb98e83f4eca81fdaf3d3babbf29669"
+    "docs/16-app-development/local-device-rust-client.md": "7be7b43cffb98e83f4eca81fdaf3d3babbf29669",
+    "docs/08-interfaces/extension-marketplace.md": "653a29747bbb3e8a70cfef7dee05dea56778b033"
   }
 }

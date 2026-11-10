@@ -93,6 +93,26 @@ for path in companion_paths:
     if not cp.is_file() or len(cp.read_text(encoding="utf-8")) < 600:
         errors.append(f"Missing/thin audited companion: {path}")
 
+# MKT-COMPANION-STATIC: design/provenance contract, NOT runtime verification.
+marketplace_path = "docs/08-interfaces/extension-marketplace.md"
+marketplace_pairs = [pair for pair in companion_records if pair[1] == marketplace_path]
+if marketplace_pairs != [("COMP-03", marketplace_path)]:
+    errors.append("COMP-03 Marketplace must be registered without replacing LDC COMP-02")
+elif not (ROOT / marketplace_path).is_file():
+    errors.append("COMP-03 Marketplace specification missing")
+else:
+    body = (ROOT / marketplace_path).read_text(encoding="utf-8")
+    marker_ids = re.findall(r"^\|\s*(MKT-T\d{2})\s*\|", body, re.M)
+    if marker_ids != [f"MKT-T{n:02d}" for n in range(1, 20)]:
+        errors.append("Marketplace acceptance table MKT-T01..T19 must be unique and ordered")
+    for marker in (
+        "OWNER_NOT_VERIFIABLE", "ownerHandle", "artifactSha256",
+        "MKT-T19", "Riskを自己申告だけで下げない",
+        "GitHubはMKT-2以降", "NOT IMPLEMENTED", "PR #82",
+    ):
+        if marker not in body:
+            errors.append(f"COMP-03 Marketplace invariant missing: {marker}")
+
 # LDC-COMPANION-STATIC: spec/provenance contract only. Not a runtime safety test.
 # COMP-02 must be cataloged beside COMP-01, without changing 88 canonical modules.
 ldc_path = "docs/16-app-development/local-device-rust-client.md"

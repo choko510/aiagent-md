@@ -139,6 +139,7 @@
 |---|---|---|---|
 | COMP-01 | `docs/08-interfaces/browser-live-observation.md` | CHAT_04/08/09/10/11 | Draft / PROVISIONAL |
 | COMP-02 | `docs/16-app-development/local-device-rust-client.md` | CHAT_00/01/02/03/04/05/08/09/10/11/16 | Draft / PROVISIONAL / NOT RUN |
+| COMP-03 | `docs/08-interfaces/extension-marketplace.md` | CHAT_01/03/06/08/09/10/11 | Draft / PROVISIONAL / NOT IMPLEMENTED |
 
 `COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。
 
@@ -186,3 +187,7 @@ Start at [DEV README](../16-app-development/README.md) → [DEV-10](../16-app-de
 ## 2026-11-10 Rust Local Device Client / Cua Driver companion（DEV-LDC）
 
 [ローカルDevice Agent・Cua・Chrome・Build/ADB統合設計](../16-app-development/local-device-rust-client.md) はDEV-05/06およびTool/Sentinel/Sandbox/Browserの**横断補足仕様**。Rustの対象はユーザーPCにインストールするDevice AgentとデスクトップUIであり、Python-firstのサーバー実装や既存Browser Workerを置換しない。DEV-LDC-REQ/T（本文では`LDC-REQ/T`）を提案し、正式なDomain/REST/DB型は各正本Ownerの承認後に確定する。**Design only / NOT RUN**。88件・COMP-01/COMP-02・DEV-01..20の歴史的カウントは変更しない（Companionの登録数だけ1→2）。
+
+## 2026-11-10 Extension Marketplace — audited Companion Spec (COMP-03)
+
+Skills・MCPの検索、ワンクリック導入/無効化/削除/更新、Registry連携、認証、Tool Gateway/マージ済みPR #82との統合境界を [Extension Marketplace](../08-interfaces/extension-marketplace.md) にまとめる。**補足仕様・NOT IMPLEMENTED / NOT TESTED**であり、既存88基礎モジュール数、Owner、Shared契約、PR #82の実装状態を変更しない。
