@@ -17,11 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Rust format
-        run: cargo fmt --all -- --check
+      - name: Normalize Rust formatting for compilation (report source drift after tests)
+        run: cargo fmt --all
       - name: Core and desktop tests
         run: cargo test --workspace
       - name: Windows Tauri compile
         run: cargo check --workspace
       - name: Build Windows desktop executable (no installer or signing)
         run: cargo build -p aiagent-device-desktop
+      - name: Assert source is preformatted in version control
+        run: git diff --exit-code -- device-client
+        working-directory: .
