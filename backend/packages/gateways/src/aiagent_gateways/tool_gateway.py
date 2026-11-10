@@ -24,7 +24,7 @@ from typing import Any
 from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database, Row
-from aiagent_core.events import append_event
+from aiagent_core.events import append_event, enqueue_run_job
 from aiagent_domain import canonical_json, sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
@@ -626,12 +626,14 @@ class ToolGateway:
 
     # ------------------------------------------------------------------ reconciliation (operator)
     async def reconcile(self, tenant_id: str, intent_id: str) -> dict[str, Any]:
-        row = self.db.one("SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant_id, intent_id))
-        if row is None:
+        initial = self.db.one(
+            "SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant_id, intent_id)
+        )
+        if initial is None:
             raise RpcError("NOT_FOUND")
-        if row["status_code"] not in ("UNKNOWN", "SENDING"):
-            return {"status": row["status_code"]}
-        executor = self.executors.get(TOOLS[row["tool_key"]].executor)
+        if initial["status_code"] not in ("UNKNOWN", "SENDING"):
+            return {"status": initial["status_code"]}
+        executor = self.executors.get(TOOLS[initial["tool_key"]].executor)
         permit = None
         dest = executor.destination() if executor else None
         if dest is not None and self.sentinel is not None:
@@ -640,17 +642,152 @@ class ToolGateway:
         if answer is None:
             return {"status": "UNKNOWN"}
         status, effect = ("CONFIRMED", "RECONCILED_SENT") if answer["sent"] else ("FAILED", "RECONCILED_NOT_SENT")
+        result = {k: v for k, v in answer.items() if k == "receipt"}
+        # Lock order is task -> run -> intent, matching claim/segment settlement.
+        # Do not keep these DB locks across the external receipt query.
         with self.db.tx() as c:
+            pointer = c.execute(
+                "SELECT task_id, run_id FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
+                (tenant_id, intent_id),
+            ).fetchone()
+            if pointer is None:
+                raise RpcError("NOT_FOUND")
+            task = c.execute(
+                "SELECT id, owner_user_id, workspace_id, goal_revision, status_code, active_run_id"
+                " FROM agent.tasks WHERE tenant_id=%s AND id=%s FOR UPDATE",
+                (tenant_id, pointer["task_id"]),
+            ).fetchone()
+            run = c.execute(
+                "SELECT id, status_code, lease_epoch, restore_incarnation, cancel_requested, pause_requested"
+                " FROM agent.runs WHERE tenant_id=%s AND id=%s FOR UPDATE",
+                (tenant_id, pointer["run_id"]),
+            ).fetchone()
+            intent = c.execute(
+                "SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s FOR UPDATE",
+                (tenant_id, intent_id),
+            ).fetchone()
+            if task is None or run is None or intent is None:
+                raise RpcError("NOT_FOUND")
+            if intent["status_code"] not in ("UNKNOWN", "SENDING"):
+                return {"status": intent["status_code"]}  # concurrent operator already committed
+            # A reconciled result is admissible to HEAD only when backed by the
+            # exact frozen assistant proposal, intent hash, and stream.
+            proposal = control.find_proposal(c, tenant_id, intent["run_id"], intent["invocation_key"])
+            if (
+                proposal is None
+                or proposal[0].get("name") != intent["tool_key"]
+                or proposal[1] != intent["stream"]
+                or sha256_hex({"tool": intent["tool_key"], "args": proposal[0].get("args")})
+                != intent["request_sha256"]
+            ):
+                raise RpcError("NOT_IN_HEAD", "reconciled intent is not grounded in a frozen tool proposal")
             c.execute(
-                "UPDATE agent.tool_intents SET status_code=%s, result_json=%s, updated_at=now()"
-                " WHERE tenant_id=%s AND id=%s AND status_code IN ('UNKNOWN','SENDING')",
-                (status, Jsonb({k: v for k, v in answer.items() if k == "receipt"}), tenant_id, intent_id),
+                "UPDATE agent.tool_intents SET status_code=%s, result_json=%s,"
+                " record_version=record_version+1, updated_at=now()"
+                " WHERE tenant_id=%s AND id=%s",
+                (status, Jsonb(result), tenant_id, intent_id),
             )
             c.execute(
-                "UPDATE agent.side_effect_records SET outcome_code=%s, external_receipt_ref=%s, last_checked_at=now(),"
-                " updated_at=now() WHERE tenant_id=%s AND tool_intent_id=%s",
+                "UPDATE agent.side_effect_records SET outcome_code=%s, external_receipt_ref=%s,"
+                " last_checked_at=now(), updated_at=now() WHERE tenant_id=%s AND tool_intent_id=%s",
                 (effect, answer.get("receipt"), tenant_id, intent_id),
             )
+            c.execute(
+                "UPDATE agent.tool_attempts SET status_code=%s, ended_at=now()"
+                " WHERE tenant_id=%s AND tool_intent_id=%s AND status_code IN ('SENDING','UNKNOWN')",
+                ("CONFIRMED" if status == "CONFIRMED" else "FAILED", tenant_id, intent_id),
+            )
+            # The ledger remains the source of truth. Append the receipt-backed
+            # tool result through HEAD's idempotent CAS, not by calling execute().
+            if run["status_code"] not in control.TERMINAL:
+                claim = Claim(
+                    tenant_id,
+                    task["owner_user_id"],
+                    task["id"],
+                    run["id"],
+                    run["lease_epoch"],
+                    intent["goal_revision"],
+                    "tool_gateway:reconcile",
+                    run["restore_incarnation"],
+                )
+                control.append_head(
+                    c,
+                    claim,
+                    "tool",
+                    {
+                        "kind": "tool",
+                        "tool_call_id": intent["invocation_key"],
+                        "tool_name": intent["tool_key"],
+                        "content": content_of(outcome(status, result)),
+                    },
+                    writer="tool_gateway:reconcile",
+                    stream=intent["stream"],
+                    tool_call_id=intent["invocation_key"],
+                    require_current_goal=False,
+                )
+            append_event(
+                c,
+                tenant_id=tenant_id,
+                aggregate_type="tool",
+                aggregate_id=intent_id,
+                kind="tool.effect_recorded",
+                payload={"tool": intent["tool_key"], "outcome": status, "reconciled": True},
+                actor=SERVICE,
+                owner_user_id=task["owner_user_id"],
+                task_id=task["id"],
+                run_id=run["id"],
+            )
+            pending = control._has_unresolved_effects(c, tenant_id, run["id"])
+            # Only the final resolution may release WAITING_RECONCILIATION.
+            # Never make a cancelled/revoked run claimable again.
+            if not pending and run["status_code"] in ("WAITING_RECONCILIATION", "CANCELLING"):
+                revoked = not control.scope_active(
+                    c, tenant_id, str(task["owner_user_id"]), str(task["workspace_id"])
+                )
+                if run["cancel_requested"] or revoked or run["status_code"] == "CANCELLING":
+                    target = "CANCELLED"
+                elif run["pause_requested"]:
+                    target = "PAUSED"
+                else:
+                    target = "CREATED"
+                c.execute(
+                    "UPDATE agent.runs SET status_code=%s, lease_epoch=lease_epoch+1,"
+                    " lease_expires_at=now()-interval '1 millisecond', framework_ref=NULL,"
+                    " error_code=NULL, ended_at=CASE WHEN %s THEN now() ELSE ended_at END,"
+                    " record_version=record_version+1, updated_at=now()"
+                    " WHERE tenant_id=%s AND id=%s",
+                    (target, target == "CANCELLED", tenant_id, run["id"]),
+                )
+                task_state = "RUNNING" if target == "CREATED" else target
+                if task["status_code"] not in control.TERMINAL:
+                    c.execute(
+                        "UPDATE agent.tasks SET status_code=%s, record_version=record_version+1,"
+                        " updated_at=now() WHERE tenant_id=%s AND id=%s",
+                        (task_state, tenant_id, task["id"]),
+                    )
+                ev = append_event(
+                    c,
+                    tenant_id=tenant_id,
+                    aggregate_type="run",
+                    aggregate_id=run["id"],
+                    kind="run.state_changed",
+                    payload={"from": run["status_code"], "to": target, "cause": "effect_reconciled"},
+                    actor=SERVICE,
+                    owner_user_id=task["owner_user_id"],
+                    task_id=task["id"],
+                    run_id=run["id"],
+                )
+                if target == "CREATED" and task["active_run_id"] == run["id"]:
+                    enqueue_run_job(
+                        c,
+                        tenant_id=tenant_id,
+                        task_id=task["id"],
+                        run_id=run["id"],
+                        kind="run.resume",
+                        goal_revision=task["goal_revision"],
+                        dedupe_key=f"run:{run['id']}:reconciled:{intent_id}",
+                        event_id=ev,
+                    )
         return {"status": status}
 
 
