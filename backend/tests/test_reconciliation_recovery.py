@@ -254,7 +254,8 @@ async def test_gateway_weak_negative_or_receipt_cannot_release_run(
     result = await _gateway(dbs, evidence).reconcile(tenant["tenantId"], intents[0])
     assert result["status"] == "UNKNOWN"
     assert _run(dbs, ids["runId"])["status_code"] == "WAITING_RECONCILIATION"
-    assert dbs["owner"].one(
-        "SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],)
-    )["status_code"] == "UNKNOWN"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.tool_intents WHERE id=%s", (intents[0],))["status_code"]
+        == "UNKNOWN"
+    )
     assert _jobs(dbs, ids["runId"]) == 0
