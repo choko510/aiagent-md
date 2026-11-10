@@ -31,8 +31,21 @@ uv run python tools/gen_contracts.py --check
 uv run ruff check . && uv run ruff format --check . && uv run mypy packages/*/src
 ```
 
-Linux カーネル機能（rlimit / namespace / uid drop）の Cell 試験と Compose 隔離試験は `tests/linux/test_sandbox_cell.py`、
-`tests/test_compose_isolation.py` の docstring 参照（CI では `cell-and-compose` job）。
+Linux カーネル機能（rlimit / namespace / uid drop / **Landlock による Task 単位のファイル隔離**）の Cell 試験と
+Compose 隔離試験は `tests/linux/test_sandbox_cell.py`、`tests/test_compose_isolation.py` の docstring 参照
+（CI では `cell-and-compose` job）。Landlock が利用できない環境では生成コードは **実行拒否**される。
+Linux Cell の試験は実際の子プロセスによる別 Tenant / 別 Task / symlink / `/proc` アクセス拒否を検証するが、
+Docker Cell は同一ホストカーネル上で動くため、**別 VM / KVM 分離の受入試験とは区別**する。
+
+## Egress の制限（セキュリティ上の fail-closed）
+
+Tool に発行した単回 Sentinel Permit は HTTP の実メソッドごとに検証する。HTTPS `CONNECT` は暗号化トンネル内部の
+要求回数・URL・本文を監査できないため、**Tool 用 Permit からの CONNECT を拒否**する。モデル Provider 専用
+`model_gateway` identity の HTTPS CONNECT だけを静的認証で許可し、Tool の認可と共有しない。
+
+したがって、STEP 3 の `HttpMessageExecutor` から HTTPS の外部副作用を直接送信する構成はまだサポートしない
+（拒否して安全側に倒す）。HTTPS Tool 通信を利用する前に、信頼された HTTP Connector が TLS を終端し、
+実際の method / path / body / 回数を検査する仕組みを実装する必要がある。URL を HTTP に弱めて回避しないこと。
 
 ## マイグレーションと運用コマンド
 
