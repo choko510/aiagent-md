@@ -369,6 +369,13 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     assert "next offset" not in pages[1]
     assert "Instruction 173" not in pages[0] and "Instruction 173" in pages[1]
 
+    references = folder / "references" / "lists"
+    references.mkdir(parents=True)
+    (references / "words.txt").write_text("allowed terms\nsecond line\n", encoding="utf-8")
+    ref_path = "/skills/yomiyasu/references/lists/words.txt"
+    _propose(dbs, claimed, "read_reference", "read_file", {"file_path": ref_path})
+    assert gw.record_internal(claimed, "read_reference", "read_file", _real_read_file_page(ref_path))["status"] == "DONE"
+
     candidates = [
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("Instruction 20", "Instruction HACK", 1)),
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 101")),
