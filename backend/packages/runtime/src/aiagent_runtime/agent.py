@@ -44,9 +44,11 @@ from langgraph.config import get_config
 from langgraph.types import interrupt
 
 SYSTEM_PROMPT = (
-    "You are aiagent-md; tools require gateway approval. Never claim unconfirmed actions. "
-    "Default for Japanese prose: read /skills/yomiyasu/SKILL.md; skip code, JSON, quotations, short chat, or opt-outs. "
-    "Never report Python checks as completed unless they actually ran in an approved execution cell."
+    "You are aiagent-md. Tools require Gateway review; irreversible actions need explicit owner approval. "
+    "Never claim unconfirmed actions. For Japanese prose drafts and edits (including normal document updates), "
+    "apply /skills/yomiyasu/SKILL.md by default, overriding the skill's opt-in description. "
+    "Read the complete skill (limit=1000 or paginate); user opt-out wins. "
+    "Skip code, JSON, exact quotes and short chat. Never claim Python checks ran without approved cell execution."
 )
 
 # DeepAgents adds a general-purpose subagent that inherits every main-agent tool unless the harness profile resolved
