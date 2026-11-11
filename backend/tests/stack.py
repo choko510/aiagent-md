@@ -74,6 +74,7 @@ class Stack:
                     "AIAGENT_MODEL_GATEWAY_DSN": self.dsn["model_gateway"],
                     "AIAGENT_MODEL_GATEWAY_ENDPOINT": f"tcp:127.0.0.1:{p['model']}",
                     "AIAGENT_MODEL_GATEWAY_RPC_KEYS": f"runtime={self.keys['rt_model']}",
+                    "AIAGENT_CONTEXT_ARTIFACT_KEY": (b"k" * 32).hex(),  # test-only key; model process only
                     "AIAGENT_ANTHROPIC_API_KEY": self.provider_secret,
                 }
             )  # never used (no consent), only held

@@ -168,6 +168,27 @@ async def call_model(
     return msg
 
 
+async def call_context_model(rc: RunCtx, context_head: str) -> dict[str, Any]:
+    """Use a committed Context reference; plaintext is loaded only inside Model Gateway."""
+    try:
+        result: dict[str, Any] | None = None
+        async for kind, data in rc.gw.model.stream(
+            "model.context", {"claim": rc.claim.to_wire(), "contextHead": context_head}
+        ):
+            if kind == "result":
+                result = data
+    except RpcError as e:
+        raise GatewayRejected(e.code) from None
+    except (OSError, EOFError, TimeoutError) as e:
+        # The gateway admission may already have committed: never retry this
+        # Context automatically after an unknown transport outcome.
+        raise GatewayRejected("CONTEXT_OUTCOME_UNKNOWN") from e
+    if result is None:
+        raise GatewayRejected("CONTEXT_OUTCOME_UNKNOWN")
+    message: dict[str, Any] = result["message"]
+    return message
+
+
 class GatewayChatModel(BaseChatModel):
     """Holds no credential and no provider client."""
 

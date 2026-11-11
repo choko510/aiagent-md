@@ -51,6 +51,21 @@ def build_model_server(db: Database, keys: dict[str, bytes], endpoint: str, gw: 
         yield {**(await task), "__final__": True}
 
     srv.register("model.complete", complete, {"runtime"}, streaming=True)
+
+    async def complete_context(caller: str, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        try:
+            claim = Claim.from_wire(body["claim"])
+            value = body["contextHead"]
+            if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or str(int(value)) != value:
+                raise ValueError("invalid head")
+            head = int(value)
+            if not 1 <= head <= 9223372036854775807:
+                raise ValueError("invalid head")
+        except (KeyError, TypeError, ValueError):
+            raise RpcError("BAD_REQUEST") from None
+        yield {**(await gw.complete_context(claim, head)), "__final__": True}
+
+    srv.register("model.context", complete_context, {"runtime"}, streaming=True)
     return srv
 
 
@@ -134,7 +149,18 @@ def main_model() -> None:
         raise SystemExit(2)
     consent = {tuple(x.split(":", 1)) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x}
     db = Database(dsn, max_size=8, name="model_gateway")
-    gw = ModelGateway(db, providers, routes, consent=consent, secrets=secrets)  # type: ignore[arg-type]
+    context_key = None
+    if config.profile() == "test":
+        context_secret = config.secret("AIAGENT_CONTEXT_ARTIFACT_KEY", required=False)
+        if context_secret is not None:
+            register_secret(context_secret.reveal())
+            try:
+                context_key = bytes.fromhex(context_secret.reveal())
+            except ValueError as exc:
+                raise config.ConfigError("invalid Context artifact key") from exc
+            if len(context_key) != 32:
+                raise config.ConfigError("invalid Context artifact key")
+    gw = ModelGateway(db, providers, routes, consent=consent, secrets=secrets, context_key=context_key)  # type: ignore[arg-type]
     gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
     srv = build_model_server(db, keys, config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"), gw)
     asyncio.run(_serve("model_gateway", srv, db, config.env_int("AIAGENT_HEALTH_PORT", 0) or None))
