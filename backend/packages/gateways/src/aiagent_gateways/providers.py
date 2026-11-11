@@ -84,6 +84,22 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 return {"content": f"done:{after['send_message'].get('status')}"}
             return _call("send_message", to="bob", body="price=42")
         return {"content": "answer: goal revised, nothing sent"}
+    # Deterministic two-page skill read for the gateway/Agent runtime integration test.
+    # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
+    if "yomiyasu fixture" in first:
+        pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
+        path = "/skills/yomiyasu/SKILL.md"
+        if "read_file" not in tools:
+            return {"content": "error: read_file not exposed"}
+        if not pages:
+            return _call("read_file", file_path=path, offset=0, limit=8)
+        if len(pages) == 1:
+            if not str(pages[0].get("content", "")).startswith("@@ lines "):
+                return {"content": "error: first skill page rejected"}
+            return _call("read_file", file_path=path, offset=8, limit=1000)
+        if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
+            return {"content": "error: skill page rejected"}
+        return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):
             return {"content": "done:delegated"}
