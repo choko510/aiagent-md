@@ -332,10 +332,13 @@ def test_cron_catchup_policies(dbs: dict[str, Database], tenant: dict[str, str],
         max_catchup=3,
     )
     _past(dbs, sid, 10)  # scheduler was down for 10 minutes
+    first_tick_minute = datetime.now(UTC).replace(second=0, microsecond=0)
     fired = [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid]
     # 'skip' may legitimately fire the newest slot if it is within the grace window
     assert len(fired) == expected or (policy == "skip" and len(fired) <= 1)
-    assert [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid] == []
+    replay = [f for f in Scheduler(dbs["relay"]).tick() if f.schedule_id == sid]
+    # An actual new minute can start between the two ticks; only the earlier slots must not replay.
+    assert all(f.slot_at > first_tick_minute for f in replay)
     nxt = dbs["owner"].one("SELECT next_fire_at FROM agent.schedules WHERE id=%s", (sid,))["next_fire_at"]
     assert nxt > datetime.now(UTC) - timedelta(seconds=5)
 
