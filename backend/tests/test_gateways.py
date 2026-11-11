@@ -339,7 +339,6 @@ def test_forged_child_result_rejected(dbs: dict[str, Database], claimed: control
         gw.record_internal(claimed, "call_r3", "send_message", "x")  # not an internal tool
 
 
-
 def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     dbs: dict[str, Database], claimed: control.Claim, tmp_path, monkeypatch
 ) -> None:
