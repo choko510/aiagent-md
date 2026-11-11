@@ -91,7 +91,7 @@ def verified_files(archive: bytes) -> dict[str, bytes]:
                 continue
             rel = member.name[len(prefix):]
             parts = PurePosixPath(rel).parts
-            if not rel or rel.startswith("/") or ".." in parts or "\\ " in rel or "\\x00" in rel:
+            if not rel or rel.startswith("/") or ".." in parts or "\\" in rel or "\x00" in rel:
                 raise ValueError(f"invalid skill path: {rel!r}")
             if member.isdir():
                 continue
@@ -105,7 +105,7 @@ def verified_files(archive: bytes) -> dict[str, bytes]:
             data = stream.read(MAX_FILE_BYTES + 1)
             if len(data) != member.size:
                 raise ValueError(f"invalid upstream file length: {rel}")
-            digest = hashlib.sha1(f"blob {len(data)}\\0".encode() + data).hexdigest()  # noqa: S324 - Git object digest
+            digest = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()  # noqa: S324 - Git object digest
             if digest != EXPECTED_BLOBS[rel]:
                 raise ValueError(f"upstream Git blob mismatch: {rel}")
             total_bytes += len(data)
