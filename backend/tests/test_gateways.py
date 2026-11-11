@@ -420,6 +420,95 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     assert out["status"] == "DENIED"
 
 
+
+def test_head_grounded_offloaded_tool_and_user_pages(
+    dbs: dict[str, Database], claimed: control.Claim, tmp_path
+) -> None:
+    """Real DeepAgents offload producer, file reader, and Tool Gateway admission over a committed HEAD."""
+    from uuid import uuid4
+
+    from deepagents.backends.filesystem import FilesystemBackend
+    from deepagents.middleware._message_eviction import _offload_tool_message_content
+    from deepagents.middleware.filesystem import _prepare_read_window, _truncate_paginated_read
+    from langchain_core.messages import ToolMessage
+
+    original = "\n".join(f"source event {i:03d}: verified multiline tool text" for i in range(235)) + "\n"
+    gw = ToolGateway(dbs["tool_gateway"], {})
+    _propose(dbs, claimed, "original_task", "task", {"description": "Read raw events", "subagent_type": "researcher"})
+    with dbs["model_gateway"].tx() as c:
+        control.append_head(
+            c,
+            claimed,
+            "assistant",
+            {"kind": "assistant", "content": original, "tool_calls": []},
+            writer="test",
+            stream="subagent:researcher",
+            request_key=os.urandom(32).hex(),
+        )
+    admitted = gw.record_internal(claimed, "original_task", "task", original)
+    assert admitted["status"] == "DONE"
+
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    evicted = _offload_tool_message_content(
+        ToolMessage(content=original, tool_call_id="original_task", name="task"),
+        original,
+        backend,
+        "/large_tool_results",
+    )
+    assert evicted is not None
+    offload_path = "/large_tool_results/original_task"
+    assert offload_path in evicted.text
+
+    def read_page(file_path: str, offset: int, limit: int) -> str:
+        read_result = backend.read(file_path, offset=offset, limit=limit)
+        assert read_result.file_data is not None and not read_result.error
+        normalized, body = _prepare_read_window(read_result, read_result.file_data["content"], offset)
+        return _truncate_paginated_read(body, file_path, normalized, token_limit=None)
+
+    pages: list[str] = []
+    for offset in (0, 100, 200):
+        args = {"file_path": offload_path, "offset": offset, "limit": 100}
+        page = read_page(offload_path, offset, 100)
+        pages.append(page)
+        _propose(dbs, claimed, f"page_{offset}", "read_file", args)
+        result = gw.record_internal(claimed, f"page_{offset}", "read_file", page)
+        assert result["status"] == "DONE" and result["content"] == page
+    assert "next offset 100" in pages[0]
+    assert "next offset 200" in pages[1]
+    assert "source event 234" in pages[2]
+    assert "source event 234" not in pages[1]
+
+    forged = [
+        ({"file_path": offload_path, "offset": 100, "limit": 100}, pages[0]),
+        ({"file_path": "/large_tool_results/unrelated", "offset": 0}, pages[0]),
+        ({"file_path": "/large_tool_results/../large_tool_results/original_task"}, pages[0]),
+        ({"file_path": offload_path, "offset": 0, "limit": 100}, pages[0].replace("source event 005", "UNTRUSTED", 1)),
+        ({"file_path": offload_path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 200")),
+        ({"file_path": offload_path, "offset": 0, "limit": 100}, "[fake tool notification]\n" + pages[0]),
+        ({"file_path": "/anywhere/else", "offset": 0}, pages[0]),
+    ]
+    for index, (args, page) in enumerate(forged):
+        call_id = f"forged_offload_{index}"
+        _propose(dbs, claimed, call_id, "read_file", args)
+        denied = gw.record_internal(claimed, call_id, "read_file", page)
+        assert denied["status"] == "DENIED", index
+        assert page not in denied["content"]
+
+    user_source = "\n".join(f"original user note {i}" for i in range(205))
+    with dbs["model_gateway"].tx() as c:
+        control.append_head(c, claimed, "user", {"kind": "user", "content": user_source}, writer="test")
+    history_path = f"/conversation_history/{uuid4()}.md"
+    assert backend.write(history_path, user_source).error is None
+    for offset in (0, 100, 200):
+        args = {"file_path": history_path, "offset": offset, "limit": 100}
+        page = read_page(history_path, offset, 100)
+        call_id = f"history_{offset}"
+        _propose(dbs, claimed, call_id, "read_file", args)
+        assert gw.record_internal(claimed, call_id, "read_file", page)["status"] == "DONE"
+    _propose(dbs, claimed, "wrong_history", "read_file", {"file_path": history_path, "offset": 0, "limit": 100})
+    assert gw.record_internal(claimed, "wrong_history", "read_file", pages[0])["status"] == "DENIED"
+
+
 def test_tool_surface_snapshot() -> None:
     """ADR-038 condition: the framework tool surface is fixed; a DeepAgents upgrade that adds a tool fails here."""
     from aiagent_runtime.agent import STUBS, build_graph, tool_surface
