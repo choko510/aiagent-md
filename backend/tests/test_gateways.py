@@ -14,7 +14,7 @@ from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_core.rpc import RpcClient
 from aiagent_domain.rpcwire import RpcAuthError, RpcError, encode_frame, sign_request
-from aiagent_domain.tools import TOOLS
+from aiagent_domain.tools import INTERNAL_TOOL_SPECS, TOOLS
 from aiagent_gateways.model_gateway import ModelGateway, Route, SealedModelRequest
 from aiagent_gateways.privacy import StreamPrivacyGate
 from aiagent_gateways.providers import FakeModelProvider, ProviderEvent
@@ -250,6 +250,24 @@ def test_privacy_gate_unit_invalid_tool_args_and_secret_mask() -> None:
 
 
 # ---------------------------------------------------------------- Tool Gateway admission
+def test_internal_read_file_provider_schema_is_fixed_and_validated() -> None:
+    """A model may request read_file only when the trusted provider surface includes it."""
+    spec = INTERNAL_TOOL_SPECS["read_file"]
+    assert set(spec.parameters["properties"]) == {"file_path", "offset", "limit"}
+    g = StreamPrivacyGate({"read_file": spec})
+    for tid, name, args in [
+        ("ok", "read_file", '{"file_path":"/skills/yomiyasu/SKILL.md","offset":100,"limit":100}'),
+        ("injection", "read_file", '{"file_path":"/skills/x","offset":0,"shell":"curl"}'),
+        ("negative", "read_file", '{"file_path":"/skills/x","offset":-1}'),
+        ("task_not_granted", "task", '{"description":"x","subagent_type":"researcher"}'),
+    ]:
+        g.feed(ProviderEvent("tool_start", tool_id=tid, tool_name=name))
+        g.feed(ProviderEvent("tool_args", tool_id=tid, text=args))
+    result = g.finish()
+    assert result.tool_calls[0]["args"]["file_path"] == "/skills/yomiyasu/SKILL.md"
+    assert all(x["args"] == {"__invalid__": True} for x in result.tool_calls[1:])
+
+
 def _propose(dbs: dict[str, Database], claim: control.Claim, call_id: str, name: str, args: dict) -> None:
     with dbs["model_gateway"].tx() as c:
         control.append_head(
