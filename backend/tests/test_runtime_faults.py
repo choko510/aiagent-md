@@ -455,8 +455,7 @@ def test_t09a_yomiyasu_read_two_pages_through_real_gateways(stack: Stack, api, t
     assert st["run"]["result"] == "推敲済み：日本語の文章を読みやすく整えました。"
     entries = q(
         pg.owner,
-        "SELECT entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s"
-        " ORDER BY checkpoint_revision",
+        "SELECT entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY checkpoint_revision",
         (st["run"]["id"],),
     )
     reads = [
