@@ -722,12 +722,6 @@ class ToolGateway:
                 control.append_reconciled_head(
                     c,
                     claim,
-                    {
-                        "kind": "tool",
-                        "tool_call_id": intent["invocation_key"],
-                        "tool_name": intent["tool_key"],
-                        "content": content_of(outcome(status, result)),
-                    },
                     stream=intent["stream"],
                     intent_id=intent_id,
                 )

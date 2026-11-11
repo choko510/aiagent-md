@@ -107,6 +107,8 @@ def test_expired_or_wrong_owner_claim_cannot_be_admitted_or_renewed(
 ) -> None:
     ids = submit(dbs, tenant)
     claim = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker-a")
+    with pytest.raises(control.FencedOut), dbs["tool_gateway"].tx() as c:
+        control.append_reconciled_head(c, claim, stream="main", intent_id=ids["runId"])
     wrong_worker = replace(claim, worker_ref="worker-b")
     with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
         control.check_current(c, wrong_worker)

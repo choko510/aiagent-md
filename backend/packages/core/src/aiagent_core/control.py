@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from aiagent_domain import TERMINAL_RUN_STATES, sha256_hex, uuid7
+from aiagent_domain import TERMINAL_RUN_STATES, canonical_json, sha256_hex, uuid7
 from aiagent_domain.generated import RunClaimV1
 from psycopg.types.json import Jsonb
 
@@ -435,26 +435,25 @@ def append_head(
     )
 
 
-def append_reconciled_head(
-    c: psycopg.Connection[Row], claim: Claim, payload: dict[str, Any], *, stream: str, intent_id: str
-) -> int:
+def append_reconciled_head(c: psycopg.Connection[Row], claim: Claim, *, stream: str, intent_id: str) -> int:
     """Append a confirmed receipt, never start an effect or grant a worker lease.
 
     The caller has verified the frozen proposal and receipt in this transaction.
     Only an already-confirmed intent belonging to the same run and stream qualifies.
     """
     intent = c.execute(
-        "SELECT invocation_key, tool_key FROM agent.tool_intents WHERE tenant_id=%s AND id=%s"
+        "SELECT invocation_key, tool_key, result_json FROM agent.tool_intents WHERE tenant_id=%s AND id=%s"
         " AND run_id=%s AND task_id=%s AND stream=%s AND status_code='CONFIRMED' FOR UPDATE",
         (claim.tenant_id, intent_id, claim.run_id, claim.task_id, stream),
     ).fetchone()
-    if (
-        intent is None
-        or payload.get("kind") != "tool"
-        or payload.get("tool_call_id") != intent["invocation_key"]
-        or payload.get("tool_name") != intent["tool_key"]
-    ):
+    if intent is None or not isinstance(intent["result_json"], dict) or not intent["result_json"].get("receipt"):
         raise FencedOut("invalid reconciled receipt")
+    payload = {
+        "kind": "tool",
+        "tool_call_id": intent["invocation_key"],
+        "tool_name": intent["tool_key"],
+        "content": canonical_json({"status": "CONFIRMED", **intent["result_json"]}),
+    }
     return _append_head(
         c,
         claim,
