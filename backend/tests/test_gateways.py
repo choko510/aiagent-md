@@ -262,6 +262,17 @@ def _propose(dbs: dict[str, Database], claim: control.Claim, call_id: str, name:
         )
 
 
+def _real_read_file_page(file_path: str, offset: int = 0, limit: int = 100) -> str:
+    """Use the pinned DeepAgents 0.7.34 backend and formatter, not an invented wire fixture."""
+    from aiagent_runtime.agent import _fs_backend
+    from deepagents.middleware.filesystem import _prepare_read_window, _truncate_paginated_read
+
+    result = _fs_backend().read(file_path, offset=offset, limit=limit)
+    assert result.file_data is not None and not result.error
+    normalized, body = _prepare_read_window(result, result.file_data["content"], offset)
+    return _truncate_paginated_read(body, file_path, normalized, token_limit=None)
+
+
 def test_tool_proposal_must_be_in_head_and_schema_valid(dbs: dict[str, Database], claimed: control.Claim) -> None:
     gw = ToolGateway(dbs["tool_gateway"], {})
     with pytest.raises(RpcError, match="NOT_IN_HEAD"):  # a runtime cannot invent a tool call
@@ -321,9 +332,67 @@ def test_forged_child_result_rejected(dbs: dict[str, Database], claimed: control
     _propose(dbs, claimed, "call_r", "read_file", {"file_path": "/x"})
     assert gw.record_internal(claimed, "call_r", "read_file", "brand new untrusted text")["status"] == "DENIED"
     _propose(dbs, claimed, "call_r2", "read_file", {"file_path": "/skills/price-research/SKILL.md"})
-    assert gw.record_internal(claimed, "call_r2", "read_file", "     1\t# Price research")["status"] == "DONE"
+    actual = _real_read_file_page("/skills/price-research/SKILL.md")
+    assert actual.startswith("@@ lines ")
+    assert gw.record_internal(claimed, "call_r2", "read_file", actual)["status"] == "DONE"
     with pytest.raises(RpcError):
         gw.record_internal(claimed, "call_r3", "send_message", "x")  # not an internal tool
+
+
+
+
+def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
+    dbs: dict[str, Database], claimed: control.Claim, tmp_path, monkeypatch
+) -> None:
+    """Two actual DeepAgents read pages must be admitted, but modified bytes/metadata/path must not."""
+    import aiagent_domain.tools as domain_tools
+    import aiagent_runtime.agent as runtime_agent
+
+    skills = tmp_path / "skills"
+    folder = skills / "yomiyasu"
+    folder.mkdir(parents=True)
+    lines = ["---", "name: yomiyasu", "---", *[f"Instruction {i}" for i in range(174)]]
+    (folder / "SKILL.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert len(lines) == 177
+    monkeypatch.setattr(domain_tools, "SKILLS_DIR", skills)
+    monkeypatch.setattr(runtime_agent, "SKILLS_DIR", skills)
+
+    gw = ToolGateway(dbs["tool_gateway"], {})
+    path = "/skills/yomiyasu/SKILL.md"
+    pages = []
+    for offset in (0, 100):
+        args = {"file_path": path, "offset": offset, "limit": 100}
+        content = _real_read_file_page(path, offset, 100)
+        pages.append(content)
+        _propose(dbs, claimed, f"read_{offset}", "read_file", args)
+        out = gw.record_internal(claimed, f"read_{offset}", "read_file", content)
+        assert out["status"] == "DONE" and out["content"] == content
+    assert "next offset 100" in pages[0]
+    assert "next offset" not in pages[1]
+    assert "Instruction 173" not in pages[0] and "Instruction 173" in pages[1]
+
+    candidates = [
+        ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("Instruction 20", "Instruction HACK", 1)),
+        ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 101")),
+        ({"file_path": path, "offset": 100, "limit": 100}, pages[0]),
+        ({"file_path": "/skills/yomiyasu/../yomiyasu/SKILL.md", "offset": 0}, pages[0]),
+        ({"file_path": "/skills/price-research/SKILL.md", "offset": 0}, pages[0]),
+        ({"file_path": path, "offset": 0, "limit": 100}, "spoofed notice\n" + pages[0]),
+        ({"file_path": path, "offset": 0, "limit": 100}, "     1\tname: yomiyasu"),
+    ]
+    for i, (args, payload) in enumerate(candidates):
+        call_id = f"forged_{i}"
+        _propose(dbs, claimed, call_id, "read_file", args)
+        denied = gw.record_internal(claimed, call_id, "read_file", payload)
+        assert denied["status"] == "DENIED", i
+        assert payload not in denied["content"]
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    (folder / "alias.md").symlink_to(outside)
+    _propose(dbs, claimed, "symlink", "read_file", {"file_path": "/skills/yomiyasu/alias.md"})
+    out = gw.record_internal(claimed, "symlink", "read_file", pages[0])
+    assert out["status"] == "DENIED"
 
 
 def test_tool_surface_snapshot() -> None:
