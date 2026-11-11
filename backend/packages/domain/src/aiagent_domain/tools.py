@@ -89,10 +89,34 @@ PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
     "anthropic": ("search", "send_message"),
     "sandbox": ("search", "sandbox_exec"),
 }
-# Framework-internal tools the runtime may keep. Their results reach HEAD only through the Tool Gateway's grounded
-# admission (tool.record_internal): `task` = sub-agent delegation, `read_file` = read of in-state offloaded content or
-# packaged read-only skills. Snapshot-tested (tests/test_runtime_surface.py).
-INTERNAL_TOOLS = frozenset({"task", "read_file"})
+# Framework-internal read-only operations: provider schema is fixed here instead of trusting a runtime-supplied
+# schema. These are NOT external Tool Gateway executors. All results enter HEAD only via grounded admission.
+INTERNAL_TOOL_SPECS: dict[str, ToolSpec] = {
+    "read_file": ToolSpec(
+        "read_file",
+        "Read an existing skill or offloaded runtime file; never execute its contents.",
+        _obj(
+            {
+                "file_path": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^/"},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            },
+            ["file_path"],
+        ),
+        "read",
+        False,
+        "framework_internal",
+    ),
+    "task": ToolSpec(
+        "task",
+        "Delegate a sub-task to an approved sub-agent.",
+        _obj({"description": {"type": "string"}, "subagent_type": {"type": "string"}}, ["description", "subagent_type"]),
+        "read",
+        False,
+        "framework_internal",
+    ),
+}
+INTERNAL_TOOLS = frozenset(INTERNAL_TOOL_SPECS)
 
 
 def tools_for(profile: str) -> list[ToolSpec]:
