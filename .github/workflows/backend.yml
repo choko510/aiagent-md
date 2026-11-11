@@ -113,6 +113,16 @@ jobs:
           docker build -q -f deploy/docker/Dockerfile --target runtime-base \
             --build-arg PACKAGES="aiagent-gateways aiagent-sentinel aiagent-api aiagent-runtime" -t aiagent/all:dev .
           docker build -q -f deploy/docker/Dockerfile.cell -t aiagent/cell:dev .
+      - name: Official yomiyasu is included as a read-only packaged skill
+        working-directory: .
+        run: |
+          docker run --rm --network none --entrypoint python aiagent/all:dev -c '
+          from aiagent_domain.tools import SKILLS_DIR
+          skill = SKILLS_DIR / "yomiyasu"
+          assert (skill / "SKILL.md").stat().st_size > 30000
+          assert (skill / "references" / "doc-types" / "pr.md").is_file()
+          assert (skill / "scripts" / "yomiyasu_check.py").is_file()
+          '
       - name: Compose network isolation gate (dev topology)
         working-directory: .
         run: |
