@@ -171,16 +171,20 @@ name = "aiagent-gateways"
 version = "0.3.0"
 source = { editable = "packages/gateways" }
 dependencies = [
+    { name = "aiagent-context" },
     { name = "aiagent-core" },
     { name = "aiagent-sandbox" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "jsonschema" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiagent-context", editable = "packages/context" },
     { name = "aiagent-core", editable = "packages/core" },
     { name = "aiagent-sandbox", editable = "packages/sandbox" },
+    { name = "cryptography", specifier = "==50.0.2" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = ">=4.25.0" },
 ]
