@@ -903,6 +903,7 @@ def _grounded_read(content: str, entries: list[Row], proposal: dict[str, Any]) -
         return _grounded_packaged_skill_read(content, args)
     return _grounded_offload_read(content, entries, args)
 
+
 def _run(coro: Any) -> Any:
     """Executors are async; _dispatch runs in a worker thread (blocking DB code), so drive the coroutine here."""
     return asyncio.run(coro)
