@@ -152,14 +152,14 @@ class Campaign:
     @classmethod
     def from_wire(cls, value: dict[str, object]) -> Campaign:
         """Deserialize a trusted store record (not external requests)."""
-        raw_plan = dict(value["plan"])  # type: ignore[arg-type]
+        raw_plan = dict(value["plan"])  # type: ignore[call-overload]
         policy = StopPolicy(**dict(raw_plan.pop("policy")))  # type: ignore[arg-type]
         plan = CampaignPlan(policy=policy, **raw_plan)  # type: ignore[arg-type]
         rest = {k: v for k, v in value.items() if k != "plan"}
-        rest["cycles"] = [Cycle(**x) for x in rest["cycles"]]  # type: ignore[union-attr]
-        rest["effects"] = [Effect(**x) for x in rest["effects"]]  # type: ignore[union-attr]
-        rest["outbox"] = [Dispatch(**x) for x in rest["outbox"]]  # type: ignore[union-attr]
-        rest["events"] = [Audit(**x) for x in rest["events"]]  # type: ignore[union-attr]
+        rest["cycles"] = [Cycle(**x) for x in rest["cycles"]]  # type: ignore[attr-defined]
+        rest["effects"] = [Effect(**x) for x in rest["effects"]]  # type: ignore[attr-defined]
+        rest["outbox"] = [Dispatch(**x) for x in rest["outbox"]]  # type: ignore[attr-defined]
+        rest["events"] = [Audit(**x) for x in rest["events"]]  # type: ignore[attr-defined]
         return cls(plan=plan, **rest)  # type: ignore[arg-type]
 
 

@@ -21,7 +21,7 @@ FEATURES = (
     "automation",
     "device",
 )
-_RESERVED_PREFIXES = tuple(f + "." for f in FEATURES) + ("step4.",)
+_RESERVED_PREFIXES = (*(f + "." for f in FEATURES), "step4.")
 _RESERVED_EXACT = frozenset(FEATURES) | {"step4"}
 
 

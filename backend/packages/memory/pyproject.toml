@@ -11,7 +11,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv.sources]
 aiagent-context = { workspace = true }
-
-# AI-07 enables shared workspace membership with one atomic backend/uv.lock update.
-[tool.uv]
-managed = false

@@ -4,6 +4,11 @@ on:
     paths:
       - 'backend/packages/development/**'
       - '.github/workflows/ai03-development.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/packages/development/**'
+      - '.github/workflows/ai03-development.yml'
   workflow_dispatch:
 permissions:
   contents: read

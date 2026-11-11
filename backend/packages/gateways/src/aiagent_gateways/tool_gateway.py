@@ -125,9 +125,7 @@ class ToolGateway:
         # STEP 4 names must remain fail-closed even if a registry/profile changes
         # before the PostgreSQL, Run/Goal/fence, effect-ledger and Sentinel adapters exist.
         if is_reserved_tool(tool):
-            return await asyncio.to_thread(
-                self._deny, claim, tool_call_id, tool, "STEP4_NOT_INTEGRATED", stream
-            )
+            return await asyncio.to_thread(self._deny, claim, tool_call_id, tool, "STEP4_NOT_INTEGRATED", stream)
         spec = TOOLS.get(tool)
         if spec is None:
             return self._deny(claim, tool_call_id, tool, "unknown tool", stream)

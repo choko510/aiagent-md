@@ -71,7 +71,7 @@ class DevelopmentWorkflow:
         return current
 
     def _save(self, old: Cycle, **changes: object) -> Cycle:
-        updated = replace(old, version=old.version + 1, **changes)
+        updated = replace(old, version=old.version + 1, **changes)  # type: ignore[arg-type]
         self.store.save(old, updated)
         return updated
 

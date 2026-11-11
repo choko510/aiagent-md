@@ -11,10 +11,10 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from aiagent_core import commands, config
-from aiagent_core.step4_gate import capability_snapshot
 from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
 from aiagent_core.migrate import check_compatible
+from aiagent_core.step4_gate import capability_snapshot
 from aiagent_domain.canonical import sha256_bytes
 from aiagent_domain.generated import ApprovalDecisionCommandV1, TaskSteerCommandV1, TaskSubmitCommandV1
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
