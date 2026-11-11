@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 
-UPSTREAM_COMMIT = "7b212ff2f037953b8c233ae315e5c08e7fc36da6"
+UPSTREAM_COMMIT = "b9a69a3791dd7d3c063ed963bc4a408e515f6288"
 UPSTREAM_URL = f"https://codeload.github.com/nanaism/yomiyasu/tar.gz/{UPSTREAM_COMMIT}"
 MAX_ARCHIVE_BYTES = 12 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -25,7 +25,7 @@ MAX_TOTAL_BYTES = 4 * 1024 * 1024
 EXPECTED_BLOBS: dict[str, str] = {
     ".codex-plugin/plugin.json": "5a19ff8aea13384325c12c2f8bd6c4720e88fb3e",
     "LICENSE": "f0d06f87f9b209d47c7f7963321ff71bab68c1e8",
-    "SKILL.md": "a1cc491efb3e9185b5609be92003a7f87a63cf8a",
+    "SKILL.md": "0fd675f22e4c22cabe858efc10d51f420ee02dae",
     "UNICODE-LICENSE.txt": "56da58912807030b451a4700687d5bd02c72d6ed",
     "assets/algo-artis.png": "21f28805968be9191621b00d64efe6b5f70c1ec6",
     "references/audience.md": "35513eb1192536e004e3e9f0412338fadb10735b",
@@ -61,11 +61,11 @@ EXPECTED_BLOBS: dict[str, str] = {
     "references/rephrase-test.md": "f31b995b9ba7b844a4a2414d5ce45ee68ccdd567",
     "references/review-points.md": "03e138b0fe490413794b3f319cc306e2408bff6c",
     "references/slop-catalog.md": "75fb321c872814247607a3be73fac89dd6c4d706",
-    "scripts/markdown_visibility.py": "82f8282b8cc4187deaeedc1daad8eef6df53f0a9",
-    "scripts/yomiyasu_check.py": "b57255eefafcdfc5fec871dbb06026f4725707fa",
-    "scripts/yomiyasu_diff.py": "0ca497d7f9c18f655b8e1f41e39980d8551207b8",
-    "scripts/yomiyasu_hook.py": "3011306bca55624905b5c9cd342e2b8abf521933",
-    "scripts/yomiyasu_lint.py": "9670465b81281e1172a8141eabbfcb228363c755",
+    "scripts/markdown_visibility.py": "6ecb900a8d68fa294decb2083b79ae28c4812fa8",
+    "scripts/yomiyasu_check.py": "56b19f54cbc27bd465187c73cf53265030ada7ab",
+    "scripts/yomiyasu_diff.py": "98593f0cf3deb60280072a13a2d94ee2fc10bc79",
+    "scripts/yomiyasu_hook.py": "d61acab1425483feef02c8dc17e15bdfb3f5564e",
+    "scripts/yomiyasu_lint.py": "15d473f8b53dbf242d9a06db6da2fb88d53af395",
 }
 
 
