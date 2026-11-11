@@ -45,7 +45,7 @@ def test_default_ja_skill_is_packaged_and_system_prompt_selects_it() -> None:
     assert "name: yomiyasu" in skill.read_text(encoding="utf-8")
     assert "yomiyasu" in "".join(packaged_skill_texts())
     assert "/skills/yomiyasu/SKILL.md" in SYSTEM_PROMPT
-    assert "never report" in SYSTEM_PROMPT
+    assert "Never report Python checks" in SYSTEM_PROMPT
 
 
 def test_pinned_bundle_verifies_git_blobs_then_installs(tmp_path, monkeypatch) -> None:
