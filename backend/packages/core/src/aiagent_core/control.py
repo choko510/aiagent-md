@@ -222,8 +222,9 @@ def mark_running(db: Database, claim: Claim) -> None:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET status_code='RUNNING', updated_at=now() WHERE tenant_id=%s AND id=%s"
-            " AND lease_epoch=%s AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested AND NOT pause_requested",
-            (claim.tenant_id, claim.run_id, claim.lease_epoch),
+            " AND lease_epoch=%s AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()"
+            " AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested AND NOT pause_requested",
+            (claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         if cur.rowcount != 1:
             _raise_for(c, claim)
@@ -246,8 +247,9 @@ def release(db: Database, claim: Claim) -> bool:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET lease_expires_at = now() - interval '1 millisecond'"
-            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
-            (claim.tenant_id, claim.run_id, claim.lease_epoch),
+            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s"
+            " AND lease_expires_at > clock_timestamp()",
+            (claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         return cur.rowcount == 1
 
@@ -644,8 +646,9 @@ def framework_ref(db: Database, tenant_id: str, run_id: str) -> str | None:
 def set_framework_ref(db: Database, claim: Claim, ref: str) -> None:
     with db.conn() as c:
         cur = c.execute(
-            "UPDATE agent.runs SET framework_ref=%s WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
-            (ref, claim.tenant_id, claim.run_id, claim.lease_epoch),
+            "UPDATE agent.runs SET framework_ref=%s WHERE tenant_id=%s AND id=%s AND lease_epoch=%s"
+            " AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()",
+            (ref, claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         if cur.rowcount != 1:
             raise FencedOut(claim.run_id)
@@ -657,8 +660,9 @@ def discard_framework_ref(db: Database, claim: Claim, ref: str | None) -> bool:
         return False
     with db.conn() as c:
         cur = c.execute(
-            "UPDATE agent.runs SET framework_ref=NULL WHERE tenant_id=%s AND id=%s AND framework_ref=%s AND lease_epoch=%s",
-            (claim.tenant_id, claim.run_id, ref, claim.lease_epoch),
+            "UPDATE agent.runs SET framework_ref=NULL WHERE tenant_id=%s AND id=%s AND framework_ref=%s AND lease_epoch=%s"
+            " AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()",
+            (claim.tenant_id, claim.run_id, ref, claim.lease_epoch, claim.worker_ref),
         )
         return cur.rowcount == 1
 
@@ -694,7 +698,8 @@ def finish_segment(
             (claim.tenant_id, claim.task_id),
         ).fetchone()
         run = c.execute(
-            "SELECT status_code, lease_epoch, cancel_requested, pause_requested FROM agent.runs"
+            "SELECT status_code, lease_epoch, lease_owner_ref,"
+            " coalesce(lease_expires_at > clock_timestamp(), false) AS lease_valid, cancel_requested, pause_requested FROM agent.runs"
             " WHERE tenant_id=%s AND id=%s AND task_id=%s FOR UPDATE",
             (claim.tenant_id, claim.run_id, claim.task_id),
         ).fetchone()
@@ -702,7 +707,11 @@ def finish_segment(
             raise TenantMismatch(claim.run_id)
         if run["status_code"] in TERMINAL:
             raise (Cancelled if run["status_code"] == "CANCELLED" else RunTerminal)(run["status_code"])
-        if run["lease_epoch"] != claim.lease_epoch:
+        if (
+            run["lease_epoch"] != claim.lease_epoch
+            or run["lease_owner_ref"] != claim.worker_ref
+            or not run["lease_valid"]
+        ):
             raise FencedOut(claim.run_id)
         target = outcome
         revoked = not scope_active(c, claim.tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))

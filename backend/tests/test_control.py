@@ -121,6 +121,11 @@ def test_expired_or_wrong_owner_claim_cannot_be_admitted_or_renewed(
     with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
         control.append_head(c, claim, "assistant", {"content": "expired"}, writer="test")
     assert not control.heartbeat(dbs["runtime"], claim)
+    with pytest.raises(control.FencedOut):
+        control.set_framework_ref(dbs["runtime"], claim, "expired-cache")
+    with pytest.raises(control.FencedOut):
+        control.finish_segment(dbs["runtime"], claim, "SUCCEEDED", result_text="expired")
+    assert not control.release(dbs["runtime"], claim)
 
 
 def test_cancel_wins_over_completion(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
