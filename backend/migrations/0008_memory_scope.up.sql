@@ -141,7 +141,7 @@ BEGIN
    AND a.id IN (NEW.source_artifact_id,NEW.projection_artifact_id)
    AND a.kind='raw' AND a.revoked_at IS NULL AND a.expires_at > clock_timestamp() FOR SHARE;
   GET DIAGNOSTICS n = ROW_COUNT;
-  IF n <> CASE WHEN NEW.source_artifact_id=NEW.projection_artifact_id THEN 1 ELSE 2 END THEN
+  IF n <> (CASE WHEN NEW.source_artifact_id=NEW.projection_artifact_id THEN 1 ELSE 2 END) THEN
    RAISE EXCEPTION 'invalid memory source' USING ERRCODE='check_violation'; END IF;
  ELSE
   IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL OR NEW.revision <> OLD.revision+1 OR
