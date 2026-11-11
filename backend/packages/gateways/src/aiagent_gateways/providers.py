@@ -87,6 +87,8 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
     # Deterministic two-page skill read for the gateway/Agent runtime integration test.
     # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
     if "yomiyasu fixture" in first:
+        if "yomiyasuを使わない" in first:
+            return {"content": "指定に従って通常回答しました。"}
         pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
         path = "/skills/yomiyasu/SKILL.md"
         if "read_file" not in tools:
