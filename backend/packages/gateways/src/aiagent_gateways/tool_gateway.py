@@ -817,7 +817,7 @@ def _grounded_packaged_skill_read(content: str, args: dict[str, Any]) -> bool:
     if str(posix) != file_path or ".." in file_path.split("/") or "." in file_path.split("/"):
         return False
     parts = posix.parts
-    if len(parts) < 4 or parts[:2] != ("/", "skills") or not parts[-1].endswith(".md"):
+    if len(parts) < 4 or parts[:2] != ("/", "skills") or not parts[-1].endswith((".md", ".txt")):
         return False
     candidate = SKILLS_DIR.joinpath(*parts[2:])
     # The runtime reads immutable packaged skills, not symlink destinations.
