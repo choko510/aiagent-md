@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import re
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from aiagent_core import control
@@ -606,7 +607,7 @@ class ToolGateway:
                 }
                 admitted = content in finals
             else:
-                admitted = _grounded_read(content, entries)
+                admitted = _grounded_read(content, entries, prop[0])
             o = outcome(
                 "DONE" if admitted else "DENIED",
                 {"childResult": content} if admitted else {"error": "child result not grounded in HEAD"},
@@ -790,20 +791,78 @@ class ToolGateway:
 
 
 _LINENO = re.compile(r"^\s*\d+\t", re.MULTILINE)
+# DeepAgents 0.7.34: read_file returns a status header followed by raw, UNNUMBERED source lines.
+# Never accept unverified metadata, trailing notices, or a fake header just because a few words match a skill.
+_SKILL_READ_HEADER = re.compile(
+    r"\A@@ lines ([1-9][0-9]*)-([1-9][0-9]*) of ([1-9][0-9]*)(?: \| next offset ([1-9][0-9]*))? @@\n"
+)
 
 
-def _grounded_read(content: str, entries: list[Row]) -> bool:
-    """A read_file result is admitted only if its text already exists in this run's HEAD (offloaded tool output /
-    history) or in the packaged read-only skills shipped with the code - i.e. it adds no new untrusted bytes."""
+def _grounded_packaged_skill_read(content: str, args: dict[str, Any]) -> bool:
+    """Verify the complete rendered page against the precise packaged skill and committed read_file arguments.
+
+    DeepAgents wraps the verbatim page with `@@ lines A-B of T | next offset N @@`.
+    The header is not itself evidence; it and every body character must match
+    a read-only file at the proposed path. Deliberately reject mid-line truncation
+    and diagnostic pages rather than launder partial/unverified bytes into HEAD.
+    """
+    from aiagent_domain.tools import SKILLS_DIR
+
+    file_path, offset, limit = args.get("file_path"), args.get("offset", 0), args.get("limit", 100)
+    if not isinstance(file_path, str) or not file_path.startswith("/skills/"):
+        return False
+    if type(offset) is not int or type(limit) is not int or offset < 0 or limit <= 0:
+        return False
+    posix = PurePosixPath(file_path)
+    if str(posix) != file_path or ".." in file_path.split("/") or "." in file_path.split("/"):
+        return False
+    parts = posix.parts
+    if len(parts) < 4 or parts[:2] != ("/", "skills") or parts[-1].endswith(".md") is False:
+        return False
+    candidate = SKILLS_DIR.joinpath(*parts[2:])
+    # The runtime reads immutable packaged skills, not symlink destinations.
+    if not candidate.is_file() or any(p.is_symlink() for p in (candidate, *candidate.parents)):
+        return False
+    header = _SKILL_READ_HEADER.match(content)
+    if header is None:
+        return False
+    start, end, total = (int(header.group(i)) for i in (1, 2, 3))
+    next_offset = int(header.group(4)) if header.group(4) is not None else None
+
+    # FilesystemBackend.read uses splitlines(keepends=True), so a final LF does
+    # not add a phantom line. _prepare_read_window preserves empty source rows.
+    source_lines = candidate.read_text(encoding="utf-8").splitlines(keepends=True)
+    total_lines = len(source_lines)
+    expected_end = min(offset + limit, total_lines)
+    if (start, end, total) != (offset + 1, expected_end, total_lines) or start > end:
+        return False
+    if next_offset != (expected_end if expected_end < total_lines else None):
+        return False
+    raw_page = "".join(source_lines[offset:expected_end]).replace("\r\n", "\n").replace("\r", "\n")
+    rows = raw_page.split("\n")
+    if rows and rows[-1] == "":
+        rows.pop()
+    # DeepAgents pads lost final blank rows when building its source block.
+    rows.extend([""] * max(0, end - start + 1 - len(rows)))
+    expected_body = "\n".join(rows)
+    return content[header.end() :] == expected_body
+
+
+def _grounded_read(content: str, entries: list[Row], proposal: dict[str, Any]) -> bool:
+    """Admit skill pages only by exact file/offset/limit; preserve HEAD-only offload reads."""
+    args = proposal.get("args")
+    if not isinstance(args, dict) or not isinstance(args.get("file_path"), str):
+        return False
+    if args["file_path"].startswith("/skills"):
+        return _grounded_packaged_skill_read(content, args)
+
+    # Non-skill offloaded content can only repeat material already committed to
+    # this run's HEAD. A fabricated skill excerpt or metadata is not sufficient.
     body = _LINENO.sub("", content).strip()
     if not body:
         return True
     corpus = "\n".join(str(e["checkpoint_json"].get("content", "")) for e in entries)
-    if body in corpus:
-        return True
-    from aiagent_domain.tools import packaged_skill_texts
-
-    return any(body in t for t in packaged_skill_texts())
+    return body in corpus
 
 
 def _run(coro: Any) -> Any:
