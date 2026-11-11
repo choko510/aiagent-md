@@ -142,7 +142,7 @@ def test_kill_after_summary_before_cas_preserves_previous_head():
     assert head.head == "head:0"
     assert head.published == []
     assert len(store._raw) == 1
-    assert len(store._summary) == 1  # orphan, not public; cleanup owned by AI-07
+    assert len(store._summary) == 2  # summary and sealed payload remain unpublished
 
 
 def test_goal_steer_and_revoked_memory_epoch_refuse_stale_summary():

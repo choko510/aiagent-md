@@ -14,6 +14,7 @@ from typing import Protocol
 
 from .models import (
     ContextPlan,
+    ContextPublication,
     ContextRequest,
     RawArtifact,
     SafeStop,
@@ -223,6 +224,7 @@ class ContextService:
             raise SafeStop("BLOCKED_CONTEXT_CAPACITY")
         # Summary is a selection record. Original bytes remain separately retrievable.
         summary_ref, summary_hash = self.artifacts.put_summary(request.scope, summary)
+        payload_ref, payload_digest = self.artifacts.put_summary(request.scope, payload.encode("utf-8"))
         plan_digest = stable_digest(
             {
                 "scope": asdict(request.scope),
@@ -248,6 +250,9 @@ class ContextService:
             request.policy_version,
             request.memory_source_epoch,
             plan_digest,
+            ContextPublication(
+                request, refs, request.memory[:memory_count], summary_ref, summary_hash, payload_ref, payload_digest
+            ),
         )
         return ContextPlan(
             request.scope,

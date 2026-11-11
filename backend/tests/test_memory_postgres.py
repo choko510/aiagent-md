@@ -125,3 +125,47 @@ def test_real_memory_retriever_rechecks_consent_and_epoch(
     with pytest.raises(SafeStop, match="STALE_MEMORY"):
         repo.retrieval(scope, query="remembered", recipient="fake")
     assert not repo.retrieval(scope, query="remembered", recipient="fake").projections
+
+
+def test_context_service_publishes_real_head_without_plaintext(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    from aiagent_context import Anchor, AnchorKind, ContextRequest, ContextService, ModelBudget, SourceInput
+    from aiagent_gateways.context_head import PostgresHeadPort
+    from aiagent_gateways.context_memory import PostgresMemoryRepository
+
+    owner, scope, store, source, projection = setup_memory(dbs, tenant)
+    memory_id, _ = create(dbs, owner, scope, source.artifact_ref, projection.artifact_ref)
+    repo = PostgresMemoryRepository(dbs["model_gateway"], store._claim, store)
+    memory = repo.retrieval(scope, query="remembered", recipient="fake")
+    head = PostgresHeadPort(dbs["model_gateway"], store._claim, store, repo)
+    old_head = dbs["owner"].one("SELECT head_revision FROM agent.runs WHERE id=%s", (scope.run_id,))["head_revision"]
+    req = ContextRequest(
+        scope,
+        str(old_head),
+        str(store._claim.lease_epoch),
+        str(store._claim.goal_revision),
+        head.policy_version(scope),
+        memory.source_epoch,
+        "cursor:1",
+        (Anchor(AnchorKind.GOAL_REF, f"goal:{store._claim.goal_revision}", "memory test"),),
+        ModelBudget("fake-gateway", "r1", "byte-upper-bound", 10000, 1000, 100),
+        memory.projections,
+        "fake",
+    )
+    plan = ContextService(store, head).compact(
+        req, (SourceInput("input", "2026-01-01T00:00:00Z", b"source evidence", locator_ref="bytes:0"),)
+    )
+    assert int(plan.committed_head) == old_head + 1
+    entry = dbs["owner"].one(
+        "SELECT checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s AND checkpoint_revision=%s",
+        (scope.run_id, int(plan.committed_head)),
+    )["checkpoint_json"]
+    assert entry["kind"] == "context_manifest" and entry["memory"] == [{"id": memory_id, "revision": 1}]
+    assert "remembered data" not in str(entry) and "source evidence" not in str(entry)
+    head.check_dispatch(plan, str(store._claim.lease_epoch))
+    memory_writer.revoke_memory(dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id)
+    from aiagent_context.models import SafeStop
+
+    with pytest.raises(SafeStop, match="STALE_MEMORY"):
+        head.check_dispatch(plan, str(store._claim.lease_epoch))
