@@ -284,7 +284,8 @@ def check_current(
         " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
         " r.cancel_requested, r.pause_requested, r.restore_incarnation,"
         " r.head_revision, r.allowed_models, r.token_budget, r.tokens_reserved, r.tokens_used, r.max_model_calls,"
-        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, s.restore_incarnation AS current_incarnation"
+        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, t.active_run_id,"
+        " s.restore_incarnation AS current_incarnation"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " CROSS JOIN agent.schema_control s"
         " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s" + (" FOR UPDATE OF r" if for_update else ""),
@@ -307,7 +308,12 @@ def check_current(
         raise Cancelled(claim.run_id)
     if row["status_code"] in TERMINAL:
         raise RunTerminal(row["status_code"])
-    if row["lease_epoch"] != claim.lease_epoch or row["lease_owner_ref"] != claim.worker_ref or not row["lease_valid"]:
+    if (
+        row["lease_epoch"] != claim.lease_epoch
+        or row["lease_owner_ref"] != claim.worker_ref
+        or not row["lease_valid"]
+        or row["active_run_id"] != claim.run_id
+    ):
         raise FencedOut(claim.run_id)
     if row["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)

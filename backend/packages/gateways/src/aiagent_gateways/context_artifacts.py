@@ -14,9 +14,10 @@ import os
 from datetime import datetime
 from hashlib import sha256
 
+import psycopg
 from aiagent_context.models import RawArtifact, SafeStop, Scope, SourceInput, forbid_secrets
 from aiagent_core import control
-from aiagent_core.db import Database
+from aiagent_core.db import Database, Row
 from aiagent_domain import uuid7
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -43,15 +44,23 @@ class PostgresArtifactStore:
         ):
             raise SafeStop("ARTIFACT_UNAVAILABLE")
 
-    def _current(self, c: object) -> None:
+    def _current(self, c: psycopg.Connection[Row]) -> None:
         try:
-            control.check_current(c, self._claim, for_update=True)  # type: ignore[arg-type]
+            control.check_current(c, self._claim, for_update=True)
         except control.ControlError as exc:
             raise SafeStop("STALE_CONTEXT") from exc
+        claim = self._claim
+        c.execute(
+            "SELECT set_config('aiagent.artifact_tenant', %s, true),"
+            " set_config('aiagent.artifact_owner', %s, true),"
+            " set_config('aiagent.artifact_task', %s, true),"
+            " set_config('aiagent.artifact_run', %s, true)",
+            (claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id),
+        )
 
-    def _aad(self, ref: str) -> bytes:
+    def _aad(self, ref: str, source_run_id: str) -> bytes:
         c = self._claim
-        return json.dumps([c.tenant_id, c.owner_user_id, c.task_id, c.run_id, ref], separators=(",", ":")).encode()
+        return json.dumps([c.tenant_id, c.owner_user_id, c.task_id, source_run_id, ref], separators=(",", ":")).encode()
 
     def _put(self, scope: Scope, kind: str, body: bytes, metadata: dict[str, str]) -> tuple[str, str]:
         self._scope(scope)
@@ -66,7 +75,7 @@ class PostgresArtifactStore:
             ensure_ascii=False,
         ).encode()
         nonce = os.urandom(12)
-        encrypted = self._cipher.encrypt(nonce, envelope, self._aad(artifact_id))
+        encrypted = self._cipher.encrypt(nonce, envelope, self._aad(artifact_id, scope.run_id))
         with self._db.tx() as c:
             self._current(c)
             # Metadata and bytes are committed together; a rolled-back write leaves neither visible.
@@ -115,16 +124,16 @@ class PostgresArtifactStore:
         with self._db.tx() as c:
             self._current(c)
             row = c.execute(
-                "SELECT content_sha256, byte_length, nonce, ciphertext FROM agent.context_artifacts"
-                " WHERE tenant_id=%s AND id::text=%s AND owner_user_id=%s AND task_id=%s AND run_id=%s"
+                "SELECT run_id, content_sha256, byte_length, nonce, ciphertext FROM agent.context_artifacts"
+                " WHERE tenant_id=%s AND id::text=%s AND owner_user_id=%s AND task_id=%s"
                 " AND kind=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()",
-                (scope.tenant_id, ref, scope.owner_id, scope.task_id, scope.run_id, kind),
+                (scope.tenant_id, ref, scope.owner_id, scope.task_id, kind),
             ).fetchone()
             if row is None:
                 raise SafeStop("ARTIFACT_UNAVAILABLE")
             try:
                 decoded = json.loads(
-                    self._cipher.decrypt(bytes(row["nonce"]), bytes(row["ciphertext"]), self._aad(ref))
+                    self._cipher.decrypt(bytes(row["nonce"]), bytes(row["ciphertext"]), self._aad(ref, row["run_id"]))
                 )
                 body = base64.b64decode(decoded["body"], validate=True)
                 metadata = decoded["metadata"]
