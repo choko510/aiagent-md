@@ -174,6 +174,12 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             || self.revoked
             || !next_fence.valid()
             || next_fence.connection_generation <= self.fence.connection_generation
+            // This mock has no authenticated authority for changing the other fences.
+            || next_fence.device_claim_epoch != self.fence.device_claim_epoch
+            || next_fence.lease_epoch != self.fence.lease_epoch
+            || next_fence.restore_incarnation != self.fence.restore_incarnation
+            || next_fence.goal_revision != self.fence.goal_revision
+            || next_fence.policy_revision != self.fence.policy_revision
             || !self.channel.online()
         {
             return Err("RECONNECT_DENIED");

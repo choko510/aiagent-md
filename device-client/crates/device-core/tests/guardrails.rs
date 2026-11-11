@@ -329,3 +329,23 @@ fn stale_and_disconnect_fail_closed_even_if_transport_is_online() {
     );
     assert_eq!(a.adapters.calls, 0);
 }
+
+#[test]
+fn reconnect_rejects_changed_authority_fences() {
+    let dir = tempdir().unwrap();
+    let mut agent = new_agent(&dir.path().join("journal.db"), "A");
+    agent.disconnect();
+    for field in 0..5 {
+        let mut next = fence();
+        next.connection_generation = Epoch(10);
+        match field {
+            0 => next.device_claim_epoch = Epoch(3),
+            1 => next.lease_epoch = Epoch(2),
+            2 => next.restore_incarnation = Epoch(1),
+            3 => next.goal_revision = Epoch(0),
+            _ => next.policy_revision = Epoch(1),
+        }
+        assert_eq!(agent.reconnect_mock(next), Err("RECONNECT_DENIED"));
+    }
+    assert_eq!(agent.adapters.calls, 0);
+}
