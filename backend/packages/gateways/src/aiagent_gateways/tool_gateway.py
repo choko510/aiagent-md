@@ -719,20 +719,17 @@ class ToolGateway:
                     "tool_gateway:reconcile",
                     run["restore_incarnation"],
                 )
-                control.append_head(
+                control.append_reconciled_head(
                     c,
                     claim,
-                    "tool",
                     {
                         "kind": "tool",
                         "tool_call_id": intent["invocation_key"],
                         "tool_name": intent["tool_key"],
                         "content": content_of(outcome(status, result)),
                     },
-                    writer="tool_gateway:reconcile",
                     stream=intent["stream"],
-                    tool_call_id=intent["invocation_key"],
-                    require_current_goal=False,
+                    intent_id=intent_id,
                 )
             append_event(
                 c,

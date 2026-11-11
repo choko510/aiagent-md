@@ -419,6 +419,67 @@ def append_head(
 ) -> int:
     """CAS-append one immutable entry inside the caller's transaction. Idempotent on (stream, request_key) for
     assistant entries and on tool_call_id for tool entries. Fails closed on stale fence / goal / cancel."""
+    return _append_head(
+        c,
+        claim,
+        kind,
+        payload,
+        writer=writer,
+        stream=stream,
+        request_key=request_key,
+        tool_call_id=tool_call_id,
+        require_current_goal=require_current_goal,
+        reconcile=False,
+    )
+
+
+def append_reconciled_head(
+    c: psycopg.Connection[Row], claim: Claim, payload: dict[str, Any], *, stream: str, intent_id: str
+) -> int:
+    """Append a confirmed receipt, never start an effect or grant a worker lease.
+
+    The caller has verified the frozen proposal and receipt in this transaction.
+    Only an already-confirmed intent belonging to the same run and stream qualifies.
+    """
+    intent = c.execute(
+        "SELECT invocation_key, tool_key FROM agent.tool_intents WHERE tenant_id=%s AND id=%s"
+        " AND run_id=%s AND task_id=%s AND stream=%s AND status_code='CONFIRMED' FOR UPDATE",
+        (claim.tenant_id, intent_id, claim.run_id, claim.task_id, stream),
+    ).fetchone()
+    if (
+        intent is None
+        or payload.get("kind") != "tool"
+        or payload.get("tool_call_id") != intent["invocation_key"]
+        or payload.get("tool_name") != intent["tool_key"]
+    ):
+        raise FencedOut("invalid reconciled receipt")
+    return _append_head(
+        c,
+        claim,
+        "tool",
+        payload,
+        writer="tool_gateway:reconcile",
+        stream=stream,
+        request_key=None,
+        tool_call_id=intent["invocation_key"],
+        require_current_goal=False,
+        reconcile=True,
+    )
+
+
+def _append_head(
+    c: psycopg.Connection[Row],
+    claim: Claim,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    writer: str,
+    stream: str,
+    request_key: str | None,
+    tool_call_id: str | None,
+    require_current_goal: bool | None,
+    reconcile: bool,
+) -> int:
     if require_current_goal is None:
         require_current_goal = kind == "assistant"
     run = c.execute(
@@ -432,7 +493,9 @@ def append_head(
         raise TenantMismatch(claim.run_id)
     if run["status_code"] in TERMINAL:
         raise RunTerminal(run["status_code"])
-    if run["lease_epoch"] != claim.lease_epoch or run["lease_owner_ref"] != claim.worker_ref or not run["lease_valid"]:
+    if run["lease_epoch"] != claim.lease_epoch or (
+        not reconcile and (run["lease_owner_ref"] != claim.worker_ref or not run["lease_valid"])
+    ):
         raise FencedOut(claim.run_id)
     if require_current_goal and run["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)
