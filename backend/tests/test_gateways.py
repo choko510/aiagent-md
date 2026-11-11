@@ -420,7 +420,6 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     assert out["status"] == "DENIED"
 
 
-
 def test_head_grounded_offloaded_tool_and_user_pages(
     dbs: dict[str, Database], claimed: control.Claim, tmp_path
 ) -> None:
@@ -483,7 +482,10 @@ def test_head_grounded_offloaded_tool_and_user_pages(
         ({"file_path": "/large_tool_results/unrelated", "offset": 0}, pages[0]),
         ({"file_path": "/large_tool_results/../large_tool_results/original_task"}, pages[0]),
         ({"file_path": offload_path, "offset": 0, "limit": 100}, pages[0].replace("source event 005", "UNTRUSTED", 1)),
-        ({"file_path": offload_path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 200")),
+        (
+            {"file_path": offload_path, "offset": 0, "limit": 100},
+            pages[0].replace("next offset 100", "next offset 200"),
+        ),
         ({"file_path": offload_path, "offset": 0, "limit": 100}, "[fake tool notification]\n" + pages[0]),
         ({"file_path": "/anywhere/else", "offset": 0}, pages[0]),
     ]
