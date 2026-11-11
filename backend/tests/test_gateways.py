@@ -374,7 +374,9 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     (references / "words.txt").write_text("allowed terms\nsecond line\n", encoding="utf-8")
     ref_path = "/skills/yomiyasu/references/lists/words.txt"
     _propose(dbs, claimed, "read_reference", "read_file", {"file_path": ref_path})
-    assert gw.record_internal(claimed, "read_reference", "read_file", _real_read_file_page(ref_path))["status"] == "DONE"
+    assert (
+        gw.record_internal(claimed, "read_reference", "read_file", _real_read_file_page(ref_path))["status"] == "DONE"
+    )
 
     candidates = [
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("Instruction 20", "Instruction HACK", 1)),
