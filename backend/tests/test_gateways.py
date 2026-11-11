@@ -120,6 +120,14 @@ def test_model_admission_fence_goal_tenant_cancel(dbs: dict[str, Database], clai
         run(gw.complete(mreq(oldgoal, messages=[{"kind": "user", "content": "x"}])))
 
 
+def test_model_gateway_rejects_expired_run_lease(dbs: dict[str, Database], claimed: control.Claim) -> None:
+    dbs["owner"].one(
+        "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING 1", (claimed.run_id,)
+    )
+    with pytest.raises(RpcError, match="FENCED"):
+        run(mgw(dbs).complete(mreq(claimed)))
+
+
 def test_model_policy_surface_and_consent(dbs: dict[str, Database], claimed: control.Claim) -> None:
     gw = ModelGateway(
         dbs["model_gateway"],

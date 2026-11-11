@@ -234,7 +234,8 @@ def heartbeat(db: Database, claim: Claim, *, lease_s: float = 30.0) -> bool:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET lease_expires_at = now() + make_interval(secs => %s), heartbeat_at = now()"
-            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s AND status_code <> ALL(%s)",
+            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s"
+            " AND lease_expires_at > clock_timestamp() AND status_code <> ALL(%s)",
             (lease_s, claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref, list(TERMINAL)),
         )
         return cur.rowcount == 1
@@ -277,7 +278,9 @@ def check_current(
 ) -> Row:
     """Gateway admission core: tenant, fence, goal, cancel, terminal and restore incarnation."""
     row = c.execute(
-        "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation,"
+        "SELECT r.status_code, r.lease_epoch, r.lease_owner_ref,"
+        " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+        " r.cancel_requested, r.pause_requested, r.restore_incarnation,"
         " r.head_revision, r.allowed_models, r.token_budget, r.tokens_reserved, r.tokens_used, r.max_model_calls,"
         " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, s.restore_incarnation AS current_incarnation"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
@@ -302,7 +305,7 @@ def check_current(
         raise Cancelled(claim.run_id)
     if row["status_code"] in TERMINAL:
         raise RunTerminal(row["status_code"])
-    if row["lease_epoch"] != claim.lease_epoch:
+    if row["lease_epoch"] != claim.lease_epoch or row["lease_owner_ref"] != claim.worker_ref or not row["lease_valid"]:
         raise FencedOut(claim.run_id)
     if row["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)
@@ -419,7 +422,8 @@ def append_head(
     if require_current_goal is None:
         require_current_goal = kind == "assistant"
     run = c.execute(
-        "SELECT r.lease_epoch, r.head_revision, r.status_code, r.cancel_requested, t.goal_revision"
+        "SELECT r.lease_epoch, r.lease_owner_ref, coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+        " r.head_revision, r.status_code, r.cancel_requested, t.goal_revision"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s FOR UPDATE OF r",
         (claim.tenant_id, claim.run_id, claim.task_id),
@@ -428,7 +432,7 @@ def append_head(
         raise TenantMismatch(claim.run_id)
     if run["status_code"] in TERMINAL:
         raise RunTerminal(run["status_code"])
-    if run["lease_epoch"] != claim.lease_epoch:
+    if run["lease_epoch"] != claim.lease_epoch or run["lease_owner_ref"] != claim.worker_ref or not run["lease_valid"]:
         raise FencedOut(claim.run_id)
     if require_current_goal and run["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)

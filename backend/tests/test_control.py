@@ -110,12 +110,16 @@ def test_expired_or_wrong_owner_claim_cannot_be_admitted_or_renewed(
     wrong_worker = replace(claim, worker_ref="worker-b")
     with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
         control.check_current(c, wrong_worker)
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.append_head(c, wrong_worker, "assistant", {"content": "invalid"}, writer="test")
     assert not control.heartbeat(dbs["runtime"], wrong_worker)
     dbs["owner"].one(
         "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING 1", (ids["runId"],)
     )
     with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
         control.check_current(c, claim)
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.append_head(c, claim, "assistant", {"content": "expired"}, writer="test")
     assert not control.heartbeat(dbs["runtime"], claim)
 
 

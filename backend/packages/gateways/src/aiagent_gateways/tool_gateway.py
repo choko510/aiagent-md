@@ -342,7 +342,9 @@ class ToolGateway:
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
             run = c.execute(
-                "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation, t.goal_revision,"
+                "SELECT r.status_code, r.lease_epoch, r.lease_owner_ref,"
+                " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+                " r.cancel_requested, r.pause_requested, r.restore_incarnation, t.goal_revision,"
                 " t.owner_user_id, t.workspace_id, s.restore_incarnation AS cur_inc FROM agent.runs r JOIN agent.tasks t ON"
                 " t.tenant_id=r.tenant_id AND t.id=r.task_id CROSS JOIN agent.schema_control s"
                 " WHERE r.tenant_id=%s AND r.id=%s FOR SHARE OF r",
@@ -366,6 +368,8 @@ class ToolGateway:
                 raise RpcError("PAUSED")
             if (
                 run["lease_epoch"] != claim.lease_epoch
+                or run["lease_owner_ref"] != claim.worker_ref
+                or not run["lease_valid"]
                 or run["owner_user_id"] != claim.owner_user_id
                 or run["restore_incarnation"] != run["cur_inc"]
                 or claim.restore_incarnation != run["cur_inc"]
