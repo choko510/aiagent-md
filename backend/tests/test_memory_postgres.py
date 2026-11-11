@@ -11,6 +11,7 @@ from aiagent_context.models import Scope as ContextScope
 from aiagent_context.models import SourceInput
 from aiagent_core import commands, control, memory_writer
 from aiagent_core.db import Database
+from aiagent_domain import uuid7
 from aiagent_gateways.context_artifacts import PostgresArtifactStore
 
 pytestmark = pytest.mark.pg
@@ -42,6 +43,7 @@ def create(dbs: dict[str, Database], owner: commands.Scope, scope: ContextScope,
         observed_at=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(days=1),
         consent_basis="user_explicit",
+        idempotency_key=uuid7(),
     )
 
 
@@ -169,3 +171,24 @@ def test_context_service_publishes_real_head_without_plaintext(
 
     with pytest.raises(SafeStop, match="STALE_MEMORY"):
         head.check_dispatch(plan, str(store._claim.lease_epoch))
+
+
+def test_memory_creation_idempotency(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
+    owner, scope, _, source, projection = setup_memory(dbs, tenant)
+    args = dict(
+        task_id=scope.task_id,
+        source_ref=source.artifact_ref,
+        projection_ref=projection.artifact_ref,
+        recipient="fake",
+        observed_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(days=1),
+        consent_basis="user_explicit",
+        idempotency_key="memory-operation-1",
+    )
+    first = memory_writer.create_memory(dbs["api"], owner, **args)
+    assert memory_writer.create_memory(dbs["api"], owner, **args) == first
+    with pytest.raises(commands.CommandError, match="IDEMPOTENCY_KEY_REUSED"):
+        memory_writer.create_memory(dbs["api"], owner, **{**args, "recipient": "other"})
+    assert (
+        dbs["owner"].one("SELECT count(*) AS n FROM agent.memory_records WHERE task_id=%s", (scope.task_id,))["n"] == 1
+    )

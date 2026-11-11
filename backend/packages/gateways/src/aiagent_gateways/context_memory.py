@@ -26,6 +26,10 @@ class PostgresMemoryRepository:
         self.db, self.claim, self.store = db, claim, store
 
     def _bind(self, c: psycopg.Connection[Row], scope: Scope) -> None:
+        if self.claim.restore_incarnation != 1:
+            # A restored database may contain old consent/tombstone state. Until
+            # an independent watermark is verified, deny all Memory reads.
+            raise SafeStop("MEMORY_RESTORE_RECONCILIATION_REQUIRED")
         self.store._scope(scope)
         self.store._current(c)
         _bind(c, scope.tenant_id, scope.owner_id, scope.task_id)

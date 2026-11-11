@@ -14,7 +14,7 @@ from aiagent_domain import uuid7
 from aiagent_domain.ids import is_uuid7
 
 from . import control
-from .commands import CommandError, Scope
+from .commands import CommandError, Scope, _idem_begin, _idem_end
 from .db import Database, Row
 
 _RECIPIENT = re.compile(r"\A[a-zA-Z0-9_.:-]{1,256}\Z")
@@ -28,7 +28,14 @@ def _bind(c: psycopg.Connection[Row], tenant: str, owner: str, task: str) -> Non
     )
 
 
-def _owner_scope(c: psycopg.Connection[Row], scope: Scope, task_id: str) -> None:
+def _owner_scope(c: psycopg.Connection[Row], scope: Scope, task_id: str, *, allow_revocation: bool = False) -> None:
+    restore = c.execute("SELECT restore_incarnation, dispatch_paused FROM agent.schema_control").fetchone()
+    if restore is None or (
+        not allow_revocation and (restore["restore_incarnation"] != 1 or restore["dispatch_paused"])
+    ):
+        # There is no external tombstone high-watermark yet. Do not resurrect
+        # Memory after a restore until an explicit reconciliation exists.
+        raise CommandError("MEMORY_RESTORE_RECONCILIATION_REQUIRED", 409)
     if not is_uuid7(task_id) or not control.scope_active(c, scope.tenant_id, scope.user_id, scope.workspace_id):
         raise CommandError("MEMORY_SCOPE_DENIED", 404)
     task = c.execute(
@@ -75,6 +82,7 @@ def create_memory(
     observed_at: datetime,
     expires_at: datetime,
     consent_basis: str,
+    idempotency_key: str,
 ) -> tuple[str, int]:
     """Persist user-authorized references only; never auto-approve model-generated memory."""
     if (
@@ -86,10 +94,29 @@ def create_memory(
         or observed_at.utcoffset() is None
         or expires_at.tzinfo is None
         or expires_at.utcoffset() is None
+        or not 8 <= len(idempotency_key) <= 200
+        or not idempotency_key.isascii()
     ):
         raise CommandError("INVALID_MEMORY", 422)
     with db.tx(tenant=scope.tenant_id) as c:
         _owner_scope(c, scope, task_id)
+        prior = _idem_begin(
+            c,
+            scope,
+            "memory.create",
+            idempotency_key,
+            {
+                "task": task_id,
+                "source": source_ref,
+                "projection": projection_ref,
+                "recipient": recipient,
+                "observed": observed_at.isoformat(),
+                "expires": expires_at.isoformat(),
+                "consent": consent_basis,
+            },
+        )
+        if prior is not None:
+            return str(prior["response_json"]["memory_id"]), int(prior["response_json"]["epoch"])
         _lock_epoch(c, scope, task_id)
         for artifact_id in (source_ref, projection_ref):
             row = c.execute(
@@ -120,6 +147,7 @@ def create_memory(
         if row is None:
             raise CommandError("MEMORY_EXPIRED", 422)
         epoch = _epoch(c, scope, task_id)
+        _idem_end(c, scope, "memory.create", idempotency_key, {"memory_id": memory_id, "epoch": epoch})
     return memory_id, epoch
 
 
@@ -128,7 +156,7 @@ def revoke_memory(db: Database, scope: Scope, *, task_id: str, memory_id: str) -
     if not is_uuid7(memory_id):
         raise CommandError("MEMORY_SCOPE_DENIED", 404)
     with db.tx(tenant=scope.tenant_id) as c:
-        _owner_scope(c, scope, task_id)
+        _owner_scope(c, scope, task_id, allow_revocation=True)
         epoch = _lock_epoch(c, scope, task_id)
         row = c.execute(
             "UPDATE agent.memory_records SET revoked_at=clock_timestamp(), revision=revision+1"
