@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 
 import psycopg
 import pytest
@@ -99,6 +100,23 @@ def test_claim_fencing_and_stale_worker(dbs: dict[str, Database], tenant: dict[s
     assert control.finish_segment(rt, c2, "SUCCEEDED", result_text="ok") == "SUCCEEDED"
     with pytest.raises(control.RunTerminal):
         control.claim_run(rt, tenant["tenantId"], ids["runId"], "w3")
+
+
+def test_expired_or_wrong_owner_claim_cannot_be_admitted_or_renewed(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    ids = submit(dbs, tenant)
+    claim = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker-a")
+    wrong_worker = replace(claim, worker_ref="worker-b")
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.check_current(c, wrong_worker)
+    assert not control.heartbeat(dbs["runtime"], wrong_worker)
+    dbs["owner"].one(
+        "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING 1", (ids["runId"],)
+    )
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.check_current(c, claim)
+    assert not control.heartbeat(dbs["runtime"], claim)
 
 
 def test_cancel_wins_over_completion(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
