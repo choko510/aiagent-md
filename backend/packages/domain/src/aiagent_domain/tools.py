@@ -110,7 +110,9 @@ INTERNAL_TOOL_SPECS: dict[str, ToolSpec] = {
     "task": ToolSpec(
         "task",
         "Delegate a sub-task to an approved sub-agent.",
-        _obj({"description": {"type": "string"}, "subagent_type": {"type": "string"}}, ["description", "subagent_type"]),
+        _obj(
+            {"description": {"type": "string"}, "subagent_type": {"type": "string"}}, ["description", "subagent_type"]
+        ),
         "read",
         False,
         "framework_internal",
