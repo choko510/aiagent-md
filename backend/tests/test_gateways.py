@@ -340,7 +340,6 @@ def test_forged_child_result_rejected(dbs: dict[str, Database], claimed: control
 
 
 
-
 def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     dbs: dict[str, Database], claimed: control.Claim, tmp_path, monkeypatch
 ) -> None:
