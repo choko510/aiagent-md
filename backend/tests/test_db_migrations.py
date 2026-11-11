@@ -34,13 +34,13 @@ def test_checksum_mismatch_fails_closed(pg: PgEnv, tmp_path: Path) -> None:
 def test_failed_migration_rolls_back_atomically(pg: PgEnv, tmp_path: Path) -> None:
     d = tmp_path / "m"
     shutil.copytree(migrate.default_dir(), d)
-    (d / "0008_broken.up.sql").write_text("CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n")
+    (d / "0009_broken.up.sql").write_text("CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n")
     with pytest.raises(psycopg.errors.UndefinedTable):
         migrate.up(pg.owner, d)
     with connect(pg.owner) as c:
         assert c.execute("SELECT to_regclass('agent.half_done') AS t").fetchone()["t"] is None
-        assert c.execute("SELECT max(version) AS v FROM aiagent_meta.schema_migrations").fetchone()["v"] == 7
-        assert c.execute("SELECT schema_version FROM agent.schema_control").fetchone()["schema_version"] == 7
+        assert c.execute("SELECT max(version) AS v FROM aiagent_meta.schema_migrations").fetchone()["v"] == 8
+        assert c.execute("SELECT schema_version FROM agent.schema_control").fetchone()["schema_version"] == 8
 
 
 def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path) -> None:
@@ -51,8 +51,8 @@ def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path
         import os
 
         os.environ["AIAGENT_ALLOW_DOWN"] = "1"
-        assert migrate.down(env.owner, 3) == [7, 6, 5, 4]
-        assert migrate.up(env.owner) == [4, 5, 6, 7]
+        assert migrate.down(env.owner, 3) == [8, 7, 6, 5, 4]
+        assert migrate.up(env.owner) == [4, 5, 6, 7, 8]
         with connect(env.owner) as c:
             c.execute(
                 "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
@@ -90,7 +90,7 @@ def test_concurrent_runners_apply_once() -> None:
     [t.join() for t in ts]
     try:
         assert not errors
-        assert sorted(len(r) for r in results) == [0, 0, 0, 7]
+        assert sorted(len(r) for r in results) == [0, 0, 0, 8]
     finally:
         drop_database(name)
 

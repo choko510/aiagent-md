@@ -178,10 +178,8 @@ class PostgresArtifactStore:
         with self._db.tx() as c:
             self._current(c)
             row = c.execute(
-                "UPDATE agent.context_artifacts SET revoked_at=clock_timestamp(), ciphertext=NULL"
-                " WHERE tenant_id=%s AND id::text=%s AND owner_user_id=%s AND task_id=%s AND run_id=%s"
-                " AND revoked_at IS NULL RETURNING id",
-                (scope.tenant_id, ref, scope.owner_id, scope.task_id, scope.run_id),
+                "SELECT agent.revoke_context_artifact(%s,%s,%s,%s,%s) AS revoked",
+                (scope.tenant_id, scope.owner_id, scope.task_id, scope.run_id, ref),
             ).fetchone()
-            if row is None:
+            if row is None or not row["revoked"]:
                 raise SafeStop("ARTIFACT_UNAVAILABLE")

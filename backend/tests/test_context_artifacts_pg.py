@@ -124,8 +124,9 @@ def test_current_run_can_read_same_task_previous_run_without_old_claim(
         dbs["model_gateway"], new_claim, b"k" * 32, expires_at=datetime.now(UTC) + timedelta(days=1)
     )
     assert current_store.get_raw(current_scope, record) == source.body
+    current_store.revoke(current_scope, record.artifact_ref)
     with pytest.raises(SafeStop, match="ARTIFACT_UNAVAILABLE"):
-        current_store.revoke(current_scope, record.artifact_ref)
+        current_store.get_raw(current_scope, record)
 
 
 def test_tamper_expiry_and_stale_lease_fail_closed(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
