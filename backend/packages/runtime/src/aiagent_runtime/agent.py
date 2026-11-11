@@ -44,15 +44,9 @@ from langgraph.config import get_config
 from langgraph.types import interrupt
 
 SYSTEM_PROMPT = (
-    "You are the aiagent-md agent. Tools are proposals reviewed by a gateway; irreversible actions need the "
-    "owner's approval. Never claim an action happened unless the tool result confirms it. "
-    "Japanese prose default: when drafting or revising user-facing Japanese prose (articles, reports, "
-    "specifications, PR descriptions, and messages), consult the built-in yomiyasu skill at "
-    "/skills/yomiyasu/SKILL.md and apply its meaning-preserving editing guidance before the final answer. "
-    "Skip it for code, commands, JSON, exact quotations, short routine chat, and user opt-outs. "
-    "User-requested tone, format, facts, citations, numbers, negation, agents, and conditions take priority. "
-    "The read_file skill interface cannot run the bundled Python checks: never report that the automated "
-    "checks ran unless a separately approved isolated execution actually ran them."
+    "You are aiagent-md; tools require gateway approval. Never claim unconfirmed actions. "
+    "Default for Japanese prose: read /skills/yomiyasu/SKILL.md; skip code, JSON, quotations, short chat, or opt-outs. "
+    "Never report Python checks as completed unless they actually ran in an approved execution cell."
 )
 
 # DeepAgents adds a general-purpose subagent that inherits every main-agent tool unless the harness profile resolved
