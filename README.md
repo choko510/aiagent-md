@@ -31,7 +31,7 @@ Agent Runtime本体のOSSは**STEP 2の実測でDeepAgents Python＋LangGraphを
 
 Agent Runtimeでは、日本語の説明文・技術文書・PR説明・メールなどの作成や推敲時に、[nanaism/yomiyasu](https://github.com/nanaism/yomiyasu) のSkillを**デフォルトで参照**します。ユーザーの明示的な不使用指定を優先し、コード・JSON・コマンド・引用文・短い通常会話を機械的に変更しません。数値、否定、条件、主体、断定度、根拠は保持します。
 
-通常のソースチェックアウトには[簡易ガイド](backend/packages/domain/src/aiagent_domain/skills/yomiyasu/SKILL.md)を同梱し、**Dockerビルド時**に [固定コミット](https://github.com/nanaism/yomiyasu/commit/7b212ff2f037953b8c233ae315e5c08e7fc36da6) の公式Skill全体をダウンロードし、各ファイルのGit blob SHAを検証して置き換えます（[導入・更新用スクリプト](backend/tools/sync_yomiyasu.py)）。ビルド後のRunはネットワークからSkillを取得せず、読み取り専用で参照します。公式SkillはMITライセンスです。
+通常のソースチェックアウトには[簡易ガイド](backend/packages/domain/src/aiagent_domain/skills/yomiyasu/SKILL.md)を同梱し、**Dockerビルド時**に [固定コミット](https://github.com/nanaism/yomiyasu/commit/b9a69a3791dd7d3c063ed963bc4a408e515f6288) （v3.0.1）の公式Skill全体をダウンロードし、各ファイルのGit blob SHAを検証して置き換えます（[導入・更新用スクリプト](backend/tools/sync_yomiyasu.py)）。ビルド後のRunはネットワークからSkillを取得せず、読み取り専用で参照します。公式SkillはMITライセンスです。
 
 **現時点の境界:** 標準適用とは*モデルの推敲指示とSkill参照*を意味します。出力後に独立したLLM検査パスを強制するものではなく、Skill付属のPythonチェックはTrusted Runtime内で自動実行しません（実行したと虚偽表示しません）。将来スクリプト検査を有効化する場合は、既存のTool Gateway承認と隔離Cellを経由する必要があります。
 
