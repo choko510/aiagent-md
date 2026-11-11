@@ -65,7 +65,7 @@ EXPECTED_BLOBS: dict[str, str] = {
     "scripts/yomiyasu_check.py": "b57255eefafcdfc5fec871dbb06026f4725707fa",
     "scripts/yomiyasu_diff.py": "0ca497d7f9c18f655b8e1f41e39980d8551207b8",
     "scripts/yomiyasu_hook.py": "3011306bca55624905b5c9cd342e2b8abf521933",
-    "scripts/yomiyasu_lint.py": "9670465b81281e1172a8141eabbfcb228363c755"
+    "scripts/yomiyasu_lint.py": "9670465b81281e1172a8141eabbfcb228363c755",
 }
 
 
@@ -89,7 +89,7 @@ def verified_files(archive: bytes) -> dict[str, bytes]:
             # Do not extract or execute anything outside the requested skill tree.
             if not member.name.startswith(prefix):
                 continue
-            rel = member.name[len(prefix):]
+            rel = member.name[len(prefix) :]
             parts = PurePosixPath(rel).parts
             if not rel or rel.startswith("/") or ".." in parts or "\\" in rel or "\x00" in rel:
                 raise ValueError(f"invalid skill path: {rel!r}")
