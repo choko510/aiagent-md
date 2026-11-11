@@ -21,6 +21,21 @@ from test_memory_postgres import create, setup_memory
 pytestmark = pytest.mark.pg
 
 
+@pytest.fixture(scope="module")
+def dbs(memory_dbs: dict[str, Database]) -> dict[str, Database]:
+    return memory_dbs
+
+
+@pytest.fixture()
+def tenant(memory_tenant: dict[str, str]) -> dict[str, str]:
+    return memory_tenant
+
+
+@pytest.fixture(scope="module")
+def stack(memory_stack: Stack) -> Stack:
+    return memory_stack
+
+
 def build_context(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: ANN201
     owner, scope, store, source, projection = setup_memory(dbs, tenant)
     memory_id, _ = create(dbs, owner, scope, source.artifact_ref, projection.artifact_ref)

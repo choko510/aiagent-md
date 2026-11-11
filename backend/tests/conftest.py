@@ -91,6 +91,39 @@ def tenant(pg: PgEnv) -> dict[str, str]:
     return admin.provision_tenant(pg.owner)
 
 
+@pytest.fixture(scope="module")
+def memory_pg() -> Iterator[PgEnv]:
+    """A fresh database: other integration tests deliberately bump restore incarnation."""
+    if not PG:
+        pytest.skip("AIAGENT_TEST_PG_URL not set")
+    env = make_database("aiagent_memory")
+    yield env
+    drop_database(env.name)
+
+
+@pytest.fixture(scope="module")
+def memory_dbs(memory_pg: PgEnv) -> Iterator[dict[str, Database]]:
+    out = {name: memory_pg.db(name, max_size=16) for name in memory_pg.dsn}
+    out["owner"] = Database(memory_pg.owner, max_size=8)
+    yield out
+    for db in out.values():
+        db.close()
+
+
+@pytest.fixture()
+def memory_tenant(memory_pg: PgEnv) -> dict[str, str]:
+    return admin.provision_tenant(memory_pg.owner)
+
+
+@pytest.fixture(scope="module")
+def memory_stack(memory_pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
+    from stack import Stack
+
+    instance = Stack(memory_pg.dsn, tmp_path_factory.mktemp("memory-stack"), owner_dsn=memory_pg.owner).start_all()
+    yield instance
+    instance.close()
+
+
 # ------------------------------------------------------------------ multi-process stack + API client (E2E suites)
 @pytest.fixture(scope="session")
 def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:

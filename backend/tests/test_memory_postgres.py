@@ -17,6 +17,16 @@ from aiagent_gateways.context_artifacts import PostgresArtifactStore
 pytestmark = pytest.mark.pg
 
 
+@pytest.fixture(scope="module")
+def dbs(memory_dbs: dict[str, Database]) -> dict[str, Database]:
+    return memory_dbs
+
+
+@pytest.fixture()
+def tenant(memory_tenant: dict[str, str]) -> dict[str, str]:
+    return memory_tenant
+
+
 def setup_memory(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: ANN201
     owner = commands.Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
     ids = commands.submit_task(dbs["api"], owner, "memory test")
