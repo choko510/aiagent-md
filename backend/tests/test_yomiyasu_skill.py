@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import tarfile
+from pathlib import Path
 
 import pytest
 from aiagent_domain.tools import SKILLS_DIR, packaged_skill_texts
 from aiagent_runtime.agent import SYSTEM_PROMPT
 
-from tools import sync_yomiyasu as sync
+# pytest's package import path does not include backend/tools.
+_SPEC = importlib.util.spec_from_file_location(
+    "sync_yomiyasu", Path(__file__).resolve().parents[1] / "tools" / "sync_yomiyasu.py"
+)
+assert _SPEC is not None and _SPEC.loader is not None
+sync = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(sync)
 
 
 def _blob_sha(data: bytes) -> str:
