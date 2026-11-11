@@ -446,13 +446,24 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
     assert sub_models and all(a["admitted"] for a in sub_models)  # sub-agent uses the same Model Gateway
 
 
-def test_t09a_yomiyasu_read_two_pages_through_real_gateways(stack: Stack, api, t, pg: PgEnv) -> None:
-    """A Japanese writing mock must read two pages via the runtime and Gateway, then reach the final answer."""
-    task = submit(api, t, "yomiyasu fixture: 日本語の文章を推敲してください。")
+@pytest.mark.parametrize(
+    ("goal", "use_skill"),
+    [
+        ("yomiyasu fixture: 日本語の文章を推敲してください。", True),
+        ("yomiyasu fixture: 技術文書を更新してください。", True),
+        ("yomiyasu fixture: yomiyasuを使わないで通常回答してください。", False),
+    ],
+)
+def test_t09a_yomiyasu_read_two_pages_through_real_gateways(
+    stack: Stack, api, t, pg: PgEnv, goal: str, use_skill: bool
+) -> None:
+    """Real Gateway path for two writing modes and an explicit opt-out; the provider is a deterministic mock."""
+    task = submit(api, t, goal)
     attempts = stack.drive()
     st = state(api, t, task)
     assert st["state"] == "SUCCEEDED", (st, [p.stderr[-1500:] for p in attempts])
-    assert st["run"]["result"] == "推敲済み：日本語の文章を読みやすく整えました。"
+    result = "推敲済み：日本語の文章を読みやすく整えました。" if use_skill else "指定に従って通常回答しました。"
+    assert st["run"]["result"] == result
     entries = q(
         pg.owner,
         "SELECT entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY checkpoint_revision",
@@ -463,6 +474,9 @@ def test_t09a_yomiyasu_read_two_pages_through_real_gateways(stack: Stack, api, t
         for r in entries
         if r["entry_kind"] == "tool" and r["checkpoint_json"].get("tool_name") == "read_file"
     ]
+    if not use_skill:
+        assert reads == []
+        return
     assert len(reads) == 2, entries
     assert all(text.startswith("@@ lines ") for text in reads)
     assert "name: yomiyasu" in reads[0]
