@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -130,3 +134,61 @@ def test_database_rollback_leaves_no_artifact(dbs: dict[str, Database], tenant: 
     assert (
         dbs["owner"].one("SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s", (claim.run_id,))["n"] == 0
     )
+
+
+def test_killed_writer_cannot_commit_partial_artifact(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
+    _, scope, claim = make_store(dbs, tenant)
+    code = """
+import json, os
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from aiagent_context.models import Scope, SourceInput
+from aiagent_core import control
+from aiagent_core.db import Database
+from aiagent_gateways.context_artifacts import PostgresArtifactStore
+
+db = Database(os.environ['TEST_ARTIFACT_DSN'])
+claim = control.Claim.from_wire(json.loads(os.environ['TEST_ARTIFACT_CLAIM']))
+class KillBeforeCommit:
+    @contextmanager
+    def tx(self):
+        with db.tx() as connection:
+            yield connection
+            os._exit(77)
+scope = Scope(claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id)
+store = PostgresArtifactStore(KillBeforeCommit(), claim, b'k'*32, expires_at=datetime.now(UTC)+timedelta(days=1))
+store.put_raw(scope, SourceInput('source', '2026-01-01T00:00:00Z', b'crash', locator_ref='locator'))
+"""
+    env = dict(os.environ, TEST_ARTIFACT_DSN=dbs["model_gateway"].url, TEST_ARTIFACT_CLAIM=json.dumps(claim.to_wire()))
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 77
+    assert (
+        dbs["owner"].one("SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s", (scope.run_id,))["n"] == 0
+    )
+
+
+def test_new_process_reads_committed_artifact(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
+    store, scope, claim = make_store(dbs, tenant)
+    item = store.put_raw(scope, SourceInput("source", "2026-01-01T00:00:00Z", b"persisted", locator_ref="locator"))
+    code = """
+import json, os
+from datetime import UTC, datetime, timedelta
+from aiagent_context.models import RawArtifact, Scope
+from aiagent_core import control
+from aiagent_core.db import Database
+from aiagent_gateways.context_artifacts import PostgresArtifactStore
+claim = control.Claim.from_wire(json.loads(os.environ['TEST_ARTIFACT_CLAIM']))
+record = RawArtifact(**json.loads(os.environ['TEST_ARTIFACT_RECORD']))
+scope = Scope(claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id)
+store = PostgresArtifactStore(Database(os.environ['TEST_ARTIFACT_DSN']), claim, b'k'*32,
+                              expires_at=datetime.now(UTC)+timedelta(days=1))
+assert store.get_raw(scope, record) == b'persisted'
+"""
+    env = dict(
+        os.environ,
+        TEST_ARTIFACT_DSN=dbs["model_gateway"].url,
+        TEST_ARTIFACT_CLAIM=json.dumps(claim.to_wire()),
+        TEST_ARTIFACT_RECORD=json.dumps(asdict(item)),
+    )
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 0
