@@ -140,9 +140,10 @@ class MemoryProjection:
     source_refs: tuple[str, ...]
     source_epoch: str
     trust_tier: str = "MEMORY_DATA"
+    record_revision: int = 1
 
     def __post_init__(self) -> None:
-        if self.trust_tier != "MEMORY_DATA" or not self.ref or not self.source_refs:
+        if self.trust_tier != "MEMORY_DATA" or not self.ref or not self.source_refs or self.record_revision < 1:
             raise SafeStop("UNAUTHORIZED_MEMORY_PROJECTION")
         forbid_secrets(self.text)
 

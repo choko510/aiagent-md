@@ -98,3 +98,30 @@ def test_memory_denies_cross_task_and_untrusted_identifiers(dbs: dict[str, Datab
         create(dbs, owner, scope, "' OR true--", projection.artifact_ref)
     with dbs["model_gateway"].tx() as c:
         assert not c.execute("SELECT id FROM agent.memory_records").fetchall()
+
+
+def test_real_memory_retriever_rechecks_consent_and_epoch(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiagent_context.models import SafeStop
+    from aiagent_gateways.context_memory import PostgresMemoryRepository
+
+    owner, scope, store, source, projection = setup_memory(dbs, tenant)
+    memory_id, epoch = create(dbs, owner, scope, source.artifact_ref, projection.artifact_ref)
+    repo = PostgresMemoryRepository(dbs["model_gateway"], store._claim, store)
+    result = repo.retrieval(scope, query="remembered", recipient="fake")
+    assert result.source_epoch == str(epoch)
+    assert len(result.projections) == 1 and result.projections[0].ref == memory_id
+    assert result.projections[0].text == "remembered data" and result.projections[0].record_revision == 1
+    assert not repo.retrieval(scope, query="remembered", recipient="other").projections
+    search = repo.search
+
+    def revoke_after_search(scope_arg: ContextScope, query: str, limit: int) -> tuple[str, ...]:
+        refs = search(scope_arg, query, limit)
+        memory_writer.revoke_memory(dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id)
+        return refs
+
+    monkeypatch.setattr(repo, "search", revoke_after_search)
+    with pytest.raises(SafeStop, match="STALE_MEMORY"):
+        repo.retrieval(scope, query="remembered", recipient="fake")
+    assert not repo.retrieval(scope, query="remembered", recipient="fake").projections

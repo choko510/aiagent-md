@@ -3,7 +3,7 @@ name = "aiagent-gateways"
 version = "0.3.0"
 description = "Model Gateway and Tool Gateway (independent processes)"
 requires-python = ">=3.12,<3.14"
-dependencies = ["aiagent-core", "aiagent-context", "cryptography==50.0.2", "aiagent-sandbox", "httpx==0.28.1", "jsonschema>=4.25.0"]
+dependencies = ["aiagent-core", "aiagent-context", "aiagent-memory", "cryptography==50.0.2", "aiagent-sandbox", "httpx==0.28.1", "jsonschema>=4.25.0"]
 
 [build-system]
 requires = ["uv_build>=0.9,<0.13"]

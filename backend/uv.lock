@@ -173,6 +173,7 @@ source = { editable = "packages/gateways" }
 dependencies = [
     { name = "aiagent-context" },
     { name = "aiagent-core" },
+    { name = "aiagent-memory" },
     { name = "aiagent-sandbox" },
     { name = "cryptography" },
     { name = "httpx" },
@@ -183,6 +184,7 @@ dependencies = [
 requires-dist = [
     { name = "aiagent-context", editable = "packages/context" },
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-memory", editable = "packages/memory" },
     { name = "aiagent-sandbox", editable = "packages/sandbox" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "httpx", specifier = "==0.28.1" },

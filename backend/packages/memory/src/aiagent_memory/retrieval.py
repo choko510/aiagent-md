@@ -121,7 +121,11 @@ class MemoryRetriever:
             encoded_length = len(record.text.encode("utf-8"))
             if used + encoded_length > max_bytes:
                 continue
-            selected.append(MemoryProjection(record.ref, record.text, record.source_refs, start_epoch))
+            selected.append(
+                MemoryProjection(
+                    record.ref, record.text, record.source_refs, start_epoch, record_revision=record.revision
+                )
+            )
             used += encoded_length
             if len(selected) >= max_items:
                 break
