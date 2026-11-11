@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from aiagent_domain.tools import TOOLS, ToolSpec
+from aiagent_domain.tools import ToolSpec
 from jsonschema import Draft202012Validator
 
 from .providers import ProviderEvent
@@ -76,11 +76,10 @@ class StreamPrivacyGate:
                 if not isinstance(args, dict):
                     raise ValueError
                 spec = self.allowed.get(name)
-                if spec is not None and name in TOOLS:
-                    if not Draft202012Validator(spec.parameters).is_valid(args):
-                        args = {"__invalid__": True}
-                elif spec is None and name != "task":
-                    args = {"__invalid__": True}  # tool not on this run's surface
+                if spec is None or not Draft202012Validator(spec.parameters).is_valid(args):
+                    # Includes framework-internal read_file/task. Unknown or malformed requests never inherit
+                    # implicit permissions from a tool name that merely appears in the model response.
+                    args = {"__invalid__": True}
             except ValueError:
                 args = {"__invalid__": True}
             self.result.tool_calls.append({"id": tid, "name": name, "args": args})
