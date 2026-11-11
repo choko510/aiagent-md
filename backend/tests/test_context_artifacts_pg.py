@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -48,6 +49,18 @@ def test_artifact_durable_encrypted_scoped_and_revoked(dbs: dict[str, Database],
     assert b"source-private" not in bytes(row["ciphertext"])
     with pytest.raises(SafeStop, match="ARTIFACT_UNAVAILABLE"):
         restarted.get_raw(Scope(scope.tenant_id, "other", scope.task_id, scope.run_id), item)
+    with pytest.raises(SafeStop, match="ARTIFACT_UNAVAILABLE"):
+        restarted.get_raw(Scope("other-tenant", scope.owner_id, scope.task_id, scope.run_id), item)
+    _, other_scope, _ = make_store(dbs, tenant)
+    with pytest.raises(SafeStop, match="ARTIFACT_UNAVAILABLE"):
+        restarted.get_raw(other_scope, item)
+    with pytest.raises(SafeStop, match="SOURCE_MISMATCH"):
+        restarted.get_raw(scope, replace(item, sha256="0" * 64))
+    wrong_key = PostgresArtifactStore(
+        dbs["model_gateway"], claim, b"x" * 32, expires_at=datetime.now(UTC) + timedelta(days=1)
+    )
+    with pytest.raises(SafeStop, match="SOURCE_MISMATCH"):
+        wrong_key.get_raw(scope, item)
     with pytest.raises(SafeStop, match="SECRET_DETECTED"):
         restarted.put_summary(scope, b"password=unsafe")
     restarted.revoke(scope, item.artifact_ref)
@@ -85,11 +98,19 @@ def test_tamper_expiry_and_stale_lease_fail_closed(dbs: dict[str, Database], ten
         ]
         is None
     )
+    retained = store.put_raw(scope, source)
     dbs["owner"].one(
         "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING id", (claim.run_id,)
     )
     with pytest.raises(SafeStop, match="STALE_CONTEXT"):
         store.put_raw(scope, source)
+    new_claim = control.claim_run(dbs["runtime"], scope.tenant_id, scope.run_id, "new-worker")
+    with pytest.raises(SafeStop, match="STALE_CONTEXT"):
+        store.get_raw(scope, retained)
+    recovered = PostgresArtifactStore(
+        dbs["model_gateway"], new_claim, b"k" * 32, expires_at=datetime.now(UTC) + timedelta(days=1)
+    )
+    assert recovered.get_raw(scope, retained) == source.body
 
 
 def test_database_rollback_leaves_no_artifact(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
