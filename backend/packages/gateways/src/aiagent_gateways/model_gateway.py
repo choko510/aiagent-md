@@ -351,7 +351,6 @@ class ModelGateway:
                 context,
                 payload,
             )
-            await asyncio.to_thread(context.finish, attempt_id, "COMPLETED")
             return {"message": message, "replayed": False}
         except Exception as exc:
             await asyncio.to_thread(self._release, req, attempt_id, est, "FAILED", {}, "UNKNOWN")
@@ -417,6 +416,10 @@ class ModelGateway:
                     usage.get("output_tokens"),
                 ),
             )
+            if context is not None:
+                # HEAD, usage and dispatch completion commit together. A crash
+                # cannot report failure and charge a second time after success.
+                context.finish_tx(c, attempt_id, "COMPLETED")
 
     async def _cancelled(self, req: SealedModelRequest) -> str | None:
         def check() -> str | None:

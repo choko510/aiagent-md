@@ -156,8 +156,13 @@ class ContextAdmission:
             from aiagent_core.memory_writer import _bind
 
             _bind(c, self.scope.tenant_id, self.scope.owner_id, self.scope.task_id)
-            c.execute(
-                "UPDATE agent.context_dispatches SET status_code=%s WHERE tenant_id=%s AND run_id=%s"
-                " AND head_revision=%s AND model_attempt_id=%s AND status_code='ADMITTED'",
-                (status, self.scope.tenant_id, self.scope.run_id, self.head, attempt_id),
-            )
+            self.finish_tx(c, attempt_id, status)
+
+    def finish_tx(self, c: psycopg.Connection[Row], attempt_id: str, status: str) -> None:
+        updated = c.execute(
+            "UPDATE agent.context_dispatches SET status_code=%s WHERE tenant_id=%s AND run_id=%s"
+            " AND head_revision=%s AND model_attempt_id=%s AND status_code='ADMITTED'",
+            (status, self.scope.tenant_id, self.scope.run_id, self.head, attempt_id),
+        )
+        if updated.rowcount != 1:
+            raise RpcError("CONTEXT_DISPATCH_STATE")

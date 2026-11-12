@@ -360,3 +360,152 @@ def test_restore_refuses_old_memory_but_allows_user_revocation() -> None:
         for db in dbs.values():
             db.close()
         drop_database(env.name)
+
+
+@pytest.mark.parametrize("transition", ["source_revoke", "reclaim"])
+def test_context_publication_loses_race_without_erasing_raw(
+    transition: str, dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from aiagent_context.models import SafeStop
+
+    _, scope, store, _, plan = build_context(dbs, tenant)
+    repo = PostgresMemoryRepository(dbs["model_gateway"], store._claim, store)
+    memory = repo.retrieval(scope, query="remembered", recipient="fake")
+    head = PostgresHeadPort(dbs["model_gateway"], store._claim, store, repo)
+    req = ContextRequest(
+        scope,
+        plan.committed_head,
+        str(store._claim.lease_epoch),
+        str(store._claim.goal_revision),
+        head.policy_version(scope),
+        memory.source_epoch,
+        "cursor:race",
+        plan.anchors,
+        ModelBudget("fake-gateway", "r1", "byte-upper-bound", 10000, 1000, 100),
+        memory.projections,
+        "fake",
+    )
+    original_publish = head.publish
+    entered = threading.Event()
+    release = threading.Event()
+
+    def pause_publish(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        entered.set()
+        if not release.wait(20):
+            raise RuntimeError("test synchronization timeout")
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(head, "publish", pause_publish)
+    before = dbs["owner"].one("SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s", (scope.run_id,))["n"]
+    errors: list[Exception] = []
+
+    def publish() -> None:
+        try:
+            ContextService(store, head).compact(
+                req, (SourceInput("race", "2026-01-01T00:00:00Z", b"raw preserved", locator_ref="bytes:0"),)
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=publish)
+    thread.start()
+    try:
+        assert entered.wait(20)
+        if transition == "source_revoke":
+            store.revoke(scope, plan.memory[0].source_refs[0])
+        else:
+            dbs["owner"].one(
+                "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING id",
+                (scope.run_id,),
+            )
+            control.claim_run(dbs["runtime"], scope.tenant_id, scope.run_id, "replacement-worker")
+    finally:
+        release.set()
+        thread.join(timeout=20)
+    assert not thread.is_alive() and len(errors) == 1 and isinstance(errors[0], SafeStop)
+    assert dbs["owner"].one("SELECT head_revision FROM agent.runs WHERE id=%s", (scope.run_id,))[
+        "head_revision"
+    ] == int(plan.committed_head)
+    assert (
+        dbs["owner"].one(
+            "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND ciphertext IS NOT NULL",
+            (scope.run_id,),
+        )["n"]
+        >= before + 2
+    )
+
+
+def test_process_death_before_head_cas_keeps_raw_and_old_head(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    _, scope, store, _, plan = build_context(dbs, tenant)
+    before = dbs["owner"].one("SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s", (scope.run_id,))["n"]
+    script = """
+import json,os
+from datetime import UTC,datetime,timedelta
+from aiagent_context import Anchor,AnchorKind,ContextRequest,ContextService,ModelBudget,SourceInput
+from aiagent_context.models import Scope
+from aiagent_core import control
+from aiagent_core.db import Database
+from aiagent_gateways.context_artifacts import PostgresArtifactStore
+from aiagent_gateways.context_head import PostgresHeadPort
+from aiagent_gateways.context_memory import PostgresMemoryRepository
+claim=control.Claim.from_wire(json.loads(os.environ['TEST_CONTEXT_CLAIM']))
+scope=Scope(claim.tenant_id,claim.owner_user_id,claim.task_id,claim.run_id)
+db=Database(os.environ['TEST_CONTEXT_DSN'])
+store=PostgresArtifactStore(db,claim,b'k'*32,expires_at=datetime.now(UTC)+timedelta(days=1))
+repo=PostgresMemoryRepository(db,claim,store)
+class KillBeforePublish(PostgresHeadPort):
+    def publish(self,*args,**kwargs): os._exit(77)
+head=KillBeforePublish(db,claim,store,repo)
+mem=repo.retrieval(scope,query='remembered',recipient='fake')
+req=ContextRequest(scope,os.environ['TEST_CONTEXT_HEAD'],str(claim.lease_epoch),str(claim.goal_revision),
+                   head.policy_version(scope),mem.source_epoch,'cursor:crash',
+                   (Anchor(AnchorKind.GOAL_REF,f'goal:{claim.goal_revision}','memory test'),),
+                   ModelBudget('fake-gateway','r1','byte-upper-bound',10000,1000,100),mem.projections,'fake')
+ContextService(store,head).compact(req,(SourceInput('crash','2026-01-01T00:00:00Z',b'raw kept',locator_ref='bytes:0'),))
+"""
+    env = dict(
+        os.environ,
+        TEST_CONTEXT_CLAIM=json.dumps(store._claim.to_wire()),
+        TEST_CONTEXT_DSN=dbs["model_gateway"].url,
+        TEST_CONTEXT_HEAD=plan.committed_head,
+    )
+    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 77
+    assert dbs["owner"].one("SELECT head_revision FROM agent.runs WHERE id=%s", (scope.run_id,))[
+        "head_revision"
+    ] == int(plan.committed_head)
+    assert (
+        dbs["owner"].one(
+            "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND ciphertext IS NOT NULL",
+            (scope.run_id,),
+        )["n"]
+        >= before + 3
+    )
+
+
+@pytest.mark.parametrize("fault_name", ["context_after_admit", "context_after_provider"])
+def test_gateway_process_death_never_retries_unknown_context(
+    fault_name: str, dbs: dict[str, Database], tenant: dict[str, str], stack: Stack
+) -> None:
+    _, scope, store, _, plan = build_context(dbs, tenant)
+    stack.restart("model", AIAGENT_FAULT=fault_name)
+    try:
+        with pytest.raises(GatewayRejected, match="CONTEXT_OUTCOME_UNKNOWN"):
+            asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
+        row = dbs["owner"].one("SELECT status_code FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))
+        assert row["status_code"] == "ADMITTED"
+    finally:
+        stack.restart("model")
+    with pytest.raises(GatewayRejected, match="CONTEXT_ALREADY_ADMITTED"):
+        asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
+    assert (
+        dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
+        == 1
+    )
