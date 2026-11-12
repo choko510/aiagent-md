@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/memory-create.schema.json",
+  "title": "MemoryCreateCommandV1",
+  "description": "Owner-authenticated Memory creation. The body carries only encrypted-artifact references and metadata; plaintext never leaves the Model Gateway.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "sourceArtifactRef": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "projectionArtifactRef": {
+      "$ref": "common.schema.json#/$defs/Uuid7"
+    },
+    "recipient": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_.:-]{1,256}$"
+    },
+    "consentBasis": {
+      "type": "string",
+      "enum": ["user_explicit", "approved_setting", "reviewed_import"]
+    },
+    "observedAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    },
+    "expiresAt": {
+      "$ref": "common.schema.json#/$defs/UtcInstant"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "sourceArtifactRef",
+    "projectionArtifactRef",
+    "recipient",
+    "consentBasis",
+    "observedAt",
+    "expiresAt"
+  ]
+}

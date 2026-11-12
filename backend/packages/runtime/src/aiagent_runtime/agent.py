@@ -88,6 +88,19 @@ class Gateways:
     tool: RpcClient
 
 
+@dataclass
+class ContextUse:
+    """One-shot use of an already committed Context HEAD for the next main inference.
+
+    `consumed` is set before the RPC so a retried graph node cannot silently send
+    the same Context twice. Only CONTEXT_PRE_ADMISSION (nothing was admitted for
+    send) clears it and allows the ordinary `model.complete` path.
+    """
+
+    head: str
+    consumed: bool = False
+
+
 @dataclass(frozen=True)
 class RunCtx:
     """Per-run services passed through RunnableConfig (never a module global): several runs share one process."""
@@ -96,6 +109,7 @@ class RunCtx:
     gw: Gateways
     model: str
     on_delta: Callable[[str], None] | None = None
+    context: ContextUse | None = None
 
 
 def run_ctx(config: RunnableConfig | None = None) -> RunCtx:
@@ -171,6 +185,42 @@ async def call_model(
     return msg
 
 
+async def context_eligible(rc: RunCtx) -> str | None:
+    """Pre-admission eligibility query; None means "not enabled" (not an error)."""
+    try:
+        out = await rc.gw.model.call("model.context_eligible", {"claim": rc.claim.to_wire()})
+    except RpcError as e:
+        if e.code in ("CONTEXT_NOT_ELIGIBLE", "CONTEXT_INTEGRATION_PENDING", "MEMORY_CONSENT_REQUIRED"):
+            return None
+        raise GatewayRejected(e.code) from None
+    except (OSError, EOFError, TimeoutError) as e:
+        raise GatewayRejected("GATEWAY_UNAVAILABLE") from e
+    if not out.get("eligible"):
+        return None
+    return str(out["head"])
+
+
+async def call_context_model(rc: RunCtx, context_head: str) -> dict[str, Any]:
+    """Use a committed Context reference; plaintext is loaded only inside Model Gateway."""
+    try:
+        result: dict[str, Any] | None = None
+        async for kind, data in rc.gw.model.stream(
+            "model.context", {"claim": rc.claim.to_wire(), "contextHead": context_head}
+        ):
+            if kind == "result":
+                result = data
+    except RpcError as e:
+        raise GatewayRejected(e.code) from None
+    except (OSError, EOFError, TimeoutError) as e:
+        # The gateway admission may already have committed: never retry this
+        # Context automatically after an unknown transport outcome.
+        raise GatewayRejected("CONTEXT_OUTCOME_UNKNOWN") from e
+    if result is None:
+        raise GatewayRejected("CONTEXT_OUTCOME_UNKNOWN")
+    message: dict[str, Any] = result["message"]
+    return message
+
+
 class GatewayChatModel(BaseChatModel):
     """Holds no credential and no provider client."""
 
@@ -196,6 +246,20 @@ class GatewayChatModel(BaseChatModel):
         rc = run_ctx()
         names = sorted(t["function"]["name"] for t in kwargs.get("tools", []))
         system = "\n".join(m.text for m in messages if isinstance(m, SystemMessage))
+        use = rc.context
+        if self.gw_stream == "main" and use is not None and not use.consumed:
+            use.consumed = True
+            try:
+                resp = await call_context_model(rc, use.head)
+                return ChatResult(generations=[ChatGeneration(message=from_neutral([resp])[0])])
+            except GatewayRejected as e:
+                if e.code == "CONTEXT_OUTCOME_UNKNOWN":
+                    raise
+                if e.code.startswith("CONTEXT_PRE_ADMISSION"):
+                    # Nothing was admitted for send: the ordinary transcript is safe.
+                    object.__setattr__(rc, "context", None)
+                else:
+                    raise
         resp = await call_model(rc, self.gw_stream, system, to_neutral(messages), names)
         return ChatResult(generations=[ChatGeneration(message=from_neutral([resp])[0])])
 

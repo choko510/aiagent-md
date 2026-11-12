@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from aiagent_domain import TERMINAL_RUN_STATES, sha256_hex, uuid7
+from aiagent_domain import TERMINAL_RUN_STATES, canonical_json, sha256_hex, uuid7
 from aiagent_domain.generated import RunClaimV1
 from psycopg.types.json import Jsonb
 
@@ -222,8 +222,9 @@ def mark_running(db: Database, claim: Claim) -> None:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET status_code='RUNNING', updated_at=now() WHERE tenant_id=%s AND id=%s"
-            " AND lease_epoch=%s AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested AND NOT pause_requested",
-            (claim.tenant_id, claim.run_id, claim.lease_epoch),
+            " AND lease_epoch=%s AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()"
+            " AND status_code IN ('CLAIMED','RUNNING') AND NOT cancel_requested AND NOT pause_requested",
+            (claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         if cur.rowcount != 1:
             _raise_for(c, claim)
@@ -234,7 +235,8 @@ def heartbeat(db: Database, claim: Claim, *, lease_s: float = 30.0) -> bool:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET lease_expires_at = now() + make_interval(secs => %s), heartbeat_at = now()"
-            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s AND status_code <> ALL(%s)",
+            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s"
+            " AND lease_expires_at > clock_timestamp() AND status_code <> ALL(%s)",
             (lease_s, claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref, list(TERMINAL)),
         )
         return cur.rowcount == 1
@@ -245,8 +247,9 @@ def release(db: Database, claim: Claim) -> bool:
     with db.conn() as c:
         cur = c.execute(
             "UPDATE agent.runs SET lease_expires_at = now() - interval '1 millisecond'"
-            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
-            (claim.tenant_id, claim.run_id, claim.lease_epoch),
+            " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND lease_owner_ref=%s"
+            " AND lease_expires_at > clock_timestamp()",
+            (claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         return cur.rowcount == 1
 
@@ -277,9 +280,12 @@ def check_current(
 ) -> Row:
     """Gateway admission core: tenant, fence, goal, cancel, terminal and restore incarnation."""
     row = c.execute(
-        "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation,"
+        "SELECT r.status_code, r.lease_epoch, r.lease_owner_ref,"
+        " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+        " r.cancel_requested, r.pause_requested, r.restore_incarnation,"
         " r.head_revision, r.allowed_models, r.token_budget, r.tokens_reserved, r.tokens_used, r.max_model_calls,"
-        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, s.restore_incarnation AS current_incarnation"
+        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, t.active_run_id,"
+        " s.restore_incarnation AS current_incarnation"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " CROSS JOIN agent.schema_control s"
         " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s" + (" FOR UPDATE OF r" if for_update else ""),
@@ -302,7 +308,12 @@ def check_current(
         raise Cancelled(claim.run_id)
     if row["status_code"] in TERMINAL:
         raise RunTerminal(row["status_code"])
-    if row["lease_epoch"] != claim.lease_epoch:
+    if (
+        row["lease_epoch"] != claim.lease_epoch
+        or row["lease_owner_ref"] != claim.worker_ref
+        or not row["lease_valid"]
+        or row["active_run_id"] != claim.run_id
+    ):
         raise FencedOut(claim.run_id)
     if row["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)
@@ -416,10 +427,71 @@ def append_head(
 ) -> int:
     """CAS-append one immutable entry inside the caller's transaction. Idempotent on (stream, request_key) for
     assistant entries and on tool_call_id for tool entries. Fails closed on stale fence / goal / cancel."""
+    return _append_head(
+        c,
+        claim,
+        kind,
+        payload,
+        writer=writer,
+        stream=stream,
+        request_key=request_key,
+        tool_call_id=tool_call_id,
+        require_current_goal=require_current_goal,
+        reconcile=False,
+    )
+
+
+def append_reconciled_head(c: psycopg.Connection[Row], claim: Claim, *, stream: str, intent_id: str) -> int:
+    """Append a confirmed receipt, never start an effect or grant a worker lease.
+
+    The caller has verified the frozen proposal and receipt in this transaction.
+    Only an already-confirmed intent belonging to the same run and stream qualifies.
+    """
+    intent = c.execute(
+        "SELECT invocation_key, tool_key, result_json FROM agent.tool_intents WHERE tenant_id=%s AND id=%s"
+        " AND run_id=%s AND task_id=%s AND stream=%s AND status_code='CONFIRMED' FOR UPDATE",
+        (claim.tenant_id, intent_id, claim.run_id, claim.task_id, stream),
+    ).fetchone()
+    if intent is None or not isinstance(intent["result_json"], dict) or not intent["result_json"].get("receipt"):
+        raise FencedOut("invalid reconciled receipt")
+    payload = {
+        "kind": "tool",
+        "tool_call_id": intent["invocation_key"],
+        "tool_name": intent["tool_key"],
+        "content": canonical_json({"status": "CONFIRMED", **intent["result_json"]}),
+    }
+    return _append_head(
+        c,
+        claim,
+        "tool",
+        payload,
+        writer="tool_gateway:reconcile",
+        stream=stream,
+        request_key=None,
+        tool_call_id=intent["invocation_key"],
+        require_current_goal=False,
+        reconcile=True,
+    )
+
+
+def _append_head(
+    c: psycopg.Connection[Row],
+    claim: Claim,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    writer: str,
+    stream: str,
+    request_key: str | None,
+    tool_call_id: str | None,
+    require_current_goal: bool | None,
+    reconcile: bool,
+) -> int:
     if require_current_goal is None:
         require_current_goal = kind == "assistant"
     run = c.execute(
-        "SELECT r.lease_epoch, r.head_revision, r.status_code, r.cancel_requested, t.goal_revision"
+        "SELECT r.lease_epoch, r.lease_owner_ref, coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+        " r.head_revision, r.status_code, r.cancel_requested, t.goal_revision"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " WHERE r.tenant_id=%s AND r.id=%s AND r.task_id=%s FOR UPDATE OF r",
         (claim.tenant_id, claim.run_id, claim.task_id),
@@ -428,7 +500,9 @@ def append_head(
         raise TenantMismatch(claim.run_id)
     if run["status_code"] in TERMINAL:
         raise RunTerminal(run["status_code"])
-    if run["lease_epoch"] != claim.lease_epoch:
+    if run["lease_epoch"] != claim.lease_epoch or (
+        not reconcile and (run["lease_owner_ref"] != claim.worker_ref or not run["lease_valid"])
+    ):
         raise FencedOut(claim.run_id)
     if require_current_goal and run["goal_revision"] != claim.goal_revision:
         raise StaleGoal(claim.run_id)
@@ -577,8 +651,9 @@ def framework_ref(db: Database, tenant_id: str, run_id: str) -> str | None:
 def set_framework_ref(db: Database, claim: Claim, ref: str) -> None:
     with db.conn() as c:
         cur = c.execute(
-            "UPDATE agent.runs SET framework_ref=%s WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
-            (ref, claim.tenant_id, claim.run_id, claim.lease_epoch),
+            "UPDATE agent.runs SET framework_ref=%s WHERE tenant_id=%s AND id=%s AND lease_epoch=%s"
+            " AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()",
+            (ref, claim.tenant_id, claim.run_id, claim.lease_epoch, claim.worker_ref),
         )
         if cur.rowcount != 1:
             raise FencedOut(claim.run_id)
@@ -590,8 +665,9 @@ def discard_framework_ref(db: Database, claim: Claim, ref: str | None) -> bool:
         return False
     with db.conn() as c:
         cur = c.execute(
-            "UPDATE agent.runs SET framework_ref=NULL WHERE tenant_id=%s AND id=%s AND framework_ref=%s AND lease_epoch=%s",
-            (claim.tenant_id, claim.run_id, ref, claim.lease_epoch),
+            "UPDATE agent.runs SET framework_ref=NULL WHERE tenant_id=%s AND id=%s AND framework_ref=%s AND lease_epoch=%s"
+            " AND lease_owner_ref=%s AND lease_expires_at > clock_timestamp()",
+            (claim.tenant_id, claim.run_id, ref, claim.lease_epoch, claim.worker_ref),
         )
         return cur.rowcount == 1
 
@@ -627,7 +703,8 @@ def finish_segment(
             (claim.tenant_id, claim.task_id),
         ).fetchone()
         run = c.execute(
-            "SELECT status_code, lease_epoch, cancel_requested, pause_requested FROM agent.runs"
+            "SELECT status_code, lease_epoch, lease_owner_ref,"
+            " coalesce(lease_expires_at > clock_timestamp(), false) AS lease_valid, cancel_requested, pause_requested FROM agent.runs"
             " WHERE tenant_id=%s AND id=%s AND task_id=%s FOR UPDATE",
             (claim.tenant_id, claim.run_id, claim.task_id),
         ).fetchone()
@@ -635,7 +712,11 @@ def finish_segment(
             raise TenantMismatch(claim.run_id)
         if run["status_code"] in TERMINAL:
             raise (Cancelled if run["status_code"] == "CANCELLED" else RunTerminal)(run["status_code"])
-        if run["lease_epoch"] != claim.lease_epoch:
+        if (
+            run["lease_epoch"] != claim.lease_epoch
+            or run["lease_owner_ref"] != claim.worker_ref
+            or not run["lease_valid"]
+        ):
             raise FencedOut(claim.run_id)
         target = outcome
         revoked = not scope_active(c, claim.tenant_id, str(task["owner_user_id"]), str(task["workspace_id"]))

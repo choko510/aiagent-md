@@ -140,9 +140,10 @@ class MemoryProjection:
     source_refs: tuple[str, ...]
     source_epoch: str
     trust_tier: str = "MEMORY_DATA"
+    record_revision: int = 1
 
     def __post_init__(self) -> None:
-        if self.trust_tier != "MEMORY_DATA" or not self.ref or not self.source_refs:
+        if self.trust_tier != "MEMORY_DATA" or not self.ref or not self.source_refs or self.record_revision < 1:
             raise SafeStop("UNAUTHORIZED_MEMORY_PROJECTION")
         forbid_secrets(self.text)
 
@@ -159,6 +160,7 @@ class ContextRequest:
     anchors: tuple[Anchor, ...]
     budget: ModelBudget
     memory: tuple[MemoryProjection, ...] = ()
+    recipient: str = ""
 
     def __post_init__(self) -> None:
         if not all(
@@ -237,6 +239,19 @@ class SummaryProposal:
     claims: tuple[SummaryClaim, ...]
     # Producer cannot confer permissions or approve effects.
     asserted_authority: str = "OBSERVATION"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPublication:
+    """Internal commit material; not a shared wire contract or source of authority."""
+
+    request: ContextRequest
+    raw_artifacts: tuple[RawArtifact, ...]
+    memory: tuple[MemoryProjection, ...]
+    summary_ref: str
+    summary_digest: str
+    payload_ref: str
+    payload_digest: str
 
 
 @dataclass(frozen=True, slots=True)

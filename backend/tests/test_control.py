@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 
 import psycopg
 import pytest
@@ -99,6 +100,34 @@ def test_claim_fencing_and_stale_worker(dbs: dict[str, Database], tenant: dict[s
     assert control.finish_segment(rt, c2, "SUCCEEDED", result_text="ok") == "SUCCEEDED"
     with pytest.raises(control.RunTerminal):
         control.claim_run(rt, tenant["tenantId"], ids["runId"], "w3")
+
+
+def test_expired_or_wrong_owner_claim_cannot_be_admitted_or_renewed(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    ids = submit(dbs, tenant)
+    claim = control.claim_run(dbs["runtime"], tenant["tenantId"], ids["runId"], "worker-a")
+    with pytest.raises(control.FencedOut), dbs["tool_gateway"].tx() as c:
+        control.append_reconciled_head(c, claim, stream="main", intent_id=ids["runId"])
+    wrong_worker = replace(claim, worker_ref="worker-b")
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.check_current(c, wrong_worker)
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.append_head(c, wrong_worker, "assistant", {"content": "invalid"}, writer="test")
+    assert not control.heartbeat(dbs["runtime"], wrong_worker)
+    dbs["owner"].one(
+        "UPDATE agent.runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s RETURNING 1", (ids["runId"],)
+    )
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.check_current(c, claim)
+    with pytest.raises(control.FencedOut), dbs["model_gateway"].tx() as c:
+        control.append_head(c, claim, "assistant", {"content": "expired"}, writer="test")
+    assert not control.heartbeat(dbs["runtime"], claim)
+    with pytest.raises(control.FencedOut):
+        control.set_framework_ref(dbs["runtime"], claim, "expired-cache")
+    with pytest.raises(control.FencedOut):
+        control.finish_segment(dbs["runtime"], claim, "SUCCEEDED", result_text="expired")
+    assert not control.release(dbs["runtime"], claim)
 
 
 def test_cancel_wins_over_completion(dbs: dict[str, Database], tenant: dict[str, str]) -> None:

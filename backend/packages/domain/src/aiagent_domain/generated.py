@@ -82,6 +82,16 @@ class CheckpointEntryV1(_Contract):
     payload: JsonObject
 
 
+class ContextPolicyCommandV1(_Contract):
+    "Owner-authenticated switch for the Context model path. No environment variable can enable it on its own."
+    __schema_title__: ClassVar[str] = "ContextPolicyCommandV1"
+    schema_version: Annotated[SchemaVersion, Field(alias="schemaVersion")]
+    recipient: Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9_.:-]{1,256}$')]
+    model: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    enabled: bool
+    expected_record_version: Annotated[NonNegativeInt64 | None, Field(alias="expectedRecordVersion")] = None
+
+
 class DomainEventEnvelopeV1(_Contract):
     __schema_title__: ClassVar[str] = "DomainEventEnvelopeV1"
     schema_version: Annotated[SchemaVersion, Field(alias="schemaVersion")]
@@ -138,6 +148,27 @@ class LeaseFenceV1(_Contract):
     epoch: NonNegativeInt64
     owner_ref: Annotated[OpaqueRef, Field(alias="ownerRef")]
     expires_at: Annotated[UtcInstant, Field(alias="expiresAt")]
+
+
+class MemoryCreateCommandV1(_Contract):
+    "Owner-authenticated Memory creation. The body carries only encrypted-artifact references and metadata; plaintext never leaves the Model Gateway."
+    __schema_title__: ClassVar[str] = "MemoryCreateCommandV1"
+    schema_version: Annotated[SchemaVersion, Field(alias="schemaVersion")]
+    source_artifact_ref: Annotated[Uuid7, Field(alias="sourceArtifactRef")]
+    projection_artifact_ref: Annotated[Uuid7, Field(alias="projectionArtifactRef")]
+    recipient: Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9_.:-]{1,256}$')]
+    consent_basis: Annotated[Literal["user_explicit", "approved_setting", "reviewed_import"], Field(alias="consentBasis")]
+    observed_at: Annotated[UtcInstant, Field(alias="observedAt")]
+    expires_at: Annotated[UtcInstant, Field(alias="expiresAt")]
+
+
+class MemoryUpdateCommandV1(_Contract):
+    "Owner-authenticated metadata update (recipient and/or expiry). Memory identity and content references are immutable."
+    __schema_title__: ClassVar[str] = "MemoryUpdateCommandV1"
+    schema_version: Annotated[SchemaVersion, Field(alias="schemaVersion")]
+    expected_revision: Annotated[PositiveInt64, Field(alias="expectedRevision")]
+    recipient: Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9_.:-]{1,256}$')] | None = None
+    expires_at: Annotated[UtcInstant | None, Field(alias="expiresAt")] = None
 
 
 class OutboxPointerV1(_Contract):
@@ -269,10 +300,13 @@ SCHEMA_FILES: dict[str, str] = {
     "ApprovalDecisionCommandV1": "approval-decision.schema.json",
     "ApprovalV1": "approval.schema.json",
     "CheckpointEntryV1": "checkpoint.schema.json",
+    "ContextPolicyCommandV1": "context-policy.schema.json",
     "DomainEventEnvelopeV1": "domain-event.schema.json",
     "EffectRecordV1": "effect-record.schema.json",
     "GoalRevisionV1": "goal-revision.schema.json",
     "LeaseFenceV1": "lease-fence.schema.json",
+    "MemoryCreateCommandV1": "memory-create.schema.json",
+    "MemoryUpdateCommandV1": "memory-update.schema.json",
     "OutboxPointerV1": "outbox-message.schema.json",
     "RunJobPointerV1": "queue-job.schema.json",
     "RunClaimV1": "run-claim.schema.json",
@@ -289,10 +323,13 @@ MODELS: dict[str, type[_Contract]] = {
     "ApprovalDecisionCommandV1": ApprovalDecisionCommandV1,
     "ApprovalV1": ApprovalV1,
     "CheckpointEntryV1": CheckpointEntryV1,
+    "ContextPolicyCommandV1": ContextPolicyCommandV1,
     "DomainEventEnvelopeV1": DomainEventEnvelopeV1,
     "EffectRecordV1": EffectRecordV1,
     "GoalRevisionV1": GoalRevisionV1,
     "LeaseFenceV1": LeaseFenceV1,
+    "MemoryCreateCommandV1": MemoryCreateCommandV1,
+    "MemoryUpdateCommandV1": MemoryUpdateCommandV1,
     "OutboxPointerV1": OutboxPointerV1,
     "RunJobPointerV1": RunJobPointerV1,
     "RunClaimV1": RunClaimV1,

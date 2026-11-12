@@ -49,11 +49,16 @@ class Stack:
     receiver_hang: bool = False
     owner_dsn: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
+    # Provider-compatible (local, non-paid) server used by the real-provider code path.
+    provider_port: int = field(default_factory=free_port)
+    provider_mode: str = "ok"
+    provider_log_path: Path | None = None
 
     def __post_init__(self) -> None:
         for name in ("model", "tool", "sentinel", "egress", "receiver"):
             self.ports[name] = free_port()
-        for k in ("rt_model", "rt_tool", "tgw_sentinel", "ops_tool"):
+        self.provider_log_path = self.tmp / "provider.jsonl"
+        for k in ("rt_model", "rt_tool", "tgw_sentinel", "ops_tool", "api_model"):
             self.keys[k] = secrets.token_hex(32)
         self.permit_key = secrets.token_hex(32)
         self.provider_secret = "sk-fake-provider-SECRET-" + secrets.token_hex(6)
@@ -73,10 +78,15 @@ class Stack:
                 {
                     "AIAGENT_MODEL_GATEWAY_DSN": self.dsn["model_gateway"],
                     "AIAGENT_MODEL_GATEWAY_ENDPOINT": f"tcp:127.0.0.1:{p['model']}",
-                    "AIAGENT_MODEL_GATEWAY_RPC_KEYS": f"runtime={self.keys['rt_model']}",
+                    "AIAGENT_MODEL_GATEWAY_RPC_KEYS": (f"runtime={self.keys['rt_model']},api={self.keys['api_model']}"),
+                    "AIAGENT_CONTEXT_ARTIFACT_KEY": (b"k" * 32).hex(),  # test-only key; model process only
                     "AIAGENT_ANTHROPIC_API_KEY": self.provider_secret,
+                    # Provider-compatible local server through the Trusted Egress proxy.
+                    "AIAGENT_ANTHROPIC_URL": f"http://127.0.0.1:{self.provider_port}/v1/messages",
+                    "AIAGENT_EGRESS_PROXY_MODEL": f"http://127.0.0.1:{p['egress']}",
+                    "AIAGENT_EGRESS_MODEL_TOKEN": self.static_model_token,
                 }
-            )  # never used (no consent), only held
+            )  # the provider secret never leaves the gateway
         elif name == "tool":
             env.update(
                 {
@@ -104,8 +114,14 @@ class Stack:
             )
         return env
 
+    @property
+    def static_model_token(self) -> str:
+        # >=32-byte token required by the real static egress identity parser.
+        return "model-" + self.permit_key
+
     def egress_config(self) -> dict[str, Any]:
         return {
+            "static_tokens": {"model_gateway": self.static_model_token},
             "destinations": {
                 "message-receiver": {
                     "scheme": "http",
@@ -113,14 +129,24 @@ class Stack:
                     "port": self.ports["receiver"],
                     "methods": ["POST", "GET"],
                     "allow_private": ["127.0.0.1"],
-                }
-            }
+                },
+                "model-provider": {
+                    "scheme": "http",
+                    "host": "127.0.0.1",
+                    "port": self.provider_port,
+                    "methods": ["POST"],
+                    "allow_private": ["127.0.0.1"],
+                    "identities": ["model_gateway"],
+                    "needs_permit": False,
+                },
+            },
         }
 
     def worker_env(self, **extra: str) -> dict[str, str]:
         env = self.base_env()
         env.update(
             {
+                "AIAGENT_API_MODEL_RPC_KEY": self.keys["api_model"],
                 "AIAGENT_RUNTIME_DSN": self.dsn["runtime"],
                 "AIAGENT_CHECKPOINTER_DSN": self.dsn["checkpointer"],
                 "AIAGENT_MODEL_GATEWAY_ENDPOINT": f"tcp:127.0.0.1:{self.ports['model']}",
@@ -136,7 +162,16 @@ class Stack:
 
     # ---------------------------------------------------------------- processes
     def start(self, name: str, **extra_env: str) -> None:
-        if name == "receiver":
+        if name == "provider":
+            args = [
+                PY,
+                str(HERE / "mock_anthropic.py"),
+                str(self.provider_port),
+                str(self.provider_log_path),
+                self.provider_mode,
+            ]
+            env = self.base_env()
+        elif name == "receiver":
             args = [
                 PY,
                 str(HERE / "mock_receiver.py"),
@@ -155,7 +190,7 @@ class Stack:
             args, env = [PY, *mod], {**self.env_for(name), "AIAGENT_ATTEMPT_ORPHAN_S": "0", **extra_env}
         out = open(self.tmp / f"{name}.log", "ab")  # noqa: SIM115
         self.procs[name] = subprocess.Popen(args, env=env, stdout=out, stderr=subprocess.STDOUT)
-        wait_port(self.ports[name])
+        wait_port(self.provider_port if name == "provider" else self.ports[name])
         if name == "sentinel":
             wait_port(self.ports["egress"])
 
@@ -174,7 +209,7 @@ class Stack:
     def start_all(self) -> Stack:
         if self.owner_dsn:
             self.tune_queue()
-        for n in ("receiver", "sentinel", "tool", "model"):
+        for n in ("receiver", "provider", "sentinel", "tool", "model"):
             self.start(n)
         return self
 
@@ -205,6 +240,11 @@ class Stack:
             return OutboxRelay(db, "test-relay").run_once()
         finally:
             db.close()
+
+    def enable_anthropic_route(self, tenant_id: str) -> None:
+        """Static deployment consent for the local Anthropic-compatible test server."""
+        self.extra_env["AIAGENT_MODEL_CONSENT"] = f"{tenant_id}:anthropic"
+        self.restart("model")
 
     def worker(self, fault: str | None = None, timeout: float = 180, **extra: str) -> subprocess.CompletedProcess[str]:
         """Relay pending outbox rows, then run one worker process until the queue is idle (or it is killed)."""
@@ -237,6 +277,11 @@ class Stack:
         finally:
             owner.close()
         return out
+
+    def provider_requests(self) -> list[dict[str, Any]]:
+        if self.provider_log_path is None or not self.provider_log_path.exists():
+            return []
+        return [json.loads(x) for x in self.provider_log_path.read_text(encoding="utf-8").splitlines() if x.strip()]
 
     def sends(self) -> list[dict[str, Any]]:
         if not self.log.exists():

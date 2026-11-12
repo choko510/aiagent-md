@@ -25,8 +25,3 @@ ignore = ["E501", "PLR0913", "PLR0917", "PLR2004", "S101", "RUF001", "RUF002", "
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "PLR", "B", "SIM"]
-
-# AI-07 registers this package in the shared uv workspace and lockfile at integration.
-# Until then, avoid making unrelated existing backend CI fail under uv sync --locked.
-[tool.uv]
-managed = false

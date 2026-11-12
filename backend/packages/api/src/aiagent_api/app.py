@@ -8,14 +8,24 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from aiagent_core import commands, config
+from aiagent_core import commands, config, memory_tombstones, memory_writer
 from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
 from aiagent_core.migrate import check_compatible
+from aiagent_core.step4_gate import capability_snapshot
 from aiagent_domain.canonical import sha256_bytes
-from aiagent_domain.generated import ApprovalDecisionCommandV1, TaskSteerCommandV1, TaskSubmitCommandV1
+from aiagent_domain.generated import (
+    ApprovalDecisionCommandV1,
+    ContextPolicyCommandV1,
+    MemoryCreateCommandV1,
+    MemoryUpdateCommandV1,
+    TaskSteerCommandV1,
+    TaskSubmitCommandV1,
+)
+from aiagent_domain.rpcwire import RpcError
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -79,6 +89,11 @@ def create_app(db: Database | None = None) -> FastAPI:
         except Exception:
             return JSONResponse({"ready": False}, status_code=503)
         return JSONResponse({"ready": True})
+
+    @app.get("/v1/step4/capabilities")
+    async def step4_capabilities(_scope: S) -> dict[str, Any]:
+        """Authenticated, read-only projection. An entry never grants a device or tool capability."""
+        return {"schemaVersion": "1.0", "capabilities": capability_snapshot()}
 
     @app.post("/v1/tasks", status_code=201)
     async def submit(request: Request, s: S, idempotency_key: Annotated[str | None, Header()] = None) -> dict[str, str]:
@@ -190,6 +205,193 @@ def create_app(db: Database | None = None) -> FastAPI:
             cmd.request_sha256,
             cmd.expected_record_version,
         )
+
+    # ------------------------------------------------------------------ Memory (owner-authenticated)
+    def memory_ingest_client() -> Any:
+        """Internal authenticated RPC to the Model Gateway (the only component holding the key)."""
+        endpoint = os.environ.get("AIAGENT_MODEL_GATEWAY_ENDPOINT")
+        key = config.secret("AIAGENT_API_MODEL_RPC_KEY", required=False)
+        if not endpoint or key is None:
+            raise HTTPException(503, "MEMORY_INGEST_UNAVAILABLE")
+        from aiagent_core.rpc import RpcClient
+
+        return RpcClient(endpoint, "api", bytes.fromhex(key.reveal()))
+
+    @app.post("/v1/tasks/{task_id}/memory/source", status_code=201)
+    async def put_memory_source(task_id: str, request: Request, s: S) -> dict[str, Any]:
+        """Store the user's original text as an encrypted artifact (plaintext never persists in the API)."""
+        raw = await request.body()
+        if not raw or len(raw) > 2_000_000:
+            raise HTTPException(413, "source too large")
+        try:
+            text = raw.decode("utf-8", "strict")
+        except UnicodeError:
+            raise HTTPException(422, "source must be UTF-8 text") from None
+        client = memory_ingest_client()
+        body = {
+            "tenantId": s.tenant_id,
+            "ownerUserId": s.user_id,
+            "workspaceId": s.workspace_id,
+            "taskId": task_id,
+            "sourceRef": f"user:{s.user_id}",
+            "locatorRef": "bytes:0",
+            "observedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "content": text,
+        }
+        try:
+            # RpcClient.call is async; run it on this loop (it is network I/O, not blocking SQL).
+            result = await client.call("memory.artifact.put", body)
+        except RpcError as exc:
+            raise HTTPException(409 if exc.code == "MEMORY_SCOPE_DENIED" else 422, exc.code) from None
+        return {"schemaVersion": "1.0", "artifactId": result["artifactId"]}
+
+    # Memory plaintext never passes through the API: creation accepts encrypted-artifact
+    # references only, and every operation is owner-scoped (another owner gets 404).
+    def tombstone_log() -> Any:
+        try:
+            return memory_tombstones.log_from_env()
+        except (memory_tombstones.TombstoneError, config.ConfigError):
+            if config.profile() == "test":
+                return None
+            raise HTTPException(503, "MEMORY_TOMBSTONE_UNAVAILABLE") from None
+
+    @app.post("/v1/tasks/{task_id}/memory", status_code=201)
+    async def create_memory(
+        task_id: str,
+        request: Request,
+        s: S,
+        idempotency_key: Annotated[str | None, Header()] = None,
+    ) -> dict[str, Any]:
+        cmd: MemoryCreateCommandV1 = await body_of(request, MemoryCreateCommandV1)
+        log = tombstone_log()
+        memory_id, epoch = await asyncio.to_thread(
+            memory_writer.create_memory,
+            get_db(),
+            s,
+            task_id=task_id,
+            source_ref=cmd.source_artifact_ref,
+            projection_ref=cmd.projection_artifact_ref,
+            recipient=cmd.recipient,
+            observed_at=datetime.fromisoformat(cmd.observed_at.replace("Z", "+00:00")),
+            expires_at=datetime.fromisoformat(cmd.expires_at.replace("Z", "+00:00")),
+            consent_basis=cmd.consent_basis,
+            idempotency_key=idempotency_key or f"memory:{task_id}:{cmd.source_artifact_ref}",
+        )
+        if log is not None:
+            await asyncio.to_thread(
+                log.append,
+                kind="created",
+                tenant_id=s.tenant_id,
+                owner_id=s.user_id,
+                task_id=task_id,
+                memory_id=memory_id,
+                revision=1,
+                recorded_at=datetime.now(UTC).isoformat(),
+            )
+        return {
+            "schemaVersion": "1.0",
+            "memoryId": memory_id,
+            "revision": "1",
+            "sourceEpoch": str(epoch),
+        }
+
+    @app.get("/v1/tasks/{task_id}/memory")
+    async def list_memory(task_id: str, s: S) -> dict[str, Any]:
+        rows = await asyncio.to_thread(memory_writer.list_memories, get_db(), s, task_id=task_id)
+        return {"schemaVersion": "1.0", "items": rows}
+
+    @app.get("/v1/tasks/{task_id}/memory/{memory_id}/revisions")
+    async def memory_revisions(task_id: str, memory_id: str, s: S) -> dict[str, Any]:
+        rows = await asyncio.to_thread(
+            memory_writer.memory_revisions, get_db(), s, task_id=task_id, memory_id=memory_id
+        )
+        return {"schemaVersion": "1.0", "items": rows}
+
+    @app.patch("/v1/tasks/{task_id}/memory/{memory_id}")
+    async def update_memory(task_id: str, memory_id: str, request: Request, s: S) -> dict[str, Any]:
+        cmd: MemoryUpdateCommandV1 = await body_of(request, MemoryUpdateCommandV1)
+        log = tombstone_log()
+        revision = await asyncio.to_thread(
+            memory_writer.update_memory,
+            get_db(),
+            s,
+            task_id=task_id,
+            memory_id=memory_id,
+            recipient=cmd.recipient,
+            expires_at=(
+                datetime.fromisoformat(cmd.expires_at.replace("Z", "+00:00")) if cmd.expires_at is not None else None
+            ),
+            expected_revision=int(cmd.expected_revision),
+            tombstone_log=log,
+        )
+        return {"schemaVersion": "1.0", "memoryId": memory_id, "revision": str(revision)}
+
+    @app.delete("/v1/tasks/{task_id}/memory/{memory_id}")
+    async def revoke_memory(task_id: str, memory_id: str, s: S) -> dict[str, Any]:
+        log = tombstone_log()
+        epoch = await asyncio.to_thread(
+            memory_writer.revoke_memory, get_db(), s, task_id=task_id, memory_id=memory_id, tombstone_log=log
+        )
+        return {"schemaVersion": "1.0", "memoryId": memory_id, "sourceEpoch": str(epoch)}
+
+    @app.get("/v1/memory/consents")
+    async def list_consents(s: S) -> dict[str, Any]:
+        rows = await asyncio.to_thread(memory_writer.memory_consents, get_db(), s)
+        return {"schemaVersion": "1.0", "items": rows}
+
+    @app.post("/v1/memory/consents/{recipient}", status_code=201)
+    async def grant_consent(recipient: str, s: S) -> dict[str, Any]:
+        revision = await asyncio.to_thread(memory_writer.grant_memory_consent, get_db(), s, recipient=recipient)
+        return {
+            "schemaVersion": "1.0",
+            "recipient": recipient,
+            "granted": True,
+            "recordVersion": str(revision),
+        }
+
+    @app.get("/v1/memory/consents/{recipient}/revisions")
+    async def consent_revisions(recipient: str, s: S) -> dict[str, Any]:
+        rows = await asyncio.to_thread(memory_writer.memory_consent_revisions, get_db(), s, recipient=recipient)
+        return {"schemaVersion": "1.0", "items": rows}
+
+    @app.delete("/v1/memory/consents/{recipient}")
+    async def revoke_consent(recipient: str, s: S) -> dict[str, Any]:
+        log = tombstone_log()
+        revision = await asyncio.to_thread(
+            memory_writer.revoke_memory_consent,
+            get_db(),
+            s,
+            recipient=recipient,
+            tombstone_log=log,
+        )
+        return {
+            "schemaVersion": "1.0",
+            "recipient": recipient,
+            "granted": False,
+            "recordVersion": str(revision),
+        }
+
+    @app.get("/v1/tasks/{task_id}/context-policy")
+    async def get_context_policy(task_id: str, s: S) -> dict[str, Any]:
+        policy = await asyncio.to_thread(memory_writer.context_policy, get_db(), s, task_id=task_id)
+        return {"schemaVersion": "1.0", "policy": policy}
+
+    @app.put("/v1/tasks/{task_id}/context-policy")
+    async def set_context_policy(task_id: str, request: Request, s: S) -> dict[str, Any]:
+        body = await body_of(request, ContextPolicyCommandV1)
+        version = await asyncio.to_thread(
+            memory_writer.set_context_policy,
+            get_db(),
+            s,
+            task_id=task_id,
+            recipient=body.recipient,
+            model=body.model,
+            enabled=body.enabled,
+            expected_record_version=(
+                int(body.expected_record_version) if body.expected_record_version is not None else None
+            ),
+        )
+        return {"schemaVersion": "1.0", "taskId": task_id, "recordVersion": str(version)}
 
     return app
 

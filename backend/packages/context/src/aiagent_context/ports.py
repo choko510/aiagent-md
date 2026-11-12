@@ -6,7 +6,7 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
 
-from .models import ContextPlan, RawArtifact, SafeStop, Scope, SourceInput
+from .models import ContextPlan, ContextPublication, RawArtifact, SafeStop, Scope, SourceInput
 
 
 class ArtifactStorePort(Protocol):
@@ -34,6 +34,7 @@ class HeadPort(Protocol):
         policy_version: str,
         memory_epoch: str,
         plan_digest: str,
+        publication: ContextPublication,
     ) -> str: ...
     def check_dispatch(self, plan: ContextPlan, lease_epoch: str) -> None: ...
 
@@ -139,6 +140,7 @@ class MockHeadPort:
         policy_version: str,
         memory_epoch: str,
         plan_digest: str,
+        publication: ContextPublication,
     ) -> str:
         self.assert_current(scope, expected_head, goal_revision, lease_epoch, policy_version, memory_epoch)
         if self.fail_before_cas:

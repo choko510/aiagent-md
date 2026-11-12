@@ -91,6 +91,39 @@ def tenant(pg: PgEnv) -> dict[str, str]:
     return admin.provision_tenant(pg.owner)
 
 
+@pytest.fixture(scope="module")
+def memory_pg() -> Iterator[PgEnv]:
+    """A fresh database: other integration tests deliberately bump restore incarnation."""
+    if not PG:
+        pytest.skip("AIAGENT_TEST_PG_URL not set")
+    env = make_database("aiagent_memory")
+    yield env
+    drop_database(env.name)
+
+
+@pytest.fixture(scope="module")
+def memory_dbs(memory_pg: PgEnv) -> Iterator[dict[str, Database]]:
+    out = {name: memory_pg.db(name, max_size=16) for name in memory_pg.dsn}
+    out["owner"] = Database(memory_pg.owner, max_size=8)
+    yield out
+    for db in out.values():
+        db.close()
+
+
+@pytest.fixture()
+def memory_tenant(memory_pg: PgEnv) -> dict[str, str]:
+    return admin.provision_tenant(memory_pg.owner)
+
+
+@pytest.fixture(scope="module")
+def memory_stack(memory_pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
+    from stack import Stack
+
+    instance = Stack(memory_pg.dsn, tmp_path_factory.mktemp("memory-stack"), owner_dsn=memory_pg.owner).start_all()
+    yield instance
+    instance.close()
+
+
 # ------------------------------------------------------------------ multi-process stack + API client (E2E suites)
 @pytest.fixture(scope="session")
 def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
@@ -102,11 +135,29 @@ def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack
 
 
 @pytest.fixture()
-def api(pg: PgEnv) -> Iterator[TestClient]:
+def api(pg: PgEnv, request: pytest.FixtureRequest) -> Iterator[TestClient]:
     from aiagent_api.app import create_app
     from fastapi.testclient import TestClient
 
+    # When the formal stack is running, the API must also be able to reach the
+    # Model Gateway's memory-artifact ingest RPC.
+    stack = request.node.funcargs.get("stack")
+    old: dict[str, str | None] = {}
+    if stack is not None:
+        old = {
+            k: os.environ.get(k)
+            for k in ("AIAGENT_MODEL_GATEWAY_ENDPOINT", "AIAGENT_API_MODEL_RPC_KEY", "AIAGENT_MEMORY_TOMBSTONE_LOG")
+        }
+        os.environ["AIAGENT_MODEL_GATEWAY_ENDPOINT"] = f"tcp:127.0.0.1:{stack.ports['model']}"
+        os.environ["AIAGENT_API_MODEL_RPC_KEY"] = stack.keys["api_model"]
     db = Database(pg.dsn["api"], max_size=4)
-    with TestClient(create_app(db)) as c:
-        yield c
-    db.close()
+    try:
+        with TestClient(create_app(db)) as c:
+            yield c
+    finally:
+        db.close()
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

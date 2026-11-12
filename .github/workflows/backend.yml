@@ -33,7 +33,7 @@ jobs:
         run: uv run python tools/gen_contracts.py --check
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src
+      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src packages/browser/src packages/context/src packages/memory/src packages/development/src packages/automation/src
 
   integration:
     name: integration (py${{ matrix.python }})
@@ -56,6 +56,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with: {version: '0.12.3'}
       - run: uv sync --locked --python ${{ matrix.python }}
+      - name: STEP 4 isolated mock and fixture tests (not production integration)
+        run: uv run --python ${{ matrix.python }} pytest -q -rs -p no:cacheprovider packages/context/tests packages/memory/tests packages/development/tests packages/automation/tests packages/browser/tests
       - name: Contracts, migrations, Run control, QueuePort/Outbox/Scheduler, gateways, Sentinel, E2E, production gates
         run: >
           uv run --python ${{ matrix.python }} pytest -q -rA -p no:cacheprovider tests
@@ -141,6 +143,11 @@ jobs:
         working-directory: .
         run: |
           sudo sh deploy/scripts/gen-secrets.sh  # root:10001 0440 so non-root services can read bind-mounted secrets
+          export AIAGENT_MEMORY_TOMBSTONE_VOLUME=aiagentdev-memory-tombstones
+          docker volume create "$AIAGENT_MEMORY_TOMBSTONE_VOLUME"
+          docker run --rm --user 0:0 -v "$AIAGENT_MEMORY_TOMBSTONE_VOLUME:/data" aiagent/all:dev chown 10001:10001 /data
+          docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml \
+            run --rm --no-deps --entrypoint python migrate -m aiagent_core.admin memory-tombstone-init
           docker compose -p aiagentdev -f deploy/compose/compose.yaml -f deploy/compose/compose.dev.yaml up -d --wait
           cd backend && AIAGENT_COMPOSE_PROJECT=aiagentdev uv run pytest -q -rA -p no:cacheprovider tests/test_compose_isolation.py
       - name: Compose logs on failure
