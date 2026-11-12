@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "aiagent Device Simulator",
+  "version": "0.1.0",
+  "identifier": "dev.aiagent.device.simulator",
+  "build": {
+    "frontendDist": "../app/ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "aiagent Device — Mock",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 700,
+        "minHeight": 520,
+        "backgroundColor": "#f5f7fc",
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'"
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": false,
+    "icon": []
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "aiagent-device-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+name = "aiagent_device_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+aiagent-device-core = { path = "../crates/device-core" }
+
+[build-dependencies]
+tauri-build = { version = "2" }
