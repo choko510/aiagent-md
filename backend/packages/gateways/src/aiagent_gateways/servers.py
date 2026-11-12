@@ -22,6 +22,8 @@ from aiagent_core.rpc import Endpoint, RpcClient, RpcServer, parse_keys
 from aiagent_core.service import Lifecycle
 from aiagent_domain.rpcwire import RpcError
 
+from .context_ingest import MemoryIngest, ingest_handler
+from .context_keys import KeyRing
 from .executors import from_env as executors_from_env
 from .model_gateway import ModelGateway, Route, SealedModelRequest
 from .providers import AnthropicProvider, FakeModelProvider
@@ -29,7 +31,14 @@ from .sentinel_port import RpcSentinel
 from .tool_gateway import ToolGateway
 
 
-def build_model_server(db: Database, keys: dict[str, bytes], endpoint: str, gw: ModelGateway) -> RpcServer:
+def build_model_server(
+    db: Database,
+    keys: dict[str, bytes],
+    endpoint: str,
+    gw: ModelGateway,
+    *,
+    ingest: MemoryIngest | None = None,
+) -> RpcServer:
     srv = RpcServer("model_gateway", Endpoint(endpoint), keys)
 
     async def complete(caller: str, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
@@ -52,6 +61,15 @@ def build_model_server(db: Database, keys: dict[str, bytes], endpoint: str, gw: 
 
     srv.register("model.complete", complete, {"runtime"}, streaming=True)
 
+    async def context_eligible(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            claim = Claim.from_wire(body["claim"])
+        except (KeyError, ValueError, TypeError):
+            raise RpcError("BAD_REQUEST") from None
+        return await asyncio.to_thread(gw.context_eligible, claim)
+
+    srv.register("model.context_eligible", context_eligible, {"runtime"})
+
     async def complete_context(caller: str, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         try:
             claim = Claim.from_wire(body["claim"])
@@ -66,6 +84,9 @@ def build_model_server(db: Database, keys: dict[str, bytes], endpoint: str, gw: 
         yield {**(await gw.complete_context(claim, head)), "__final__": True}
 
     srv.register("model.context", complete_context, {"runtime"}, streaming=True)
+
+    if ingest is not None:
+        srv.register("memory.artifact.put", ingest_handler(ingest), {"api"}, streaming=False)
     return srv
 
 
@@ -123,6 +144,30 @@ async def _serve(name: str, srv: RpcServer, db: Database, health_port: int | Non
     db.close()
 
 
+def load_key_ring() -> KeyRing:
+    """Deployment key ring from a mounted file; the single test key is a compatibility input only."""
+    path = os.environ.get("AIAGENT_CONTEXT_ARTIFACT_KEYS_FILE")
+    if path:
+        try:
+            ring = KeyRing.from_file(path)
+        except (OSError, ValueError) as exc:
+            raise config.ConfigError("invalid Context artifact key ring") from exc
+        return ring
+    if config.profile() == "production":
+        raise config.ConfigError("AIAGENT_CONTEXT_ARTIFACT_KEYS_FILE is required in production")
+    single = config.secret("AIAGENT_CONTEXT_ARTIFACT_KEY", required=False)
+    if single is None:
+        raise config.ConfigError("no Context artifact key ring configured")
+    try:
+        key = bytes.fromhex(single.reveal())
+    except ValueError as exc:
+        raise config.ConfigError("invalid Context artifact key") from exc
+    try:
+        return KeyRing.single(key)
+    except ValueError as exc:
+        raise config.ConfigError("invalid Context artifact key") from exc
+
+
 def main_model() -> None:
     setup("model_gateway")
     config.require_isolation("model_gateway")
@@ -135,10 +180,15 @@ def main_model() -> None:
     if anth is not None:
         register_secret(anth.reveal())
         secrets.append(anth.reveal())
+        proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY_MODEL")
+        if config.profile() == "production" and not proxy_url:
+            raise config.ConfigError("AIAGENT_EGRESS_PROXY_MODEL is required in production")
         providers["anthropic"] = AnthropicProvider(
             anth,
-            os.environ.get("AIAGENT_EGRESS_PROXY_MODEL"),
+            proxy_url,
             proxy_token=config.secret("AIAGENT_EGRESS_MODEL_TOKEN", required=False),
+            url=os.environ.get("AIAGENT_ANTHROPIC_URL"),  # provider-compatible local test server only
+            timeout_s=float(os.environ.get("AIAGENT_ANTHROPIC_TIMEOUT_S", "120")),
         )
         routes["claude-sonnet-5-5"] = [Route("anthropic", "claude-sonnet-5-5"), Route("anthropic", "claude-haiku-5-5")]
     if config.profile() == "production" and providers.keys() == {"fake"}:
@@ -147,22 +197,23 @@ def main_model() -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    # Static recipient consent is a deployment fact (data-processing agreement); the
+    # per-user grant is separate and is re-checked in the database on every admission.
     consent = {tuple(x.split(":", 1)) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x}
     db = Database(dsn, max_size=8, name="model_gateway")
-    context_key = None
-    if config.profile() == "test":
-        context_secret = config.secret("AIAGENT_CONTEXT_ARTIFACT_KEY", required=False)
-        if context_secret is not None:
-            register_secret(context_secret.reveal())
-            try:
-                context_key = bytes.fromhex(context_secret.reveal())
-            except ValueError as exc:
-                raise config.ConfigError("invalid Context artifact key") from exc
-            if len(context_key) != 32:
-                raise config.ConfigError("invalid Context artifact key")
+    ring = load_key_ring()
+    for key in ring.keys.values():
+        register_secret(key.hex())
+    context_key = ring
     gw = ModelGateway(db, providers, routes, consent=consent, secrets=secrets, context_key=context_key)  # type: ignore[arg-type]
     gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
-    srv = build_model_server(db, keys, config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"), gw)
+    srv = build_model_server(
+        db,
+        keys,
+        config.env("AIAGENT_MODEL_GATEWAY_ENDPOINT"),
+        gw,
+        ingest=MemoryIngest(db, ring, max_bytes=config.env_int("AIAGENT_MEMORY_SOURCE_MAX_BYTES", 2_000_000)),
+    )
     asyncio.run(_serve("model_gateway", srv, db, config.env_int("AIAGENT_HEALTH_PORT", 0) or None))
 
 

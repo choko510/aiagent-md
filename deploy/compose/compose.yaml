@@ -52,6 +52,9 @@ secrets:
   sentinel_dsn: {file: ./secrets/sentinel_dsn}
   login_passwords: {file: ./secrets/login_passwords.env}
   model_gateway_rpc_keys: {file: ./secrets/model_gateway_rpc_keys}
+  api_model_rpc_key: {file: ./secrets/api_model_rpc_key}
+  context_artifact_keys: {file: ./secrets/context_artifact_keys}
+  memory_tombstone_hmac_key: {file: ./secrets/memory_tombstone_hmac_key}
   tool_gateway_rpc_keys: {file: ./secrets/tool_gateway_rpc_keys}
   sentinel_rpc_keys: {file: ./secrets/sentinel_rpc_keys}
   runtime_model_rpc_key: {file: ./secrets/runtime_model_rpc_key}
@@ -88,24 +91,36 @@ services:
     restart: "no"
     networks: [db]
     depends_on: {postgres: {condition: service_healthy}}
-    secrets: [migrate_dsn, login_passwords]
+    secrets: [migrate_dsn, login_passwords, memory_tombstone_hmac_key]
     environment:
       <<: *env
       AIAGENT_MIGRATE_DSN_FILE: /run/secrets/migrate_dsn
+      AIAGENT_MEMORY_TOMBSTONE_LOG: /var/lib/aiagent/memory-tombstones/memory.jsonl
+      AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY_FILE: /run/secrets/memory_tombstone_hmac_key
+    volumes:
+      - memory_tombstones:/var/lib/aiagent/memory-tombstones
     entrypoint: ["sh", "-c", "python -m aiagent_core.migrate up && set -a && . /run/secrets/login_passwords && set +a && python -m aiagent_core.admin logins"]
     healthcheck: {disable: true}
 
   api:
     <<: *hardening
     image: aiagent/api:${TAG:-dev}
-    networks: [db, web]  # no route out; reachable only through `edge`
-    depends_on: {migrate: {condition: service_completed_successfully}}
-    secrets: [api_dsn]
+    networks: [db, web, rpc]  # no Internet route; RPC access is internal to Model Gateway
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      model-gateway: {condition: service_healthy}
+    secrets: [api_dsn, api_model_rpc_key, memory_tombstone_hmac_key]
     environment:
       <<: *env
       AIAGENT_API_DSN_FILE: /run/secrets/api_dsn
+      AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:model-gateway:7101
+      AIAGENT_API_MODEL_RPC_KEY_FILE: /run/secrets/api_model_rpc_key
+      AIAGENT_MEMORY_TOMBSTONE_LOG: /var/lib/aiagent/memory-tombstones/memory.jsonl
+      AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY_FILE: /run/secrets/memory_tombstone_hmac_key
       AIAGENT_API_HOST: 0.0.0.0
       AIAGENT_API_PORT: "8080"
+    volumes:
+      - memory_tombstones:/var/lib/aiagent/memory-tombstones
     command: ["python", "-m", "aiagent_api.app"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3).status == 200 else 1)"]
@@ -163,11 +178,12 @@ services:
     image: aiagent/gateways:${TAG:-dev}
     networks: [db, rpc]  # provider traffic goes through sentinel's egress proxy on the rpc network
     depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
-    secrets: [model_gateway_dsn, model_gateway_rpc_keys, anthropic_api_key, egress_model_token]
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, context_artifact_keys, anthropic_api_key, egress_model_token]
     environment:
       <<: *env
       AIAGENT_MODEL_GATEWAY_DSN_FILE: /run/secrets/model_gateway_dsn
       AIAGENT_MODEL_GATEWAY_RPC_KEYS_FILE: /run/secrets/model_gateway_rpc_keys
+      AIAGENT_CONTEXT_ARTIFACT_KEYS_FILE: /run/secrets/context_artifact_keys
       AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:0.0.0.0:7101
       AIAGENT_ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
       AIAGENT_EGRESS_PROXY_MODEL: http://sentinel:3128
@@ -223,3 +239,8 @@ services:
 
 volumes:
   pgdata: {}
+  # External to PostgreSQL backups/PITR. Provision, permission and back up this
+  # volume independently; never restore it from the same point-in-time as PG.
+  memory_tombstones:
+    external: true
+    name: ${AIAGENT_MEMORY_TOMBSTONE_VOLUME:-aiagent-memory-tombstones}

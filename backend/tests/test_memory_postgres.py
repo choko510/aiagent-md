@@ -108,8 +108,8 @@ def test_memory_denies_cross_task_and_untrusted_identifiers(dbs: dict[str, Datab
         create(dbs, owner, other_scope, source.artifact_ref, projection.artifact_ref)
     with pytest.raises(commands.CommandError, match="INVALID_MEMORY"):
         create(dbs, owner, scope, "' OR true--", projection.artifact_ref)
-    with dbs["model_gateway"].tx() as c:
-        assert not c.execute("SELECT id FROM agent.memory_records").fetchall()
+    with dbs["model_gateway"].tx() as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute("SELECT id FROM agent.memory_records")
 
 
 def test_real_memory_retriever_rechecks_consent_and_epoch(

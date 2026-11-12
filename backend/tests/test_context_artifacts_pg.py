@@ -9,7 +9,9 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import psycopg
 import pytest
 from aiagent_context.models import SafeStop, Scope, SourceInput
 from aiagent_core import commands, control
@@ -79,24 +81,40 @@ def test_artifact_durable_encrypted_scoped_and_revoked(dbs: dict[str, Database],
     )
 
 
-def test_rls_defaults_to_no_scope_and_does_not_leak_between_transactions(
+def test_gateway_role_has_no_direct_table_access_and_scope_cannot_be_widened(
     dbs: dict[str, Database], tenant: dict[str, str]
 ) -> None:
-    store, scope, _ = make_store(dbs, tenant)
+    """The Model Gateway role must not read artifact rows directly, and a forged GUC
+    scope must not grant access: only the claim-bound function is allowed."""
+    store, scope, claim = make_store(dbs, tenant)
     item = store.put_raw(scope, SourceInput("source", "2026-01-01T00:00:00Z", b"private", locator_ref="locator"))
     db = dbs["model_gateway"]
-    with db.tx() as c:
-        assert c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,)).fetchone() is None
-        c.execute(
-            "SELECT set_config('aiagent.artifact_tenant',%s,true), set_config('aiagent.artifact_owner',%s,true),"
-            " set_config('aiagent.artifact_task',%s,true)",
-            (scope.tenant_id, scope.owner_id, scope.task_id),
-        )
-        assert c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,)).fetchone()
-        c.execute("SELECT set_config('aiagent.artifact_task',%s,true)", (str(uuid7()),))
-        assert c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,)).fetchone() is None
-    with db.tx() as c:
-        assert c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,)).fetchone() is None
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with db.tx() as c:
+            c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,))
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with db.tx() as c:
+            c.execute(
+                "SELECT set_config('aiagent.artifact_tenant',%s,true), set_config('aiagent.artifact_owner',%s,true),"
+                " set_config('aiagent.artifact_task',%s,true)",
+                (scope.tenant_id, scope.owner_id, scope.task_id),
+            )
+            c.execute("SELECT id FROM agent.context_artifacts WHERE id=%s", (item.artifact_ref,))
+    # A claim with a forged worker/lease is rejected by the database function itself.
+    forged = replace(claim, worker_ref="forged-worker")
+    wrong = PostgresArtifactStore(
+        dbs["model_gateway"], forged, b"k" * 32, expires_at=datetime.now(UTC) + timedelta(days=1)
+    )
+    with pytest.raises(SafeStop, match="STALE_CONTEXT"):
+        wrong.get_raw(scope, item)
+    forged_lease = replace(claim, lease_epoch=claim.lease_epoch + 1)
+    wrong_lease = PostgresArtifactStore(
+        dbs["model_gateway"], forged_lease, b"k" * 32, expires_at=datetime.now(UTC) + timedelta(days=1)
+    )
+    with pytest.raises(SafeStop, match="STALE_CONTEXT"):
+        wrong_lease.get_raw(scope, item)
+    # The legitimate claim can read only its own row.
+    assert store.get_raw(scope, item) == b"private"
 
 
 def test_current_run_can_read_same_task_previous_run_without_old_claim(
@@ -193,6 +211,7 @@ def test_killed_writer_cannot_commit_partial_artifact(dbs: dict[str, Database], 
 import json, os
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from aiagent_context.models import Scope, SourceInput
 from aiagent_core import control
 from aiagent_core.db import Database
@@ -224,6 +243,7 @@ def test_new_process_reads_committed_artifact(dbs: dict[str, Database], tenant: 
     code = """
 import json, os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from aiagent_context.models import RawArtifact, Scope
 from aiagent_core import control
 from aiagent_core.db import Database
@@ -243,3 +263,114 @@ assert store.get_raw(scope, record) == b'persisted'
     )
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, timeout=30, check=False)
     assert result.returncode == 0
+
+
+def test_key_ring_rotation_keeps_old_decryption_and_fails_closed_when_missing(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    from aiagent_gateways.context_keys import KeyRing
+
+    old_key, new_key = b"o" * 32, b"n" * 32
+    _, scope, claim = make_store(dbs, tenant)
+    old_ring = KeyRing({"artifact-2026-10": old_key}, "artifact-2026-10")
+    old_store = PostgresArtifactStore(
+        dbs["model_gateway"], claim, old_ring, expires_at=datetime.now(UTC) + timedelta(days=30)
+    )
+    old_artifact = old_store.put_raw(
+        scope, SourceInput("old", "2026-01-01T00:00:00Z", b"encrypted with old key", locator_ref="old:0")
+    )
+    ring_file = tmp_path / "keys.json"
+    ring_file.write_text(
+        json.dumps(
+            {
+                "active": "artifact-2026-11",
+                "keys": {
+                    "artifact-2026-10": old_key.hex(),
+                    "artifact-2026-11": new_key.hex(),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    rotated = KeyRing.from_file(ring_file)
+    assert rotated.active == "artifact-2026-11"
+    rotated_store = PostgresArtifactStore(
+        dbs["model_gateway"], claim, rotated, expires_at=datetime.now(UTC) + timedelta(days=30)
+    )
+    assert rotated_store.get_raw(scope, old_artifact) == b"encrypted with old key"
+    new_artifact = rotated_store.put_raw(
+        scope, SourceInput("new", "2026-01-01T00:00:00Z", b"encrypted with new key", locator_ref="new:0")
+    )
+    assert rotated_store.get_raw(scope, new_artifact) == b"encrypted with new key"
+    rows = dbs["owner"].all(
+        "SELECT key_id,ciphertext FROM agent.context_artifacts WHERE id IN (%s,%s)",
+        (old_artifact.artifact_ref, new_artifact.artifact_ref),
+    )
+    assert {r["key_id"] for r in rows} == {"artifact-2026-10", "artifact-2026-11"}
+    assert all(old_key not in bytes(r["ciphertext"]) and new_key not in bytes(r["ciphertext"]) for r in rows)
+
+    missing_old = PostgresArtifactStore(
+        dbs["model_gateway"],
+        claim,
+        KeyRing({"artifact-2026-11": new_key}, "artifact-2026-11"),
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    with pytest.raises(SafeStop, match="KEY_UNAVAILABLE"):
+        missing_old.get_raw(scope, old_artifact)
+    # Retaining the old key continues to decrypt without changing the database row.
+    assert rotated_store.get_raw(scope, old_artifact) == b"encrypted with old key"
+
+
+def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    store, scope, claim = make_store(dbs, tenant)
+    orphan = store.put_raw(scope, SourceInput("orphan", "2026-01-01T00:00:00Z", b"unreferenced", locator_ref="o:0"))
+    referenced = store.put_raw(
+        scope, SourceInput("referenced", "2026-01-01T00:00:00Z", b"still referenced", locator_ref="r:0")
+    )
+    dbs["owner"].one(
+        "UPDATE agent.context_artifacts SET created_at=now()-interval '2 days' WHERE id IN (%s,%s) RETURNING id",
+        (orphan.artifact_ref, referenced.artifact_ref),
+    )
+    dbs["owner"].one(
+        "UPDATE agent.runs SET status_code='SUCCEEDED',ended_at=now() WHERE id=%s RETURNING id", (claim.run_id,)
+    )
+    # An active Memory reference remains protected even on a terminal Run.
+    from aiagent_core import commands, memory_writer
+    from aiagent_domain import uuid7
+
+    owner = commands.Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    memory_writer.create_memory(
+        dbs["api"],
+        owner,
+        task_id=scope.task_id,
+        source_ref=referenced.artifact_ref,
+        projection_ref=referenced.artifact_ref,
+        recipient="fake",
+        observed_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(days=3),
+        consent_basis="user_explicit",
+        idempotency_key=uuid7(),
+    )
+    removed = dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
+    assert removed == 1
+    rows = dbs["owner"].all(
+        "SELECT id,ciphertext,revoked_at FROM agent.context_artifacts WHERE id IN (%s,%s)",
+        (orphan.artifact_ref, referenced.artifact_ref),
+    )
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[orphan.artifact_ref]["ciphertext"] is None
+    assert by_id[orphan.artifact_ref]["revoked_at"] is not None
+    assert by_id[referenced.artifact_ref]["ciphertext"] is not None
+
+    # Once the Memory itself is revoked, its artifact reference is no longer live
+    # and the terminal-run orphan collector can erase the residual ciphertext.
+    memory_id = dbs["owner"].one("SELECT id FROM agent.memory_records WHERE task_id=%s", (scope.task_id,))["id"]
+    memory_writer.revoke_memory(dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id)
+    removed = dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
+    assert removed == 1
+    row = dbs["owner"].one(
+        "SELECT ciphertext,revoked_at FROM agent.context_artifacts WHERE id=%s", (referenced.artifact_ref,)
+    )
+    assert row["ciphertext"] is None and row["revoked_at"] is not None

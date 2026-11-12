@@ -3,6 +3,7 @@
 The admission transaction serializes with Memory/Artifact revocation on the
 scope epoch. An admitted request can be sent after a later revocation; no DB
 lock is held during provider I/O. A unique dispatch row forbids blind retries.
+All row access goes through claim-bound database functions.
 """
 
 from __future__ import annotations
@@ -20,11 +21,12 @@ from aiagent_domain.rpcwire import RpcError
 
 from .context_artifacts import PostgresArtifactStore
 from .context_head import PostgresHeadPort
+from .context_keys import KeyRing
 from .context_memory import PostgresMemoryRepository
 
 
 class ContextAdmission:
-    def __init__(self, db: Database, claim: control.Claim, key: bytes, head: int):
+    def __init__(self, db: Database, claim: control.Claim, key: bytes | KeyRing, head: int):
         if head < 1:
             raise RpcError("STALE_CONTEXT")
         self.db, self.claim, self.head = db, claim, head
@@ -37,7 +39,6 @@ class ContextAdmission:
     def load(self) -> str:
         try:
             with self.db.tx() as c:
-                self.memory._bind(c, self.scope)
                 run = control.check_current(c, self.claim, for_update=True)
                 row = c.execute(
                     "SELECT checkpoint_json FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s"
@@ -50,11 +51,15 @@ class ContextAdmission:
             m = self.manifest
             if (
                 m.get("kind") != "context_manifest"
-                or m.get("model") != "fake-gateway"
-                or m.get("recipient") != "fake"
+                or not m.get("model")
+                or not m.get("recipient")
                 or m.get("restoreIncarnation") != str(self.claim.restore_incarnation)
             ):
                 raise RpcError("STALE_CONTEXT")
+            # Check the external restore watermark before decrypting the frozen
+            # payload, which may contain Memory text. No stale Memory plaintext is
+            # loaded into the Gateway even transiently while reconciliation is pending.
+            self.memory.epoch(self.scope)
             payload = self.store.get_summary(self.scope, m["payloadRef"])
             summary = self.store.get_summary(self.scope, m["summaryRef"])
             if sha256(payload).hexdigest() != m["payloadDigest"] or sha256(summary).hexdigest() != m["summaryDigest"]:
@@ -84,11 +89,12 @@ class ContextAdmission:
             return payload.decode("utf-8", "strict")
         except control.ControlError as exc:
             raise RpcError(exc.code) from None
-        except (SafeStop, KeyError, TypeError, ValueError, UnicodeError) as exc:
+        except SafeStop as exc:
+            raise RpcError(exc.code) from None
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
             raise RpcError("CONTEXT_UNAVAILABLE", type(exc).__name__) from None
 
     def lock_and_validate(self, c: psycopg.Connection[Row], run: Row, payload: str, model: str) -> None:
-        self.memory._bind(c, self.scope)
         row = c.execute(
             "SELECT checkpoint_json FROM agent.run_checkpoints WHERE tenant_id=%s AND run_id=%s"
             " AND checkpoint_revision=%s AND entry_kind='summary'",
@@ -109,60 +115,77 @@ class ContextAdmission:
             or sha256(payload.encode()).hexdigest() != m["payloadDigest"]
         ):
             raise RpcError("STALE_CONTEXT")
-        locked = c.execute(
-            "SELECT agent.lock_memory_epoch(%s,%s,%s,%s) AS ok",
-            (self.scope.tenant_id, self.scope.owner_id, self.scope.task_id, int(m["sourceEpoch"])),
-        ).fetchone()
-        if locked is None or not locked["ok"]:
+        # Preflight is advisory only. Re-read and row-lock the owner policy and
+        # recipient consent in this same transaction as the unique dispatch row.
+        # A user withdrawal that commits first denies admission; if admission locks
+        # first, withdrawal waits until admission is durable and cannot retract it.
+        policy = self.memory._call_tx(c, "context_policy_lock", self.scope)
+        if (
+            policy is None
+            or not policy["enabled"]
+            or policy["recipient"] != m["recipient"]
+            or policy["model"] != m["model"]
+        ):
+            raise RpcError("CONTEXT_NOT_ELIGIBLE")
+        consent = self.memory._call_tx(c, "memory_consent_lock", self.scope, str(m["recipient"]))
+        if consent is None or not consent["memory_consent_lock"]:
+            raise RpcError("MEMORY_CONSENT_REQUIRED")
+        locked = self.memory._call_tx(c, "memory_epoch_lock", self.scope, int(m["sourceEpoch"]))
+        if locked is None or not locked["memory_epoch_lock"]:
             raise RpcError("STALE_MEMORY")
         for entry in m["memory"]:
-            current = c.execute(
-                "SELECT id FROM agent.memory_records WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s"
-                " AND id::text=%s AND revision=%s AND recipient=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()"
-                " AND agent.memory_artifact_usable(tenant_id,owner_user_id,task_id,source_artifact_id)"
-                " AND agent.memory_artifact_usable(tenant_id,owner_user_id,task_id,projection_artifact_id)",
-                (
-                    self.scope.tenant_id,
-                    self.scope.owner_id,
-                    self.scope.task_id,
-                    entry["id"],
-                    entry["revision"],
-                    m["recipient"],
-                ),
-            ).fetchone()
-            if current is None:
+            current = self.memory._call_tx(
+                c,
+                "memory_row_current",
+                self.scope,
+                entry["id"],
+                entry["revision"],
+                m["recipient"],
+                int(m["sourceEpoch"]),
+            )
+            if current is None or not current["memory_row_current"]:
                 raise RpcError("STALE_MEMORY")
         for ref in [*m["rawRefs"], m["summaryRef"], m["payloadRef"]]:
-            artifact = c.execute(
-                "SELECT id FROM agent.context_artifacts WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s"
-                " AND id::text=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()",
-                (self.scope.tenant_id, self.scope.owner_id, self.scope.task_id, ref),
-            ).fetchone()
-            if artifact is None:
+            artifact = self.memory._call_tx(c, "context_artifact_live", self.scope, ref)
+            if artifact is None or not artifact["context_artifact_live"]:
                 raise RpcError("CONTEXT_UNAVAILABLE")
 
     def record(self, c: psycopg.Connection[Row], attempt_id: str) -> None:
         row = c.execute(
-            "INSERT INTO agent.context_dispatches(tenant_id,owner_user_id,task_id,run_id,head_revision,model_attempt_id,status_code)"
-            " VALUES (%s,%s,%s,%s,%s,%s,'ADMITTED') ON CONFLICT DO NOTHING RETURNING head_revision",
-            (self.scope.tenant_id, self.scope.owner_id, self.scope.task_id, self.scope.run_id, self.head, attempt_id),
+            "SELECT agent.context_dispatch_record(%s,%s,%s,%s,%s,%s,%s,%s) AS ok",
+            (
+                self.scope.tenant_id,
+                self.scope.owner_id,
+                self.scope.task_id,
+                self.scope.run_id,
+                self.claim.lease_epoch,
+                self.claim.worker_ref,
+                self.head,
+                attempt_id,
+            ),
         ).fetchone()
-        if row is None:
+        if row is None or not row["ok"]:
             raise RpcError("CONTEXT_ALREADY_ADMITTED")
 
     def finish(self, attempt_id: str, status: str) -> None:
         # No new authorization is conferred here; failures leave ADMITTED as UNKNOWN.
         with self.db.tx() as c:
-            from aiagent_core.memory_writer import _bind
-
-            _bind(c, self.scope.tenant_id, self.scope.owner_id, self.scope.task_id)
             self.finish_tx(c, attempt_id, status)
 
     def finish_tx(self, c: psycopg.Connection[Row], attempt_id: str, status: str) -> None:
-        updated = c.execute(
-            "UPDATE agent.context_dispatches SET status_code=%s WHERE tenant_id=%s AND run_id=%s"
-            " AND head_revision=%s AND model_attempt_id=%s AND status_code='ADMITTED'",
-            (status, self.scope.tenant_id, self.scope.run_id, self.head, attempt_id),
-        )
-        if updated.rowcount != 1:
+        row = c.execute(
+            "SELECT agent.context_dispatch_finish(%s,%s,%s,%s,%s,%s,%s,%s,%s) AS ok",
+            (
+                self.scope.tenant_id,
+                self.scope.owner_id,
+                self.scope.task_id,
+                self.scope.run_id,
+                self.claim.lease_epoch,
+                self.claim.worker_ref,
+                self.head,
+                attempt_id,
+                status,
+            ),
+        ).fetchone()
+        if row is None or not row["ok"]:
             raise RpcError("CONTEXT_DISPATCH_STATE")

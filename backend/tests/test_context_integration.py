@@ -9,6 +9,7 @@ from aiagent_context import Anchor, AnchorKind, ContextRequest, ContextService, 
 from aiagent_core import control, memory_writer
 from aiagent_core.db import Database
 from aiagent_core.rpc import RpcClient
+from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_dispatch import ContextAdmission
 from aiagent_gateways.context_head import PostgresHeadPort
 from aiagent_gateways.context_memory import PostgresMemoryRepository
@@ -39,6 +40,10 @@ def stack(memory_stack: Stack) -> Stack:
 def build_context(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: ANN201
     owner, scope, store, source, projection = setup_memory(dbs, tenant)
     memory_id, _ = create(dbs, owner, scope, source.artifact_ref, projection.artifact_ref)
+    memory_writer.grant_memory_consent(dbs["api"], owner, recipient="fake")
+    memory_writer.set_context_policy(
+        dbs["api"], owner, task_id=scope.task_id, recipient="fake", model="fake-gateway", enabled=True
+    )
     repo = PostgresMemoryRepository(dbs["model_gateway"], store._claim, store)
     retrieval = repo.retrieval(scope, query="remembered", recipient="fake")
     head = PostgresHeadPort(dbs["model_gateway"], store._claim, store, repo)
@@ -93,7 +98,7 @@ def test_revoke_after_context_before_gateway_blocks_send(
 ) -> None:
     owner, scope, store, memory_id, plan = build_context(dbs, tenant)
     memory_writer.revoke_memory(dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id)
-    with pytest.raises(GatewayRejected, match="STALE_MEMORY|CONTEXT_UNAVAILABLE"):
+    with pytest.raises(GatewayRejected, match="CONTEXT_PRE_ADMISSION"):
         asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
     assert (
         dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
@@ -122,7 +127,7 @@ def test_unknown_admission_is_never_sent_twice(dbs: dict[str, Database], tenant:
         }
     )
     gateway._admit(req, cached=False, est_tokens=len(payload) // 4 + 1024, context=admission)
-    with pytest.raises(GatewayRejected, match="CONTEXT_ALREADY_ADMITTED"):
+    with pytest.raises(GatewayRejected, match="CONTEXT_OUTCOME_UNKNOWN"):
         asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
     assert (
         dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
@@ -153,7 +158,9 @@ def test_unknown_admission_is_never_sent_twice(dbs: dict[str, Database], tenant:
     new_plan = ContextService(store, head).compact(
         request, (SourceInput("again", "2026-01-01T00:00:00Z", b"document evidence", locator_ref="bytes:0"),)
     )
-    with pytest.raises(GatewayRejected, match="CONTEXT_ALREADY_ADMITTED"):
+    # A different HEAD is still refused: the unresolved dispatch blocks the whole
+    # run until an operator reconciles it (it is never bypassed by a fallback).
+    with pytest.raises(GatewayRejected, match="CONTEXT_OUTCOME_UNKNOWN|CONTEXT_PRE_ADMISSION"):
         asyncio.run(call_context_model(runtime_context(stack, store._claim), new_plan.committed_head))
 
 
@@ -205,7 +212,10 @@ def test_revoke_commits_before_admission_blocks_provider(
         assert not provider_started.is_set()
     thread.join(timeout=20)
     assert not thread.is_alive() and len(errors) == 1
-    assert isinstance(errors[0], RpcError) and errors[0].code == "STALE_MEMORY"
+    # Pre-admission rejection: the underlying reason is preserved on the message and
+    # the ordinary path may run later (nothing carrying the revoked Memory was admitted).
+    assert isinstance(errors[0], RpcError)
+    assert errors[0].code == "CONTEXT_PRE_ADMISSION" and errors[0].message == "STALE_MEMORY"
     assert not provider_started.is_set()
 
 
@@ -265,6 +275,143 @@ def test_admission_precedes_revoke_and_does_not_claim_unsend(
     )
 
 
+def test_consent_revoked_before_admission_blocks_provider(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiagent_domain.rpcwire import RpcError
+
+    owner, scope, store, _, plan = build_context(dbs, tenant)
+    memory_writer.revoke_memory_consent(dbs["api"], owner, recipient="fake")
+    provider = FakeModelProvider()
+    sent: list[bool] = []
+    original = provider.stream
+
+    async def track(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        sent.append(True)
+        async for event in original(*args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(provider, "stream", track)
+    gateway = ModelGateway(
+        dbs["model_gateway"],
+        {"fake": provider},
+        {"fake-gateway": [Route("fake", "fake-1")]},
+        consent={(owner.tenant_id, "fake")},
+        context_key=b"k" * 32,
+    )
+    with pytest.raises(RpcError) as exc:
+        asyncio.run(gateway.complete_context(store._claim, int(plan.committed_head)))
+    assert exc.value.code == "CONTEXT_PRE_ADMISSION" and exc.value.message == "MEMORY_CONSENT_REQUIRED"
+    assert not sent
+    assert (
+        dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
+        == 0
+    )
+
+
+def test_admission_locks_consent_before_withdrawal_but_cannot_unsend(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission wins the DB lock order; a later revoke waits and cannot recall admitted bytes."""
+    import threading
+
+    from aiagent_domain.rpcwire import RpcError
+
+    owner, scope, store, _, plan = build_context(dbs, tenant)
+    provider = FakeModelProvider()
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+    admission_locked = threading.Event()
+    allow_admission_commit = threading.Event()
+    revoke_started = threading.Event()
+    revoke_done = threading.Event()
+    original_validate = ContextAdmission.lock_and_validate
+    original_stream = provider.stream
+
+    def validate(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        result = original_validate(self, *args, **kwargs)
+        admission_locked.set()  # policy + consent rows now share-locked in admission transaction
+        if not allow_admission_commit.wait(20):
+            raise RuntimeError("test admission release timed out")
+        return result
+
+    async def stream(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        provider_started.set()
+        if not await asyncio.to_thread(provider_release.wait, 20):
+            raise RuntimeError("test provider release timed out")
+        async for event in original_stream(*args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(ContextAdmission, "lock_and_validate", validate)
+    monkeypatch.setattr(provider, "stream", stream)
+    gateway = ModelGateway(
+        dbs["model_gateway"],
+        {"fake": provider},
+        {"fake-gateway": [Route("fake", "fake-1")]},
+        consent={(owner.tenant_id, "fake")},
+        context_key=b"k" * 32,
+    )
+    errors: list[Exception] = []
+
+    def send() -> None:
+        try:
+            asyncio.run(gateway.complete_context(store._claim, int(plan.committed_head)))
+        except Exception as exc:
+            errors.append(exc)
+
+    def revoke() -> None:
+        revoke_started.set()
+        try:
+            memory_writer.revoke_memory_consent(dbs["api"], owner, recipient="fake")
+        finally:
+            revoke_done.set()
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    revoker: threading.Thread | None = None
+    try:
+        assert admission_locked.wait(10)
+        assert not provider_started.is_set()
+        revoker = threading.Thread(target=revoke)
+        revoker.start()
+        assert revoke_started.wait(10)
+        # The revocation UPDATE conflicts with the admission FOR SHARE row lock.
+        # It must remain blocked until the admission transaction is allowed to commit.
+        assert not revoke_done.wait(0.25)
+        allow_admission_commit.set()
+        assert provider_started.wait(10)
+        assert revoke_done.wait(10)
+        assert (
+            dbs["owner"].one("SELECT status_code FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))[
+                "status_code"
+            ]
+            == "ADMITTED"
+        )
+    finally:
+        allow_admission_commit.set()
+        provider_release.set()
+        sender.join(timeout=20)
+        if revoker is not None:
+            revoker.join(timeout=20)
+    assert not sender.is_alive() and (revoker is None or not revoker.is_alive())
+    # A later revocation cannot recall a request already admitted and started. The
+    # provider reply cannot be committed against withdrawn consent; state is UNKNOWN.
+    assert len(errors) == 1 and isinstance(errors[0], RpcError)
+    assert errors[0].code == "MEMORY_CONSENT_REQUIRED"
+    assert (
+        dbs["owner"].one("SELECT status_code FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))[
+            "status_code"
+        ]
+        == "UNKNOWN"
+    )
+    assert (
+        dbs["owner"].one(
+            "SELECT count(*) AS n FROM agent.model_attempts WHERE run_id=%s AND admitted", (scope.run_id,)
+        )["n"]
+        == 1
+    )
+
+
 @pytest.mark.parametrize("kind", ["source", "goal", "head", "lease"])
 def test_stale_context_never_reaches_provider(
     kind: str, dbs: dict[str, Database], tenant: dict[str, str], stack: Stack
@@ -295,7 +442,6 @@ def test_stale_context_never_reaches_provider(
 def test_unavailable_memory_authority_never_calls_provider(
     dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import psycopg
 
     owner, scope, store, _, plan = build_context(dbs, tenant)
     del owner
@@ -314,12 +460,18 @@ def test_unavailable_memory_authority_never_calls_provider(
     )
     try:
         with dbs["owner"].conn() as c:
-            c.execute("REVOKE SELECT ON agent.memory_records FROM aiagent_model_gateway")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            c.execute(
+                "REVOKE EXECUTE ON FUNCTION agent.memory_row(uuid,uuid,uuid,uuid,bigint,text,uuid)"
+                " FROM aiagent_model_gateway"
+            )
+        with pytest.raises(RpcError, match="STALE_CONTEXT|MEMORY_RESTORE_RECONCILIATION_REQUIRED"):
             asyncio.run(gw.complete_context(store._claim, int(plan.committed_head)))
     finally:
         with dbs["owner"].conn() as c:
-            c.execute("GRANT SELECT ON agent.memory_records TO aiagent_model_gateway")
+            c.execute(
+                "GRANT EXECUTE ON FUNCTION agent.memory_row(uuid,uuid,uuid,uuid,bigint,text,uuid)"
+                " TO aiagent_model_gateway"
+            )
     assert not sent
     assert (
         dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
@@ -503,9 +655,80 @@ def test_gateway_process_death_never_retries_unknown_context(
         assert row["status_code"] == "ADMITTED"
     finally:
         stack.restart("model")
-    with pytest.raises(GatewayRejected, match="CONTEXT_ALREADY_ADMITTED"):
+    with pytest.raises(GatewayRejected, match="CONTEXT_OUTCOME_UNKNOWN"):
         asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
     assert (
         dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
         == 1
     )
+
+
+def test_ordinary_provider_unknown_request_identity_is_never_resent(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    """A non-Context model.complete transport UNKNOWN is fenced by model_attempts."""
+    from collections.abc import AsyncIterator
+    from typing import Any
+
+    from aiagent_core import commands
+    from aiagent_domain.rpcwire import RpcError
+    from aiagent_gateways.providers import Capability, ProviderError, ProviderEvent
+
+    owner = commands.Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    ids = commands.submit_task(dbs["api"], owner, "uncertain ordinary provider")
+    claim = control.claim_run(dbs["runtime"], owner.tenant_id, ids["runId"], "unknown-provider-worker")
+
+    class UncertainProvider:
+        calls = 0
+
+        def capability(self, model: str) -> Capability:
+            return Capability(True, True, 100_000, "provider-test", True)
+
+        async def stream(
+            self,
+            model: str,
+            system: str,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: str = "main",
+        ) -> AsyncIterator[ProviderEvent]:
+            self.calls += 1
+            raise ProviderError("OUTCOME_UNKNOWN", False)
+            yield ProviderEvent("stop")  # pragma: no cover - make this an async generator
+
+    provider = UncertainProvider()
+    gateway = ModelGateway(
+        dbs["model_gateway"],
+        {"provider": provider},
+        {"fake-gateway": [Route("provider", "provider-test-model")]},
+        consent={(claim.tenant_id, "provider-test")},
+    )
+    req = SealedModelRequest.from_wire(
+        {
+            "claim": claim.to_wire(),
+            "stream": "main",
+            "model": "fake-gateway",
+            "tools": [],
+            "system": "safe system",
+            "messages": [{"kind": "user", "content": "one logical request"}],
+        }
+    )
+    with pytest.raises(RpcError, match="PROVIDER_OUTCOME_UNKNOWN"):
+        asyncio.run(gateway.complete(req))
+    with pytest.raises(RpcError, match="MODEL_OUTCOME_UNKNOWN"):
+        asyncio.run(gateway.complete(req))
+    assert provider.calls == 1
+    attempts = dbs["owner"].all(
+        "SELECT status_code,reason_code,usage_quality FROM agent.model_attempts WHERE run_id=%s ORDER BY created_at",
+        (claim.run_id,),
+    )
+    assert len(attempts) == 2
+    assert attempts[0]["status_code"] == "FAILED" and attempts[0]["usage_quality"] == "UNKNOWN"
+    assert attempts[1]["status_code"] == "DENIED" and attempts[1]["reason_code"] == "MODEL_OUTCOME_UNKNOWN"
+    usage = dbs["owner"].all(
+        "SELECT usage_kind,input_units,output_units FROM agent.cost_usage_records WHERE run_id=%s",
+        (claim.run_id,),
+    )
+    assert len(usage) == 1 and usage[0]["usage_kind"] == "UNKNOWN"
+    assert usage[0]["input_units"] is None and usage[0]["output_units"] is None

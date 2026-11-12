@@ -135,11 +135,29 @@ def stack(pg: PgEnv, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack
 
 
 @pytest.fixture()
-def api(pg: PgEnv) -> Iterator[TestClient]:
+def api(pg: PgEnv, request: pytest.FixtureRequest) -> Iterator[TestClient]:
     from aiagent_api.app import create_app
     from fastapi.testclient import TestClient
 
+    # When the formal stack is running, the API must also be able to reach the
+    # Model Gateway's memory-artifact ingest RPC.
+    stack = request.node.funcargs.get("stack")
+    old: dict[str, str | None] = {}
+    if stack is not None:
+        old = {
+            k: os.environ.get(k)
+            for k in ("AIAGENT_MODEL_GATEWAY_ENDPOINT", "AIAGENT_API_MODEL_RPC_KEY", "AIAGENT_MEMORY_TOMBSTONE_LOG")
+        }
+        os.environ["AIAGENT_MODEL_GATEWAY_ENDPOINT"] = f"tcp:127.0.0.1:{stack.ports['model']}"
+        os.environ["AIAGENT_API_MODEL_RPC_KEY"] = stack.keys["api_model"]
     db = Database(pg.dsn["api"], max_size=4)
-    with TestClient(create_app(db)) as c:
-        yield c
-    db.close()
+    try:
+        with TestClient(create_app(db)) as c:
+            yield c
+    finally:
+        db.close()
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

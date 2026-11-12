@@ -521,3 +521,121 @@ def test_pause_after_permit_issuance_refuses_actual_send(dbs: dict[str, Database
         s.verify_and_consume(token, "http", "receiver.test", 8080, "POST")
     with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
         s.verify_and_consume(read_token, "http", "receiver.test", 8080, "GET")
+
+
+def test_model_provider_https_connect_uses_static_model_identity() -> None:
+    """Exercise the production HTTPS CONNECT branch with a local ephemeral TLS server."""
+    import ssl
+    import tempfile
+    from datetime import UTC, datetime, timedelta
+    from pathlib import Path
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    async def scenario() -> tuple[list, list[bytes]]:
+        from aiagent_core.config import Secret
+        from aiagent_gateways.providers import AnthropicProvider, ProviderError
+
+        hits: list[bytes] = []
+        private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "provider.test")])
+        now = datetime.now(UTC).replace(tzinfo=None)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(private.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("provider.test")]), critical=False)
+            .sign(private, hashes.SHA256())
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path, key_path = Path(tmp) / "cert.pem", Path(tmp) / "key.pem"
+            cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(
+                private.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption(),
+                )
+            )
+            server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_tls.load_cert_chain(cert_path, key_path)
+            client_tls = ssl.create_default_context(cafile=str(cert_path))
+
+            async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+                head = await r.readuntil(b"\r\n\r\n")
+                n = int(
+                    next(ln.split(b":")[1] for ln in head.split(b"\r\n") if ln.lower().startswith(b"content-length"))
+                )
+                hits.append(head + await r.readexactly(n))
+                body = SSE.encode()
+                w.write(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: %d\r\n\r\n%s"
+                    % (len(body), body)
+                )
+                await w.drain()
+                w.close()
+
+            upstream = await asyncio.start_server(handler, "127.0.0.1", 0, ssl=server_tls)
+            upstream_port = int(upstream.sockets[0].getsockname()[1])
+            cfg = EgressConfig.from_json(
+                json.dumps(
+                    {
+                        "destinations": {
+                            "anthropic": {
+                                "scheme": "https",
+                                "host": "provider.test",
+                                "port": upstream_port,
+                                "methods": ["POST"],
+                                "identities": ["model_gateway"],
+                                "needs_permit": False,
+                                "allow_private": ["127.0.0.1"],
+                            }
+                        }
+                    }
+                ),
+                production=False,
+            )
+            cfg.static_tokens["model_gateway"] = "m" * 48
+
+            class NoDb:
+                def receipt(self, *args: object) -> None:
+                    return None
+
+            async def resolver(host: str, port: int) -> list[str]:
+                assert host == "provider.test" and port == upstream_port
+                return ["127.0.0.1"]
+
+            proxy = EgressProxy(NoDb(), cfg, resolver=resolver)  # type: ignore[arg-type]
+            proxy_port = await proxy.start("127.0.0.1", 0)
+            provider = AnthropicProvider(
+                Secret("sk-local-test"),
+                f"http://127.0.0.1:{proxy_port}",
+                proxy_token=Secret("m" * 48),
+                url=f"https://provider.test:{upstream_port}/v1/messages",
+                verify=client_tls,
+            )
+            events: list = []
+            try:
+                async for event in provider.stream("local", "system", [{"kind": "user", "content": "hello"}], []):
+                    events.append(event)
+            except ProviderError as exc:
+                events.append(("error", exc.code))
+            finally:
+                await proxy.close()
+                upstream.close()
+                await upstream.wait_closed()
+            return events, hits
+
+    events, hits = run(scenario())
+    assert len(hits) == 1
+    assert any(e.type == "text" and e.text == "hello" for e in events)
+    assert events[-1].type == "stop"
+    assert b"proxy-authorization" not in hits[0].lower()
+    assert b"x-api-key: sk-local-test" in hits[0].lower()

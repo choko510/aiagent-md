@@ -2,6 +2,7 @@
 
 This adapter is internal; callers must supply the STEP 3 authenticated claim and
 Postgres-backed artifacts and memory. It never grants a Tool or model permission.
+Every authorization re-check runs through claim-bound database functions.
 """
 
 from __future__ import annotations
@@ -44,15 +45,34 @@ class PostgresHeadPort:
         )
 
     def policy_version(self, scope: Scope) -> str:
-        with self.db.tx() as c:
-            self.memory._bind(c, scope)
-            run = control.check_current(c, self.claim, for_update=True)
-            task = c.execute(
-                "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s", (scope.tenant_id, scope.task_id)
-            ).fetchone()
-            if task is None:
-                raise SafeStop("STALE_CONTEXT")
-            return self._policy(run, task["profile_code"])
+        try:
+            with self.db.tx() as c:
+                run = control.check_current(c, self.claim, for_update=True)
+                task = c.execute(
+                    "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s",
+                    (scope.tenant_id, scope.task_id),
+                ).fetchone()
+        except control.ControlError as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        if task is None:
+            raise SafeStop("STALE_CONTEXT")
+        return self._policy(run, task["profile_code"])
+
+    def _epoch(self, scope: Scope, memory_epoch: str, *, lock: bool) -> None:
+        try:
+            epoch = int(memory_epoch)
+            if epoch < 1 or str(epoch) != memory_epoch:
+                raise ValueError("epoch")
+        except ValueError as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        if lock:
+            row = self.memory._call("memory_epoch_lock", scope, epoch)
+            ok = bool(row and row["memory_epoch_lock"])
+        else:
+            row = self.memory._call("memory_epoch", scope)
+            ok = bool(row and int(row["memory_epoch"]) == epoch)
+        if not ok:
+            raise SafeStop("STALE_MEMORY")
 
     def _assert(
         self,
@@ -68,36 +88,21 @@ class PostgresHeadPort:
         if goal_revision != str(self.claim.goal_revision) or lease_epoch != str(self.claim.lease_epoch):
             raise SafeStop("STALE_CONTEXT")
         try:
-            epoch = int(memory_epoch)
-            if epoch < 1 or str(epoch) != memory_epoch:
-                raise ValueError("epoch")
-        except ValueError as exc:
+            with self.db.tx() as c:
+                run = control.check_current(c, self.claim, for_update=True)
+                task = c.execute(
+                    "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s",
+                    (scope.tenant_id, scope.task_id),
+                ).fetchone()
+                if (
+                    task is None
+                    or str(run["head_revision"]) != expected_head
+                    or self._policy(run, task["profile_code"]) != policy_version
+                ):
+                    raise SafeStop("STALE_CONTEXT")
+        except control.ControlError as exc:
             raise SafeStop("STALE_CONTEXT") from exc
-        with self.db.tx() as c:
-            self.memory._bind(c, scope)
-            run = control.check_current(c, self.claim, for_update=True)
-            task = c.execute(
-                "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s", (scope.tenant_id, scope.task_id)
-            ).fetchone()
-            if (
-                task is None
-                or str(run["head_revision"]) != expected_head
-                or self._policy(run, task["profile_code"]) != policy_version
-            ):
-                raise SafeStop("STALE_CONTEXT")
-            if lock_epoch:
-                e = c.execute(
-                    "SELECT agent.lock_memory_epoch(%s,%s,%s,%s) AS ok",
-                    (scope.tenant_id, scope.owner_id, scope.task_id, epoch),
-                ).fetchone()
-            else:
-                e = c.execute(
-                    "SELECT source_epoch=%s AS ok FROM agent.memory_scope_epochs"
-                    " WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s",
-                    (epoch, scope.tenant_id, scope.owner_id, scope.task_id),
-                ).fetchone()
-            if e is None or not e["ok"]:
-                raise SafeStop("STALE_MEMORY")
+        self._epoch(scope, memory_epoch, lock=lock_epoch)
 
     def assert_current(
         self,
@@ -189,7 +194,6 @@ class PostgresHeadPort:
             ):
                 raise SafeStop("STALE_MEMORY")
         with self.db.tx() as c:
-            self.memory._bind(c, scope)
             run = control.check_current(c, self.claim, for_update=True)
             task = c.execute(
                 "SELECT t.profile_code,g.goal_text FROM agent.tasks t JOIN agent.task_goal_revisions g"
@@ -212,33 +216,22 @@ class PostgresHeadPort:
                 or req.anchors[0].source_ref != f"goal:{goal_revision}"
             ):
                 raise SafeStop("INVALID_GOAL_ANCHOR")
-            locked = c.execute(
-                "SELECT agent.lock_memory_epoch(%s,%s,%s,%s) AS ok",
-                (scope.tenant_id, scope.owner_id, scope.task_id, int(memory_epoch)),
-            ).fetchone()
-            if locked is None or not locked["ok"]:
+            locked = self.memory._call_tx(c, "memory_epoch_lock", scope, int(memory_epoch))
+            if locked is None or not locked["memory_epoch_lock"]:
                 raise SafeStop("STALE_MEMORY")
             for item in publication.memory:
-                row = c.execute(
-                    "SELECT id FROM agent.memory_records WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s"
-                    " AND id::text=%s AND revision=%s AND recipient=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()"
-                    " AND agent.memory_artifact_usable(tenant_id,owner_user_id,task_id,source_artifact_id)"
-                    " AND agent.memory_artifact_usable(tenant_id,owner_user_id,task_id,projection_artifact_id)",
-                    (scope.tenant_id, scope.owner_id, scope.task_id, item.ref, item.record_revision, req.recipient),
-                ).fetchone()
-                if row is None:
+                row = self.memory._call_tx(
+                    c, "memory_row_current", scope, item.ref, item.record_revision, req.recipient, int(memory_epoch)
+                )
+                if row is None or not row["memory_row_current"]:
                     raise SafeStop("STALE_MEMORY")
             for ref, digest, kind in [
                 *((r.artifact_ref, r.sha256, "raw") for r in publication.raw_artifacts),
                 (publication.summary_ref, publication.summary_digest, "summary"),
                 (publication.payload_ref, publication.payload_digest, "summary"),
             ]:
-                row = c.execute(
-                    "SELECT id FROM agent.context_artifacts WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s"
-                    " AND id::text=%s AND kind=%s AND content_sha256=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()",
-                    (scope.tenant_id, scope.owner_id, scope.task_id, ref, kind, digest),
-                ).fetchone()
-                if row is None:
+                row = self.memory._call_tx(c, "context_artifact_present", scope, ref, kind, digest)
+                if row is None or not row["context_artifact_present"]:
                     raise SafeStop("ARTIFACT_UNAVAILABLE")
             manifest: dict[str, Any] = {
                 "kind": "context_manifest",
@@ -258,7 +251,7 @@ class PostgresHeadPort:
             revision = control.append_head(
                 c, self.claim, "summary", manifest, writer="model_gateway", require_current_goal=True
             )
-            return str(revision)
+        return str(revision)
 
     def check_dispatch(self, plan: ContextPlan, lease_epoch: str) -> None:
         self._assert(

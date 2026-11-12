@@ -23,11 +23,13 @@ from langgraph.types import Command
 
 from .agent import (
     AwaitingApproval,
+    ContextUse,
     GatewayRejected,
     Gateways,
     RunCtx,
     UnknownEffect,
     build_graph,
+    context_eligible,
     fault,
     from_neutral,
     submit_tool,
@@ -58,6 +60,9 @@ _CODE_TO_STATUS = {
     "SCOPE_REVOKED": "REVOKED",
     "TERMINAL": "CANCELLED",
     "BUDGET_EXHAUSTED": "BUDGET",
+    "MODEL_OUTCOME_UNKNOWN": "UNKNOWN_EFFECT",
+    "PROVIDER_OUTCOME_UNKNOWN": "UNKNOWN_EFFECT",
+    "PROVIDER_INCOMPLETE_STREAM": "UNKNOWN_EFFECT",
 }
 
 
@@ -209,6 +214,17 @@ class DeepAgentsRuntime:
     async def run_segment(self, claim: Claim, profile: str, *, on_delta: Any = None) -> SegmentOutcome:
         graph = self.graph(profile)
         rc = RunCtx(claim, self.gw, self.model, on_delta)
+        # Context is opt-in per task (owner policy + Memory consent in the database).
+        # An ineligible run keeps the ordinary path; an unresolved Context send
+        # raises here and is never silently downgraded to model.complete.
+        try:
+            context_head = await context_eligible(rc)
+        except GatewayRejected as e:
+            # An unresolved earlier Context send is never retried automatically;
+            # other control/transport failures are ordinary retryable errors.
+            return SegmentOutcome("UNKNOWN_EFFECT" if e.code == "CONTEXT_OUTCOME_UNKNOWN" else "ERROR", detail=e.code)
+        if context_head is not None:
+            rc = RunCtx(claim, self.gw, self.model, on_delta, ContextUse(context_head))
         ref = control.framework_ref(self.db, claim.tenant_id, claim.run_id)
         try:
             head = self._head(claim)

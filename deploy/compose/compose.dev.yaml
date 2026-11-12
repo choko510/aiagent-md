@@ -5,7 +5,10 @@
 # Network separation (internal db/rpc networks, egress only via sentinel) is the same as production.
 #   docker compose -f compose.yaml -f compose.dev.yaml up -d
 services:
-  migrate: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
+  migrate:
+    image: "aiagent/all:${TAG:-dev}"
+    environment: {AIAGENT_PROFILE: development}
+    volumes: ["memory_tombstones:/var/lib/aiagent/memory-tombstones"]
   api: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
   edge: {image: "aiagent/all:${TAG:-dev}"}
   relay: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
@@ -17,7 +20,7 @@ services:
   model-gateway:
     image: "aiagent/all:${TAG:-dev}"
     volumes: !reset []
-    secrets: [model_gateway_dsn, model_gateway_rpc_keys, egress_model_token]
+    secrets: [model_gateway_dsn, model_gateway_rpc_keys, context_artifact_keys, egress_model_token]
     environment: {AIAGENT_PROFILE: development, AIAGENT_ANTHROPIC_API_KEY_FILE: ""}
   tool-gateway:
     image: "aiagent/all:${TAG:-dev}"

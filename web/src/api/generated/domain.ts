@@ -55,6 +55,14 @@ export interface CheckpointEntryV1 {
   readonly payload: JsonObject;
 }
 
+export interface ContextPolicyCommandV1 {
+  readonly schemaVersion: SchemaVersion;
+  readonly recipient: string;
+  readonly model: string;
+  readonly enabled: boolean;
+  readonly expectedRecordVersion?: NonNegativeInt64 | null;
+}
+
 export interface DomainEventEnvelopeV1 {
   readonly schemaVersion: SchemaVersion;
   readonly eventId: Uuid7;
@@ -105,6 +113,23 @@ export interface LeaseFenceV1 {
   readonly epoch: NonNegativeInt64;
   readonly ownerRef: OpaqueRef;
   readonly expiresAt: UtcInstant;
+}
+
+export interface MemoryCreateCommandV1 {
+  readonly schemaVersion: SchemaVersion;
+  readonly sourceArtifactRef: Uuid7;
+  readonly projectionArtifactRef: Uuid7;
+  readonly recipient: string;
+  readonly consentBasis: "user_explicit" | "approved_setting" | "reviewed_import";
+  readonly observedAt: UtcInstant;
+  readonly expiresAt: UtcInstant;
+}
+
+export interface MemoryUpdateCommandV1 {
+  readonly schemaVersion: SchemaVersion;
+  readonly expectedRevision: PositiveInt64;
+  readonly recipient?: string | null;
+  readonly expiresAt?: UtcInstant | null;
 }
 
 export interface OutboxPointerV1 {

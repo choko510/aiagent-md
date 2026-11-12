@@ -1,8 +1,10 @@
 """Encrypted PostgreSQL Context artifacts, internal and not connected to model dispatch.
 
-Blob and metadata use one database transaction. A caller must provide a claim issued by
-STEP 3, a key supplied outside the database, and a finite retention deadline. This is
-not an Evidence authority or an authorization to send a model request.
+Ciphertext access is a SECURITY DEFINER function that re-validates the Run claim
+(tenant/owner/task/run/lease/worker/restore) inside the database. The Model
+Gateway role has no direct table privilege, so a client-set scope cannot widen
+access. The key ring supplies the key for the artifact's stored key id; a missing
+key fails closed instead of silently using another key.
 """
 
 from __future__ import annotations
@@ -17,22 +19,40 @@ from hashlib import sha256
 import psycopg
 from aiagent_context.models import RawArtifact, SafeStop, Scope, SourceInput, forbid_secrets
 from aiagent_core import control
-from aiagent_core.db import Database, Row
+from aiagent_core.db import Database
 from aiagent_domain import uuid7
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from .context_keys import LEGACY_KEY_ID, KeyRing
+
+
+def artifact_aad(tenant_id: str, owner_id: str, task_id: str, run_id: str, ref: str, key_id: str) -> bytes:
+    """AAD binds ciphertext to scope, the writing run and the key id.
+
+    Rows written before key ids existed (legacy single-key deployment) keep the
+    historic five-field AAD so they remain decryptable with the legacy key.
+    """
+    fields = [tenant_id, owner_id, task_id, run_id, ref]
+    if key_id != LEGACY_KEY_ID:
+        fields.append(key_id)
+    return json.dumps(fields, separators=(",", ":")).encode()
 
 
 class PostgresArtifactStore:
-    """Internal ArtifactStorePort; scope derives from a trusted claim, never from model text."""
+    """Internal ArtifactStorePort; scope derives from a validated claim, never from model text."""
 
-    def __init__(self, db: Database, claim: control.Claim, key: bytes, *, expires_at: datetime) -> None:
-        if len(key) != 32 or expires_at.tzinfo is None or expires_at.utcoffset() is None:
-            raise ValueError("a 256-bit key and timezone-aware expiry are required")
+    def __init__(self, db: Database, claim: control.Claim, key: bytes | KeyRing, *, expires_at: datetime) -> None:
+        ring = key if isinstance(key, KeyRing) else KeyRing.single(key)
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise ValueError("timezone-aware expiry is required")
         self._db = db
         self._claim = claim
-        self._cipher = AESGCM(key)
+        self._ring = ring
         self._expires_at = expires_at
+
+    @property
+    def key_ring(self) -> KeyRing:
+        return self._ring
 
     def _scope(self, scope: Scope) -> None:
         claim = self._claim
@@ -44,23 +64,13 @@ class PostgresArtifactStore:
         ):
             raise SafeStop("ARTIFACT_UNAVAILABLE")
 
-    def _current(self, c: psycopg.Connection[Row]) -> None:
-        try:
-            control.check_current(c, self._claim, for_update=True)
-        except control.ControlError as exc:
-            raise SafeStop("STALE_CONTEXT") from exc
-        claim = self._claim
-        c.execute(
-            "SELECT set_config('aiagent.artifact_tenant', %s, true),"
-            " set_config('aiagent.artifact_owner', %s, true),"
-            " set_config('aiagent.artifact_task', %s, true),"
-            " set_config('aiagent.artifact_run', %s, true)",
-            (claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id),
-        )
-
-    def _aad(self, ref: str, source_run_id: str) -> bytes:
+    def _claim_args(self) -> tuple[str, str, str, str, int, str]:
         c = self._claim
-        return json.dumps([c.tenant_id, c.owner_user_id, c.task_id, source_run_id, ref], separators=(",", ":")).encode()
+        return (c.tenant_id, c.owner_user_id, c.task_id, c.run_id, c.lease_epoch, c.worker_ref)
+
+    def _aad(self, ref: str, source_run_id: str, key_id: str) -> bytes:
+        c = self._claim
+        return artifact_aad(c.tenant_id, c.owner_user_id, c.task_id, source_run_id, ref, key_id)
 
     def _put(self, scope: Scope, kind: str, body: bytes, metadata: dict[str, str]) -> tuple[str, str]:
         self._scope(scope)
@@ -68,6 +78,7 @@ class PostgresArtifactStore:
             raise SafeStop("INVALID_SOURCE")
         artifact_id = str(uuid7())
         digest = sha256(body).hexdigest()
+        key_id = self._ring.active
         envelope = json.dumps(
             {"body": base64.b64encode(body).decode("ascii"), "metadata": metadata},
             sort_keys=True,
@@ -75,31 +86,27 @@ class PostgresArtifactStore:
             ensure_ascii=False,
         ).encode()
         nonce = os.urandom(12)
-        encrypted = self._cipher.encrypt(nonce, envelope, self._aad(artifact_id, scope.run_id))
-        with self._db.tx() as c:
-            self._current(c)
-            # Metadata and bytes are committed together; a rolled-back write leaves neither visible.
-            row = c.execute(
-                "INSERT INTO agent.context_artifacts(tenant_id,id,task_id,run_id,owner_user_id,kind,"
-                "content_sha256,byte_length,nonce,ciphertext,expires_at)"
-                " SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s WHERE %s > clock_timestamp() RETURNING id",
-                (
-                    scope.tenant_id,
-                    artifact_id,
-                    scope.task_id,
-                    scope.run_id,
-                    scope.owner_id,
-                    kind,
-                    digest,
-                    len(body),
-                    nonce,
-                    encrypted,
-                    self._expires_at,
-                    self._expires_at,
-                ),
-            ).fetchone()
-            if row is None:
-                raise SafeStop("RETENTION_EXPIRED")
+        encrypted = self._ring.cipher(key_id).encrypt(nonce, envelope, self._aad(artifact_id, scope.run_id, key_id))
+        try:
+            with self._db.tx() as c:
+                row = c.execute(
+                    "SELECT agent.context_artifact_put(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS id",
+                    (
+                        *self._claim_args(),
+                        artifact_id,
+                        kind,
+                        digest,
+                        len(body),
+                        nonce,
+                        encrypted,
+                        self._expires_at,
+                        key_id,
+                    ),
+                ).fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        if row is None or row["id"] is None:
+            raise SafeStop("RETENTION_EXPIRED")
         return artifact_id, digest
 
     def put_raw(self, scope: Scope, source: SourceInput) -> RawArtifact:
@@ -121,32 +128,41 @@ class PostgresArtifactStore:
 
     def _get(self, scope: Scope, ref: str, kind: str) -> tuple[bytes, dict[str, str], str]:
         self._scope(scope)
-        with self._db.tx() as c:
-            self._current(c)
-            row = c.execute(
-                "SELECT run_id, content_sha256, byte_length, nonce, ciphertext FROM agent.context_artifacts"
-                " WHERE tenant_id=%s AND id::text=%s AND owner_user_id=%s AND task_id=%s"
-                " AND kind=%s AND revoked_at IS NULL AND expires_at > clock_timestamp()",
-                (scope.tenant_id, ref, scope.owner_id, scope.task_id, kind),
-            ).fetchone()
-            if row is None:
-                raise SafeStop("ARTIFACT_UNAVAILABLE")
-            try:
-                decoded = json.loads(
-                    self._cipher.decrypt(bytes(row["nonce"]), bytes(row["ciphertext"]), self._aad(ref, row["run_id"]))
+        try:
+            with self._db.tx() as c:
+                row = c.execute(
+                    "SELECT * FROM agent.context_artifact_fetch(%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (*self._claim_args(), ref, kind),
+                ).fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        if row is None:
+            raise SafeStop("ARTIFACT_UNAVAILABLE")
+        key_id = str(row["key_id"])
+        try:
+            cipher = self._ring.cipher(key_id)
+        except KeyError as exc:
+            raise SafeStop("KEY_UNAVAILABLE") from exc
+        try:
+            decoded = json.loads(
+                cipher.decrypt(
+                    bytes(row["nonce"]), bytes(row["ciphertext"]), self._aad(ref, str(row["run_id"]), key_id)
                 )
-                body = base64.b64decode(decoded["body"], validate=True)
-                metadata = decoded["metadata"]
-                if not isinstance(metadata, dict) or not all(
-                    isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()
-                ):
-                    raise ValueError("invalid metadata")
-            except (InvalidTag, ValueError, TypeError, KeyError, binascii.Error) as exc:
-                raise SafeStop("SOURCE_MISMATCH") from exc
-            digest = sha256(body).hexdigest()
-            if digest != row["content_sha256"].strip() or len(body) != row["byte_length"]:
-                raise SafeStop("SOURCE_MISMATCH")
-            return body, metadata, digest
+            )
+            body = base64.b64decode(decoded["body"], validate=True)
+            metadata = decoded["metadata"]
+            if not isinstance(metadata, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()
+            ):
+                raise ValueError("invalid metadata")
+        except InvalidTag as exc:
+            raise SafeStop("SOURCE_MISMATCH") from exc
+        except (ValueError, TypeError, KeyError, binascii.Error) as exc:
+            raise SafeStop("SOURCE_MISMATCH") from exc
+        digest = sha256(body).hexdigest()
+        if digest != row["content_sha256"].strip() or len(body) != row["byte_length"]:
+            raise SafeStop("SOURCE_MISMATCH")
+        return body, metadata, digest
 
     def get_raw(self, scope: Scope, record: RawArtifact) -> bytes:
         body, meta, digest = self._get(scope, record.artifact_ref, "raw")
@@ -175,11 +191,25 @@ class PostgresArtifactStore:
 
     def revoke(self, scope: Scope, ref: str) -> None:
         self._scope(scope)
-        with self._db.tx() as c:
-            self._current(c)
-            row = c.execute(
-                "SELECT agent.revoke_context_artifact(%s,%s,%s,%s,%s) AS revoked",
-                (scope.tenant_id, scope.owner_id, scope.task_id, scope.run_id, ref),
-            ).fetchone()
-            if row is None or not row["revoked"]:
-                raise SafeStop("ARTIFACT_UNAVAILABLE")
+        try:
+            with self._db.tx() as c:
+                row = c.execute(
+                    "SELECT agent.context_artifact_revoke(%s,%s,%s,%s,%s,%s,%s) AS revoked", (*self._claim_args(), ref)
+                ).fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        if row is None or not row["revoked"]:
+            raise SafeStop("ARTIFACT_UNAVAILABLE")
+
+    def present(self, scope: Scope, ref: str, kind: str, digest: str) -> bool:
+        """Metadata-only existence/digest check through the claim-bound function."""
+        self._scope(scope)
+        try:
+            with self._db.tx() as c:
+                row = c.execute(
+                    "SELECT agent.context_artifact_present(%s,%s,%s,%s,%s,%s,%s,%s,%s) AS ok",
+                    (*self._claim_args(), ref, kind, digest),
+                ).fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise SafeStop("STALE_CONTEXT") from exc
+        return bool(row and row["ok"])
