@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir uv==0.12.3
 WORKDIR /src
 COPY backend/pyproject.toml backend/uv.lock backend/.python-version ./
 COPY backend/packages ./packages
+# Bundle a fixed, verified upstream Skill at build time; never fetch or execute it during a Run.
+COPY backend/tools/sync_yomiyasu.py ./tools/sync_yomiyasu.py
+RUN python ./tools/sync_yomiyasu.py
 ARG PACKAGES
 # --locked: the lockfile is authoritative; a drift fails the build.
 RUN uv export --locked --no-dev --no-hashes --no-editable $(for p in ${PACKAGES}; do printf -- "--package %s " "$p"; done) \

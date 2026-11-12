@@ -113,6 +113,30 @@ jobs:
           docker build -q -f deploy/docker/Dockerfile --target runtime-base \
             --build-arg PACKAGES="aiagent-gateways aiagent-sentinel aiagent-api aiagent-runtime" -t aiagent/all:dev .
           docker build -q -f deploy/docker/Dockerfile.cell -t aiagent/cell:dev .
+      - name: Official yomiyasu is included as a read-only packaged skill
+        working-directory: .
+        run: |
+          docker run --rm --network none --entrypoint python aiagent/all:dev -c '
+          from aiagent_domain.tools import SKILLS_DIR
+          skill = SKILLS_DIR / "yomiyasu"
+          assert (skill / "SKILL.md").stat().st_size > 30000
+          assert (skill / "references" / "doc-types" / "pr.md").is_file()
+          assert (skill / "scripts" / "yomiyasu_check.py").is_file()
+          from aiagent_runtime.agent import _fs_backend
+          from aiagent_gateways.tool_gateway import _grounded_packaged_skill_read
+          from deepagents.middleware.filesystem import _prepare_read_window, _truncate_paginated_read
+          path = "/skills/yomiyasu/SKILL.md"
+          total = len((skill / "SKILL.md").read_text(encoding="utf-8").splitlines())
+          assert total > 100
+          for offset in range(0, total, 100):
+              result = _fs_backend().read(path, offset=offset, limit=100)
+              assert result.file_data is not None and not result.error
+              normalized, body = _prepare_read_window(result, result.file_data["content"], offset)
+              rendered = _truncate_paginated_read(body, path, normalized, None)
+              assert _grounded_packaged_skill_read(
+                  rendered, {"file_path": path, "offset": offset, "limit": 100}
+              )
+          '
       - name: Compose network isolation gate (dev topology)
         working-directory: .
         run: |
