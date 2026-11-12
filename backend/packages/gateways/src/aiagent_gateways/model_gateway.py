@@ -23,7 +23,7 @@ from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_domain import sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
-from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
+from aiagent_domain.tools import INTERNAL_TOOL_SPECS, INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 
 from .context_dispatch import ContextAdmission
 from .privacy import StreamPrivacyGate
@@ -440,21 +440,11 @@ class ModelGateway:
         *,
         single_attempt: bool = False,
     ) -> tuple[StreamPrivacyGate, int]:
+        # Both normal tools and read-only framework-internal tools must be exposed to the provider
+        # with trusted schemas; the runtime may request only names, never supply or broaden schemas.
         allowed = {k: TOOLS[k] for k in req.tools if k in TOOLS}
-        tool_schemas = [TOOLS[k].provider_schema() for k in req.tools if k in TOOLS]
-        if "task" in req.tools:
-            tool_schemas.append(
-                {
-                    "name": "task",
-                    "description": "Delegate a sub-task to a sub-agent.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"description": {"type": "string"}, "subagent_type": {"type": "string"}},
-                        "required": ["description", "subagent_type"],
-                        "additionalProperties": False,
-                    },
-                }
-            )
+        allowed.update({k: INTERNAL_TOOL_SPECS[k] for k in req.tools if k in INTERNAL_TOOL_SPECS})
+        tool_schemas = [allowed[k].provider_schema() for k in req.tools if k in allowed]
         attempts = 0
         last: ProviderError | None = None
         for route in self.routes[req.model][:1] if single_attempt else self.routes[req.model]:

@@ -446,6 +446,45 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
     assert sub_models and all(a["admitted"] for a in sub_models)  # sub-agent uses the same Model Gateway
 
 
+@pytest.mark.parametrize(
+    ("goal", "use_skill"),
+    [
+        ("yomiyasu fixture: 日本語の文章を推敲してください。", True),
+        ("yomiyasu fixture: 技術文書を更新してください。", True),
+        ("yomiyasu fixture: yomiyasuを使わないで通常回答してください。", False),
+    ],
+)
+def test_t09a_yomiyasu_read_two_pages_through_real_gateways(
+    stack: Stack, api, t, pg: PgEnv, goal: str, use_skill: bool
+) -> None:
+    """Real Gateway path for two writing modes and an explicit opt-out; the provider is a deterministic mock."""
+    task = submit(api, t, goal)
+    attempts = stack.drive()
+    st = state(api, t, task)
+    assert st["state"] == "SUCCEEDED", (st, [p.stderr[-1500:] for p in attempts])
+    result = "推敲済み：日本語の文章を読みやすく整えました。" if use_skill else "指定に従って通常回答しました。"
+    assert st["run"]["result"] == result
+    entries = q(
+        pg.owner,
+        "SELECT entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY checkpoint_revision",
+        (st["run"]["id"],),
+    )
+    reads = [
+        r["checkpoint_json"]["content"]
+        for r in entries
+        if r["entry_kind"] == "tool" and r["checkpoint_json"].get("tool_name") == "read_file"
+    ]
+    if not use_skill:
+        assert reads == []
+        return
+    assert len(reads) == 2, entries
+    assert all(text.startswith("@@ lines ") for text in reads)
+    assert "name: yomiyasu" in reads[0]
+    assert "next offset 8" in reads[0]
+    assert "next offset" not in reads[1]
+    assert all("not grounded in HEAD" not in text for text in reads)
+
+
 def test_t09b_compaction_keeps_raw_head(stack: Stack, api, t, pg: PgEnv) -> None:
     long_goal = "search widget price. " + " ".join(f"[history {i}] " + "lorem ipsum " * 300 for i in range(5))
     assert len(long_goal) < 20000

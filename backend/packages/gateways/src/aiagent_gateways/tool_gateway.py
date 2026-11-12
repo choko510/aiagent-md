@@ -19,6 +19,8 @@ import asyncio
 import logging
 import os
 import re
+from hashlib import sha256
+from pathlib import PurePosixPath
 from typing import Any
 
 from aiagent_core import control
@@ -615,7 +617,7 @@ class ToolGateway:
                 }
                 admitted = content in finals
             else:
-                admitted = _grounded_read(content, entries)
+                admitted = _grounded_read(content, entries, prop[0])
             o = outcome(
                 "DONE" if admitted else "DENIED",
                 {"childResult": content} if admitted else {"error": "child result not grounded in HEAD"},
@@ -789,21 +791,117 @@ class ToolGateway:
         return {"status": status}
 
 
-_LINENO = re.compile(r"^\s*\d+\t", re.MULTILINE)
+# DeepAgents 0.7.34 text read_file uses an unnumbered verbatim page below this header.
+# Reject notices, midline-truncated content, bogus pagination, and ungrounded state files.
+_READ_HEADER = re.compile(
+    r"\A@@ lines ([1-9][0-9]*)-([1-9][0-9]*) of ([1-9][0-9]*)(?: \| next offset ([1-9][0-9]*))? @@\n"
+)
+_HISTORY_PATH = re.compile(
+    r"/conversation_history/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.md\Z"
+)
 
 
-def _grounded_read(content: str, entries: list[Row]) -> bool:
-    """A read_file result is admitted only if its text already exists in this run's HEAD (offloaded tool output /
-    history) or in the packaged read-only skills shipped with the code - i.e. it adds no new untrusted bytes."""
-    body = _LINENO.sub("", content).strip()
-    if not body:
-        return True
-    corpus = "\n".join(str(e["checkpoint_json"].get("content", "")) for e in entries)
-    if body in corpus:
-        return True
-    from aiagent_domain.tools import packaged_skill_texts
+def _exact_read_page(content: str, args: dict[str, Any], source: str) -> bool:
+    """Compare the full DeepAgents text page against a known HEAD or packaged source.
 
-    return any(body in t for t in packaged_skill_texts())
+    Neither the header nor the proposed path grants trust; every page field and
+    byte must agree with the source after DeepAgents' newline normalization.
+    """
+    offset, limit = args.get("offset", 0), args.get("limit", 100)
+    if type(offset) is not int or type(limit) is not int or offset < 0 or limit <= 0:
+        return False
+    header = _READ_HEADER.match(content)
+    if header is None:
+        return False
+    start, end, total = (int(header.group(i)) for i in (1, 2, 3))
+    next_offset = int(header.group(4)) if header.group(4) is not None else None
+    lines = source.splitlines(keepends=True)
+    end_expected = min(offset + limit, len(lines))
+    if (start, end, total) != (offset + 1, end_expected, len(lines)) or start > end:
+        return False
+    if next_offset != (end_expected if end_expected < len(lines) else None):
+        return False
+    raw_page = "".join(lines[offset:end_expected]).replace("\r\n", "\n").replace("\r", "\n")
+    rows = raw_page.split("\n")
+    if rows and rows[-1] == "":
+        rows.pop()
+    # The pinned formatter pads blank final source rows to the advertised range.
+    rows.extend([""] * max(0, end - start + 1 - len(rows)))
+    return content[header.end() :] == "\n".join(rows)
+
+
+def _grounded_packaged_skill_read(content: str, args: dict[str, Any]) -> bool:
+    """Verify the exact packaged file and rendered page; never trust path alone."""
+    from aiagent_domain.tools import SKILLS_DIR
+
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str) or not file_path.startswith("/skills/"):
+        return False
+    posix = PurePosixPath(file_path)
+    if str(posix) != file_path or ".." in file_path.split("/") or "." in file_path.split("/"):
+        return False
+    parts = posix.parts
+    if len(parts) < 4 or parts[:2] != ("/", "skills") or not parts[-1].endswith((".md", ".txt")):
+        return False
+    candidate = SKILLS_DIR.joinpath(*parts[2:])
+    if not candidate.is_file() or any(p.is_symlink() for p in (candidate, *candidate.parents)):
+        return False
+    return _exact_read_page(content, args, candidate.read_text(encoding="utf-8"))
+
+
+def _sanitized_tool_id(tool_call_id: str) -> str:
+    """Mirror pinned DeepAgents 0.7.34 sanitize_tool_call_id (128-byte path component)."""
+    sanitized = tool_call_id.replace(".", "_").replace("/", "_").replace("\\", "_")
+    if len(sanitized.encode("utf-8")) > 128:
+        return "call-" + sha256(tool_call_id.encode("utf-8")).hexdigest()
+    return sanitized
+
+
+def _grounded_offload_read(content: str, entries: list[Row], args: dict[str, Any]) -> bool:
+    """Admit only exact pages derived from this Run's original HEAD tool/user messages.
+
+    Large tool result paths encode the committed tool_call_id. Conversation history
+    uses a fresh UUID unrelated to HEAD; it is allowed only if the *entire page*
+    reconstructs exactly from a HEAD user message. No arbitrary state files,
+    path-only matches, or concatenated HEAD excerpts are accepted.
+    """
+    path = args.get("file_path")
+    if not isinstance(path, str) or str(PurePosixPath(path)) != path:
+        return False
+    parts = PurePosixPath(path).parts
+    if len(parts) == 3 and parts[:2] == ("/", "large_tool_results"):
+        tool_component = parts[2]
+        for entry in entries:
+            if entry["entry_kind"] != "tool":
+                continue
+            message = entry["checkpoint_json"]
+            tool_id, source = message.get("tool_call_id"), message.get("content")
+            if (
+                isinstance(tool_id, str)
+                and isinstance(source, str)
+                and _sanitized_tool_id(tool_id) == tool_component
+                and _exact_read_page(content, args, source)
+            ):
+                return True
+        return False
+    if _HISTORY_PATH.fullmatch(path):
+        return any(
+            entry["entry_kind"] == "user"
+            and isinstance(entry["checkpoint_json"].get("content"), str)
+            and _exact_read_page(content, args, entry["checkpoint_json"]["content"])
+            for entry in entries
+        )
+    return False
+
+
+def _grounded_read(content: str, entries: list[Row], proposal: dict[str, Any]) -> bool:
+    """All internal file reads must be exactly grounded in packaged data or the current Run HEAD."""
+    args = proposal.get("args")
+    if not isinstance(args, dict) or not isinstance(args.get("file_path"), str):
+        return False
+    if args["file_path"].startswith("/skills"):
+        return _grounded_packaged_skill_read(content, args)
+    return _grounded_offload_read(content, entries, args)
 
 
 def _run(coro: Any) -> Any:
