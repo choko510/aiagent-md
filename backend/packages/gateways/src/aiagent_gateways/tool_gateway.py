@@ -27,6 +27,7 @@ from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database, Row
 from aiagent_core.events import append_event, enqueue_run_job
+from aiagent_core.step4_gate import is_reserved_tool
 from aiagent_domain import canonical_json, sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
@@ -123,6 +124,10 @@ class ToolGateway:
 
             data = json.loads(hit["content"])
             return outcome(data.pop("status"), data, replayed=True)
+        # STEP 4 names must remain fail-closed even if a registry/profile changes
+        # before the PostgreSQL, Run/Goal/fence, effect-ledger and Sentinel adapters exist.
+        if is_reserved_tool(tool):
+            return await asyncio.to_thread(self._deny, claim, tool_call_id, tool, "STEP4_NOT_INTEGRATED", stream)
         spec = TOOLS.get(tool)
         if spec is None:
             return self._deny(claim, tool_call_id, tool, "unknown tool", stream)
@@ -339,7 +344,9 @@ class ToolGateway:
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
             run = c.execute(
-                "SELECT r.status_code, r.lease_epoch, r.cancel_requested, r.pause_requested, r.restore_incarnation, t.goal_revision,"
+                "SELECT r.status_code, r.lease_epoch, r.lease_owner_ref,"
+                " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
+                " r.cancel_requested, r.pause_requested, r.restore_incarnation, t.goal_revision,"
                 " t.owner_user_id, t.workspace_id, s.restore_incarnation AS cur_inc FROM agent.runs r JOIN agent.tasks t ON"
                 " t.tenant_id=r.tenant_id AND t.id=r.task_id CROSS JOIN agent.schema_control s"
                 " WHERE r.tenant_id=%s AND r.id=%s FOR SHARE OF r",
@@ -363,6 +370,8 @@ class ToolGateway:
                 raise RpcError("PAUSED")
             if (
                 run["lease_epoch"] != claim.lease_epoch
+                or run["lease_owner_ref"] != claim.worker_ref
+                or not run["lease_valid"]
                 or run["owner_user_id"] != claim.owner_user_id
                 or run["restore_incarnation"] != run["cur_inc"]
                 or claim.restore_incarnation != run["cur_inc"]
@@ -712,20 +721,11 @@ class ToolGateway:
                     "tool_gateway:reconcile",
                     run["restore_incarnation"],
                 )
-                control.append_head(
+                control.append_reconciled_head(
                     c,
                     claim,
-                    "tool",
-                    {
-                        "kind": "tool",
-                        "tool_call_id": intent["invocation_key"],
-                        "tool_name": intent["tool_key"],
-                        "content": content_of(outcome(status, result)),
-                    },
-                    writer="tool_gateway:reconcile",
                     stream=intent["stream"],
-                    tool_call_id=intent["invocation_key"],
-                    require_current_goal=False,
+                    intent_id=intent_id,
                 )
             append_event(
                 c,

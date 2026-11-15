@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from aiagent_development.contracts import (
+    CommitEvidence,
     EffectUnknown,
     ExecutionRequest,
     InvalidEvidence,
@@ -331,3 +332,100 @@ def test_symlink_in_repository_root_ancestor_denied(repo, tmp_path):
     shortcut.symlink_to(root, target_is_directory=True)
     with pytest.raises(InvalidPath):
         validate_manifest_paths(shortcut, ("file.py",))
+
+
+def test_repair_round_reaches_code_ready_after_failed_test(env):
+    root, scope, run, _, scm, sandbox, _, flow = env
+    _prepare(env)
+    _test(env, "unit", exit_code=1)
+    assert flow._load(scope, "cycle-1").phase == Phase.REVIEWING
+
+    repaired = flow.start_repair_round(scope, "cycle-1")
+    assert repaired.phase == Phase.EXECUTING
+    assert repaired.round_number == 2
+    assert repaired.commit is not None
+    head1 = repaired.commit.commit_sha
+
+    patch2 = PatchArtifact(
+        "artifact-2", hashlib.sha256(b"patch-2").hexdigest(), ("app.py",), head1, scope.workspace_revision, run
+    )
+    flow.submit_patch(scope, "cycle-1", patch2, root)
+    flow.commit(scope, "cycle-1", message="repair test", intent_ref="commit-2")
+    sandbox.source_sha = scm.head(scope)
+    _test(env, "unit")
+    _test(env, "security")
+    _review(env, "functional")
+    _review(env, "security")
+    final = _review(env, "ui-e2e")
+    assert final.phase == Phase.CODE_READY
+    assert final.round_number == 2
+
+
+def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
+    root, scope, run, auth, scm, _sandbox, _, flow = env
+    _prepare(env)
+    _test(env, "unit")
+    _test(env, "security")
+    _review(env, "functional")
+    _review(env, "security")
+    _review(env, "ui-e2e")
+
+    # Manifest file vs directory prefix collision is denied
+    with pytest.raises(InvalidPath):
+        validate_manifest_paths(root, ("src", "src/app.py"))
+
+    # Duplicate push rejected after first succeeds
+    auth.allowed.add("git.push")
+    assert flow.push(scope, "cycle-1", intent_ref="push-1") == "mock-push:push-1"
+    with pytest.raises(StateConflict):
+        flow.push(scope, "cycle-1", intent_ref="push-2")
+
+    # Push failure transitions to UNKNOWN_EXTERNAL_EFFECT
+    auth.allowed.add("git.pull_request.create")
+    scm.create_pr = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network drop"))  # type: ignore[method-assign]
+    with pytest.raises(EffectUnknown):
+        flow.create_pr(scope, "cycle-1", intent_ref="pr-1")
+    assert flow._load(scope, "cycle-1").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+
+    # Reconcile unknown commit when remote stayed at parent -> BLOCKED
+    parent_sha = scm.head(scope)
+    scope_rec = replace(scope, base_sha=parent_sha)
+    req_rec = ExecutionRequest(scope_rec, run, "plan-1", "build", ("pytest", "-q"), "a" * 64, "build-rec")
+    # Use a fresh workflow bound to current head so scope matches workspace cleanly
+    auth_rec = MockAuthority(scope_rec, run)
+    scm_rec = MockGitProvider(scope_rec, auth_rec)
+    flow_rec = DevelopmentWorkflow(
+        runs=auth_rec,
+        reviewers=auth_rec,
+        workspaces=auth_rec,
+        gateway=auth_rec,
+        sandbox=MockSandbox(),
+        git=scm_rec,
+        store=MemoryCycleStore(),
+    )
+    flow_rec.create("cycle-rec", scope_rec, run, "change-rec")
+    flow_rec.plan(scope_rec, "cycle-rec", TaskPlan("plan-1", "change-rec", ("unit",), 1))
+    flow_rec.execute(scope_rec, "cycle-rec", req_rec)
+    p = PatchArtifact("p-rec", "d" * 64, ("app.py",), parent_sha, scope.workspace_revision, run)
+    flow_rec.submit_patch(scope_rec, "cycle-rec", p, root)
+    scm_rec.commit_patch = lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("ack lost"))  # type: ignore[method-assign]
+    with pytest.raises(EffectUnknown):
+        flow_rec.commit(scope_rec, "cycle-rec", message="uncertain", intent_ref="commit-rec")
+    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec", None).phase == Phase.BLOCKED
+
+    # Reconcile unknown commit when remote actually committed -> COMMITTED
+    flow_rec.create("cycle-rec2", scope_rec, run, "change-rec2")
+    flow_rec.plan(scope_rec, "cycle-rec2", TaskPlan("plan-1", "change-rec2", ("unit",), 1))
+    flow_rec.execute(
+        scope_rec,
+        "cycle-rec2",
+        ExecutionRequest(scope_rec, run, "plan-1", "build", ("pytest", "-q"), "a" * 64, "build-rec2"),
+    )
+    p2 = PatchArtifact("p-rec2", "e" * 64, ("app.py",), parent_sha, scope.workspace_revision, run)
+    flow_rec.submit_patch(scope_rec, "cycle-rec2", p2, root)
+    with pytest.raises(EffectUnknown):
+        flow_rec.commit(scope_rec, "cycle-rec2", message="uncertain2", intent_ref="commit-rec2")
+    committed_sha = "1" * 40
+    scm_rec.heads[(scope_rec.repository, scope_rec.branch, scope_rec.workspace_id)] = committed_sha
+    ev = CommitEvidence(parent_sha, committed_sha, "e" * 64, "p-rec2", "recovered-receipt")
+    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev).phase == Phase.COMMITTED

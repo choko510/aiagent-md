@@ -11,6 +11,11 @@ dependencies = [
   "aiagent-sentinel",
   "aiagent-api",
   "aiagent-sandbox",
+  "aiagent-browser",
+  "aiagent-context",
+  "aiagent-memory",
+  "aiagent-development",
+  "aiagent-automation",
 ]
 
 [dependency-groups]
@@ -38,6 +43,11 @@ aiagent-gateways = { workspace = true }
 aiagent-sentinel = { workspace = true }
 aiagent-api = { workspace = true }
 aiagent-sandbox = { workspace = true }
+aiagent-browser = { workspace = true }
+aiagent-context = { workspace = true }
+aiagent-memory = { workspace = true }
+aiagent-development = { workspace = true }
+aiagent-automation = { workspace = true }
 
 [tool.ruff]
 line-length = 120
@@ -68,7 +78,9 @@ platform = "linux"  # deployment target; Linux-only kernel APIs (rlimits, namesp
 strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = ["packages/domain/src", "packages/core/src", "packages/runtime/src", "packages/gateways/src",
-             "packages/sentinel/src", "packages/api/src", "packages/sandbox/src"]
+             "packages/sentinel/src", "packages/api/src", "packages/sandbox/src",
+             "packages/browser/src", "packages/context/src", "packages/memory/src",
+             "packages/development/src", "packages/automation/src"]
 explicit_package_bases = true
 warn_unused_ignores = false
 

@@ -6,7 +6,9 @@ scheduler Task/Run path and handles its PostgreSQL occurrence ledger.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -68,7 +70,7 @@ def next_daily(watch: DailyWatch, after_utc: datetime) -> datetime | None:
 
 
 class WatchQueue(Protocol):
-    def request_watch(self, *, tenant_id: str, watch_id: str, slot_utc: str, dedupe_key: str) -> None: ...
+    def request_watch(self, *, tenant_id: str, watch_id: str, slot_utc: str, dedupe_key: str) -> bool: ...
 
 
 class SqliteWatchHarness:
@@ -76,15 +78,44 @@ class SqliteWatchHarness:
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
-        with sqlite3.connect(self.path) as db:
+        with self._connection() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS watch_slots (watch_id TEXT, slot TEXT, tenant_id TEXT,"
-                " dedupe TEXT UNIQUE, status TEXT, PRIMARY KEY (watch_id,slot))"
+                " dedupe TEXT UNIQUE, status TEXT, PRIMARY KEY (tenant_id, watch_id, slot))"
             )
+
+    @contextlib.contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        db = sqlite3.connect(self.path, timeout=10)
+        try:
+            db.execute("PRAGMA busy_timeout=10000")
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def claim(self, watch: DailyWatch, slot: datetime) -> bool:
         dedupe = f"watch:{watch.tenant_id}:{watch.watch_id}:r{watch.revision}:{slot.isoformat()}"
-        with sqlite3.connect(self.path, timeout=10) as db:
+        with self._connection() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO watch_slots VALUES (?,?,?,?, 'PENDING')",
+                (watch.watch_id, slot.isoformat(), watch.tenant_id, dedupe),
+            )
+            return cur.rowcount == 1
+
+    def claim_bounded(self, watch: DailyWatch, slot: datetime) -> bool:
+        """Atomically enforce per-tenant max_occurrences and claim slot under BEGIN IMMEDIATE."""
+        dedupe = f"watch:{watch.tenant_id}:{watch.watch_id}:r{watch.revision}:{slot.isoformat()}"
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = int(
+                db.execute(
+                    "SELECT count(*) FROM watch_slots WHERE tenant_id=? AND watch_id=?",
+                    (watch.tenant_id, watch.watch_id),
+                ).fetchone()[0]
+            )
+            if existing >= watch.max_occurrences:
+                return False
             cur = db.execute(
                 "INSERT OR IGNORE INTO watch_slots VALUES (?,?,?,?, 'PENDING')",
                 (watch.watch_id, slot.isoformat(), watch.tenant_id, dedupe),
@@ -92,18 +123,23 @@ class SqliteWatchHarness:
             return cur.rowcount == 1
 
     def pending(self) -> list[tuple[str, str, str, str]]:
-        with sqlite3.connect(self.path) as db:
+        with self._connection() as db:
             return db.execute(
                 "SELECT tenant_id,watch_id,slot,dedupe FROM watch_slots WHERE status='PENDING'"
             ).fetchall()
 
     def ack(self, dedupe: str) -> None:
-        with sqlite3.connect(self.path) as db:
-            db.execute("UPDATE watch_slots SET status='SENT' WHERE dedupe=?", (dedupe,))
+        with self._connection() as db:
+            db.execute("UPDATE watch_slots SET status='SENT' WHERE dedupe=? AND status='PENDING'", (dedupe,))
 
-    def count(self, watch_id: str) -> int:
-        with sqlite3.connect(self.path) as db:
-            return int(db.execute("SELECT count(*) FROM watch_slots WHERE watch_id=?", (watch_id,)).fetchone()[0])
+    def count(self, tenant_id: str, watch_id: str) -> int:
+        with self._connection() as db:
+            return int(
+                db.execute(
+                    "SELECT count(*) FROM watch_slots WHERE tenant_id=? AND watch_id=?",
+                    (tenant_id, watch_id),
+                ).fetchone()[0]
+            )
 
 
 class WatchController:
@@ -112,8 +148,6 @@ class WatchController:
 
     def tick(self, watch: DailyWatch) -> bool:
         """Bounded latest slot, no infinite catch-up or provider access. Occurrence admission is atomic."""
-        if self.store.count(watch.watch_id) >= watch.max_occurrences:
-            return False
         now = self.clock.now()
         if now.tzinfo is None:
             raise Rejected("NAIVE_CLOCK")
@@ -122,12 +156,12 @@ class WatchController:
         slot = local_slot(day, watch)
         if slot is None or not parse_utc(watch.start_utc) <= slot <= now:
             return False
-        return self.store.claim(watch, slot)
+        return self.store.claim_bounded(watch, slot)
 
     def relay(self) -> int:
         sent = 0
         for tenant, watch, slot, dedupe in self.store.pending():
-            self.queue.request_watch(tenant_id=tenant, watch_id=watch, slot_utc=slot, dedupe_key=dedupe)
-            self.store.ack(dedupe)
-            sent += 1
+            if self.queue.request_watch(tenant_id=tenant, watch_id=watch, slot_utc=slot, dedupe_key=dedupe):
+                self.store.ack(dedupe)
+                sent += 1
         return sent

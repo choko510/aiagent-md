@@ -40,6 +40,10 @@ def validate_manifest_paths(repo_root: Path, candidates: tuple[str, ...]) -> tup
     if not os.path.isabs(str(root)):
         raise InvalidPath("root must be an absolute path selected by the trusted broker")
     normalized = tuple(safe_relative_path(p) for p in candidates)
+    sorted_paths = sorted(normalized)
+    for idx, parent in enumerate(sorted_paths[:-1]):
+        if sorted_paths[idx + 1].startswith(parent + "/"):
+            raise InvalidPath("manifest cannot contain both a file path and nested path under it")
     for name in normalized:
         cur = root
         for part in name.split("/"):

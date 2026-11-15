@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TypeVar
 
@@ -21,10 +22,15 @@ class SqliteHarnessStore:
         with self._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
 
-    def _connection(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.path, timeout=10)
-        db.execute("PRAGMA busy_timeout=10000")
-        return db
+        try:
+            db.execute("PRAGMA busy_timeout=10000")
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def create(self, campaign: Campaign) -> None:
         with self._connection() as db:
@@ -51,13 +57,15 @@ class SqliteHarnessStore:
             campaign = Campaign.from_wire(json.loads(row[0]))
             # _CommitRejection represents an expected fail-closed transition that must persist.
             rejection: _CommitRejection | None = None
+            outcome: tuple[T] | None = None
             try:
-                result = fn(campaign)
+                outcome = (fn(campaign),)
             except _CommitRejection as exc:
                 rejection = exc
-                result = None  # type: ignore[assignment]
             db.execute("UPDATE campaigns SET payload=? WHERE id=?", (json.dumps(campaign.wire()), campaign_id))
             db.commit()
             if rejection is not None:
                 raise rejection
-            return result  # type: ignore[return-value]
+            if outcome is None:  # pragma: no cover - defensive guard
+                raise Rejected("MUTATE_MISSING_RESULT")
+            return outcome[0]

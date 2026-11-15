@@ -142,7 +142,7 @@ def test_kill_after_summary_before_cas_preserves_previous_head():
     assert head.head == "head:0"
     assert head.published == []
     assert len(store._raw) == 1
-    assert len(store._summary) == 1  # orphan, not public; cleanup owned by AI-07
+    assert len(store._summary) == 2  # summary and sealed payload remain unpublished
 
 
 def test_goal_steer_and_revoked_memory_epoch_refuse_stale_summary():
@@ -252,3 +252,63 @@ def test_custom_summarizer_cannot_escalate_authority():
 
     expect_code("QUALITY_FAILED", lambda: ContextService(store, head).compact(req, sources, summarizer=FakePolicy()))
     assert head.head == "head:0"
+
+
+def test_multiple_claims_per_artifact_and_stale_head_avoids_orphan_summary():
+    req, head, store, sources = setup()
+
+    class MultiClaimSummarizer:
+        def __call__(self, request, refs, artifacts, max_chars):
+            r = refs[0]
+            return SummaryProposal(
+                request.goal_revision,
+                request.anchor_digest,
+                (r.artifact_ref,),
+                (
+                    SummaryClaim("Base JPY 48,000", "Base JPY 48,000", r.artifact_ref, r.sha256, r.observed_at, 0, 15),
+                    SummaryClaim(
+                        "Parking JPY 2,000", "Parking JPY 2,000", r.artifact_ref, r.sha256, r.observed_at, 17, 34
+                    ),
+                ),
+            )
+
+    plan = ContextService(store, head).compact(req, sources, summarizer=MultiClaimSummarizer())
+    assert len(plan.selected_claims) == 2
+    assert '"trustedControl"' in plan.model_payload and '"untrustedData"' in plan.model_payload
+
+
+def test_overflow_retry_reuses_raw_artifacts_and_check_dispatch_guards():
+    from datetime import UTC, datetime, timedelta
+
+    req, head, store, sources = setup()
+
+    class OverflowOnce:
+        calls = 0
+
+        def send(self, plan):
+            self.calls += 1
+            if self.calls == 1:
+                raise ProviderOverflow()
+            return "ok"
+
+    provider = OverflowOnce()
+    resp, plan = ContextService(store, head).dispatch_with_overflow_limit(req, sources, provider)
+    assert resp == "ok"
+    assert len(store._raw) == 1  # raw artifact not duplicated on overflow retry
+
+    # Summary tamper detected by check_dispatch
+    scope_saved, _ = store._summary[plan.summary_artifact_ref]
+    store._summary[plan.summary_artifact_ref] = (scope_saved, b"corrupted")
+    expect_code("SUMMARY_MISMATCH", lambda: ContextService(store, head).check_dispatch(plan, "11"))
+
+    # Expired memory detected on cached ContextPlan at dispatch time
+    req2, head2, store2, sources2 = setup()
+    from aiagent_context.models import MemoryProjection
+
+    exp = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    req2 = replace(req2, memory=(MemoryProjection("m1", "likes quiet room", ("s1",), "epoch-1", expires_at=exp),))
+    plan2 = ContextService(store2, head2).compact(req2, sources2)
+    expect_code(
+        "EXPIRED_MEMORY",
+        lambda: ContextService(store2, head2).check_dispatch(plan2, "11", now=datetime.now(UTC) + timedelta(hours=1)),
+    )

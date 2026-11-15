@@ -2,7 +2,7 @@
 
 **Status: IMPLEMENTED (isolated logic) / TESTED (local mock). NOT VERIFIED in production.**
 
-This package intentionally contains **no provider clients, Task/Run tables, PostgreSQL migrations, or actual recurring remote access**. It preserves the STEP 3 `QueuePort` contract (the only real queue is `run`, with canonical `RunJobPointerV1`) and delegates mapping of campaign dispatch intents into authorized Task/Run creations to AI-07. SQLite here is a **test harness only**, not a competing production datastore. The test package deliberately has no `pyproject.toml`: `backend/pyproject.toml` owns the uv lock/workspace and adding a new uv member without the lock update would break `uv sync --locked`. AI-07 must register the package after the lock/CI ownership handoff.
+This package intentionally contains **no provider clients, Task/Run tables, PostgreSQL migrations, or actual recurring remote access**. It preserves the STEP 3 `QueuePort` contract (the only real queue is `run`, with canonical `RunJobPointerV1`) and delegates mapping of campaign dispatch intents into authorized Task/Run creations to AI-07. SQLite here is a **test harness only**, not a competing production datastore. This package is a member of the locked backend workspace. Registration does not connect it to PostgreSQL or the production scheduler.
 
 ## Implemented
 

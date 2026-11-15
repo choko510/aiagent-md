@@ -1,15 +1,19 @@
 """Operator commands: create per-process DB logins, provision tenant/user/workspace/API token, bump the restore
-incarnation after a restore, retention GC. Run with the migration-owner DSN only.
+incarnation after a restore, retention GC, initialize/reseal external Memory tombstones. Run with the migration-owner DSN only.
 
 python -m aiagent_core.admin logins            (passwords from AIAGENT_LOGIN_<ROLE>_PASSWORD_FILE)
 python -m aiagent_core.admin tenant            (prints a fresh API token once; only its SHA-256 is stored)
 python -m aiagent_core.admin restore-bump      (after PITR / failover: invalidates claims, pointers, permits)
 python -m aiagent_core.admin gc --days 30
+python -m aiagent_core.admin memory-tombstone-init (once, before Memory APIs are enabled)
+python -m aiagent_core.admin memory-tombstone-reseal (after inspecting a valid log with a stale/missing seal)
+python -m aiagent_core.admin memory-reconcile   (after restore-bump/adopt-runs: external tombstone replay)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 from typing import Any
 
@@ -117,13 +121,34 @@ def gc(owner_dsn: str, days: int) -> dict[str, int]:
     with connect(owner_dsn) as c:
         a = c.execute("SELECT lg_checkpoint.gc(make_interval(days => %s)) AS n", (days,)).fetchone()
         b = c.execute("SELECT agent.gc_terminal_runs(make_interval(days => %s)) AS n", (days,)).fetchone()
-    assert a is not None and b is not None
-    return {"framework_threads": int(a["n"]), "stream_chunks": int(b["n"])}
+        expired = c.execute("SELECT agent.gc_expired_context_artifacts() AS n").fetchone()
+        orphans = c.execute(
+            "SELECT agent.gc_orphan_context_artifacts(make_interval(days => %s)) AS n", (days,)
+        ).fetchone()
+    assert a is not None and b is not None and expired is not None and orphans is not None
+    return {
+        "framework_threads": int(a["n"]),
+        "stream_chunks": int(b["n"]),
+        "context_expired": int(expired["n"]),
+        "context_orphans": int(orphans["n"]),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="aiagent-admin")
-    ap.add_argument("cmd", choices=["logins", "tenant", "restore-bump", "adopt-runs", "gc"])
+    ap.add_argument(
+        "cmd",
+        choices=[
+            "logins",
+            "tenant",
+            "restore-bump",
+            "adopt-runs",
+            "gc",
+            "memory-tombstone-init",
+            "memory-tombstone-reseal",
+            "memory-reconcile",
+        ],
+    )
     ap.add_argument("--days", type=int, default=30)
     a = ap.parse_args(argv)
     s = secret("AIAGENT_MIGRATE_DSN")
@@ -144,6 +169,25 @@ def main(argv: list[str] | None = None) -> int:
         print("restore_incarnation:", restore_bump(dsn))
     elif a.cmd == "adopt-runs":
         print("adopted runs:", adopt_runs_after_restore(dsn))
+    elif a.cmd == "memory-tombstone-init":
+        from .memory_tombstones import log_from_env
+
+        log_from_env(require_initialized=False).initialize()
+        print("external Memory tombstone log initialized at generation 0")
+    elif a.cmd == "memory-tombstone-reseal":
+        from .memory_tombstones import log_from_env
+
+        generation, _ = log_from_env(require_initialized=False).reseal_validated()
+        print(f"external Memory tombstone head resealed at generation {generation}")
+    elif a.cmd == "memory-reconcile":
+        from .memory_restore import reconcile_owner
+        from .memory_tombstones import log_from_env
+
+        report = reconcile_owner(dsn, log_from_env(), reconciled_by=os.environ.get("AIAGENT_OPERATOR", "operator"))
+        print(
+            f"memory reconciled: incarnation={report.incarnation} generation={report.generation}"
+            f" replayed={report.replayed} reflected={report.reflected}"
+        )
     else:
         print(gc(dsn, a.days))
     return 0

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Protocol
 
 from .models import (
     ContextPlan,
+    ContextPublication,
     ContextRequest,
     RawArtifact,
     SafeStop,
@@ -23,6 +25,7 @@ from .models import (
     ToolEvent,
     forbid_secrets,
     stable_digest,
+    utc_instant,
 )
 from .ports import ArtifactStorePort, HeadPort
 
@@ -111,13 +114,17 @@ def audit_proposal(
         or len(candidate.covered_artifact_refs) != len(expected)
     ):
         raise SafeStop("COVERAGE_GAP")
-    if len(candidate.claims) != len(refs) or {c.artifact_ref for c in candidate.claims} != set(expected):
+    if {c.artifact_ref for c in candidate.claims} != set(expected):
         raise SafeStop("COVERAGE_GAP")
     for claim in candidate.claims:
         record = expected[claim.artifact_ref]
         original = store.get_raw(request.scope, record)  # ACL + rehash, including after generation
         if claim.source_hash != record.sha256 or claim.observed_at != record.observed_at:
             raise SafeStop("SOURCE_MISMATCH")
+        if len(original) == 0:
+            if (claim.start_byte, claim.end_byte) != (0, 0) or claim.quote != "" or claim.text != "":
+                raise SafeStop("INVALID_LOCATOR")
+            continue
         if not (0 <= claim.start_byte < claim.end_byte <= len(original)):
             raise SafeStop("INVALID_LOCATOR")
         try:
@@ -149,14 +156,18 @@ def _serialize(
     sealed = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     payload = json.dumps(
         {
-            "untrustedDataOnly": True,
-            "sourceBackedExcerpts": [asdict(item) for item in candidate.claims],
-            "typedCanonicalAnchors": [
-                dict(kind=a.kind.value, sourceRef=a.source_ref, value=a.value, unit=a.unit, currency=a.currency)
-                for a in request.anchors
-            ],
-            "memoryDataNotInstructions": [asdict(item) for item in request.memory[:memory_count]],
-            "toolPairIds": tool_pairs,
+            "trustedControl": {
+                "typedCanonicalAnchors": [
+                    dict(kind=a.kind.value, sourceRef=a.source_ref, value=a.value, unit=a.unit, currency=a.currency)
+                    for a in request.anchors
+                ],
+                "toolPairIds": tool_pairs,
+            },
+            "untrustedData": {
+                "trustBoundary": "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY",
+                "sourceBackedExcerpts": [asdict(item) for item in candidate.claims],
+                "memoryDataNotInstructions": [asdict(item) for item in request.memory[:memory_count]],
+            },
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -189,6 +200,7 @@ class ContextService:
         events: tuple[ToolEvent, ...] = (),
         summarizer: SummarizerPort | None = None,
         max_excerpt_chars: int = 240,
+        _existing_refs: tuple[RawArtifact, ...] | None = None,
     ) -> ContextPlan:
         self._validate_current(request)
         if max_excerpt_chars < 1 or max_excerpt_chars > 4096 or len(sources) > 64:
@@ -197,7 +209,11 @@ class ContextService:
             raise SafeStop("DUPLICATE_SOURCE")
         tool_pairs = verify_tool_pairs(events)
         # No summarizer calls or publication before *every* raw source is durable.
-        refs = tuple(self.artifacts.put_raw(request.scope, src) for src in sources)
+        refs = (
+            _existing_refs
+            if _existing_refs is not None
+            else tuple(self.artifacts.put_raw(request.scope, src) for src in sources)
+        )
         for ref in refs:
             self.artifacts.get_raw(request.scope, ref)
         candidate = (summarizer or MockExcerptSummarizer())(request, refs, self.artifacts, max_excerpt_chars)
@@ -221,8 +237,10 @@ class ContextService:
                 memory_count -= 1
                 continue
             raise SafeStop("BLOCKED_CONTEXT_CAPACITY")
+        self._validate_current(request)
         # Summary is a selection record. Original bytes remain separately retrievable.
         summary_ref, summary_hash = self.artifacts.put_summary(request.scope, summary)
+        payload_ref, payload_digest = self.artifacts.put_summary(request.scope, payload.encode("utf-8"))
         plan_digest = stable_digest(
             {
                 "scope": asdict(request.scope),
@@ -239,7 +257,6 @@ class ContextService:
                 "cursor": request.raw_event_cursor,
             }
         )
-        self._validate_current(request)
         new_head = self.head.publish(
             request.scope,
             request.expected_head,
@@ -248,6 +265,9 @@ class ContextService:
             request.policy_version,
             request.memory_source_epoch,
             plan_digest,
+            ContextPublication(
+                request, refs, request.memory[:memory_count], summary_ref, summary_hash, payload_ref, payload_digest
+            ),
         )
         return ContextPlan(
             request.scope,
@@ -274,13 +294,23 @@ class ContextService:
             request.raw_event_cursor,
         )
 
-    def check_dispatch(self, plan: ContextPlan, lease_epoch: str) -> None:
+    def check_dispatch(self, plan: ContextPlan, lease_epoch: str, *, now: datetime | None = None) -> None:
         self.head.check_dispatch(plan, lease_epoch)
         # Final raw re-validation also detects retention expiry or post-publication tampering.
         for record in plan.raw_artifacts:
             self.artifacts.get_raw(plan.scope, record)
+        get_summary = getattr(self.artifacts, "get_summary", None)
+        if callable(get_summary):
+            summary_bytes = get_summary(plan.scope, plan.summary_artifact_ref)
+            if not isinstance(summary_bytes, bytes) or sha256(summary_bytes).hexdigest() != plan.summary_digest:
+                raise SafeStop("SUMMARY_MISMATCH")
+        dispatch_now = now if now is not None else datetime.now(UTC)
+        for mem in plan.memory:
+            if mem.expires_at is not None and utc_instant(mem.expires_at) <= dispatch_now:
+                raise SafeStop("EXPIRED_MEMORY")
         if sha256(plan.model_payload.encode()).hexdigest() != plan.model_payload_digest:
             raise SafeStop("MODEL_PAYLOAD_MISMATCH")
+        forbid_secrets(plan.model_payload)
 
     def dispatch_with_overflow_limit(
         self,
@@ -295,8 +325,16 @@ class ContextService:
             raise SafeStop("INVALID_RETRY_LIMIT")
         seen_payloads: set[str] = set()
         current = request
+        cached_refs: tuple[RawArtifact, ...] | None = None
         for attempt in range(max_overflow_retries + 1):
-            plan = self.compact(current, sources, events=events, max_excerpt_chars=240 // (4**attempt))
+            plan = self.compact(
+                current,
+                sources,
+                events=events,
+                max_excerpt_chars=max(1, 240 // (4**attempt)),
+                _existing_refs=cached_refs,
+            )
+            cached_refs = plan.raw_artifacts
             self.check_dispatch(plan, current.lease_epoch)
             if plan.model_payload_digest in seen_payloads:
                 raise SafeStop("UNCHANGED_OVERFLOW_PAYLOAD")
@@ -308,4 +346,4 @@ class ContextService:
                     raise SafeStop("OVERFLOW_RETRY_EXHAUSTED") from exc
                 # Explicit overflow only; never retry timeout/UNKNOWN effects.
                 current = replace(current, expected_head=plan.committed_head)
-        raise AssertionError("unreachable")
+        raise SafeStop("OVERFLOW_RETRY_EXHAUSTED")

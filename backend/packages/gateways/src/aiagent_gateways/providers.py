@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -191,8 +192,9 @@ class AnthropicProvider:
         proxy_token: Secret | None = None,
         url: str | None = None,
         timeout_s: float = 120.0,
+        verify: bool | ssl.SSLContext = True,
     ) -> None:
-        self.key, self.proxy, self.timeout_s = key, proxy, timeout_s
+        self.key, self.proxy, self.timeout_s, self.verify = key, proxy, timeout_s, verify
         self.proxy_token = proxy_token  # identifies the Model Gateway to the Trusted Egress (standing destination)
         self.url = url or self.URL
 
@@ -201,7 +203,7 @@ class AnthropicProvider:
         if self.proxy:
             tok = self.proxy_token.reveal() if self.proxy_token is not None else ""
             proxy = httpx.Proxy(self.proxy, headers={"Proxy-Authorization": f"Aiagent model_gateway:{tok}"})
-        return httpx.AsyncClient(proxy=proxy, timeout=self.timeout_s, trust_env=False)
+        return httpx.AsyncClient(proxy=proxy, timeout=self.timeout_s, trust_env=False, verify=self.verify)
 
     def capability(self, model: str) -> Capability:
         return Capability(True, True, 600_000, "anthropic", True)
@@ -252,39 +254,53 @@ class AnthropicProvider:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        async with self._client() as client:
-            async with client.stream("POST", self.url, headers=headers, json=body) as resp:
-                if resp.status_code in (429, 529):
-                    raise ProviderError("RATE_LIMITED", True)
-                if resp.status_code >= 500:
-                    raise ProviderError("UNAVAILABLE", True)
-                if resp.status_code >= 400:
-                    raise ProviderError(f"HTTP_{resp.status_code}", False)
-                current: dict[int, str] = {}
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    ev = json.loads(line[5:])
-                    t = ev.get("type")
-                    if t == "content_block_start" and ev["content_block"]["type"] == "tool_use":
-                        current[ev["index"]] = ev["content_block"]["id"]
-                        yield ProviderEvent(
-                            "tool_start", tool_id=ev["content_block"]["id"], tool_name=ev["content_block"]["name"]
-                        )
-                    elif t == "content_block_delta":
-                        d = ev["delta"]
-                        if d["type"] == "text_delta":
-                            yield ProviderEvent("text", text=d["text"])
-                        elif d["type"] == "thinking_delta":
-                            yield ProviderEvent("reasoning", text=d.get("thinking", ""))
-                        elif d["type"] == "input_json_delta":
-                            yield ProviderEvent("tool_args", tool_id=current[ev["index"]], text=d["partial_json"])
-                    elif t == "content_block_stop" and ev["index"] in current:
-                        yield ProviderEvent("tool_end", tool_id=current.pop(ev["index"]))
-                    elif t == "message_delta" and "usage" in ev:
-                        yield ProviderEvent("usage", usage={"output_tokens": ev["usage"].get("output_tokens", 0)})
-                    elif t == "message_start":
-                        u = ev["message"].get("usage", {})
-                        yield ProviderEvent("usage", usage={"input_tokens": u.get("input_tokens", 0)})
-                    elif t == "message_stop":
-                        yield ProviderEvent("stop")
+        message_stop_seen = False
+        try:
+            async with self._client() as client:
+                async with client.stream("POST", self.url, headers=headers, json=body) as resp:
+                    if resp.status_code in (429, 529):
+                        raise ProviderError("RATE_LIMITED", True)
+                    if resp.status_code >= 500:
+                        # A 5xx may be emitted after the service accepted/billed the
+                        # request. Do not infer non-execution from an error status.
+                        raise ProviderError("OUTCOME_UNKNOWN", False)
+                    if resp.status_code >= 400:
+                        raise ProviderError(f"HTTP_{resp.status_code}", False)
+                    current: dict[int, str] = {}
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            ev = json.loads(line[5:])
+                        except ValueError as exc:
+                            raise ProviderError("INVALID_STREAM", False) from exc
+                        t = ev.get("type")
+                        if t == "content_block_start" and ev["content_block"]["type"] == "tool_use":
+                            current[ev["index"]] = ev["content_block"]["id"]
+                            yield ProviderEvent(
+                                "tool_start", tool_id=ev["content_block"]["id"], tool_name=ev["content_block"]["name"]
+                            )
+                        elif t == "content_block_delta":
+                            d = ev["delta"]
+                            if d["type"] == "text_delta":
+                                yield ProviderEvent("text", text=d["text"])
+                            elif d["type"] == "thinking_delta":
+                                yield ProviderEvent("reasoning", text=d.get("thinking", ""))
+                            elif d["type"] == "input_json_delta":
+                                yield ProviderEvent("tool_args", tool_id=current[ev["index"]], text=d["partial_json"])
+                        elif t == "content_block_stop" and ev["index"] in current:
+                            yield ProviderEvent("tool_end", tool_id=current.pop(ev["index"]))
+                        elif t == "message_delta" and "usage" in ev:
+                            yield ProviderEvent("usage", usage={"output_tokens": ev["usage"].get("output_tokens", 0)})
+                        elif t == "message_start":
+                            u = ev["message"].get("usage", {})
+                            yield ProviderEvent("usage", usage={"input_tokens": u.get("input_tokens", 0)})
+                        elif t == "message_stop":
+                            message_stop_seen = True
+                            yield ProviderEvent("stop")
+        except httpx.TransportError as exc:
+            # Once request bytes may have left the Gateway, transport loss is
+            # UNKNOWN. Never feed it to the ordinary transient retry path.
+            raise ProviderError("OUTCOME_UNKNOWN", False) from exc
+        if not message_stop_seen:
+            raise ProviderError("INCOMPLETE_STREAM", False)

@@ -65,7 +65,9 @@ class StopPolicy:
             for n in (self.max_cycles, self.max_cost_micro_usd, self.max_tokens, self.max_tool_calls)
         ):
             raise Rejected("FINITE_LIMITS_REQUIRED")
-        if self.target_count is not None and (not isinstance(self.target_count, int) or self.target_count < 1):
+        if self.target_count is not None and (
+            not isinstance(self.target_count, int) or isinstance(self.target_count, bool) or self.target_count < 1
+        ):
             raise Rejected("BAD_TARGET")
         parse_utc(self.deadline_utc)
 
@@ -152,15 +154,133 @@ class Campaign:
     @classmethod
     def from_wire(cls, value: dict[str, object]) -> Campaign:
         """Deserialize a trusted store record (not external requests)."""
-        raw_plan = dict(value["plan"])  # type: ignore[arg-type]
-        policy = StopPolicy(**dict(raw_plan.pop("policy")))  # type: ignore[arg-type]
-        plan = CampaignPlan(policy=policy, **raw_plan)  # type: ignore[arg-type]
-        rest = {k: v for k, v in value.items() if k != "plan"}
-        rest["cycles"] = [Cycle(**x) for x in rest["cycles"]]  # type: ignore[union-attr]
-        rest["effects"] = [Effect(**x) for x in rest["effects"]]  # type: ignore[union-attr]
-        rest["outbox"] = [Dispatch(**x) for x in rest["outbox"]]  # type: ignore[union-attr]
-        rest["events"] = [Audit(**x) for x in rest["events"]]  # type: ignore[union-attr]
-        return cls(plan=plan, **rest)  # type: ignore[arg-type]
+        raw_plan = dict(_as_mapping(value["plan"], "plan"))
+        raw_policy = dict(_as_mapping(raw_plan.pop("policy"), "policy"))
+        policy = StopPolicy(
+            max_cycles=_as_int(raw_policy["max_cycles"], "max_cycles"),
+            deadline_utc=_as_str(raw_policy["deadline_utc"], "deadline_utc"),
+            max_cost_micro_usd=_as_int(raw_policy["max_cost_micro_usd"], "max_cost_micro_usd"),
+            max_tokens=_as_int(raw_policy["max_tokens"], "max_tokens"),
+            max_tool_calls=_as_int(raw_policy["max_tool_calls"], "max_tool_calls"),
+            target_count=(
+                _as_int(raw_policy["target_count"], "target_count")
+                if raw_policy.get("target_count") is not None
+                else None
+            ),
+        )
+        plan = CampaignPlan(
+            campaign_id=_as_str(raw_plan["campaign_id"], "campaign_id"),
+            tenant_id=_as_str(raw_plan["tenant_id"], "tenant_id"),
+            goal_revision=_as_str(raw_plan["goal_revision"], "goal_revision"),
+            policy=policy,
+            cost_per_cycle=_as_int(raw_plan["cost_per_cycle"], "cost_per_cycle"),
+            tokens_per_cycle=_as_int(raw_plan["tokens_per_cycle"], "tokens_per_cycle"),
+            tools_per_cycle=_as_int(raw_plan["tools_per_cycle"], "tools_per_cycle"),
+        )
+        cycles = [
+            Cycle(
+                cycle_id=_as_str(item["cycle_id"], "cycle_id"),
+                logical_work_item_id=_as_str(item["logical_work_item_id"], "logical_work_item_id"),
+                phase=Phase(_as_str(item["phase"], "phase")),
+                started=_as_bool(item["started"], "started"),
+                result=ResultState(_as_str(item["result"], "result")) if item.get("result") is not None else None,
+                evidence_refs=[
+                    _as_str(ref, "evidence_ref") for ref in _as_list(item.get("evidence_refs", []), "evidence_refs")
+                ],
+                gate_ref=_as_str(item["gate_ref"], "gate_ref") if item.get("gate_ref") is not None else None,
+                usage_finalized=_as_bool(item.get("usage_finalized", False), "usage_finalized"),
+            )
+            for item in (_as_mapping(x, "cycle") for x in _as_list(value.get("cycles", []), "cycles"))
+        ]
+        effects = [
+            Effect(
+                intent_id=_as_str(item["intent_id"], "intent_id"),
+                cycle_id=_as_str(item["cycle_id"], "cycle_id"),
+                target_ref=_as_str(item["target_ref"], "target_ref"),
+                state=EffectState(_as_str(item["state"], "effect_state")),
+                evidence_ref=(
+                    _as_str(item["evidence_ref"], "evidence_ref") if item.get("evidence_ref") is not None else None
+                ),
+            )
+            for item in (_as_mapping(x, "effect") for x in _as_list(value.get("effects", []), "effects"))
+        ]
+        outbox = [
+            Dispatch(
+                dedupe_key=_as_str(item["dedupe_key"], "dedupe_key"),
+                cycle_id=_as_str(item["cycle_id"], "cycle_id"),
+                control_version=_as_int(item["control_version"], "control_version"),
+                status=_as_str(item["status"], "dispatch_status"),
+            )
+            for item in (_as_mapping(x, "dispatch") for x in _as_list(value.get("outbox", []), "outbox"))
+        ]
+        events = [
+            Audit(
+                seq=_as_int(item["seq"], "seq"),
+                at_utc=_as_str(item["at_utc"], "at_utc"),
+                reason=_as_str(item["reason"], "reason"),
+                state=_as_str(item["state"], "audit_state"),
+                cycle_id=_as_str(item["cycle_id"], "cycle_id") if item.get("cycle_id") is not None else None,
+            )
+            for item in (_as_mapping(x, "audit") for x in _as_list(value.get("events", []), "events"))
+        ]
+        raw_receipts = _as_mapping(value.get("control_receipts", {}), "control_receipts")
+        receipts: dict[str, tuple[str, int]] = {}
+        for cmd_id, pair_obj in raw_receipts.items():
+            pair = _as_list(pair_obj, "control_receipt")
+            if len(pair) != 2:
+                raise Rejected("CORRUPT_WIRE_RECORD")
+            receipts[_as_str(cmd_id, "command_id")] = (_as_str(pair[0], "action"), _as_int(pair[1], "version"))
+        return cls(
+            plan=plan,
+            state=CampaignState(_as_str(value["state"], "state")),
+            control_version=_as_int(value["control_version"], "control_version"),
+            cycles=cycles,
+            effects=effects,
+            outbox=outbox,
+            events=events,
+            completed_items=[
+                _as_str(x, "completed_item") for x in _as_list(value.get("completed_items", []), "completed_items")
+            ],
+            spent_cost=_as_int(value.get("spent_cost", 0), "spent_cost"),
+            spent_tokens=_as_int(value.get("spent_tokens", 0), "spent_tokens"),
+            spent_tools=_as_int(value.get("spent_tools", 0), "spent_tools"),
+            held_cost=_as_int(value.get("held_cost", 0), "held_cost"),
+            held_tokens=_as_int(value.get("held_tokens", 0), "held_tokens"),
+            held_tools=_as_int(value.get("held_tools", 0), "held_tools"),
+            authorized=_as_bool(value.get("authorized", True), "authorized"),
+            pending_approval=_as_bool(value.get("pending_approval", False), "pending_approval"),
+            control_receipts=receipts,
+        )
+
+
+def _as_mapping(value: object, field_name: str) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
+        raise Rejected(f"CORRUPT_WIRE_{field_name.upper()}")
+    return value
+
+
+def _as_list(value: object, field_name: str) -> list[object]:
+    if not isinstance(value, list):
+        raise Rejected(f"CORRUPT_WIRE_{field_name.upper()}")
+    return value
+
+
+def _as_str(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise Rejected(f"CORRUPT_WIRE_{field_name.upper()}")
+    return value
+
+
+def _as_int(value: object, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise Rejected(f"CORRUPT_WIRE_{field_name.upper()}")
+    return value
+
+
+def _as_bool(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise Rejected(f"CORRUPT_WIRE_{field_name.upper()}")
+    return value
 
 
 T = TypeVar("T")
@@ -296,13 +416,16 @@ class CampaignController:
         if self.clock.now() >= parse_utc(plan.policy.deadline_utc):
             raise Rejected("DEADLINE_REACHED")
         c = Campaign(plan=plan)
-        self._reserve(c, f"{plan.campaign_id}:1", first_work_item_id)
+        if self._reserve(c, f"{plan.campaign_id}:1", first_work_item_id) is None:
+            raise Rejected("INSUFFICIENT_INITIAL_BUDGET")
         self.store.create(c)
 
     def dispatch_pending(self, campaign_id: str) -> int:
         """Outbox relay; duplicates across crash are expected and MUST be deduped by Queue/Task admission."""
         sent = 0
-        for item in self.store.read(campaign_id).outbox:
+        campaign = self.store.read(campaign_id)
+        tenant_id = campaign.plan.tenant_id
+        for item in campaign.outbox:
             if item.status != "PENDING":
                 continue
 
@@ -317,7 +440,7 @@ class CampaignController:
                 continue
             # This call must be a trusted Task/Run intent; it MUST NOT itself send external effects.
             accepted = self.queue.request_run(
-                tenant_id=self.store.read(campaign_id).plan.tenant_id,
+                tenant_id=tenant_id,
                 campaign_id=campaign_id,
                 cycle_id=item.cycle_id,
                 dedupe_key=item.dedupe_key,
@@ -326,13 +449,17 @@ class CampaignController:
             if not accepted:
                 continue
 
-            def ack(c: Campaign, item: Dispatch = item) -> None:
+            def ack(c: Campaign, item: Dispatch = item) -> bool:
+                if c.control_version != item.control_version or c.state != CampaignState.ACTIVE:
+                    return False
                 for pending in c.outbox:
-                    if pending.dedupe_key == item.dedupe_key:
+                    if pending.dedupe_key == item.dedupe_key and pending.status == "PENDING":
                         pending.status = "SENT"
+                        return True
+                return False
 
-            self.store.mutate(campaign_id, ack)
-            sent += 1
+            if self.store.mutate(campaign_id, ack):
+                sent += 1
         return sent
 
     def admit_cycle(self, campaign_id: str, cycle_id: str, expected_control_version: int) -> bool:
@@ -420,6 +547,13 @@ class CampaignController:
             if c.state == CampaignState.STOP_REQUESTED:
                 if not barrier:
                     c.state = CampaignState.STOPPED
+            elif c.state in (
+                CampaignState.REVOKED,
+                CampaignState.STOPPED,
+                CampaignState.LIMIT_REACHED,
+                CampaignState.TARGET_REACHED,
+            ):
+                pass
             elif state == EffectState.UNKNOWN:
                 c.state = CampaignState.WAITING_RECONCILIATION
             elif c.state == CampaignState.WAITING_RECONCILIATION and not barrier and c.authorized:
@@ -440,9 +574,10 @@ class CampaignController:
         tokens: int | None,
         tools: int | None,
         next_work_item_id: str | None = None,
+        expected_control_version: int | None = None,
     ) -> ResultState:
         def op(c: Campaign) -> ResultState:
-            self._gate(c)
+            self._gate(c, expected_control_version)
             cycle = self._cycle(c, cycle_id)
             if cycle.phase == Phase.DONE:
                 return cycle.result or ResultState.UNVERIFIED
@@ -551,6 +686,13 @@ class CampaignController:
                 else:
                     c.state = CampaignState.ACTIVE
             elif action == "APPROVAL_PENDING":
+                if c.state not in (
+                    CampaignState.ACTIVE,
+                    CampaignState.PAUSED,
+                    CampaignState.WAITING_INPUT,
+                    CampaignState.WAITING_APPROVAL,
+                ):
+                    raise Rejected("INVALID_APPROVAL_TRANSITION")
                 c.pending_approval, c.state = True, CampaignState.WAITING_APPROVAL
             elif action == "APPROVAL_GRANTED":
                 c.pending_approval = False

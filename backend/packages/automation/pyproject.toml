@@ -11,7 +11,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aiagent_automation"]
-
-# Not a member of the locked STEP 3 backend until AI-07 root workspace integration.
-[tool.uv]
-managed = false

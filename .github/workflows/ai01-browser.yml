@@ -4,6 +4,11 @@ on:
     paths:
       - 'backend/packages/browser/**'
       - '.github/workflows/ai01-browser.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/packages/browser/**'
+      - '.github/workflows/ai01-browser.yml'
   workflow_dispatch:
 permissions:
   contents: read

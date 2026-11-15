@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/memory-update.schema.json",
+  "title": "MemoryUpdateCommandV1",
+  "description": "Owner-authenticated metadata update (recipient and/or expiry). Memory identity and content references are immutable.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "expectedRevision": {
+      "$ref": "common.schema.json#/$defs/PositiveInt64"
+    },
+    "recipient": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_.:-]{1,256}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expiresAt": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "expectedRevision"
+  ]
+}

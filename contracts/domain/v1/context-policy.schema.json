@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/choko510/aiagent-md/contracts/domain/v1/context-policy.schema.json",
+  "title": "ContextPolicyCommandV1",
+  "description": "Owner-authenticated switch for the Context model path. No environment variable can enable it on its own.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "recipient": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_.:-]{1,256}$"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "expectedRecordVersion": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/NonNegativeInt64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "recipient",
+    "model",
+    "enabled"
+  ]
+}

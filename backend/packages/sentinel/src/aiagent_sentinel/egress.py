@@ -127,6 +127,22 @@ class EgressProxy:
             ip = addrs[0]
             ur, uw = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=self.connect_timeout_s)
             await asyncio.to_thread(self.sentinel.receipt, tenant, pid, "ALLOWED", "FORWARDED", host, port, ip)
+            # Static Model Gateway egress has no Tool permit/receipt, so emit a
+            # metadata-only record at the actual forwarding boundary. Never log
+            # URL paths, request headers/body, provider keys or proxy tokens.
+            log.info(
+                "egress forwarded",
+                extra={
+                    "fields": {
+                        "identity": identity,
+                        "scheme": scheme,
+                        "host": host,
+                        "port": port,
+                        "method": method,
+                        "authorization": "permit" if dest.needs_permit else "static_destination",
+                    }
+                },
+            )
             if method == "CONNECT":
                 w.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await w.drain()
