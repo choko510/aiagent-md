@@ -40,6 +40,9 @@ from aiagent_core import config
 
 GENESIS = "0" * 64
 _EVENT_KINDS = frozenset({"created", "revoked", "updated", "consent_revoked"})
+# Kinds that revoke or change consent. `created` never revives a revocation, so the
+# live egress coverage check ignores it.
+REVOCATION_KINDS = frozenset({"revoked", "updated", "consent_revoked"})
 _LOCAL_LOCKS: dict[str, threading.RLock] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
 
@@ -82,6 +85,28 @@ class Tombstone:
     recorded_at: str
     prev: str
     chain_head: str
+
+
+@dataclass(frozen=True)
+class TombstoneSnapshot:
+    """Verified external log state; `max_revocation_generation` is the newest revocation.
+
+    `heads[i]` is the chain head of generation `i + 1`, so a caller can prove that a
+    database-recorded generation still names the same history (a restored-to-another-
+    point log with the same key is otherwise indistinguishable by generation alone).
+    """
+
+    generation: int
+    chain_head: str
+    max_revocation_generation: int
+    heads: tuple[str, ...] = ()
+
+    def head_at(self, generation: int) -> str | None:
+        if generation == 0:
+            return GENESIS
+        if generation < 0 or generation > self.generation or len(self.heads) < generation:
+            return None
+        return self.heads[generation - 1]
 
 
 class TombstoneLog:
@@ -292,6 +317,61 @@ class TombstoneLog:
         entries = self.read()
         payload = self._seal_payload(entries)
         return payload["generation"], payload["chain_head"]
+
+    def snapshot(self) -> TombstoneSnapshot:
+        """One consistent, HMAC-verified read of the external log for egress admission.
+
+        `read()` already refuses a broken chain, a seal ahead of the log, or a seal
+        that does not match the last event, so any inconsistency raises and the
+        caller must deny. This is the authority the Model Gateway consults before
+        every Context/Memory send.
+        """
+        with self._lock():
+            return self._snapshot_unlocked(self._read_unlocked())
+
+    def read_with_snapshot(self) -> tuple[list[Tombstone], TombstoneSnapshot]:
+        """Entries and their verified snapshot from a single read (no double I/O)."""
+        with self._lock():
+            entries = self._read_unlocked()
+            return entries, self._snapshot_unlocked(entries)
+
+    def snapshot_readonly(self) -> TombstoneSnapshot:
+        """Verify the log without writing a lock file (read-only gateway mount).
+
+        A concurrent append is a complete fsynced line written before the seal. If a
+        read races the tail, generation and seal disagree; retry once, then fail
+        closed. Denying a send is always safe; accepting an unverified log is not.
+        """
+        last: TombstoneError | None = None
+        for _ in range(2):
+            try:
+                entries = self._read_events_unlocked()
+                seal = self._read_seal_unlocked()
+            except TombstoneError as exc:
+                last = exc
+                continue
+            actual = self._seal_payload(entries)
+            if seal == actual:
+                return self._snapshot_unlocked(entries)
+            last = TombstoneError("external tombstone high-watermark does not match event log")
+        raise last or TombstoneError("external tombstone log is unreadable")
+
+    @staticmethod
+    def _snapshot_unlocked(entries: list[Tombstone]) -> TombstoneSnapshot:
+        payload: SealPayload = {
+            "generation": entries[-1].generation if entries else 0,
+            "chain_head": entries[-1].chain_head if entries else GENESIS,
+        }
+        last_revocation = 0
+        for entry in entries:
+            if entry.kind in REVOCATION_KINDS and entry.generation > last_revocation:
+                last_revocation = entry.generation
+        return TombstoneSnapshot(
+            payload["generation"],
+            str(payload["chain_head"]),
+            last_revocation,
+            tuple(entry.chain_head for entry in entries),
+        )
 
     def append(
         self,

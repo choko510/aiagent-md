@@ -24,7 +24,7 @@ import psycopg
 from aiagent_core.db import Database, Row, connect
 
 from .audit import record_audit
-from .memory_tombstones import Tombstone, TombstoneLog, watermark_payload
+from .memory_tombstones import REVOCATION_KINDS, Tombstone, TombstoneLog, watermark_payload
 
 
 class RestoreReconcileError(RuntimeError):
@@ -40,7 +40,14 @@ class ReconcileReport:
     reflected: int
 
 
-def _apply(c: psycopg.Connection[Row], entries: list[Tombstone], *, reconciled_by: str) -> ReconcileReport:
+def _apply(
+    c: psycopg.Connection[Row],
+    entries: list[Tombstone],
+    *,
+    reconciled_by: str,
+    log: TombstoneLog | None = None,
+    expected_chain_head: str | None = None,
+) -> ReconcileReport:
     control = c.execute("SELECT restore_incarnation, dispatch_paused FROM agent.schema_control").fetchone()
     if control is None:
         raise RestoreReconcileError("schema_control is missing")
@@ -141,6 +148,21 @@ def _apply(c: psycopg.Connection[Row], entries: list[Tombstone], *, reconciled_b
         replayed += 1
     payload = watermark_payload(entries)
     generation = payload["generation"]
+    # Cover the newest replayed revocation so Memory egress can resume after the
+    # operator reconciliation. Without this the gateway would keep denying every
+    # send because the restored database watermark is behind the external log.
+    last_revocation = 0
+    last_revocation_head = ""
+    for entry in entries:
+        if entry.kind in REVOCATION_KINDS and entry.generation > last_revocation:
+            last_revocation = entry.generation
+            last_revocation_head = entry.chain_head
+    if last_revocation > 0:
+        c.execute(
+            "UPDATE agent.memory_tombstone_coverage SET covered_revocation_generation=%s, chain_head=%s,"
+            " updated_at=now() WHERE singleton AND covered_revocation_generation <= %s",
+            (last_revocation, last_revocation_head, last_revocation),
+        )
     c.execute(
         "INSERT INTO agent.memory_restore_state(restore_incarnation,external_generation,tombstone_chain_head,"
         " observed_at,reconciled_by) VALUES (%s,%s,%s,%s,%s)"
@@ -166,25 +188,54 @@ def _apply(c: psycopg.Connection[Row], entries: list[Tombstone], *, reconciled_b
             target_ref=f"incarnation:{incarnation}",
             detail={"generation": generation, "replayed": replayed, "reflected": reflected},
         )
+    if (
+        log is not None
+        and expected_chain_head is not None
+        and log.snapshot_readonly().chain_head != expected_chain_head
+    ):
+        raise RestoreReconcileError("external tombstone log advanced during reconciliation; run memory-reconcile again")
     return ReconcileReport(incarnation, generation, str(payload["chain_head"]), replayed, reflected)
 
 
 def reconcile(db: Database, log: TombstoneLog, *, reconciled_by: str) -> ReconcileReport:
     if not reconciled_by or len(reconciled_by) > 200:
         raise RestoreReconcileError("a reconciling operator identity is required")
-    entries = log.read()
+    entries, snapshot = log.read_with_snapshot()
     with db.tx() as c:
-        return _apply(c, entries, reconciled_by=reconciled_by)
+        report = _apply(
+            c,
+            entries,
+            reconciled_by=reconciled_by,
+            log=log,
+            expected_chain_head=snapshot.chain_head,
+        )
+    # Re-read after the database commit. An append that raced the replay leaves a
+    # revocation the restored database does not reflect, so the watermark we just
+    # wrote would be a lie. Fail and require a second reconciliation instead of
+    # reporting a generation that is already stale.
+    after = log.snapshot()
+    if after.chain_head != snapshot.chain_head:
+        raise RestoreReconcileError("external tombstone log advanced during reconciliation; run memory-reconcile again")
+    return report
 
 
 def reconcile_owner(owner_dsn: str, log: TombstoneLog, *, reconciled_by: str) -> ReconcileReport:
     """Operator CLI variant: migration-owner connection (no RLS restrictions)."""
     if not reconciled_by or len(reconciled_by) > 200:
         raise RestoreReconcileError("a reconciling operator identity is required")
-    entries = log.read()
+    entries, snapshot = log.read_with_snapshot()
     conn = connect(owner_dsn)
     try:
         with conn.transaction():
-            return _apply(conn, entries, reconciled_by=reconciled_by)
+            report = _apply(
+                conn,
+                entries,
+                reconciled_by=reconciled_by,
+                log=log,
+                expected_chain_head=snapshot.chain_head,
+            )
     finally:
         conn.close()
+    if log.snapshot().chain_head != snapshot.chain_head:
+        raise RestoreReconcileError("external tombstone log advanced during reconciliation; run memory-reconcile again")
+    return report

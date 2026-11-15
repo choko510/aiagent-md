@@ -13,7 +13,7 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-from aiagent_core import config
+from aiagent_core import config, memory_tombstones
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_core.logging import register_secret, setup
@@ -199,13 +199,32 @@ def main_model() -> None:
         raise SystemExit(2)
     # Static recipient consent is a deployment fact (data-processing agreement); the
     # per-user grant is separate and is re-checked in the database on every admission.
-    consent = {tuple(x.split(":", 1)) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x}
+    consent = {
+        (a, b) for x in os.environ.get("AIAGENT_MODEL_CONSENT", "").split(",") if ":" in x for a, b in [x.split(":", 1)]
+    }
     db = Database(dsn, max_size=8, name="model_gateway")
     ring = load_key_ring()
     for key in ring.keys.values():
         register_secret(key.hex())
     context_key = ring
-    gw = ModelGateway(db, providers, routes, consent=consent, secrets=secrets, context_key=context_key)  # type: ignore[arg-type]
+    # The external tombstone log is a Memory egress authority, not only a restore
+    # input. Without it the gateway still starts (ordinary model calls keep
+    # working) but every Context/Memory send is denied.
+    tombstone_log = None
+    try:
+        tombstone_log = memory_tombstones.log_from_env()
+    except (memory_tombstones.TombstoneError, config.ConfigError) as exc:
+        if config.profile() == "production":
+            print(f"model_gateway: Memory egress disabled: {type(exc).__name__}", file=sys.stderr)
+    gw = ModelGateway(  # type: ignore[arg-type]
+        db,
+        providers,
+        routes,
+        consent=consent,
+        secrets=secrets,
+        context_key=context_key,
+        tombstone_log=tombstone_log,
+    )
     gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
     srv = build_model_server(
         db,

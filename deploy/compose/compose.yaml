@@ -178,7 +178,10 @@ services:
     image: aiagent/gateways:${TAG:-dev}
     networks: [db, rpc]  # provider traffic goes through sentinel's egress proxy on the rpc network
     depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
-    secrets: [model_gateway_dsn, model_gateway_rpc_keys, context_artifact_keys, anthropic_api_key, egress_model_token]
+    secrets: [
+      model_gateway_dsn, model_gateway_rpc_keys, context_artifact_keys, anthropic_api_key, egress_model_token,
+      memory_tombstone_hmac_key,
+    ]
     environment:
       <<: *env
       AIAGENT_MODEL_GATEWAY_DSN_FILE: /run/secrets/model_gateway_dsn
@@ -189,6 +192,12 @@ services:
       AIAGENT_EGRESS_PROXY_MODEL: http://sentinel:3128
       AIAGENT_EGRESS_MODEL_TOKEN_FILE: /run/secrets/egress_model_token
       AIAGENT_MODEL_CONSENT: ${AIAGENT_MODEL_CONSENT:-}
+      # Memory egress authority: without this log and HMAC key the gateway denies
+      # every Context/Memory send (ordinary model calls are unaffected).
+      AIAGENT_MEMORY_TOMBSTONE_LOG: /var/lib/aiagent/memory-tombstones/memory.jsonl
+      AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY_FILE: /run/secrets/memory_tombstone_hmac_key
+    volumes:
+      - memory_tombstones:/var/lib/aiagent/memory-tombstones:ro
     command: ["python", "-m", "aiagent_gateways.servers", "model"]
     deploy: {resources: {limits: {cpus: "1", memory: 512m, pids: 256}}}
 

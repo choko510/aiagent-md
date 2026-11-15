@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from aiagent_context import Anchor, AnchorKind, ContextRequest, ContextService, ModelBudget, SourceInput
@@ -479,9 +481,89 @@ def test_unavailable_memory_authority_never_calls_provider(
     )
 
 
-def test_restore_refuses_old_memory_but_allows_user_revocation() -> None:
-    from datetime import UTC, datetime, timedelta
+def test_unavailable_external_tombstone_denies_memory_egress(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    """The external log is an admission authority, not just a restore input.
 
+    A deployment can have a healthy database and still be unable to prove that a
+    revocation survives a PITR (missing log, rolled back volume, or an append whose
+    commit failed). Memory bytes must not reach a provider in that state.
+    """
+    from aiagent_core.memory_tombstones import TombstoneLog
+
+    _, scope, store, memory_id, plan = build_context(dbs, tenant)
+    sent: list[bool] = []
+
+    def provider() -> FakeModelProvider:
+        p = FakeModelProvider()
+        original = p.stream
+
+        async def track(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            sent.append(True)
+            async for event in original(*args, **kwargs):
+                yield event
+
+        p.stream = track  # type: ignore[method-assign]
+        return p
+
+    def gateway(log: TombstoneLog | None) -> ModelGateway:
+        return ModelGateway(
+            dbs["model_gateway"],
+            {"fake": provider()},
+            {"fake-gateway": [Route("fake", "fake-1")]},
+            consent={(scope.tenant_id, "fake")},
+            context_key=b"k" * 32,
+            tombstone_log=log,
+        )
+
+    def dispatches() -> int:
+        return int(
+            dbs["owner"].one("SELECT count(*) AS n FROM agent.context_dispatches WHERE run_id=%s", (scope.run_id,))["n"]
+        )
+
+    def send(gw: ModelGateway) -> None:
+        asyncio.run(gw.complete_context(store._claim, int(plan.committed_head)))
+
+    # 1. No authority configured: deny before any provider call.
+    with pytest.raises(RpcError, match="MEMORY_TOMBSTONE_UNAVAILABLE"):
+        send(gateway(None))
+    assert not sent and dispatches() == 0
+
+    # 2. Configured but uninitialized log: deny.
+    with pytest.raises(RpcError, match="MEMORY_TOMBSTONE_UNAVAILABLE"):
+        send(gateway(TombstoneLog(tmp_path / "absent" / "memory.jsonl", integrity_key=b"h" * 32)))
+    assert not sent and dispatches() == 0
+
+    # 3. Verified log holding a revocation PostgreSQL never committed: deny until an
+    #    operator reconciles, instead of assuming the append took effect.
+    key = b"h" * 32
+    path = tmp_path / "memory.jsonl"
+    log = TombstoneLog(path, integrity_key=key)
+    log.initialize()
+    event = log.append(
+        kind="revoked",
+        tenant_id=scope.tenant_id,
+        owner_id=scope.owner_id,
+        task_id=scope.task_id,
+        memory_id=memory_id,
+        revision=2,
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    with pytest.raises(RpcError, match="MEMORY_TOMBSTONE_UNAVAILABLE"):
+        send(gateway(TombstoneLog(path, integrity_key=key)))
+    assert not sent and dispatches() == 0
+
+    # 4. Covering it exactly as the API does inside its transaction clears the denial.
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "UPDATE agent.memory_tombstone_coverage SET covered_revocation_generation=%s, chain_head=%s",
+            (event.generation, event.chain_head),
+        )
+    try:
+        send(gateway(TombstoneLog(path, integrity_key=key)))
+    except RpcError as exc:
+        assert "MEMORY_TOMBSTONE_UNAVAILABLE" not in str(exc)
     from aiagent_context.models import SafeStop, Scope
     from aiagent_core import admin, commands
     from aiagent_gateways.context_artifacts import PostgresArtifactStore

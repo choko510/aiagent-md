@@ -64,6 +64,41 @@ def _owner_scope(c: psycopg.Connection[Row], scope: Scope, task_id: str, *, allo
     _bind(c, scope.tenant_id, scope.user_id, task_id)
 
 
+def _cover_tombstone(c: psycopg.Connection[Row], event: Any) -> None:
+    """Record, inside the same transaction, that this external generation is applied.
+
+    The Model Gateway denies new Memory egress while the external log holds a
+    revocation generation beyond this watermark, so an append whose database
+    transaction failed can never be mistaken for an applied revocation. Commits
+    may arrive out of order; the watermark never regresses.
+    """
+    c.execute(
+        "UPDATE agent.memory_tombstone_coverage SET covered_revocation_generation=%s, chain_head=%s,"
+        " updated_at=now() WHERE singleton AND covered_revocation_generation <= %s",
+        (int(event.generation), str(event.chain_head), int(event.generation)),
+    )
+
+
+def _tombstone_for(tombstone_log: Any) -> Any:
+    """Resolve the external log: an explicit argument wins, else the environment.
+
+    Every revocation path must use the same log the Gateway verifies, otherwise a
+    revocation committed to PostgreSQL leaves an uncovered external generation and
+    egress stays denied. Outside the test profile a missing log is still a hard
+    error, not an implicit "skip the append".
+    """
+    if tombstone_log is not None:
+        return tombstone_log
+    from .memory_tombstones import TombstoneError, log_from_env
+
+    try:
+        return log_from_env(require_initialized=False)
+    except (TombstoneError, config.ConfigError):
+        if config.profile() == "test":
+            return None
+        raise
+
+
 def _lock_epoch(c: psycopg.Connection[Row], scope: Scope, task_id: str) -> int:
     c.execute(
         "INSERT INTO agent.memory_scope_epochs(tenant_id,owner_user_id,task_id) VALUES (%s,%s,%s)"
@@ -132,6 +167,35 @@ def create_memory(
     idempotency_key: str,
 ) -> tuple[str, int]:
     """Persist user-authorized references only; never auto-approve model-generated memory."""
+    memory_id, epoch, _created = create_memory_with_status(
+        db,
+        scope,
+        task_id=task_id,
+        source_ref=source_ref,
+        projection_ref=projection_ref,
+        recipient=recipient,
+        observed_at=observed_at,
+        expires_at=expires_at,
+        consent_basis=consent_basis,
+        idempotency_key=idempotency_key,
+    )
+    return memory_id, epoch
+
+
+def create_memory_with_status(
+    db: Database,
+    scope: Scope,
+    *,
+    task_id: str,
+    source_ref: str,
+    projection_ref: str,
+    recipient: str,
+    observed_at: datetime,
+    expires_at: datetime,
+    consent_basis: str,
+    idempotency_key: str,
+) -> tuple[str, int, bool]:
+    """Persist user-authorized references only and report whether a new row was created."""
     if (
         not is_uuid7(source_ref)
         or not is_uuid7(projection_ref)
@@ -163,7 +227,7 @@ def create_memory(
             },
         )
         if prior is not None:
-            return str(prior["response_json"]["memory_id"]), int(prior["response_json"]["epoch"])
+            return str(prior["response_json"]["memory_id"]), int(prior["response_json"]["epoch"]), False
         _lock_epoch(c, scope, task_id)
         for artifact_id in (source_ref, projection_ref):
             row = c.execute(
@@ -215,7 +279,7 @@ def create_memory(
         )
         epoch = _epoch(c, scope, task_id)
         _idem_end(c, scope, "memory.create", idempotency_key, {"memory_id": memory_id, "epoch": epoch})
-    return memory_id, epoch
+    return memory_id, epoch, True
 
 
 def revoke_memory(
@@ -234,7 +298,8 @@ def revoke_memory(
     """
     if not is_uuid7(memory_id):
         raise CommandError("MEMORY_SCOPE_DENIED", 404)
-    if tombstone_log is None and config.profile() != "test":
+    tombstone_log = _tombstone_for(tombstone_log)
+    if tombstone_log is None:
         # Without the external append-only record a PITR restore could resurrect
         # this revocation, so production refuses to revoke.
         raise CommandError("MEMORY_TOMBSTONE_UNAVAILABLE", 503)
@@ -249,14 +314,17 @@ def revoke_memory(
         ).fetchone()
         if row is not None:
             if tombstone_log is not None:
-                tombstone_log.append(
-                    kind="revoked",
-                    tenant_id=scope.tenant_id,
-                    owner_id=scope.user_id,
-                    task_id=task_id,
-                    memory_id=memory_id,
-                    revision=int(row["revision"]),
-                    recorded_at=datetime.now(UTC).isoformat(),
+                _cover_tombstone(
+                    c,
+                    tombstone_log.append(
+                        kind="revoked",
+                        tenant_id=scope.tenant_id,
+                        owner_id=scope.user_id,
+                        task_id=task_id,
+                        memory_id=memory_id,
+                        revision=int(row["revision"]),
+                        recorded_at=datetime.now(UTC).isoformat(),
+                    ),
                 )
             _insert_revision(
                 c,
@@ -309,6 +377,11 @@ def update_memory(
         or expected_revision < 1
     ):
         raise CommandError("INVALID_MEMORY", 422)
+    tombstone_log = _tombstone_for(tombstone_log)
+    if tombstone_log is None:
+        # Update tombstones are treated as conservative revocations on PITR replay,
+        # so metadata updates require the same external authority as revocations.
+        raise CommandError("MEMORY_TOMBSTONE_UNAVAILABLE", 503)
     with db.tx(tenant=scope.tenant_id) as c:
         _owner_scope(c, scope, task_id)
         _lock_epoch(c, scope, task_id)
@@ -324,12 +397,16 @@ def update_memory(
         new_recipient = recipient if recipient is not None else str(current["recipient"])
         new_expiry = expires_at if expires_at is not None else current["expires_at"]
         revision = int(current["revision"]) + 1
-        c.execute(
+        updated = c.execute(
             "UPDATE agent.memory_records SET recipient=%s, expires_at=%s, revision=%s, updated_at=now()"
-            " WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s AND id=%s",
-            (new_recipient, new_expiry, revision, scope.tenant_id, scope.user_id, task_id, memory_id),
-        )
-        if tombstone_log is not None:
+            " WHERE tenant_id=%s AND owner_user_id=%s AND task_id=%s AND id=%s AND (%s)::timestamptz > clock_timestamp()"
+            " RETURNING revision",
+            (new_recipient, new_expiry, revision, scope.tenant_id, scope.user_id, task_id, memory_id, new_expiry),
+        ).fetchone()
+        if updated is None:
+            raise CommandError("MEMORY_EXPIRED", 422)
+        _cover_tombstone(
+            c,
             tombstone_log.append(
                 kind="updated",
                 tenant_id=scope.tenant_id,
@@ -338,7 +415,8 @@ def update_memory(
                 memory_id=memory_id,
                 revision=revision,
                 recorded_at=datetime.now(UTC).isoformat(),
-            )
+            ),
+        )
         _insert_revision(
             c,
             scope,
@@ -464,7 +542,10 @@ def revoke_memory_consent(db: Database, scope: Scope, *, recipient: str, tombsto
     """Withdraw one recipient grant, persisting the tombstone before the DB update."""
     if not _RECIPIENT.fullmatch(recipient):
         raise CommandError("INVALID_MEMORY", 422)
-    if tombstone_log is None and config.profile() != "test":
+    tombstone_log = _tombstone_for(tombstone_log)
+    if tombstone_log is None:
+        # A consent withdrawal is a revocation: without the external record a PITR
+        # restore could resurrect the grant.
         raise CommandError("MEMORY_TOMBSTONE_UNAVAILABLE", 503)
     with db.tx(tenant=scope.tenant_id) as c:
         if not control.scope_active(c, scope.tenant_id, scope.user_id, scope.workspace_id):
@@ -478,14 +559,17 @@ def revoke_memory_consent(db: Database, scope: Scope, *, recipient: str, tombsto
             raise CommandError("MEMORY_CONSENT_NOT_FOUND", 404)
         revision = int(row["record_version"]) + 1
         if tombstone_log is not None:
-            tombstone_log.append(
-                kind="consent_revoked",
-                tenant_id=scope.tenant_id,
-                owner_id=scope.user_id,
-                task_id="__owner_consent__",
-                memory_id=recipient,
-                revision=revision,
-                recorded_at=datetime.now(UTC).isoformat(),
+            _cover_tombstone(
+                c,
+                tombstone_log.append(
+                    kind="consent_revoked",
+                    tenant_id=scope.tenant_id,
+                    owner_id=scope.user_id,
+                    task_id="__owner_consent__",
+                    memory_id=recipient,
+                    revision=revision,
+                    recorded_at=datetime.now(UTC).isoformat(),
+                ),
             )
         c.execute(
             "UPDATE agent.memory_consents SET revoked_at=now(), record_version=%s"

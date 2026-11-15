@@ -8,7 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
 from aiagent_development.contracts import (
+    CommitEvidence,
     EffectUnknown,
     ExecutionRequest,
     InvalidEvidence,
@@ -360,9 +362,7 @@ def test_repair_round_reaches_code_ready_after_failed_test(env):
 
 
 def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
-    from aiagent_development.contracts import CommitEvidence
-
-    root, scope, run, auth, scm, sandbox, _, flow = env
+    root, scope, run, auth, scm, _sandbox, _, flow = env
     _prepare(env)
     _test(env, "unit")
     _test(env, "security")

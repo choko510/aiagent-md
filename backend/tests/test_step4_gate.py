@@ -69,7 +69,14 @@ def test_capabilities_requires_authenticated_scope() -> None:
         assert payload["schemaVersion"] == "1.0"
         assert payload["capabilities"] == capability_snapshot()
         assert {x["component"] for x in payload["capabilities"]} == set(FEATURES)
-        assert all(x["integrationState"] == "INTEGRATION_PENDING" for x in payload["capabilities"])
+        by_feature = {x["component"]: x for x in payload["capabilities"]}
+        for name in ("context", "memory"):
+            assert by_feature[name]["integrationState"] == "INTEGRATED_CONDITIONAL"
+            assert by_feature[name]["memoryEgressPath"] == "OWNER_ENABLED_CONTEXT"
+        for name in ("browser", "development", "automation", "device"):
+            assert by_feature[name]["integrationState"] == "INTEGRATION_PENDING"
+            assert by_feature[name]["memoryEgressPath"] == "NONE"
+        # No record may claim autonomous external action or readiness.
         assert all(x["externalActionsEnabled"] is False for x in payload["capabilities"])
         assert all(x["hostVerified"] is False for x in payload["capabilities"])
         assert all(x["productionReady"] is False for x in payload["capabilities"])

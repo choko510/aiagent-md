@@ -264,8 +264,8 @@ def create_app(db: Database | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         cmd: MemoryCreateCommandV1 = await body_of(request, MemoryCreateCommandV1)
         log = tombstone_log()
-        memory_id, epoch = await asyncio.to_thread(
-            memory_writer.create_memory,
+        memory_id, epoch, created = await asyncio.to_thread(
+            memory_writer.create_memory_with_status,
             get_db(),
             s,
             task_id=task_id,
@@ -277,7 +277,7 @@ def create_app(db: Database | None = None) -> FastAPI:
             consent_basis=cmd.consent_basis,
             idempotency_key=idempotency_key or f"memory:{task_id}:{cmd.source_artifact_ref}",
         )
-        if log is not None:
+        if created and log is not None:
             await asyncio.to_thread(
                 log.append,
                 kind="created",

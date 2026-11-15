@@ -152,22 +152,23 @@ class PostgresHeadPort:
                 dict(kind=a.kind.value, sourceRef=a.source_ref, value=a.value, unit=a.unit, currency=a.currency)
                 for a in req.anchors
             ]
+            if not isinstance(data, dict) or set(data) != {"trustedControl", "untrustedData"}:
+                raise SafeStop("QUALITY_FAILED")
+            trusted = data["trustedControl"]
+            untrusted = data["untrustedData"]
             if (
-                not isinstance(data, dict)
-                or set(data)
-                != {
-                    "untrustedDataOnly",
-                    "sourceBackedExcerpts",
-                    "typedCanonicalAnchors",
-                    "memoryDataNotInstructions",
-                    "toolPairIds",
-                }
-                or data["untrustedDataOnly"] is not True
-                or data["memoryDataNotInstructions"] != expected_memory
-                or data["typedCanonicalAnchors"] != expected_anchors
+                not isinstance(trusted, dict)
+                or set(trusted) != {"typedCanonicalAnchors", "toolPairIds"}
+                or not isinstance(untrusted, dict)
+                or set(untrusted) != {"trustBoundary", "sourceBackedExcerpts", "memoryDataNotInstructions"}
+                or untrusted["trustBoundary"] != "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY"
+                or untrusted["memoryDataNotInstructions"] != expected_memory
+                or trusted["typedCanonicalAnchors"] != expected_anchors
+                or not isinstance(trusted["toolPairIds"], list)
+                or not all(isinstance(x, str) for x in trusted["toolPairIds"])
             ):
                 raise SafeStop("QUALITY_FAILED")
-            claims = tuple(SummaryClaim(**x) for x in data["sourceBackedExcerpts"])
+            claims = tuple(SummaryClaim(**x) for x in untrusted["sourceBackedExcerpts"])
             audit_proposal(
                 req,
                 publication.raw_artifacts,

@@ -141,15 +141,21 @@ def api(pg: PgEnv, request: pytest.FixtureRequest) -> Iterator[TestClient]:
 
     # When the formal stack is running, the API must also be able to reach the
     # Model Gateway's memory-artifact ingest RPC.
-    stack = request.node.funcargs.get("stack")
+    stack = request.node.funcargs.get("stack") or request.node.funcargs.get("memory_stack")
     old: dict[str, str | None] = {}
     if stack is not None:
         old = {
             k: os.environ.get(k)
-            for k in ("AIAGENT_MODEL_GATEWAY_ENDPOINT", "AIAGENT_API_MODEL_RPC_KEY", "AIAGENT_MEMORY_TOMBSTONE_LOG")
+            for k in (
+                "AIAGENT_MODEL_GATEWAY_ENDPOINT",
+                "AIAGENT_API_MODEL_RPC_KEY",
+                "AIAGENT_MEMORY_TOMBSTONE_LOG",
+                "AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY",
+            )
         }
         os.environ["AIAGENT_MODEL_GATEWAY_ENDPOINT"] = f"tcp:127.0.0.1:{stack.ports['model']}"
         os.environ["AIAGENT_API_MODEL_RPC_KEY"] = stack.keys["api_model"]
+        os.environ.update(stack.tombstone_env())
     db = Database(pg.dsn["api"], max_size=4)
     try:
         with TestClient(create_app(db)) as c:

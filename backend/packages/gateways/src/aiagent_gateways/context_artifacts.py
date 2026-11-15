@@ -13,7 +13,7 @@ import base64
 import binascii
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import psycopg
@@ -41,14 +41,28 @@ def artifact_aad(tenant_id: str, owner_id: str, task_id: str, run_id: str, ref: 
 class PostgresArtifactStore:
     """Internal ArtifactStorePort; scope derives from a validated claim, never from model text."""
 
-    def __init__(self, db: Database, claim: control.Claim, key: bytes | KeyRing, *, expires_at: datetime) -> None:
+    def __init__(
+        self,
+        db: Database,
+        claim: control.Claim,
+        key: bytes | KeyRing,
+        *,
+        expires_at: datetime | None = None,
+        ttl: timedelta | None = None,
+    ) -> None:
         ring = key if isinstance(key, KeyRing) else KeyRing.single(key)
-        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+        if ttl is not None:
+            if ttl <= timedelta(0):
+                raise ValueError("positive ttl is required")
+            if expires_at is not None:
+                raise ValueError("specify expires_at or ttl, not both")
+        elif expires_at is None or expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise ValueError("timezone-aware expiry is required")
         self._db = db
         self._claim = claim
         self._ring = ring
         self._expires_at = expires_at
+        self._ttl = ttl
 
     @property
     def key_ring(self) -> KeyRing:
@@ -87,6 +101,7 @@ class PostgresArtifactStore:
         ).encode()
         nonce = os.urandom(12)
         encrypted = self._ring.cipher(key_id).encrypt(nonce, envelope, self._aad(artifact_id, scope.run_id, key_id))
+        expires_at = datetime.now(UTC) + self._ttl if self._ttl is not None else self._expires_at
         try:
             with self._db.tx() as c:
                 row = c.execute(
@@ -99,7 +114,7 @@ class PostgresArtifactStore:
                         len(body),
                         nonce,
                         encrypted,
-                        self._expires_at,
+                        expires_at,
                         key_id,
                     ),
                 ).fetchone()

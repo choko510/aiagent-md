@@ -49,6 +49,9 @@ class Stack:
     receiver_hang: bool = False
     owner_dsn: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
+    # External Memory tombstone log: an admission authority, so the stack owns one.
+    tombstone_key: str = field(default_factory=lambda: (b"t" * 32).hex())
+    tombstone_log_path: Path | None = None
     # Provider-compatible (local, non-paid) server used by the real-provider code path.
     provider_port: int = field(default_factory=free_port)
     provider_mode: str = "ok"
@@ -63,6 +66,24 @@ class Stack:
         self.permit_key = secrets.token_hex(32)
         self.provider_secret = "sk-fake-provider-SECRET-" + secrets.token_hex(6)
         self.log = self.tmp / "receiver.jsonl"
+        self.tombstone_log_path = self.tmp / "memory-tombstones" / "memory.jsonl"
+
+    def tombstone_env(self) -> dict[str, str]:
+        return {
+            "AIAGENT_MEMORY_TOMBSTONE_LOG": str(self.tombstone_log_path),
+            "AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY": self.tombstone_key,
+        }
+
+    def init_tombstone_log(self) -> None:
+        from aiagent_core.memory_tombstones import TombstoneLog
+
+        if not self.tombstone_log_path.exists():  # type: ignore[union-attr]
+            TombstoneLog(self.tombstone_log_path, integrity_key=bytes.fromhex(self.tombstone_key)).initialize()
+
+    def tombstone_log(self) -> Any:
+        from aiagent_core.memory_tombstones import TombstoneLog
+
+        return TombstoneLog(self.tombstone_log_path, integrity_key=bytes.fromhex(self.tombstone_key))
 
     # ---------------------------------------------------------------- env
     def base_env(self) -> dict[str, str]:
@@ -85,6 +106,7 @@ class Stack:
                     "AIAGENT_ANTHROPIC_URL": f"http://127.0.0.1:{self.provider_port}/v1/messages",
                     "AIAGENT_EGRESS_PROXY_MODEL": f"http://127.0.0.1:{p['egress']}",
                     "AIAGENT_EGRESS_MODEL_TOKEN": self.static_model_token,
+                    **self.tombstone_env(),
                 }
             )  # the provider secret never leaves the gateway
         elif name == "tool":
@@ -209,6 +231,7 @@ class Stack:
     def start_all(self) -> Stack:
         if self.owner_dsn:
             self.tune_queue()
+        self.init_tombstone_log()
         for n in ("receiver", "provider", "sentinel", "tool", "model"):
             self.start(n)
         return self

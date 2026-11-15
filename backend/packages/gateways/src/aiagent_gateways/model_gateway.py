@@ -21,6 +21,7 @@ from typing import Any
 from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
+from aiagent_core.memory_tombstones import TombstoneLog
 from aiagent_domain import sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOL_SPECS, INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
@@ -29,6 +30,7 @@ from .context_dispatch import ContextAdmission
 from .context_keys import KeyRing
 from .privacy import StreamPrivacyGate
 from .providers import FakeModelProvider, ProviderError
+from .tombstone_authority import verify as verify_tombstones
 
 log = logging.getLogger("aiagent.model_gateway")
 STREAMS_RE = ("main", "summarize")
@@ -44,6 +46,33 @@ def fault(point: str) -> None:
 class Route:
     provider: str
     provider_model: str
+
+
+def _coerce_message_content(raw: object) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+            else:
+                raise TypeError("unsupported message content block")
+        return "".join(parts)
+    raise TypeError("unsupported message content")
+
+
+def _extract_context_payload(messages: list[dict[str, Any]]) -> str:
+    if len(messages) != 1 or messages[0].get("kind") != "user":
+        raise RpcError("CONTEXT_UNAVAILABLE", "invalid context message envelope")
+    content = messages[0].get("content")
+    if not isinstance(content, str) or not content:
+        raise RpcError("CONTEXT_UNAVAILABLE", "empty context payload")
+    return content
 
 
 @dataclass
@@ -74,7 +103,7 @@ class SealedModelRequest:
             clean.append(
                 {
                     "kind": m["kind"],
-                    "content": str(m.get("content") or ""),
+                    "content": _coerce_message_content(m.get("content")),
                     "tool_calls": [
                         {"id": str(t["id"]), "name": str(t["name"]), "args": dict(t["args"])}
                         for t in m.get("tool_calls") or []
@@ -132,12 +161,17 @@ class ModelGateway:
         max_retries: int = 2,
         cancel_poll_s: float = 0.5,
         context_key: bytes | KeyRing | None = None,
+        tombstone_log: TombstoneLog | None = None,
     ) -> None:
         self.db, self.providers, self.routes = db, providers, routes
         self.consent = consent or set()
         self.secrets = secrets or []
         self.max_retries, self.cancel_poll_s = max_retries, cancel_poll_s
         self.context_key = context_key
+        # External revocation authority. Loaded once at start-up: a missing or
+        # unreadable log must stop Memory egress, and re-reading the environment on
+        # every admission would make the authority depend on per-request state.
+        self.tombstone_log = tombstone_log
 
     def recover_orphans(self, older_than_s: float) -> int:
         """Attempts left RESERVED/STREAMING by a crashed gateway: the provider may have been called (and billed), so
@@ -234,7 +268,12 @@ class ModelGateway:
                     ):
                         reason = "BUDGET_EXHAUSTED"
                 if reason is None and context is not None:
-                    context.lock_and_validate(c, run, req.messages[0]["content"], req.model)
+                    # External revocation authority, verified in the same transaction
+                    # that reserves budget and records the dispatch. The database
+                    # alone cannot prove a PITR-safe revocation, so an unreadable,
+                    # rolled-back, diverged or uncovered external log denies here.
+                    verify_tombstones(c, req.claim, self.tombstone_log)
+                    context.lock_and_validate(c, run, _extract_context_payload(req.messages), req.model)
                 if reason is None and not cached:
                     c.execute(
                         "UPDATE agent.runs SET tokens_reserved = tokens_reserved + %s, model_calls = model_calls + 1,"
@@ -347,19 +386,39 @@ class ModelGateway:
         attempt_id = await asyncio.to_thread(self._admit, req, cached=False, est_tokens=est)
         try:
             gate, provider_attempts = await self._stream_with_retry(req, attempt_id, on_delta)
-        except RpcError as e:
-            known_provider_rejection = e.code == "PROVIDER_RATE_LIMITED" or e.code.startswith("PROVIDER_HTTP_")
+        except BaseException as e:
+            if isinstance(e, asyncio.CancelledError):
+                await asyncio.shield(
+                    asyncio.to_thread(
+                        self._release,
+                        req,
+                        attempt_id,
+                        est,
+                        "CANCELLED",
+                        {},
+                        "UNKNOWN",
+                        reason_code="CANCELLED",
+                    )
+                )
+                raise
+            known_provider_rejection = isinstance(e, RpcError) and (
+                e.code == "PROVIDER_RATE_LIMITED" or e.code.startswith("PROVIDER_HTTP_")
+            )
             await asyncio.to_thread(
                 self._release,
                 req,
                 attempt_id,
                 est,
-                "CANCELLED" if e.code == "CANCELLED" else "FAILED",
+                "CANCELLED" if isinstance(e, RpcError) and e.code == "CANCELLED" else "FAILED",
                 {},
                 "UNKNOWN",
                 reason_code="PROVIDER_REJECTED" if known_provider_rejection else "PROVIDER_UNKNOWN",
             )
-            raise
+            if isinstance(e, RpcError):
+                raise
+            if not isinstance(e, Exception):
+                raise
+            raise _rpc(e) from None
         result = gate.finish()
         usage, quality = result.usage, "MEASURED" if result.usage else "ESTIMATED"
         if not usage:
@@ -476,6 +535,11 @@ class ModelGateway:
             est = len(payload) // 4 + 1024
             attempt_id = await asyncio.to_thread(self._admit, req, cached=False, est_tokens=est, context=context)
         except RpcError as exc:
+            if exc.code == "MEMORY_TOMBSTONE_UNAVAILABLE":
+                # The external revocation authority could not be verified. Falling
+                # back to the ordinary path would silently drop Context; surface the
+                # authority failure so the run stops and an operator repairs the log.
+                raise
             raise RpcError("CONTEXT_PRE_ADMISSION", exc.code) from None
         fault("context_after_admit")
         try:
@@ -500,10 +564,32 @@ class ModelGateway:
                 payload,
             )
             return {"message": message, "replayed": False}
-        except Exception as exc:
-            await asyncio.to_thread(self._release, req, attempt_id, est, "FAILED", {}, "UNKNOWN")
-            await asyncio.to_thread(context.finish, attempt_id, "UNKNOWN")
+        except BaseException as exc:
+            cancelled = isinstance(exc, asyncio.CancelledError) or (
+                isinstance(exc, RpcError) and exc.code == "CANCELLED"
+            )
+            release_status = "CANCELLED" if cancelled else "FAILED"
+            release_reason = "CANCELLED" if cancelled else "PROVIDER_UNKNOWN"
+
+            def _cleanup_context_unknown() -> None:
+                self._release(
+                    req,
+                    attempt_id,
+                    est,
+                    release_status,
+                    {},
+                    "UNKNOWN",
+                    reason_code=release_reason,
+                )
+                context.finish(attempt_id, "UNKNOWN")
+
+            if isinstance(exc, asyncio.CancelledError):
+                await asyncio.shield(asyncio.to_thread(_cleanup_context_unknown))
+                raise
+            await asyncio.to_thread(_cleanup_context_unknown)
             if isinstance(exc, RpcError):
+                raise
+            if not isinstance(exc, Exception):
                 raise
             raise _rpc(exc) from None
 
@@ -523,6 +609,7 @@ class ModelGateway:
         with self.db.tx() as c:
             if context is not None:
                 run = control.check_current(c, req.claim, for_update=True)
+                verify_tombstones(c, req.claim, self.tombstone_log)
                 context.lock_and_validate(c, run, context_payload, req.model)
             control.append_head(
                 c, req.claim, "assistant", message, writer="model_gateway", stream=req.stream, request_key=key

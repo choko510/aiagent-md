@@ -7,6 +7,12 @@ untrusted code merely because a Python package was installed.
 This gate is intentionally *not* controlled by an environment variable. A future
 adapter must provide audited runtime/ledger/tenant transactions and a separate
 integration change before any reserved tool can be exposed.
+
+`context` and `memory` now have a narrow, owner-gated egress path: the Runtime
+Worker may send an owner-approved Context HEAD through the Model Gateway. That is
+NOT external-action/tool authority and NOT production readiness. The projection
+reports those facts separately so operators do not read `INTEGRATION_PENDING` as
+"no bytes can leave the building".
 """
 
 from __future__ import annotations
@@ -21,6 +27,8 @@ FEATURES = (
     "automation",
     "device",
 )
+# Features with a real, owner-consent-gated path integrated into the normal Runtime Worker.
+_OWNER_GATED_EGRESS = frozenset({"context", "memory"})
 _RESERVED_PREFIXES = (*(f + "." for f in FEATURES), "step4.")
 _RESERVED_EXACT = frozenset(FEATURES) | {"step4"}
 
@@ -48,12 +56,21 @@ def require_step4_admission(tool: str) -> None:
 
 
 def capability_snapshot() -> list[dict[str, str | bool]]:
-    """Read-only UI projection; not proof of readiness, not an authorization token."""
+    """Read-only UI projection; not proof of readiness, not an authorization token.
+
+    `integrationState` describes code integration with the STEP 3 path.
+    `memoryEgressPath` describes whether Memory/Context bytes can reach an external
+    recipient when the owner enables it, separately from production readiness.
+    `externalActionsEnabled` stays False: this record grants no autonomous Tool or
+    external-action authority.
+    """
     return [
         {
             "component": name,
-            "integrationState": "INTEGRATION_PENDING",
+            "integrationState": "INTEGRATED_CONDITIONAL" if name in _OWNER_GATED_EGRESS else "INTEGRATION_PENDING",
+            "memoryEgressPath": "OWNER_ENABLED_CONTEXT" if name in _OWNER_GATED_EGRESS else "NONE",
             "externalActionsEnabled": False,
+            "ownerConsentRequired": True,
             "hostVerified": False,
             "productionReady": False,
         }

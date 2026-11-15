@@ -9,7 +9,7 @@ All row access goes through claim-bound database functions.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from hashlib import sha256
 from typing import Any
 
@@ -32,7 +32,7 @@ class ContextAdmission:
         self.db, self.claim, self.head = db, claim, head
         self.scope = Scope(claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id)
         # The deadline is only for writes. This object performs read-only artifact access.
-        self.store = PostgresArtifactStore(db, claim, key, expires_at=datetime.now(UTC) + timedelta(days=1))
+        self.store = PostgresArtifactStore(db, claim, key, ttl=timedelta(days=1))
         self.memory = PostgresMemoryRepository(db, claim, self.store)
         self.manifest: dict[str, Any] = {}
 
@@ -67,7 +67,17 @@ class ContextAdmission:
             for ref in m["rawRefs"]:
                 self.store._get(self.scope, ref, "raw")
             data = json.loads(payload)
-            memory_data = data["memoryDataNotInstructions"]
+            if not isinstance(data, dict) or set(data) != {"trustedControl", "untrustedData"}:
+                raise RpcError("STALE_CONTEXT")
+            trusted = data["trustedControl"]
+            untrusted = data["untrustedData"]
+            if (
+                not isinstance(trusted, dict)
+                or not isinstance(untrusted, dict)
+                or untrusted.get("trustBoundary") != "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY"
+            ):
+                raise RpcError("STALE_CONTEXT")
+            memory_data = untrusted["memoryDataNotInstructions"]
             if len(memory_data) != len(m["memory"]):
                 raise RpcError("STALE_MEMORY")
             for item, frozen in zip(memory_data, m["memory"], strict=True):
