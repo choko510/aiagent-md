@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -11,10 +13,30 @@ from aiagent_context.models import Scope as ContextScope
 from aiagent_context.models import SourceInput
 from aiagent_core import commands, control, memory_writer
 from aiagent_core.db import Database
+from aiagent_core.memory_tombstones import TombstoneLog
 from aiagent_domain import uuid7
 from aiagent_gateways.context_artifacts import PostgresArtifactStore
 
 pytestmark = pytest.mark.pg
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _memory_tombstone_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Provision an external tombstone authority matching the module-scoped memory DB."""
+    key = b"t" * 32
+    path = tmp_path_factory.mktemp("memory-pg-tombstones") / "memory.jsonl"
+    TombstoneLog(path, integrity_key=key).initialize()
+    prev = {k: os.environ.get(k) for k in ("AIAGENT_MEMORY_TOMBSTONE_LOG", "AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY")}
+    os.environ["AIAGENT_MEMORY_TOMBSTONE_LOG"] = str(path)
+    os.environ["AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY"] = key.hex()
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @pytest.fixture(scope="module")

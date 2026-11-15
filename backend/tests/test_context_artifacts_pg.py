@@ -322,7 +322,7 @@ def test_key_ring_rotation_keeps_old_decryption_and_fails_closed_when_missing(
 
 
 def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(
-    dbs: dict[str, Database], tenant: dict[str, str]
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
 ) -> None:
     store, scope, claim = make_store(dbs, tenant)
     orphan = store.put_raw(scope, SourceInput("orphan", "2026-01-01T00:00:00Z", b"unreferenced", locator_ref="o:0"))
@@ -366,8 +366,14 @@ def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(
 
     # Once the Memory itself is revoked, its artifact reference is no longer live
     # and the terminal-run orphan collector can erase the residual ciphertext.
+    from aiagent_core.memory_tombstones import TombstoneLog
+
+    tombstone_log = TombstoneLog(tmp_path / "memory.jsonl", integrity_key=b"h" * 32)
+    tombstone_log.initialize()
     memory_id = dbs["owner"].one("SELECT id FROM agent.memory_records WHERE task_id=%s", (scope.task_id,))["id"]
-    memory_writer.revoke_memory(dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id)
+    memory_writer.revoke_memory(
+        dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id, tombstone_log=tombstone_log
+    )
     removed = dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
     assert removed == 1
     row = dbs["owner"].one(
