@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aiagent Device — Mock</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-icon">A</div><span>aiagent Device</span></div>
+      <div class="nav active">デバイスの状態</div>
+      <div class="nav">権限と安全性</div>
+      <div class="nav">操作履歴</div>
+      <div class="sidebar-bottom"><span class="dot amber"></span> Mock環境 / Cloud未接続</div>
+    </aside>
+    <main>
+      <header><div><p class="overline">DESKTOP CLIENT · WINDOWS FIRST</p><h1>デバイスの管理</h1><p class="sub">ローカルPCへの操作は、明示的な認可が得られるまで開始されません。</p></div><span class="mode">SIMULATOR</span></header>
+      <section class="hero card">
+        <div class="hero-top"><div class="device-image">▣</div><div><div class="eyebrow">このPC</div><h2>未登録のデバイス</h2><p id="connection" class="status">状態を確認しています…</p></div></div>
+        <p class="warn">この画面はMockです。Cloudとの接続・PC操作・Chrome操作・USB操作は実装されていません。</p>
+        <div class="actions">
+          <button id="pair" disabled title="実Device Gateway接続は未実装">PCを接続（未実装）</button>
+          <button id="perform" disabled title="未接続かつ未承認のため操作できません">デバイス操作（無効）</button>
+          <button id="stop" class="danger">ローカル停止</button>
+          <button id="revoke" class="secondary">Mock端末を無効化</button>
+        </div>
+      </section>
+      <section class="columns">
+        <div class="card">
+          <h3>許可されたCapability</h3>
+          <p class="muted">Cloud操作権限はありません。以下はローカルのシミュレーター機能です。</p>
+          <ul id="caps"><li>確認中…</li></ul>
+          <p class="small">Desktop・Chrome・Build・ADB の実Adapter: <strong>OFF</strong></p>
+        </div>
+        <div class="card">
+          <h3>実行待ちの操作</h3>
+          <div class="empty"><span>✓</span><div id="pending">なし</div></div>
+          <p class="muted">START_PERMITを取得しない限り、状態変更は拒否します。</p>
+        </div>
+      </section>
+      <section class="card">
+        <div class="section-top"><h3>監査結果</h3><span class="small">ローカルMock履歴のみ</span></div>
+        <ol id="audit"><li>読み込み中…</li></ol>
+      </section>
+      <footer>実Cua / BrowserMCP / Build / ADB は未接続 · Cloudの承認結果を代弁しません</footer>
+    </main>
+  </div>
+</body>
+</html>
