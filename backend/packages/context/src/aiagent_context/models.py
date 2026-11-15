@@ -35,10 +35,14 @@ def stable_digest(value: object) -> str:
 
 # Deliberately conservative. A broader DLP/redaction adapter is a production prerequisite.
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+\S+"),
+    re.compile(r"(?i)\b(?:authorization|proxy-authorization)\s*[:=]\s*(?:bearer|basic)\s+\S+"),
     re.compile(r"(?i)\b(?:cookie|set-cookie)\s*:"),
-    re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^\s,;]+"),
-    re.compile(r"(?i)\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-zA-Z0-9]{16,})\b"),
+    re.compile(
+        r'(?i)(?:"|\b)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client_secret|password|secret)"?\s*[:=]\s*["\']?[^\s,;}"\']+'
+    ),
+    re.compile(r"(?i)\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-zA-Z0-9]{16,}|xox[baprs]-[a-zA-Z0-9-]{10,})\b"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
 )
 
 
@@ -141,10 +145,13 @@ class MemoryProjection:
     source_epoch: str
     trust_tier: str = "MEMORY_DATA"
     record_revision: int = 1
+    expires_at: str | None = None
 
     def __post_init__(self) -> None:
         if self.trust_tier != "MEMORY_DATA" or not self.ref or not self.source_refs or self.record_revision < 1:
             raise SafeStop("UNAUTHORIZED_MEMORY_PROJECTION")
+        if self.expires_at is not None:
+            utc_instant(self.expires_at)
         forbid_secrets(self.text)
 
 

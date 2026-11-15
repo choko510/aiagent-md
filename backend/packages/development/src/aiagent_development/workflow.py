@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .contracts import (
+    CommitEvidence,
     Cycle,
     EffectUnknown,
     ExecutionRequest,
@@ -70,8 +71,7 @@ class DevelopmentWorkflow:
         self._current(current.scope, current.run)
         return current
 
-    def _save(self, old: Cycle, **changes: object) -> Cycle:
-        updated = replace(old, version=old.version + 1, **changes)  # type: ignore[arg-type]
+    def _save(self, old: Cycle, updated: Cycle) -> Cycle:
         self.store.save(old, updated)
         return updated
 
@@ -93,7 +93,7 @@ class DevelopmentWorkflow:
         self._phase(c, Phase.REQUESTED)
         if plan.goal_revision != c.run.goal_revision or plan.change_request_ref != c.change_request_ref:
             raise StaleReference("plan does not match canonical goal")
-        return self._save(c, phase=Phase.PLANNED, plan=plan)
+        return self._save(c, replace(c, version=c.version + 1, phase=Phase.PLANNED, plan=plan))
 
     def execute(self, scope: ProjectScope, cycle_id: str, request: ExecutionRequest) -> Cycle:
         """Execute only through Cell port; persist bounded, hash-addressed receipt."""
@@ -101,9 +101,12 @@ class DevelopmentWorkflow:
         self._phase(c, Phase.PLANNED, Phase.EXECUTING, Phase.COMMITTED, Phase.REVIEWING)
         if request.project != c.scope or request.run != c.run or c.plan is None or request.plan_ref != c.plan.plan_ref:
             raise ScopeDenied("execution does not belong to this plan/fence")
-        if c.commit is None and request.kind == "test":
+        if c.phase in (Phase.PLANNED, Phase.EXECUTING) and request.kind == "test":
             raise StateConflict("test must be bound to an immutable committed SHA")
-        target = c.commit.commit_sha if c.commit else c.scope.base_sha
+        if c.commit is not None and c.phase in (Phase.COMMITTED, Phase.REVIEWING):
+            target = c.commit.commit_sha
+        else:
+            target = c.commit.commit_sha if c.commit is not None else c.scope.base_sha
         self.gateway.require_operation(c.scope, c.run, f"sandbox.{request.kind}", target, request.intent_ref)
         receipt = self.sandbox.execute(request)
         if (
@@ -111,7 +114,11 @@ class DevelopmentWorkflow:
             or receipt.intent_ref != request.intent_ref
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
-            or (c.commit is not None and receipt.source_commit_sha != c.commit.commit_sha)
+            or (
+                c.commit is not None
+                and c.phase in (Phase.COMMITTED, Phase.REVIEWING)
+                and receipt.source_commit_sha != c.commit.commit_sha
+            )
         ):
             raise InvalidEvidence("sandbox receipt mismatches immutable request/SHA/fence")
         if receipt.test_id is not None:
@@ -119,19 +126,29 @@ class DevelopmentWorkflow:
                 raise InvalidEvidence("unknown or misleading test ID")
             if any(r.test_id == receipt.test_id for r in c.tests):
                 raise StateConflict("duplicate test receipt; start a new review round")
-        if c.commit is not None and request.kind == "test" and not receipt.test_id:
+        if c.phase in (Phase.COMMITTED, Phase.REVIEWING) and request.kind == "test" and not receipt.test_id:
             raise InvalidEvidence("test receipt missing required test ID")
         tests = (*c.tests, receipt) if receipt.test_id else c.tests
-        phase = Phase.EXECUTING if c.commit is None else Phase.REVIEWING
-        return self._save(c, phase=phase, tests=tests, execution_receipts=(*c.execution_receipts, receipt))
+        phase = Phase.EXECUTING if c.phase in (Phase.PLANNED, Phase.EXECUTING) else Phase.REVIEWING
+        return self._save(
+            c,
+            replace(
+                c,
+                version=c.version + 1,
+                phase=phase,
+                tests=tests,
+                execution_receipts=(*c.execution_receipts, receipt),
+            ),
+        )
 
     def submit_patch(self, scope: ProjectScope, cycle_id: str, patch: PatchArtifact, repo_root: Path) -> Cycle:
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.EXECUTING)
+        expected_parent = c.commit.commit_sha if c.commit is not None else scope.base_sha
         if (
             patch.run != c.run
             or patch.workspace_revision != scope.workspace_revision
-            or patch.parent_sha != scope.base_sha
+            or patch.parent_sha != expected_parent
         ):
             raise StaleReference("patch lineage/workspace/base differs")
         validate_manifest_paths(repo_root, patch.paths)
@@ -160,18 +177,18 @@ class DevelopmentWorkflow:
             raise StaleReference("branch HEAD moved: CAS conflict")
         # Gateway does fresh authoritative checks immediately before dispatch.
         self.gateway.require_operation(c.scope, c.run, "git.commit", c.patch.parent_sha, intent_ref)
-        pending = self._save(c, phase=Phase.COMMIT_PENDING)
+        pending = self._save(c, replace(c, version=c.version + 1, phase=Phase.COMMIT_PENDING))
         try:
             result = self.git.commit_patch(c.scope, c.patch, c.patch.parent_sha, intent_ref, message)
         except EffectUnknown:
-            self._save(pending, phase=Phase.UNKNOWN_EXTERNAL_EFFECT)
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise
         except StaleReference:
-            self._save(pending, phase=Phase.BLOCKED)
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.BLOCKED))
             raise
         except Exception as exc:
             # A provider exception after dispatch may conceal a completed write.
-            self._save(pending, phase=Phase.UNKNOWN_EXTERNAL_EFFECT)
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider exception; reconcile remote operation") from exc
         # No blind retry if a network call may have been accepted but failed locally.
         if (
@@ -180,9 +197,9 @@ class DevelopmentWorkflow:
             or result.artifact_ref != c.patch.artifact_ref
             or self.git.head(scope) != result.commit_sha
         ):
-            self._save(pending, phase=Phase.UNKNOWN_EXTERNAL_EFFECT)
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider evidence cannot prove target commit; reconcile")
-        return self._save(pending, phase=Phase.COMMITTED, commit=result)
+        return self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.COMMITTED, commit=result))
 
     def review(self, scope: ProjectScope, cycle_id: str, verdict: ReviewVerdict) -> Cycle:
         c = self._load(scope, cycle_id)
@@ -200,7 +217,7 @@ class DevelopmentWorkflow:
             raise InvalidEvidence("reviewers must be independent and roles unique")
         reviews = (*c.reviews, verdict)
         phase = Phase.CODE_READY if self._gate(c, reviews) else Phase.REVIEWING
-        return self._save(c, reviews=reviews, phase=phase)
+        return self._save(c, replace(c, version=c.version + 1, reviews=reviews, phase=phase))
 
     def _ensure_review_head(self, c: Cycle) -> None:
         if c.commit is None or self.git.head(c.scope) != c.commit.commit_sha:
@@ -228,6 +245,48 @@ class DevelopmentWorkflow:
             for v in reviews
         )
 
+    def start_repair_round(self, scope: ProjectScope, cycle_id: str) -> Cycle:
+        """Start a new P0/P1/test repair round on the current committed SHA without losing diff history."""
+        c = self._load(scope, cycle_id)
+        self._phase(c, Phase.COMMITTED, Phase.REVIEWING)
+        self._ensure_review_head(c)
+        return self._save(
+            c,
+            replace(
+                c,
+                version=c.version + 1,
+                phase=Phase.EXECUTING,
+                tests=(),
+                reviews=(),
+                round_number=c.round_number + 1,
+            ),
+        )
+
+    def reconcile_commit(
+        self, scope: ProjectScope, cycle_id: str, observed_commit: CommitEvidence | None = None
+    ) -> Cycle:
+        """Resolve UNKNOWN_EXTERNAL_EFFECT deterministically from current remote/git head evidence."""
+        c = self._load(scope, cycle_id)
+        self._phase(c, Phase.UNKNOWN_EXTERNAL_EFFECT)
+        if c.patch is None:
+            raise StateConflict("missing patch for reconciliation")
+        head = self.git.head(scope)
+        if observed_commit is not None:
+            if (
+                head != observed_commit.commit_sha
+                or observed_commit.parent_sha != c.patch.parent_sha
+                or observed_commit.diff_sha256 != c.patch.diff_sha256
+                or observed_commit.artifact_ref != c.patch.artifact_ref
+            ):
+                raise StaleReference("observed commit does not match remote HEAD or pending patch")
+            return self._save(
+                c,
+                replace(c, version=c.version + 1, phase=Phase.COMMITTED, commit=observed_commit),
+            )
+        if head == c.patch.parent_sha:
+            return self._save(c, replace(c, version=c.version + 1, phase=Phase.BLOCKED))
+        raise StaleReference("remote branch state does not match pre-commit parent SHA")
+
     def assert_code_ready(self, scope: ProjectScope, cycle_id: str) -> Cycle:
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.CODE_READY)
@@ -238,13 +297,45 @@ class DevelopmentWorkflow:
 
     def push(self, scope: ProjectScope, cycle_id: str, *, intent_ref: str) -> str:
         """Optional operation, NEVER called implicitly from commit/review."""
+        if not intent_ref:
+            raise StateConflict("missing typed intent reference")
         c = self.assert_code_ready(scope, cycle_id)
-        assert c.commit is not None
+        if c.commit is None:
+            raise StateConflict("commit evidence required")
+        if c.push_receipt is not None:
+            raise StateConflict("push already recorded for this commit")
         self.gateway.require_operation(c.scope, c.run, "git.push", c.commit.commit_sha, intent_ref)
-        return self.git.push(c.scope, c.commit.commit_sha, intent_ref)
+        try:
+            receipt = self.git.push(c.scope, c.commit.commit_sha, intent_ref)
+        except (ScopeDenied, StaleReference, InvalidEvidence, StateConflict):
+            raise
+        except EffectUnknown:
+            self._save(c, replace(c, version=c.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise
+        except Exception as exc:
+            self._save(c, replace(c, version=c.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise EffectUnknown("push outcome unknown; reconcile remote branch") from exc
+        self._save(c, replace(c, version=c.version + 1, push_receipt=receipt))
+        return receipt
 
     def create_pr(self, scope: ProjectScope, cycle_id: str, *, intent_ref: str) -> str:
+        if not intent_ref:
+            raise StateConflict("missing typed intent reference")
         c = self.assert_code_ready(scope, cycle_id)
-        assert c.commit is not None
+        if c.commit is None:
+            raise StateConflict("commit evidence required")
+        if c.pr_receipt is not None:
+            raise StateConflict("PR already recorded for this commit")
         self.gateway.require_operation(c.scope, c.run, "git.pull_request.create", c.commit.commit_sha, intent_ref)
-        return self.git.create_pr(c.scope, c.commit.commit_sha, intent_ref)
+        try:
+            receipt = self.git.create_pr(c.scope, c.commit.commit_sha, intent_ref)
+        except (ScopeDenied, StaleReference, InvalidEvidence, StateConflict):
+            raise
+        except EffectUnknown:
+            self._save(c, replace(c, version=c.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise
+        except Exception as exc:
+            self._save(c, replace(c, version=c.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise EffectUnknown("PR creation outcome unknown; reconcile remote provider") from exc
+        self._save(c, replace(c, version=c.version + 1, pr_receipt=receipt))
+        return receipt

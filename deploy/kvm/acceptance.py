@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +20,11 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # Windows does not provide fcntl; KVM checks report False.
+    fcntl = None  # type: ignore[assignment]
+
 KVM_API_VERSION = 0xAE00
 EXPECTED_API_VERSION = 12
 BASE = ("HV-U01", "HV-U02", "JQ-SMOKE")
@@ -31,6 +35,7 @@ HOST = (
 )
 PROD = ("JQ-T12-1M", "JQ-T14", "JQ-T16", "REC-PITR", "REC-EFFECT-QUARANTINE", "OPERATOR-SIGNOFF")
 MAX_EVIDENCE_BYTES = 1_000_000
+MAX_XML_BYTES = 10_000_000
 
 
 def host_id() -> str:
@@ -46,15 +51,26 @@ def now_iso() -> str:
     return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
 
 
-def run_readonly(*args: str) -> tuple[bool, str]:
+def run_readonly(
+    *args: str,
+    max_bytes: int | None = MAX_EVIDENCE_BYTES,
+    env_override: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    env = {**os.environ, **env_override} if env_override else None
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=8, check=False)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=8, check=False, env=env)  # noqa: S603
     except (OSError, subprocess.TimeoutExpired):
         return False, ""
-    return p.returncode == 0, p.stdout[:MAX_EVIDENCE_BYTES] if p.returncode == 0 else ""
+    if p.returncode != 0:
+        return False, ""
+    if max_bytes is not None and len(p.stdout.encode("utf-8", errors="replace")) > max_bytes:
+        return False, ""
+    return True, p.stdout
 
 
 def kvm_api_available() -> bool:
+    if fcntl is None:
+        return False
     path = Path("/dev/kvm")
     try:
         if not stat.S_ISCHR(path.stat().st_mode):
@@ -96,28 +112,62 @@ def topology_report() -> dict[str, object]:
     states: dict[str, str] = {}
     uuids: dict[str, str] = {}
     for name in ("aiagent-control", "aiagent-exec"):
-        ok, xml = run_readonly("virsh", "--readonly", "--connect", "qemu:///system", "dumpxml", name)
+        ok, xml = run_readonly(
+            "virsh", "--readonly", "--connect", "qemu:///system", "dumpxml", name,
+            max_bytes=MAX_XML_BYTES,
+        )
         if not ok or not xml:
             return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
                     "checks": {"libvirt_dumpxml": False}, "hostId": host_id(), "recordedAt": now_iso()}
         xmls[name] = xml
-        state_ok, state = run_readonly("virsh", "--readonly", "--connect", "qemu:///system", "domstate", name)
-        uuid_ok, uid = run_readonly("virsh", "--readonly", "--connect", "qemu:///system", "domuuid", name)
+        state_ok, state = run_readonly(
+            "virsh", "--readonly", "--connect", "qemu:///system", "domstate", name,
+            env_override={"LC_ALL": "C"},
+        )
+        uuid_ok, uid = run_readonly(
+            "virsh", "--readonly", "--connect", "qemu:///system", "domuuid", name,
+            env_override={"LC_ALL": "C"},
+        )
         states[name] = state.strip().lower() if state_ok else "unknown"
         uuids[name] = uid.strip() if uuid_ok else ""
+    if any("<!DOCTYPE" in xml or "<!ENTITY" in xml for xml in xmls.values()):
+        return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
+                "checks": {"valid_libvirt_xml": False}, "hostId": host_id(), "recordedAt": now_iso()}
     try:
-        control, execution = (ET.fromstring(xmls[name]) for name in ("aiagent-control", "aiagent-exec"))
+        control, execution = (ET.fromstring(xmls[name]) for name in ("aiagent-control", "aiagent-exec"))  # noqa: S314
     except ET.ParseError:
         return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
                 "checks": {"valid_libvirt_xml": False}, "hostId": host_id(), "recordedAt": now_iso()}
 
     def sources(root: ET.Element) -> set[str]:
-        return {s for disk in root.findall("./devices/disk") for node in disk.findall("source")
-                if (s := node.get("file") or node.get("dev"))}
+        found: set[str] = set()
+        for disk in root.findall("./devices/disk"):
+            for node in disk.findall(".//source"):
+                if s := (node.get("file") or node.get("dev")):
+                    found.add(f"path:{s}")
+                elif name := node.get("name"):
+                    hosts = ",".join(
+                        f"{h.get('name', '')}:{h.get('port', '')}" for h in node.findall("host")
+                    )
+                    found.add(f"net:{node.get('protocol', '')}:{name}:{hosts}")
+                elif (pool := node.get("pool")) and (vol := node.get("volume")):
+                    found.add(f"vol:{pool}/{vol}")
+        return found
 
     def cid(root: ET.Element) -> str | None:
-        node = root.find("./devices/vsock/cid")
+        vsocks = root.findall("./devices/vsock")
+        if len(vsocks) != 1:
+            return None
+        node = vsocks[0].find("cid")
         return node.get("address") if node is not None and node.get("auto") == "no" else None
+
+    def has_forbidden_channel(root: ET.Element) -> bool:
+        return bool(
+            root.findall("./devices/interface")
+            or root.findall("./devices/shmem")
+            or root.findall("./devices/channel")
+            or [s for s in root.findall("./devices/serial") if s.get("type") in ("unix", "tcp", "udp")]
+        )
 
     checks = {
         "both_kvm_domains": all(root.get("type") == "kvm" for root in (control, execution)),
@@ -127,7 +177,7 @@ def topology_report() -> dict[str, object]:
                                 and uuids["aiagent-control"] != uuids["aiagent-exec"],
         "correct_domain_names": control.findtext("name") == "aiagent-control"
                                 and execution.findtext("name") == "aiagent-exec",
-        "execution_has_no_nic": not execution.findall("./devices/interface"),
+        "execution_has_no_nic": not has_forbidden_channel(execution),
         "no_shared_file_devices": not control.findall("./devices/filesystem")
                                   and not execution.findall("./devices/filesystem"),
         "no_host_device_passthrough": not control.findall("./devices/hostdev")
@@ -150,6 +200,26 @@ def topology_report() -> dict[str, object]:
     }
 
 
+def _read_regular_bytes(path: Path, max_bytes: int) -> bytes:
+    if path.is_symlink():
+        raise OSError("symlinks are forbidden for evidence files")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            raise OSError("evidence file is not a bounded regular file")
+        with os.fdopen(fd, "rb") as f:
+            fd = -1
+            data = f.read(max_bytes + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(data) > max_bytes:
+        raise OSError("evidence file exceeded byte limit")
+    return data
+
+
 def _valid_record(
     check: object, identity: object, digest: object, fresh_time: dt.datetime, evidence_dir: Path | None,
 ) -> bool:
@@ -157,14 +227,20 @@ def _valid_record(
         "id", "status", "execution", "evidenceSha256", "evidenceFile",
         "hostId", "topologyDigest", "recordedAt",
     }
-    if not isinstance(check, dict) or set(check) != required or evidence_dir is None:
+    if not isinstance(check, dict) or set(check) != required or evidence_dir is None or evidence_dir.is_symlink():
         return False
     if check["status"] != "PASS" or check["execution"] not in ("CI", "REAL_HOST", "OPERATOR"):
         return False
     proof, name = check["evidenceSha256"], check["evidenceFile"]
-    valid_sha = lambda x: isinstance(x, str) and len(x) == 71 and x.startswith("sha256:") and all(
-        c in "0123456789abcdef" for c in x[7:]
-    )
+
+    def valid_sha(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 71
+            and value.startswith("sha256:")
+            and all(c in "0123456789abcdef" for c in value[7:])
+        )
+
     if not valid_sha(check["hostId"]) or not valid_sha(check["topologyDigest"]):
         return False
     if not isinstance(proof, str) or len(proof) != 64 or any(c not in "0123456789abcdef" for c in proof):
@@ -172,10 +248,8 @@ def _valid_record(
     if not isinstance(name, str) or len(name) > 120 or name in (".", "..") or Path(name).name != name:
         return False
     try:
-        artifact = evidence_dir / name
-        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size > MAX_EVIDENCE_BYTES:
-            return False
-        if hashlib.sha256(artifact.read_bytes()).hexdigest() != proof:
+        raw = _read_regular_bytes(evidence_dir / name, MAX_EVIDENCE_BYTES)
+        if hashlib.sha256(raw).hexdigest() != proof:
             return False
         when = dt.datetime.fromisoformat(check["recordedAt"].replace("Z", "+00:00"))
         age = (fresh_time - when).total_seconds() if when.tzinfo else float('inf')
@@ -262,10 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         result = topology_report()
     else:
         try:
-            if a.evidence.stat().st_size > MAX_EVIDENCE_BYTES:
-                raise ValueError("evidence too large")
-            evidence = json.loads(a.evidence.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            evidence = json.loads(_read_regular_bytes(a.evidence, MAX_EVIDENCE_BYTES).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
             print(json.dumps({"status": "NOT_RUN", "error": "invalid evidence file"}))
             return 2
         result = evaluate_evidence(evidence, evidence_dir=a.evidence.parent)

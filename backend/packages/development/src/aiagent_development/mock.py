@@ -147,7 +147,7 @@ class MockGitProvider:
     def push(self, scope: ProjectScope, expected_head_sha: str, intent_ref: str) -> str:
         with self._lock:
             self.authority.assert_current(scope, self.authority.run)
-            if "git.push" not in self.authority.allowed:
+            if "git.push" not in self.authority.allowed or not intent_ref:
                 raise ScopeDenied("push not approved")
             if self.head(scope) != expected_head_sha:
                 raise StaleReference("push CAS conflict")
@@ -157,7 +157,7 @@ class MockGitProvider:
     def create_pr(self, scope: ProjectScope, head_sha: str, intent_ref: str) -> str:
         with self._lock:
             self.authority.assert_current(scope, self.authority.run)
-            if "git.pull_request.create" not in self.authority.allowed:
+            if "git.pull_request.create" not in self.authority.allowed or not intent_ref:
                 raise ScopeDenied("PR creation not approved")
             if self.head(scope) != head_sha:
                 raise StaleReference("PR source changed")

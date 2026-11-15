@@ -15,15 +15,35 @@ from urllib.parse import urlsplit
 ENV = "AIAGENT_HV_RESTORE_DSN"
 
 
+def safe_target(dsn: str) -> bool:
+    """Prevent touching remote/prod hosts or overriding host/dbname via query params."""
+    try:
+        uri = urlsplit(dsn)
+        port_ok = uri.port is None or (1 <= uri.port <= 65535)
+        return (
+            uri.scheme in ("postgresql", "postgres")
+            and uri.hostname in ("localhost", "127.0.0.1", "::1")
+            and uri.path == "/aiagent_hv_restored_quarantine"
+            and not uri.query
+            and not uri.fragment
+            and port_ok
+        )
+    except ValueError:
+        return False
+
+
 def safety_checks(snapshot: dict[str, int | bool]) -> dict[str, object]:
     conditions = {
         "restore_incarnation_bumped": snapshot.get("incarnation", 0) > 1,
         "dispatch_paused": snapshot.get("dispatch_paused") is True,
         "queue_all_paused": snapshot.get("active_queues", 1) == 0,
+        "no_claimed_jobs": snapshot.get("claimed_jobs", 1) == 0,
         "no_unrevoked_permits": snapshot.get("unrevoked_permits", 1) == 0,
         "no_sending_intents": snapshot.get("sending_intents", 1) == 0,
         "no_sending_effects": snapshot.get("sending_effects", 1) == 0,
         "no_live_run_leases": snapshot.get("live_leases", 1) == 0,
+        "no_stale_active_runs": snapshot.get("stale_active_runs", 1) == 0,
+        "no_unknown_effects": snapshot.get("unknown_effects", 1) == 0,
     }
     return {
         "kind": "restore_quarantine_inspection",
@@ -50,6 +70,11 @@ def query_readonly(dsn: str) -> dict[str, int | bool]:
             read_only = c.execute("SHOW transaction_read_only").fetchone()
             if not read_only or read_only["transaction_read_only"] != "on":
                 raise RuntimeError("DB not in read-only mode")
+            role = c.execute(
+                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+            ).fetchone()
+            if not role or not (role["rolsuper"] or role["rolbypassrls"]):
+                raise RuntimeError("restore probe role lacks BYPASSRLS")
             row = c.execute(
                 "SELECT restore_incarnation, dispatch_paused FROM agent.schema_control WHERE singleton"
             ).fetchone()
@@ -59,10 +84,16 @@ def query_readonly(dsn: str) -> dict[str, int | bool]:
             data["dispatch_paused"] = row["dispatch_paused"] is True
             queries = {
                 "active_queues": "SELECT count(*) AS n FROM queue.queues WHERE paused IS NOT TRUE",
+                "claimed_jobs": "SELECT count(*) AS n FROM queue.jobs WHERE status='CLAIMED'",
                 "unrevoked_permits": "SELECT count(*) AS n FROM agent.egress_permits WHERE revoked_at IS NULL",
                 "sending_intents": "SELECT count(*) AS n FROM agent.tool_intents WHERE status_code='SENDING'",
                 "sending_effects": "SELECT count(*) AS n FROM agent.side_effect_records WHERE outcome_code='SENDING'",
                 "live_leases": "SELECT count(*) AS n FROM agent.runs WHERE lease_expires_at > now()",
+                "stale_active_runs": (
+                    "SELECT count(*) AS n FROM agent.runs"
+                    " WHERE status_code IN ('CLAIMED','RUNNING','CANCELLING')"
+                    " AND (lease_expires_at IS NULL OR lease_expires_at <= now())"
+                ),
                 "unknown_effects": "SELECT count(*) AS n FROM agent.side_effect_records WHERE outcome_code='UNKNOWN'",
             }
             for name, sql in queries.items():
@@ -75,13 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--inspect", action="store_true", help="Explicit read-only query; default is NOT_RUN")
     a = p.parse_args(argv)
     dsn = os.environ.get(ENV, "")
-    try:
-        uri = urlsplit(dsn)
-        # Prevent touching remote/prod hosts; use an SSH tunnel on localhost if needed.
-        safe = (uri.scheme in ("postgresql", "postgres") and uri.hostname in ("localhost", "127.0.0.1", "::1")
-                and uri.path == "/aiagent_hv_restored_quarantine")
-    except ValueError:
-        safe = False
+    safe = safe_target(dsn)
     if not a.inspect or not safe:
         print(json.dumps({"status": "NOT_RUN",
                           "reason": "requires --inspect and a loopback isolated DB named aiagent_hv_restored_quarantine"}))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .contracts import (
     Authority,
@@ -21,6 +22,22 @@ from .contracts import (
     WorkerPort,
     validate_fixture_url,
 )
+
+
+def _resolve_redirect(current: str, redirect_to: str) -> str:
+    if not isinstance(redirect_to, str) or len(redirect_to) > 2048 or "\\" in redirect_to:
+        raise BrowserError("INVALID_FIXTURE_REDIRECT")
+    try:
+        redir_parts = urlsplit(redirect_to)
+    except ValueError as exc:
+        raise BrowserError("INVALID_FIXTURE_REDIRECT") from exc
+    if redir_parts.scheme:
+        return redirect_to
+    base = urlsplit(current)
+    joined = urlsplit(urljoin(f"http://{base.netloc}{base.path or '/'}", redirect_to))
+    if joined.scheme != "http":
+        raise BrowserError("EGRESS_DENIED")
+    return urlunsplit(("fixture", joined.netloc, joined.path, joined.query, joined.fragment))
 
 
 @dataclass(slots=True)
@@ -48,7 +65,12 @@ class BrowserSessionService:
         max_sessions_per_task: int = 2,
         max_observation_chars: int = 4096,
     ) -> None:
-        if not allowed_fixture_hosts or max_sessions_per_task < 1 or not 1 <= max_observation_chars <= 8192:
+        if (
+            not allowed_fixture_hosts
+            or not all(isinstance(h, str) and bool(h.strip()) and h == h.strip().lower() for h in allowed_fixture_hosts)
+            or max_sessions_per_task < 1
+            or not 1 <= max_observation_chars <= 8192
+        ):
             raise ValueError("invalid browser configuration")
         self._worker = worker
         self._authority = authority
@@ -95,20 +117,26 @@ class BrowserSessionService:
             entry = _Entry(scope=(authority.tenant_id, authority.owner_user_id, authority.task_id))
             await self._fence.register(session_id, authority)
             self._entries[session_id] = entry
-            try:
+
+        try:
+            async with entry.lock:
                 await self._fence.check(session_id, authority)
                 await self._worker.start(session_id)
                 await self._fence.check(session_id, authority)
                 entry.state = State.ACTIVE
                 return SessionView(session_id, State.ACTIVE, 1, authority.goal_revision, authority.lease_epoch)
-            except Exception:
-                entry.state = State.CLOSED
+        except BaseException:
+            entry.state = State.CLOSED
+            self._entries.pop(session_id, None)
+            try:
                 await self._worker.close(session_id)
-                try:
-                    await self._fence.revoke(session_id, authority)
-                except BrowserError:
-                    pass
-                raise
+            except Exception:
+                pass
+            try:
+                await self._fence.revoke(session_id, authority)
+            except BrowserError:
+                pass
+            raise
 
     async def view(self, session_id: str, authority: Authority) -> SessionView:
         entry = await self._check(session_id, authority, "observe")
@@ -125,16 +153,20 @@ class BrowserSessionService:
         async with entry.lock:
             await self._operation(session_id, authority, "navigate_fixture")
             current = validate_fixture_url(url, self._hosts)
+            visited: set[str] = set()
             try:
                 for _ in range(4):
+                    if current in visited:
+                        raise BrowserError("REDIRECT_LOOP")
+                    visited.add(current)
                     await self._check(session_id, authority, "navigate_fixture")
                     # Cannot infer a real-network permit from a mock fixture permission.
                     await self._gate.permit(authority, current)
                     response = await self._fixture.fetch(current)
                     if response.status in (301, 302, 303, 307, 308):
-                        if response.redirect_to is None:
+                        if response.redirect_to is None or not response.redirect_to.strip():
                             raise BrowserError("INVALID_FIXTURE_REDIRECT")
-                        current = validate_fixture_url(response.redirect_to, self._hosts)
+                        current = validate_fixture_url(_resolve_redirect(current, response.redirect_to), self._hosts)
                         continue
                     if response.status != 200 or len(response.html.encode("utf-8")) > 65536:
                         raise BrowserError("FIXTURE_RESPONSE_DENIED")
@@ -172,6 +204,8 @@ class BrowserSessionService:
 
     async def takeover(self, session_id: str, current: Authority, human: Authority) -> SessionView:
         entry = self._entry(session_id, current)
+        if entry.state not in (State.ACTIVE, State.PAUSED, State.NEEDS_LOGIN):
+            raise BrowserError("INVALID_STATE")
         await self._authority.authorize(current, "takeover", session_id)
         if (current.tenant_id, current.owner_user_id, current.task_id) != (
             human.tenant_id,
@@ -183,6 +217,8 @@ class BrowserSessionService:
         # Fence FIRST to invalidate a pending operation, then wait for local Page mutex.
         await self._fence.advance(session_id, current, human, mode="HUMAN")
         async with entry.lock:
+            if entry.state not in (State.ACTIVE, State.PAUSED, State.NEEDS_LOGIN):
+                raise BrowserError("INVALID_STATE")
             entry.state = State.PAUSED
             return SessionView(session_id, entry.state, entry.generation, human.goal_revision, human.lease_epoch)
 

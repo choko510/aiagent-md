@@ -122,7 +122,12 @@ class WorkerPort(Protocol):
 
 def validate_fixture_url(url: str, allowed_hosts: frozenset[str]) -> str:
     """Offline `fixture://` URLs ONLY; never a route to real hosts/private IPs."""
-    if not isinstance(url, str) or len(url) > 2048 or "\\" in url or any(ord(c) < 32 for c in url):
+    if (
+        not isinstance(url, str)
+        or len(url) > 2048
+        or "\\" in url
+        or any(ord(c) < 32 or ord(c) == 127 or c.isspace() for c in url)
+    ):
         raise BrowserError("INVALID_FIXTURE_URL")
     try:
         parts = urlsplit(url)

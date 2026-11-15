@@ -90,15 +90,30 @@ class MemoryRetriever:
             now = datetime.now(UTC)
         if now.tzinfo is None or now.utcoffset() is None:
             raise SafeStop("INVALID_TIMESTAMP")
-        start_epoch = self.repository.epoch(scope)
+        try:
+            start_epoch = self.repository.epoch(scope)
+        except SafeStop:
+            raise
+        except Exception as exc:
+            raise SafeStop("MEMORY_POLICY_UNAVAILABLE") from exc
         if not start_epoch:
             raise SafeStop("MEMORY_POLICY_UNAVAILABLE")
-        refs = self.repository.search(scope, query, max_items * 4)
+        try:
+            refs = self.repository.search(scope, query, max_items * 4)
+        except SafeStop:
+            raise
+        except Exception as exc:
+            raise SafeStop("MEMORY_POLICY_UNAVAILABLE") from exc
         selected: list[MemoryProjection] = []
         used = 0
         # Unknown/other-tenant ID returned by malicious index cannot escape.
         for ref in dict.fromkeys(refs):
-            record = self.repository.get(scope, ref)
+            try:
+                record = self.repository.get(scope, ref)
+            except SafeStop:
+                raise
+            except Exception as exc:
+                raise SafeStop("MEMORY_POLICY_UNAVAILABLE") from exc
             if record is None or record.tenant_id != scope.tenant_id or record.owner_id != scope.owner_id:
                 continue
             if record.scope_task_id is not None and record.scope_task_id != scope.task_id:
@@ -111,25 +126,45 @@ class MemoryRetriever:
                 continue
             if utc_instant(record.expires_at) <= now:
                 continue
+            forbid_secrets(record.text)
+            for source_ref in record.source_refs:
+                forbid_secrets(source_ref)
             # Fail closed if one of the independent ports is unavailable/raises.
-            if not (
-                self.consent.permits(scope, record, recipient)
-                and self.retention.permits(scope, record, now)
-                and self.sources.permits(scope, record.source_refs)
-            ):
+            try:
+                permitted = (
+                    self.consent.permits(scope, record, recipient)
+                    and self.retention.permits(scope, record, now)
+                    and self.sources.permits(scope, record.source_refs)
+                )
+            except SafeStop:
+                raise
+            except Exception as exc:
+                raise SafeStop("MEMORY_POLICY_UNAVAILABLE") from exc
+            if not permitted:
                 continue
             encoded_length = len(record.text.encode("utf-8"))
             if used + encoded_length > max_bytes:
-                continue
+                break
             selected.append(
                 MemoryProjection(
-                    record.ref, record.text, record.source_refs, start_epoch, record_revision=record.revision
+                    record.ref,
+                    record.text,
+                    record.source_refs,
+                    start_epoch,
+                    record_revision=record.revision,
+                    expires_at=record.expires_at,
                 )
             )
             used += encoded_length
             if len(selected) >= max_items:
                 break
-        if self.repository.epoch(scope) != start_epoch:
+        try:
+            end_epoch = self.repository.epoch(scope)
+        except SafeStop:
+            raise
+        except Exception as exc:
+            raise SafeStop("MEMORY_POLICY_UNAVAILABLE") from exc
+        if end_epoch != start_epoch:
             raise SafeStop("STALE_MEMORY")
         return Retrieval(tuple(selected), start_epoch, recipient)
 
