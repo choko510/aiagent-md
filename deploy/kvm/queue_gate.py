@@ -26,14 +26,20 @@ MAX_DEDICATED = 1_000_000
 CHILD = """
 import os, runpy, sys
 import psycopg
-with psycopg.connect(os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'], connect_timeout=5) as c:
-    value = c.execute("SELECT current_setting('aiagent.hv_disposable', true)").fetchone()[0]
-    if value != 'aiagent-hv-disposable-v1':
-        sys.exit(17)
-sys.argv = ['bench_queue.py', '--pg', os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'],
-            '-n', sys.argv[1], '--relays', sys.argv[2], '--consumers', sys.argv[3],
-            '--outage', sys.argv[4]]
-runpy.run_path('tools/bench_queue.py', run_name='__main__')
+try:
+    with psycopg.connect(os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'], connect_timeout=5) as c:
+        value = c.execute("SELECT current_setting('aiagent.hv_disposable', true)").fetchone()[0]
+        if value != 'aiagent-hv-disposable-v1':
+            sys.exit(17)
+    sys.argv = ['bench_queue.py', '--pg', os.environ['AIAGENT_HV_DISPOSABLE_PG_URL'],
+                '-n', sys.argv[1], '--relays', sys.argv[2], '--consumers', sys.argv[3],
+                '--outage', sys.argv[4]]
+    runpy.run_path('tools/bench_queue.py', run_name='__main__')
+except SystemExit:
+    raise
+except BaseException as exc:
+    sys.stderr.write(type(exc).__name__ + '\\n')
+    sys.exit(18)
 """
 
 
@@ -42,7 +48,8 @@ def safe_target(url: str) -> bool:
     try:
         u = urlsplit(url)
         return (u.scheme in ("postgresql", "postgres") and u.hostname in ("127.0.0.1", "::1", "localhost")
-                and u.path == "/" + MARKER and bool(u.username) and bool(u.password)
+                and u.path == "/" + MARKER and not u.query and not u.fragment
+                and bool(u.username) and bool(u.password)
                 and u.port is not None and 1 <= u.port <= 65535)
     except (TypeError, ValueError):
         return False
@@ -104,13 +111,27 @@ def plan(a: argparse.Namespace, url: str | None) -> dict[str, object]:
     }
 
 
+def _child_env() -> dict[str, str]:
+    allowed = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", ENV_VAR)
+    env = {k: v for k, v in os.environ.items() if k in allowed or k.startswith("UV_")}
+    return env
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def main(argv: list[str] | None = None) -> int:
     a = arguments(argv)
     target = os.environ.get(ENV_VAR)
     result = plan(a, target)
     if not a.execute or result["blockers"]:
         print(json.dumps(result, indent=2))
-        return 2 if a.execute or validate_limits(a) else 0
+        return 2 if a.execute or result["blockers"] else 0
     # Never leave the benchmark writing after a timeout: isolate and kill its entire process group.
     # uv runs the pinned workspace interpreter without putting the DSN on the command line.
     uv = shutil.which("uv")
@@ -120,8 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     command = [uv, "run", "--no-sync", "--locked", "python", "-c", CHILD,
                str(a.rows), str(a.relays), str(a.consumers), str(a.outage)]
     try:
-        process = subprocess.Popen(
-            command, cwd=BACKEND, env={**os.environ}, text=True,
+        process = subprocess.Popen(  # noqa: S603
+            command, cwd=BACKEND, env=_child_env(), text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
         try:
@@ -142,11 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         print(json.dumps({"status": "FAILED", "reason": "unparseable or incomplete benchmark result"}))
         return 2
-    required = {"rows", "acked", "duplicate_acks", "outbox_pending_after", "max_db_connections", "wal_mb"}
-    success = (isinstance(metrics, dict) and required <= metrics.keys()
-               and metrics["rows"] == a.rows + 1 and metrics["acked"] == a.rows + 1
-               and metrics["duplicate_acks"] == 0 and metrics["outbox_pending_after"] == 0
-               and metrics["max_db_connections"] <= 40)
+    int_keys = ("rows", "acked", "duplicate_acks", "outbox_pending_after", "max_db_connections")
+    success = (
+        isinstance(metrics, dict)
+        and all(_is_int(metrics.get(k)) for k in int_keys)
+        and _is_number(metrics.get("wal_mb"))
+        and metrics["rows"] == a.rows + 1
+        and metrics["acked"] == a.rows + 1
+        and metrics["duplicate_acks"] == 0
+        and metrics["outbox_pending_after"] == 0
+        and metrics["max_db_connections"] <= 40
+    )
     # Avoid exposing free-form output from the child. Metrics are fixed known-number keys.
     public = {k: metrics.get(k) for k in (
         "rows", "acked", "duplicate_acks", "outbox_pending_after", "max_db_connections",
