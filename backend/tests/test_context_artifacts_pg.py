@@ -333,7 +333,7 @@ def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(tmp_path
     local_dbs = {role: Database(dsn) for role, dsn in env.dsn.items()}
     local_dbs["owner"] = Database(env.owner)
     try:
-        local_tenant = admin.provision_tenant(local_dbs["owner"])
+        local_tenant = admin.provision_tenant(env.owner)
         store, scope, claim = make_store(local_dbs, local_tenant)
         orphan = store.put_raw(scope, SourceInput("orphan", "2026-01-01T00:00:00Z", b"unreferenced", locator_ref="o:0"))
         referenced = store.put_raw(
