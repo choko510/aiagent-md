@@ -321,62 +321,75 @@ def test_key_ring_rotation_keeps_old_decryption_and_fails_closed_when_missing(
     assert rotated_store.get_raw(scope, old_artifact) == b"encrypted with old key"
 
 
-def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(
-    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
-) -> None:
-    store, scope, claim = make_store(dbs, tenant)
-    orphan = store.put_raw(scope, SourceInput("orphan", "2026-01-01T00:00:00Z", b"unreferenced", locator_ref="o:0"))
-    referenced = store.put_raw(
-        scope, SourceInput("referenced", "2026-01-01T00:00:00Z", b"still referenced", locator_ref="r:0")
-    )
-    dbs["owner"].one(
-        "UPDATE agent.context_artifacts SET created_at=now()-interval '2 days' WHERE id IN (%s,%s) RETURNING id",
-        (orphan.artifact_ref, referenced.artifact_ref),
-    )
-    dbs["owner"].one(
-        "UPDATE agent.runs SET status_code='SUCCEEDED',ended_at=now() WHERE id=%s RETURNING id", (claim.run_id,)
-    )
-    # An active Memory reference remains protected even on a terminal Run.
-    from aiagent_core import commands, memory_writer
+@pytest.mark.usefixtures("pg")
+def test_orphan_artifact_gc_erases_only_unreferenced_terminal_run_bytes(tmp_path: Path) -> None:
+    from aiagent_core import admin, commands, memory_writer
     from aiagent_domain import uuid7
+    from conftest import drop_database, make_database
 
-    owner = commands.Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
-    memory_writer.create_memory(
-        dbs["api"],
-        owner,
-        task_id=scope.task_id,
-        source_ref=referenced.artifact_ref,
-        projection_ref=referenced.artifact_ref,
-        recipient="fake",
-        observed_at=datetime.now(UTC),
-        expires_at=datetime.now(UTC) + timedelta(days=3),
-        consent_basis="user_explicit",
-        idempotency_key=uuid7(),
-    )
-    removed = dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
-    assert removed == 1
-    rows = dbs["owner"].all(
-        "SELECT id,ciphertext,revoked_at FROM agent.context_artifacts WHERE id IN (%s,%s)",
-        (orphan.artifact_ref, referenced.artifact_ref),
-    )
-    by_id = {r["id"]: r for r in rows}
-    assert by_id[orphan.artifact_ref]["ciphertext"] is None
-    assert by_id[orphan.artifact_ref]["revoked_at"] is not None
-    assert by_id[referenced.artifact_ref]["ciphertext"] is not None
+    # Use an isolated database so external tombstone revocations in this test do
+    # not advance the session DB coverage generation past the session stack log.
+    env = make_database("aiagent_orphan_gc")
+    local_dbs = {role: Database(dsn) for role, dsn in env.dsn.items()}
+    local_dbs["owner"] = Database(env.owner)
+    try:
+        local_tenant = admin.provision_tenant(local_dbs["owner"])
+        store, scope, claim = make_store(local_dbs, local_tenant)
+        orphan = store.put_raw(scope, SourceInput("orphan", "2026-01-01T00:00:00Z", b"unreferenced", locator_ref="o:0"))
+        referenced = store.put_raw(
+            scope, SourceInput("referenced", "2026-01-01T00:00:00Z", b"still referenced", locator_ref="r:0")
+        )
+        local_dbs["owner"].one(
+            "UPDATE agent.context_artifacts SET created_at=now()-interval '2 days' WHERE id IN (%s,%s) RETURNING id",
+            (orphan.artifact_ref, referenced.artifact_ref),
+        )
+        local_dbs["owner"].one(
+            "UPDATE agent.runs SET status_code='SUCCEEDED',ended_at=now() WHERE id=%s RETURNING id", (claim.run_id,)
+        )
+        # An active Memory reference remains protected even on a terminal Run.
+        owner = commands.Scope(local_tenant["tenantId"], local_tenant["userId"], local_tenant["workspaceId"])
+        memory_writer.create_memory(
+            local_dbs["api"],
+            owner,
+            task_id=scope.task_id,
+            source_ref=referenced.artifact_ref,
+            projection_ref=referenced.artifact_ref,
+            recipient="fake",
+            observed_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=3),
+            consent_basis="user_explicit",
+            idempotency_key=uuid7(),
+        )
+        removed = local_dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
+        assert removed == 1
+        rows = local_dbs["owner"].all(
+            "SELECT id,ciphertext,revoked_at FROM agent.context_artifacts WHERE id IN (%s,%s)",
+            (orphan.artifact_ref, referenced.artifact_ref),
+        )
+        by_id = {r["id"]: r for r in rows}
+        assert by_id[orphan.artifact_ref]["ciphertext"] is None
+        assert by_id[orphan.artifact_ref]["revoked_at"] is not None
+        assert by_id[referenced.artifact_ref]["ciphertext"] is not None
 
-    # Once the Memory itself is revoked, its artifact reference is no longer live
-    # and the terminal-run orphan collector can erase the residual ciphertext.
-    from aiagent_core.memory_tombstones import TombstoneLog
+        # Once the Memory itself is revoked, its artifact reference is no longer live
+        # and the terminal-run orphan collector can erase the residual ciphertext.
+        from aiagent_core.memory_tombstones import TombstoneLog
 
-    tombstone_log = TombstoneLog(tmp_path / "memory.jsonl", integrity_key=b"h" * 32)
-    tombstone_log.initialize()
-    memory_id = dbs["owner"].one("SELECT id FROM agent.memory_records WHERE task_id=%s", (scope.task_id,))["id"]
-    memory_writer.revoke_memory(
-        dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id, tombstone_log=tombstone_log
-    )
-    removed = dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
-    assert removed == 1
-    row = dbs["owner"].one(
-        "SELECT ciphertext,revoked_at FROM agent.context_artifacts WHERE id=%s", (referenced.artifact_ref,)
-    )
-    assert row["ciphertext"] is None and row["revoked_at"] is not None
+        tombstone_log = TombstoneLog(tmp_path / "memory.jsonl", integrity_key=b"h" * 32)
+        tombstone_log.initialize()
+        memory_id = local_dbs["owner"].one("SELECT id FROM agent.memory_records WHERE task_id=%s", (scope.task_id,))[
+            "id"
+        ]
+        memory_writer.revoke_memory(
+            local_dbs["api"], owner, task_id=scope.task_id, memory_id=memory_id, tombstone_log=tombstone_log
+        )
+        removed = local_dbs["ops"].one("SELECT agent.gc_orphan_context_artifacts(interval '1 day') AS n")["n"]
+        assert removed == 1
+        row = local_dbs["owner"].one(
+            "SELECT ciphertext,revoked_at FROM agent.context_artifacts WHERE id=%s", (referenced.artifact_ref,)
+        )
+        assert row["ciphertext"] is None and row["revoked_at"] is not None
+    finally:
+        for db in local_dbs.values():
+            db.close()
+        drop_database(env.name)
