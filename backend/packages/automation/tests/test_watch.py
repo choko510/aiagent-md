@@ -6,13 +6,17 @@ from aiagent_automation.watch import DailyWatch, SqliteWatchHarness, WatchContro
 
 
 class MockQueue:
-    def __init__(self):
+    def __init__(self, *, accept: bool = True):
         self.dedupe_keys = set()
         self.calls = []
+        self.accept = accept
 
-    def request_watch(self, **kw):
+    def request_watch(self, **kw) -> bool:
         self.calls.append(kw)
+        if not self.accept:
+            return False
         self.dedupe_keys.add(kw["dedupe_key"])
+        return True
 
 
 def watch(zone, hour=2, minute=30, max_occurrences=3):
@@ -58,3 +62,36 @@ def test_no_access_to_external_service(tmp_path: Path):
     ctrl = WatchController(SqliteWatchHarness(tmp_path / "watch.sqlite"), clock, queue)
     assert not ctrl.tick(watch("Asia/Tokyo", hour=10))
     assert ctrl.relay() == 0
+
+
+def test_relay_keeps_pending_when_queue_rejects_and_isolates_tenants(tmp_path: Path):
+    clock = FakeClock(datetime(2026, 11, 11, 0, 30, tzinfo=UTC))
+    store = SqliteWatchHarness(tmp_path / "watch.sqlite")
+    queue = MockQueue(accept=False)
+    ctrl = WatchController(store, clock, queue)
+
+    w_t1 = DailyWatch("shared-watch", "t1", 1, "Asia/Tokyo", 9, 0, "2026-01-01T00:00:00Z", 1)
+    w_t2 = DailyWatch("shared-watch", "t2", 1, "Asia/Tokyo", 9, 0, "2026-01-01T00:00:00Z", 1)
+    assert ctrl.tick(w_t1)
+    assert ctrl.tick(w_t2)
+    assert store.count("t1", "shared-watch") == 1
+    assert store.count("t2", "shared-watch") == 1
+
+    # Queue rejects -> entries remain PENDING and can be retried later when accepted.
+    assert ctrl.relay() == 0
+    assert len(store.pending()) == 2
+
+    queue.accept = True
+    assert ctrl.relay() == 2
+    assert store.pending() == []
+    assert len(queue.dedupe_keys) == 2
+
+
+def test_claim_bounded_enforces_max_occurrences_atomically(tmp_path: Path):
+    store = SqliteWatchHarness(tmp_path / "watch.sqlite")
+    w = watch("UTC", hour=1, minute=0, max_occurrences=1)
+    slot1 = datetime(2026, 11, 11, 1, 0, tzinfo=UTC)
+    slot2 = datetime(2026, 11, 12, 1, 0, tzinfo=UTC)
+    assert store.claim_bounded(w, slot1)
+    assert not store.claim_bounded(w, slot2)
+    assert store.count("t1", "w1") == 1

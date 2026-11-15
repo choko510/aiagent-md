@@ -349,3 +349,89 @@ def test_no_verifier_defaults_fail_closed(tmp_path):
     )
     assert result == ResultState.UNVERIFIED
     assert ctl.view("c1")["completedCount"] == 0
+
+
+def test_stop_policy_rejects_bool_target_count(rig):
+    _ctl, _store, clock, _queue = rig
+    with pytest.raises(Rejected, match="BAD_TARGET"):
+        plan(clock, target_count=True)
+
+
+def test_create_rejects_insufficient_initial_budget(rig):
+    ctl, _store, clock, _queue = rig
+    p = CampaignPlan(
+        "c-low",
+        "tenant1",
+        "g1",
+        StopPolicy(
+            max_cycles=1,
+            deadline_utc=(clock.now() + timedelta(hours=1)).isoformat(),
+            max_cost_micro_usd=50,
+            max_tokens=100,
+            max_tool_calls=2,
+        ),
+        100,
+        50,
+        1,
+    )
+    with pytest.raises(Rejected, match="INSUFFICIENT_INITIAL_BUDGET"):
+        ctl.create(p, "work1")
+
+
+def test_terminal_states_block_approval_pending_and_unknown_override(rig, tmp_path: Path):
+    ctl = start(rig)
+    assert ctl.control("c1", "STOP", 1) == 2
+    with pytest.raises(Rejected, match="INVALID_APPROVAL_TRANSITION"):
+        ctl.control("c1", "APPROVAL_PENDING", 2)
+
+    ctl2 = CampaignController(
+        SqliteHarnessStore(tmp_path / "c2.sqlite"),
+        rig[2],
+        rig[3],
+        MockVerifier(),
+    )
+    ctl2.create(plan(rig[2]), "work1")
+    ctl2.dispatch_pending("c1")
+    ctl2.admit_cycle("c1", "c1:1", 1)
+    ctl2.advance("c1", "c1:1", Phase.PLAN, Phase.EXECUTE, 1)
+    ctl2.admit_effect("c1", "c1:1", "intent-revoked", "targetA", 1)
+    ctl2.control("c1", "REVOKE", 1)
+    assert ctl2.view("c1")["state"] == "REVOKED"
+    ctl2.record_effect("c1", "intent-revoked", EffectState.UNKNOWN)
+    assert ctl2.view("c1")["state"] == "REVOKED"
+
+
+def test_dispatch_pending_skips_ack_if_stopped_mid_dispatch(rig):
+    ctl, store, clock, _queue = rig
+    ctl.create(plan(clock), "work1")
+
+    class StopThenReturnTrueQueue(MockQueue):
+        def request_run(self, **kw):
+            ctl.control("c1", "STOP", 1)
+            return True
+
+    ctl.queue = StopThenReturnTrueQueue()
+    assert ctl.dispatch_pending("c1") == 0
+    assert store.read("c1").outbox[0].status == "CANCELLED"
+
+
+def test_complete_cycle_checks_expected_control_version_and_wire_types(rig):
+    ctl = start(rig)
+    ctl.advance("c1", "c1:1", Phase.EXECUTE, Phase.VERIFY, 1)
+    ctl.control("c1", "PAUSE", 1)
+    with pytest.raises(Rejected, match="STALE_CONTROL_VERSION"):
+        ctl.complete_cycle(
+            "c1",
+            "c1:1",
+            claimed_success=True,
+            evidence_refs=["artifact:sha"],
+            quality_gate_ref="gate:pass",
+            cost_micro_usd=10,
+            tokens=10,
+            tools=1,
+            expected_control_version=1,
+        )
+
+    loaded = rig[1].read("c1")
+    assert loaded.state == CampaignState.PAUSED
+    assert isinstance(loaded.plan.goal_revision, str)
