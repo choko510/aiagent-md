@@ -50,6 +50,7 @@ class PlaywrightBrowserWorker:
             if session_id in self._pages:
                 raise BrowserError("DUPLICATE_SESSION")
             browser = await self._browser_or_start()
+            context: BrowserContext | None = None
             try:
                 context = await browser.new_context(
                     java_script_enabled=False,
@@ -65,8 +66,11 @@ class PlaywrightBrowserWorker:
                 await context.route("**/*", reject_network)
                 page = await context.new_page()
             except Exception as exc:
-                if "context" in locals():
-                    await context.close()
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
                 raise BrowserError("BROWSER_START_BLOCKED") from exc
             self._pages[session_id] = _PrivatePage(context=context, page=page)
 
@@ -76,30 +80,43 @@ class PlaywrightBrowserWorker:
             raise BrowserError("BROWSER_CRASHED")
         return obj.page
 
+    def _classify_error(self, session_id: str, exc: Exception) -> BrowserError:
+        obj = self._pages.get(session_id)
+        if obj is None or obj.page.is_closed() or self._browser is None or not self._browser.is_connected():
+            return BrowserError("BROWSER_CRASHED")
+        if isinstance(exc, TimeoutError) or type(exc).__name__ == "TimeoutError":
+            return BrowserError("BROWSER_TIMEOUT")
+        return BrowserError("BROWSER_CRASHED")
+
     async def render(self, session_id: str, html: str) -> None:
-        try:
-            await self._page(session_id).set_content(html, wait_until="domcontentloaded", timeout=10_000)
-        except BrowserError:
-            raise
-        except Exception as exc:
-            raise BrowserError("BROWSER_CRASHED") from exc
+        async with self._lock:
+            try:
+                await self._page(session_id).set_content(html, wait_until="domcontentloaded", timeout=10_000)
+            except BrowserError:
+                raise
+            except Exception as exc:
+                raise self._classify_error(session_id, exc) from exc
 
     async def observe(self, session_id: str) -> str:
-        try:
-            return await self._page(session_id).locator("body").inner_text(timeout=10_000)
-        except BrowserError:
-            raise
-        except Exception as exc:
-            raise BrowserError("BROWSER_CRASHED") from exc
+        async with self._lock:
+            try:
+                return await self._page(session_id).locator("body").inner_text(timeout=10_000)
+            except BrowserError:
+                raise
+            except Exception as exc:
+                raise self._classify_error(session_id, exc) from exc
+
+    async def _close_locked(self, session_id: str) -> None:
+        obj = self._pages.pop(session_id, None)
+        if obj is not None:
+            try:
+                await obj.context.close()
+            except Exception:
+                pass  # crash cleanup: no secrets or raw exception to caller
 
     async def close(self, session_id: str) -> None:
         async with self._lock:
-            obj = self._pages.pop(session_id, None)
-            if obj is not None:
-                try:
-                    await obj.context.close()
-                except Exception:
-                    pass  # crash cleanup: no secrets or raw exception to caller
+            await self._close_locked(session_id)
 
     async def _shutdown_browser(self) -> None:
         browser, pw = self._browser, self._playwright
@@ -116,6 +133,7 @@ class PlaywrightBrowserWorker:
                 pass
 
     async def shutdown(self) -> None:
-        for session_id in tuple(self._pages):
-            await self.close(session_id)
-        await self._shutdown_browser()
+        async with self._lock:
+            for session_id in tuple(self._pages):
+                await self._close_locked(session_id)
+            await self._shutdown_browser()

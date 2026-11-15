@@ -358,3 +358,67 @@ async def test_secret_deny_policy_can_reject_observation(ctx):
     auth.denied.add("observe")
     with pytest.raises(BrowserError, match="AUTH_DENIED"):
         await service.observe(sid, p)
+
+
+@pytest.mark.asyncio
+async def test_create_failure_cleans_entry_and_revokes_fence_even_if_close_fails(ctx):
+    service, p, _, fence, _, _, worker = ctx
+
+    async def fail_start(_sid):
+        raise BrowserError("BROWSER_START_BLOCKED")
+
+    async def fail_close(_sid):
+        raise RuntimeError("cleanup boom")
+
+    worker.start = fail_start
+    worker.close = fail_close
+
+    with pytest.raises(BrowserError, match="BROWSER_START_BLOCKED"):
+        await service.create(p)
+    assert fence.values == {}
+    assert service._entries == {}
+
+    # Restore start/close: quota must not be leaked by failed create() attempts.
+    async def ok_start(sid):
+        worker.pages[sid] = ""
+
+    async def ok_close(sid):
+        worker.pages.pop(sid, None)
+
+    worker.start = ok_start
+    worker.close = ok_close
+    assert (await service.create(p)).state is State.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_takeover_rejects_closed_and_recovering_states(ctx):
+    service, p, *_ = ctx
+    sid = (await service.create(p)).session_id
+    human = replace(p, lease_epoch="2")
+    await service.mark_crashed(sid, p)
+    with pytest.raises(BrowserError, match="INVALID_STATE"):
+        await service.takeover(sid, p, human)
+
+    sid2 = (await service.create(p)).session_id
+    await service.cancel(sid2, p)
+    with pytest.raises(BrowserError, match="INVALID_STATE"):
+        await service.takeover(sid2, p, human)
+
+
+@pytest.mark.asyncio
+async def test_relative_redirect_and_loop_detection_and_url_control_chars(ctx):
+    service, p, _, _, gate, fixtures, _ = ctx
+    sid = (await service.create(p)).session_id
+    fixtures.data["fixture://alpha.test/rel"] = FixtureResponse(302, redirect_to="/next")
+    obs = await service.navigate_fixture(sid, p, "fixture://alpha.test/rel")
+    assert obs.text == "next"
+    assert gate.permits[-2:] == ["fixture://alpha.test/rel", "fixture://alpha.test/next"]
+
+    fixtures.data["fixture://alpha.test/loop1"] = FixtureResponse(302, redirect_to="/loop2")
+    fixtures.data["fixture://alpha.test/loop2"] = FixtureResponse(302, redirect_to="/loop1")
+    with pytest.raises(BrowserError, match="REDIRECT_LOOP"):
+        await service.navigate_fixture(sid, p, "fixture://alpha.test/loop1")
+
+    for bad_url in ("fixture://alpha.test/\x7f", "fixture://alpha.test/a b"):
+        with pytest.raises(BrowserError, match="INVALID_FIXTURE_URL"):
+            await service.navigate_fixture(sid, p, bad_url)
