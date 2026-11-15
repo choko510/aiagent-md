@@ -1,6 +1,6 @@
 "use strict";
 const byId = id => document.getElementById(id);
-const invoke = window.__TAURI__?.core?.invoke;
+const getInvoke = () => window.__TAURI_INTERNALS__?.invoke ?? window.__TAURI__?.core?.invoke;
 const showText = (el, text) => { el.textContent = String(text); };
 function failClosed(message) {
   showText(byId("connection"), message);
@@ -32,10 +32,15 @@ function update(s) {
   byId("revoke").disabled = s.revoked || !s.persisted;
 }
 async function call(command) {
+  const invoke = getInvoke();
   if (!invoke) { failClosed("● ブラウザプレビューのみ / Tauri未接続"); return; }
   try { update(await invoke(command)); }
   catch { failClosed("● 状態取得エラー · 操作は禁止"); }
 }
 byId("stop").addEventListener("click", () => call("stop_local"));
 byId("revoke").addEventListener("click", () => call("revoke_local"));
-call("snapshot");
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => call("snapshot"));
+} else {
+  call("snapshot");
+}

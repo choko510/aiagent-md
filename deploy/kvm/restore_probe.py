@@ -4,6 +4,7 @@
 Never restores a database, rotates keys, resumes jobs, contacts egress, or changes state.
 This is one REC safety check, not evidence of successful PITR or external reconciliation.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -61,7 +62,9 @@ def query_readonly(dsn: str) -> dict[str, int | bool]:
 
     data: dict[str, int | bool] = {}
     with psycopg.connect(
-        dsn, connect_timeout=5, row_factory=dict_row,
+        dsn,
+        connect_timeout=5,
+        row_factory=dict_row,
         options="-c default_transaction_read_only=on -c statement_timeout=5000",
     ) as c:
         if c.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
@@ -70,9 +73,7 @@ def query_readonly(dsn: str) -> dict[str, int | bool]:
             read_only = c.execute("SHOW transaction_read_only").fetchone()
             if not read_only or read_only["transaction_read_only"] != "on":
                 raise RuntimeError("DB not in read-only mode")
-            role = c.execute(
-                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
-            ).fetchone()
+            role = c.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
             if not role or not (role["rolsuper"] or role["rolbypassrls"]):
                 raise RuntimeError("restore probe role lacks BYPASSRLS")
             row = c.execute(
@@ -97,7 +98,10 @@ def query_readonly(dsn: str) -> dict[str, int | bool]:
                 "unknown_effects": "SELECT count(*) AS n FROM agent.side_effect_records WHERE outcome_code='UNKNOWN'",
             }
             for name, sql in queries.items():
-                data[name] = int(c.execute(sql).fetchone()["n"])
+                count_row = c.execute(sql).fetchone()
+                if count_row is None:
+                    raise RuntimeError(f"restore probe query {name} returned no row")
+                data[name] = int(count_row["n"])
     return data
 
 
@@ -108,8 +112,14 @@ def main(argv: list[str] | None = None) -> int:
     dsn = os.environ.get(ENV, "")
     safe = safe_target(dsn)
     if not a.inspect or not safe:
-        print(json.dumps({"status": "NOT_RUN",
-                          "reason": "requires --inspect and a loopback isolated DB named aiagent_hv_restored_quarantine"}))
+        print(
+            json.dumps(
+                {
+                    "status": "NOT_RUN",
+                    "reason": "requires --inspect and a loopback isolated DB named aiagent_hv_restored_quarantine",
+                }
+            )
+        )
         return 2 if a.inspect else 0
     try:
         result = safety_checks(query_readonly(dsn))

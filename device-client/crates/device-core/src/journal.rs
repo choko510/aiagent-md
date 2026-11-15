@@ -1,10 +1,15 @@
 use crate::protocol::Scope;
+use crate::security::{
+    load_or_create_journal_key, open_payload, restrict_path_owner_only, seal_payload,
+};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// STARTED is durable before mock adapter execution. It is UNKNOWN after recovery.
-/// SQLite in this slice contains metadata-only mock data and is NOT production encrypted.
+/// Sensitive local_control payloads (`audit_json`) are sealed with HMAC-SHA256 + SHA256-CTR
+/// keyed by a DPAPI-protected (Windows) or 0o600 (Unix) keyfile, and journal files enforce owner-only OS ACLs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectState {
     Started,
@@ -50,35 +55,46 @@ pub struct ControlRecord {
 pub struct LocalJournal {
     conn: Connection,
     scope_hash: String,
+    master_key: [u8; 32],
+    db_path: PathBuf,
 }
+
+fn companion_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut os: OsString = db_path.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+fn restrict_db_companions(db_path: &Path) -> Result<(), String> {
+    restrict_path_owner_only(db_path, false)?;
+    restrict_path_owner_only(&companion_path(db_path, "-wal"), false)?;
+    restrict_path_owner_only(&companion_path(db_path, "-shm"), false)?;
+    Ok(())
+}
+
 impl LocalJournal {
-    /// This is strictly a mock metadata store. Callers must not store secrets in arguments.
+    /// Local device journal with owner-only ACLs and authenticated at-rest encryption for control audit logs.
     pub fn open(path: &Path, scope: &Scope) -> Result<Self, String> {
         if !scope.valid() {
             return Err("invalid scope".into());
         }
+        if path.is_dir() {
+            return Err("journal path must not be a directory".into());
+        }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|e| e.to_string())?;
-            }
+            restrict_path_owner_only(parent, true)?;
         }
+        let master_key = load_or_create_journal_key(path)?;
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-        }
+        restrict_path_owner_only(path, false)?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(|e| e.to_string())?;
+        restrict_db_companions(path)?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS effects (
@@ -118,7 +134,12 @@ impl LocalJournal {
             params![scope_hash],
         )
         .map_err(|e| e.to_string())?;
-        Ok(Self { conn, scope_hash })
+        Ok(Self {
+            conn,
+            scope_hash,
+            master_key,
+            db_path: path.to_path_buf(),
+        })
     }
 
     pub fn load_control(&self, default_audit: Vec<String>) -> Result<ControlRecord, String> {
@@ -132,9 +153,15 @@ impl LocalJournal {
             .optional()
             .map_err(|e| e.to_string())?;
         match row {
-            Some((stopped, revoked, audit_json)) => {
+            Some((stopped, revoked, sealed_audit)) => {
+                let raw_json = open_payload(
+                    &self.master_key,
+                    &self.scope_hash,
+                    "local_control",
+                    &sealed_audit,
+                )?;
                 let audit: Vec<String> =
-                    serde_json::from_str(&audit_json).map_err(|e| e.to_string())?;
+                    serde_json::from_slice(&raw_json).map_err(|e| e.to_string())?;
                 Ok(ControlRecord {
                     stopped: stopped != 0,
                     revoked: revoked != 0,
@@ -151,6 +178,12 @@ impl LocalJournal {
 
     pub fn save_control(&mut self, record: &ControlRecord) -> Result<(), String> {
         let audit_json = serde_json::to_string(&record.audit).map_err(|e| e.to_string())?;
+        let sealed_audit = seal_payload(
+            &self.master_key,
+            &self.scope_hash,
+            "local_control",
+            audit_json.as_bytes(),
+        )?;
         self.conn
             .execute(
                 "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json)
@@ -163,10 +196,11 @@ impl LocalJournal {
                     self.scope_hash,
                     i64::from(record.stopped),
                     i64::from(record.revoked),
-                    audit_json
+                    sealed_audit
                 ],
             )
             .map_err(|e| e.to_string())?;
+        restrict_db_companions(&self.db_path)?;
         Ok(())
     }
     pub fn state(&self, intent_id: &str) -> Result<Option<EffectState>, String> {

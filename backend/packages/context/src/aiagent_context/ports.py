@@ -92,6 +92,19 @@ class MockArtifactStore:
     def drop_raw(self, ref: str) -> None:
         self._raw.pop(ref, None)
 
+    def revoke(self, scope: Scope, ref: str) -> None:
+        if ref in self._summary:
+            if self._summary[ref][0] != scope:
+                raise SafeStop("ARTIFACT_UNAVAILABLE")
+            self._summary.pop(ref, None)
+            return
+        if ref in self._raw:
+            if self._raw[ref][0] != scope:
+                raise SafeStop("ARTIFACT_UNAVAILABLE")
+            self._raw.pop(ref, None)
+            return
+        raise SafeStop("ARTIFACT_UNAVAILABLE")
+
     def tamper_raw(self, ref: str, content: bytes) -> None:
         scope, meta, _ = self._raw[ref]
         self._raw[ref] = (scope, meta, content)

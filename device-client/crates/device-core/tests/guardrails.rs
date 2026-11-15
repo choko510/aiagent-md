@@ -449,3 +449,69 @@ fn unpaired_agent_cannot_execute_or_reconnect() {
     assert_eq!(agent.reconnect_mock(next), Err("RECONNECT_DENIED"));
     assert_eq!(agent.adapters.calls, 0);
 }
+
+#[test]
+fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
+    use aiagent_device_core::security::{
+        key_file_path, load_or_create_journal_key, open_payload, seal_payload,
+        verify_owner_only_acl,
+    };
+    use aiagent_device_core::ControlRecord;
+
+    let dir = tempdir().unwrap();
+    let db_dir = dir.path().join("restricted");
+    let path = db_dir.join("journal.db");
+    let marker = "SENSITIVE_AUDIT_MARKER_XYZ_987";
+
+    {
+        let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: false,
+                audit: vec![marker.into()],
+            })
+            .unwrap();
+    }
+
+    assert!(verify_owner_only_acl(&db_dir).unwrap());
+    assert!(verify_owner_only_acl(&path).unwrap());
+    assert!(verify_owner_only_acl(&key_file_path(&path)).unwrap());
+
+    for candidate in [
+        path.clone(),
+        dir.path().join("restricted/journal.db-wal"),
+        key_file_path(&path),
+    ] {
+        if candidate.exists() {
+            let raw = std::fs::read(&candidate).unwrap();
+            assert!(
+                !raw.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                "plaintext marker leaked in {}",
+                candidate.display()
+            );
+        }
+    }
+
+    let reopened = LocalJournal::open(&path, &scope("A"))
+        .unwrap()
+        .load_control(vec![])
+        .unwrap();
+    assert!(reopened.stopped);
+    assert_eq!(reopened.audit, vec![marker.to_string()]);
+
+    let key = load_or_create_journal_key(&path).unwrap();
+    let sealed = seal_payload(&key, &scope("A").namespace(), "local_control", b"[\"ok\"]").unwrap();
+    assert!(open_payload(&key, &scope("B").namespace(), "local_control", &sealed).is_err());
+    let mut tampered = sealed.clone();
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == '0' { '1' } else { '0' });
+    assert!(open_payload(&key, &scope("A").namespace(), "local_control", &tampered).is_err());
+    assert!(open_payload(
+        &key,
+        &scope("A").namespace(),
+        "local_control",
+        "[\"plain\"]"
+    )
+    .is_err());
+}

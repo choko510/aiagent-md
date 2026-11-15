@@ -682,7 +682,14 @@ def test_context_publication_loses_race_without_erasing_raw(
         return original_publish(*args, **kwargs)
 
     monkeypatch.setattr(head, "publish", pause_publish)
-    before = dbs["owner"].one("SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s", (scope.run_id,))["n"]
+    before_raw = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND kind='raw' AND ciphertext IS NOT NULL",
+        (scope.run_id,),
+    )["n"]
+    before_summary = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND kind='summary' AND ciphertext IS NOT NULL",
+        (scope.run_id,),
+    )["n"]
     errors: list[Exception] = []
 
     def publish() -> None:
@@ -712,13 +719,19 @@ def test_context_publication_loses_race_without_erasing_raw(
     assert dbs["owner"].one("SELECT head_revision FROM agent.runs WHERE id=%s", (scope.run_id,))[
         "head_revision"
     ] == int(plan.committed_head)
-    assert (
-        dbs["owner"].one(
-            "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND ciphertext IS NOT NULL",
-            (scope.run_id,),
-        )["n"]
-        >= before + 2
-    )
+    live_raw = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND kind='raw' AND ciphertext IS NOT NULL",
+        (scope.run_id,),
+    )["n"]
+    live_summary = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.context_artifacts WHERE run_id=%s AND kind='summary' AND ciphertext IS NOT NULL",
+        (scope.run_id,),
+    )["n"]
+    if transition == "source_revoke":
+        assert live_raw == before_raw
+        assert live_summary == before_summary
+    else:
+        assert live_raw == before_raw + 1
 
 
 def test_process_death_before_head_cas_keeps_raw_and_old_head(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
