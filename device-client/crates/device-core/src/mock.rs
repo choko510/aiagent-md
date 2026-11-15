@@ -54,6 +54,7 @@ impl AuthenticatedChannelPort for MockChannel {
 #[derive(Default)]
 pub struct MockAdapters {
     pub calls: usize,
+    pub deliver_failed: bool,
     pub deliver_unknown: bool,
 }
 impl MockAdapters {
@@ -61,6 +62,8 @@ impl MockAdapters {
         self.calls += 1;
         if self.deliver_unknown {
             Delivery::PossiblyApplied
+        } else if self.deliver_failed {
+            Delivery::Failed
         } else {
             Delivery::LocalOnly
         }

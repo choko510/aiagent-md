@@ -177,7 +177,13 @@ fn restarted_started_is_unknown_and_never_auto_retried() {
         let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
         assert_eq!(
             journal
-                .begin(&r.tool_intent_id, &r.journal_fingerprint(), "7", "permit")
+                .begin(
+                    &r.tool_intent_id,
+                    &r.journal_fingerprint(),
+                    "7",
+                    "grant-1",
+                    "permit",
+                )
                 .unwrap(),
             aiagent_device_core::BeginResult::StartedNew
         );
@@ -347,5 +353,99 @@ fn reconnect_rejects_changed_authority_fences() {
         }
         assert_eq!(agent.reconnect_mock(next), Err("RECONNECT_DENIED"));
     }
+    assert_eq!(agent.adapters.calls, 0);
+}
+
+#[test]
+fn grant_nonce_replay_across_intents_is_rejected_without_adapter_call() {
+    let dir = tempdir().unwrap();
+    let mut agent = new_agent(&dir.path().join("journal.db"), "A");
+    let r1 = request("A", "one", Operation::DesktopClick);
+    let r2 = request("A", "two", Operation::DesktopClick);
+    assert_eq!(
+        agent.execute(&r1, &mock_grant(&r1, "shared-grant-nonce", 200), 100),
+        Decision::LocalCompleted
+    );
+    assert_eq!(
+        agent.execute(&r2, &mock_grant(&r2, "shared-grant-nonce", 200), 100),
+        Decision::GrantReused
+    );
+    assert_eq!(agent.adapters.calls, 1);
+    assert_eq!(agent.channel.authorize_calls, 1);
+}
+
+#[test]
+fn failed_effect_is_distinct_from_unknown_and_not_retried() {
+    let dir = tempdir().unwrap();
+    let mut agent = new_agent(&dir.path().join("journal.db"), "A");
+    agent.adapters.deliver_failed = true;
+    let r = request("A", "failed-once", Operation::DesktopClick);
+    let g = mock_grant(&r, "nonce-fail", 200);
+    assert_eq!(agent.execute(&r, &g, 100), Decision::Failed);
+    assert_eq!(
+        agent.effect("failed-once").unwrap(),
+        Some(EffectState::Failed)
+    );
+    // Replaying an already recorded FAILED effect stops at journal precheck without calling cloud or adapter again.
+    assert_eq!(agent.execute(&r, &g, 100), Decision::Failed);
+    assert_eq!(agent.adapters.calls, 1);
+    assert_eq!(agent.channel.authorize_calls, 1);
+}
+
+#[test]
+fn target_and_policy_validation_reject_whitespace_and_non_origin_urls() {
+    let dir = tempdir().unwrap();
+    let mut agent = new_agent(&dir.path().join("journal.db"), "A");
+    assert!(agent.policy.allow_desktop(" ").is_err());
+    assert!(agent
+        .policy
+        .allow_browser_origin("https://example.com/path")
+        .is_err());
+    assert!(agent
+        .policy
+        .allow_browser_origin("https://user@example.com")
+        .is_err());
+    agent
+        .policy
+        .allow_browser_origin("https://example.com")
+        .unwrap();
+
+    let mut bad_desktop = request("A", "ws-desktop", Operation::DesktopClick);
+    if let Target::Desktop { window_token, .. } = &mut bad_desktop.target {
+        *window_token = " window-2 ".into();
+    }
+    assert_eq!(
+        agent.execute(&bad_desktop, &mock_grant(&bad_desktop, "n1", 200), 100),
+        Decision::Denied("INVALID_GRANT_OR_ARGUMENTS")
+    );
+
+    let mut bad_browser = request("A", "bad-origin", Operation::BrowserClick);
+    if let Target::Browser { origin, .. } = &mut bad_browser.target {
+        *origin = "https://example.com/admin".into();
+    }
+    assert_eq!(
+        agent.execute(&bad_browser, &mock_grant(&bad_browser, "n2", 200), 100),
+        Decision::Denied("INVALID_GRANT_OR_ARGUMENTS")
+    );
+    assert_eq!(agent.adapters.calls, 0);
+}
+
+#[test]
+fn unpaired_agent_cannot_execute_or_reconnect() {
+    let dir = tempdir().unwrap();
+    let mut agent = new_agent(&dir.path().join("journal.db"), "A");
+    agent.unpair();
+    assert_eq!(
+        agent.phase(),
+        aiagent_device_core::ConnectionPhase::Unpaired
+    );
+    let r = request("A", "unpaired", Operation::DesktopClick);
+    assert_eq!(
+        agent.execute(&r, &mock_grant(&r, "n1", 200), 100),
+        Decision::Denied("LOCAL_STOP_OR_REVOKED")
+    );
+    let mut next = fence();
+    next.connection_generation = Epoch(10);
+    assert_eq!(agent.reconnect_mock(next), Err("RECONNECT_DENIED"));
     assert_eq!(agent.adapters.calls, 0);
 }

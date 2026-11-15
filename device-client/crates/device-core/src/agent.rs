@@ -1,5 +1,8 @@
 use crate::journal::{BeginResult, EffectState, LocalJournal};
-use crate::protocol::{ActionRequest, CloudGrant, Fence, Operation, Scope, StartPermit, Target};
+use crate::protocol::{
+    valid_browser_origin, valid_field, ActionRequest, CloudGrant, Fence, Operation, Scope,
+    StartPermit, Target,
+};
 use std::collections::HashSet;
 
 /// These traits are capability boundaries, NOT a licence to forward raw MCP/CDP/shell.
@@ -16,6 +19,7 @@ pub trait AuthenticatedChannelPort {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
     LocalOnly,
+    Failed,
     PossiblyApplied,
 }
 pub trait CuaAdapterPort {
@@ -48,7 +52,24 @@ pub struct LocalPolicy {
     pub allow_mock_android: bool,
 }
 impl LocalPolicy {
+    pub fn allow_desktop(&mut self, app_id: &str) -> Result<(), &'static str> {
+        if !valid_field(app_id, 256) {
+            return Err("INVALID_POLICY_ENTRY");
+        }
+        self.desktop_apps.insert(app_id.to_owned());
+        Ok(())
+    }
+    pub fn allow_browser_origin(&mut self, origin: &str) -> Result<(), &'static str> {
+        if !valid_browser_origin(origin) {
+            return Err("INVALID_POLICY_ENTRY");
+        }
+        self.browser_origins.insert(origin.to_owned());
+        Ok(())
+    }
     fn allows(&self, request: &ActionRequest) -> bool {
+        if !request.target.valid() {
+            return false;
+        }
         match (&request.operation, &request.target) {
             (
                 Operation::DesktopInspect | Operation::DesktopClick,
@@ -61,8 +82,9 @@ impl LocalPolicy {
             ) => {
                 // Positive allowlist prevents desktop-input browser-origin bypass.
                 !browser_like
-                    && !window_token.is_empty()
-                    && !process_generation.is_empty()
+                    && valid_field(window_token, 256)
+                    && valid_field(process_generation, 256)
+                    && valid_field(app_id, 256)
                     && self.desktop_apps.contains(app_id)
             }
             (
@@ -74,16 +96,17 @@ impl LocalPolicy {
                     document_generation,
                 },
             ) => {
-                !profile_id.is_empty()
-                    && !tab_id.is_empty()
-                    && !document_generation.is_empty()
+                valid_browser_origin(origin)
+                    && valid_field(profile_id, 256)
+                    && valid_field(tab_id, 256)
+                    && valid_field(document_generation, 256)
                     && self.browser_origins.contains(origin)
             }
             (Operation::BuildRun, Target::Build { workspace_id }) => {
-                self.allow_mock_build && !workspace_id.is_empty()
+                self.allow_mock_build && valid_field(workspace_id, 256)
             }
             (Operation::AndroidInstall, Target::Android { serial, package_id }) => {
-                self.allow_mock_android && !serial.is_empty() && !package_id.is_empty()
+                self.allow_mock_android && valid_field(serial, 256) && valid_field(package_id, 256)
             }
             _ => false,
         }
@@ -103,8 +126,10 @@ pub enum Decision {
     Denied(&'static str),
     LocalCompleted,
     AlreadyCompletedLocal,
+    Failed,
     Unknown,
     IntentConflict,
+    GrantReused,
     PermitReused,
     StorageError,
 }
@@ -163,14 +188,21 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             self.phase = ConnectionPhase::PairedOffline;
         }
     }
-    pub fn mark_stale(&mut self) {
+    pub fn unpair(&mut self) {
         if !self.revoked {
+            self.stopped = true;
+            self.phase = ConnectionPhase::Unpaired;
+        }
+    }
+    pub fn mark_stale(&mut self) {
+        if !self.revoked && self.phase != ConnectionPhase::Unpaired {
             self.phase = ConnectionPhase::Stale;
         }
     }
-    /// Simulator-only reconnect. An old connection generation can never be revived.
+    /// Simulator-only reconnect. An old connection generation or unpaired client can never be revived.
     pub fn reconnect_mock(&mut self, next_fence: Fence) -> Result<(), &'static str> {
-        if self.stopped
+        if self.phase == ConnectionPhase::Unpaired
+            || self.stopped
             || self.revoked
             || !next_fence.valid()
             || next_fence.connection_generation <= self.fence.connection_generation
@@ -219,6 +251,28 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
         if !self.policy.allows(request) {
             return Decision::Denied("LOCAL_POLICY");
         }
+        let fingerprint = request.journal_fingerprint();
+        let attempt_fence = request.attempt_fence.to_string();
+        match self.journal.precheck(
+            &request.tool_intent_id,
+            &fingerprint,
+            &attempt_fence,
+            &grant.nonce,
+        ) {
+            Ok(Some(BeginResult::Replay(EffectState::CompletedLocal))) => {
+                return Decision::AlreadyCompletedLocal;
+            }
+            Ok(Some(BeginResult::Replay(EffectState::Failed))) => return Decision::Failed,
+            Ok(Some(BeginResult::Replay(EffectState::Started | EffectState::Unknown))) => {
+                return Decision::Unknown;
+            }
+            Ok(Some(BeginResult::IntentConflict)) => return Decision::IntentConflict,
+            Ok(Some(BeginResult::GrantReused)) => return Decision::GrantReused,
+            Ok(Some(BeginResult::PermitReused)) => return Decision::PermitReused,
+            Ok(Some(BeginResult::StartedNew)) => {}
+            Ok(None) => {}
+            Err(_) => return Decision::StorageError,
+        }
         let permit = match self.channel.authorize_start(request, grant, now_ms) {
             Some(value) => value,
             None => return Decision::Denied("START_PERMIT_DENIED"),
@@ -234,19 +288,24 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
         if !permit.matches(request, grant, now_ms) {
             return Decision::Denied("START_PERMIT_MISMATCH");
         }
-        // SQLite uses IMMEDIATE transaction, commits STARTED+one-use Permit together.
+        // SQLite uses IMMEDIATE transaction, commits STARTED+one-use Grant/Permit together.
         let begin = self.journal.begin(
             &request.tool_intent_id,
-            &request.journal_fingerprint(),
-            &request.attempt_fence.to_string(),
+            &fingerprint,
+            &attempt_fence,
+            &grant.nonce,
             &permit.permit_nonce,
         );
         match begin {
             Ok(BeginResult::Replay(EffectState::CompletedLocal)) => {
                 return Decision::AlreadyCompletedLocal;
             }
-            Ok(BeginResult::Replay(_)) => return Decision::Unknown,
+            Ok(BeginResult::Replay(EffectState::Failed)) => return Decision::Failed,
+            Ok(BeginResult::Replay(EffectState::Started | EffectState::Unknown)) => {
+                return Decision::Unknown;
+            }
             Ok(BeginResult::IntentConflict) => return Decision::IntentConflict,
+            Ok(BeginResult::GrantReused) => return Decision::GrantReused,
             Ok(BeginResult::PermitReused) => return Decision::PermitReused,
             Err(_) => return Decision::StorageError,
             Ok(BeginResult::StartedNew) => {}
@@ -259,6 +318,7 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
         };
         let state = match delivery {
             Delivery::LocalOnly => EffectState::CompletedLocal,
+            Delivery::Failed => EffectState::Failed,
             Delivery::PossiblyApplied => EffectState::Unknown,
         };
         if self.journal.finish(&request.tool_intent_id, state).is_err() {
@@ -266,10 +326,10 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             return Decision::Unknown;
         }
         // COMPLETED_LOCAL is not a Cloud-ledger CONFIRMED or Task completion.
-        if state == EffectState::CompletedLocal {
-            Decision::LocalCompleted
-        } else {
-            Decision::Unknown
+        match state {
+            EffectState::CompletedLocal => Decision::LocalCompleted,
+            EffectState::Failed => Decision::Failed,
+            EffectState::Started | EffectState::Unknown => Decision::Unknown,
         }
     }
 }

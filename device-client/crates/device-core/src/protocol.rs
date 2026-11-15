@@ -72,8 +72,30 @@ impl Scope {
             &self.device_id,
         ]
         .iter()
-        .all(|s| !s.trim().is_empty() && s.len() <= 256)
+        .all(|s| valid_field(s, 256))
     }
+}
+
+pub(crate) fn valid_field(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+pub(crate) fn valid_browser_origin(origin: &str) -> bool {
+    if !valid_field(origin, 256) {
+        return false;
+    }
+    let Some(authority) = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !authority.is_empty()
+        && !authority.contains(['/', '?', '#', '@'])
+        && !authority.chars().any(char::is_whitespace)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +158,38 @@ pub enum Target {
     },
 }
 
+impl Target {
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Desktop {
+                app_id,
+                window_token,
+                process_generation,
+                ..
+            } => {
+                valid_field(app_id, 256)
+                    && valid_field(window_token, 256)
+                    && valid_field(process_generation, 256)
+            }
+            Self::Browser {
+                origin,
+                profile_id,
+                tab_id,
+                document_generation,
+            } => {
+                valid_browser_origin(origin)
+                    && valid_field(profile_id, 256)
+                    && valid_field(tab_id, 256)
+                    && valid_field(document_generation, 256)
+            }
+            Self::Build { workspace_id } => valid_field(workspace_id, 256),
+            Self::Android { serial, package_id } => {
+                valid_field(serial, 256) && valid_field(package_id, 256)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionRequest {
     pub scope: Scope,
@@ -190,10 +244,10 @@ impl ActionRequest {
         hex_digest(&hasher.finalize())
     }
     pub fn has_valid_shape(&self) -> bool {
-        !self.tool_intent_id.trim().is_empty()
-            && self.tool_intent_id.len() <= 256
+        valid_field(&self.tool_intent_id, 256)
             && self.args.len() <= 64 * 1024
             && self.scope.valid()
+            && self.target.valid()
             && self.args_sha256 == hex_digest(&Sha256::digest(&self.args))
             && self.attempt_fence.0 <= i64::MAX as u64
             && self.fence.valid()
@@ -222,7 +276,7 @@ impl CloudGrant {
             && self.args_sha256 == req.args_sha256
             && self.operation == req.operation
             && self.target == req.target
-            && !self.nonce.is_empty()
+            && valid_field(&self.nonce, 256)
             && self.expires_at_ms > now_ms
     }
 }
@@ -240,7 +294,7 @@ impl StartPermit {
             && self.grant.nonce == grant.nonce
             && self.expires_at_ms > now_ms
             && self.expires_at_ms <= grant.expires_at_ms
-            && !self.permit_nonce.is_empty()
+            && valid_field(&self.permit_nonce, 256)
     }
 }
 pub fn hex_digest(bytes: &[u8]) -> String {
