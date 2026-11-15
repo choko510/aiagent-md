@@ -261,4 +261,15 @@ mod tests {
         assert!(!snap.real_device_io_enabled);
         assert_eq!(snap.connection, "JOURNAL_UNAVAILABLE");
     }
+
+    #[test]
+    fn ui_config_and_html_start_hardened_and_fail_closed() {
+        let conf = include_str!("../tauri.conf.json");
+        assert!(conf.contains("\"withGlobalTauri\": false"));
+        let html = include_str!("../../app/ui/index.html");
+        assert!(html.contains("<button id=\"stop\" class=\"danger\" disabled>"));
+        assert!(html.contains("<button id=\"revoke\" class=\"secondary\" disabled>"));
+        let js = include_str!("../../app/ui/app.js");
+        assert!(js.contains("__TAURI_INTERNALS__"));
+    }
 }

@@ -4,6 +4,7 @@
 No VM, firewall, queue, or database is modified. CI mocks never count as HOST_VERIFIED.
 The operator must independently review evidence before using any production gate.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,8 +31,14 @@ EXPECTED_API_VERSION = 12
 BASE = ("HV-U01", "HV-U02", "JQ-SMOKE")
 CI = ("HV-CI",)
 HOST = (
-    "KVM-CELL", "KVM-NETWORK", "KVM-SENTINEL", "KVM-RESTART",
-    "KVM-FENCE", "KVM-FS", "KVM-VSOCK", "KVM-ATTESTATION",
+    "KVM-CELL",
+    "KVM-NETWORK",
+    "KVM-SENTINEL",
+    "KVM-RESTART",
+    "KVM-FENCE",
+    "KVM-FS",
+    "KVM-VSOCK",
+    "KVM-ATTESTATION",
 )
 PROD = ("JQ-T12-1M", "JQ-T14", "JQ-T16", "REC-PITR", "REC-EFFECT-QUARANTINE", "OPERATOR-SIGNOFF")
 MAX_EVIDENCE_BYTES = 1_000_000
@@ -113,31 +120,61 @@ def topology_report() -> dict[str, object]:
     uuids: dict[str, str] = {}
     for name in ("aiagent-control", "aiagent-exec"):
         ok, xml = run_readonly(
-            "virsh", "--readonly", "--connect", "qemu:///system", "dumpxml", name,
+            "virsh",
+            "--readonly",
+            "--connect",
+            "qemu:///system",
+            "dumpxml",
+            name,
             max_bytes=MAX_XML_BYTES,
         )
         if not ok or not xml:
-            return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
-                    "checks": {"libvirt_dumpxml": False}, "hostId": host_id(), "recordedAt": now_iso()}
+            return {
+                "kind": "static_topology",
+                "status": "BLOCKED_HOST_UNAVAILABLE",
+                "checks": {"libvirt_dumpxml": False},
+                "hostId": host_id(),
+                "recordedAt": now_iso(),
+            }
         xmls[name] = xml
         state_ok, state = run_readonly(
-            "virsh", "--readonly", "--connect", "qemu:///system", "domstate", name,
+            "virsh",
+            "--readonly",
+            "--connect",
+            "qemu:///system",
+            "domstate",
+            name,
             env_override={"LC_ALL": "C"},
         )
         uuid_ok, uid = run_readonly(
-            "virsh", "--readonly", "--connect", "qemu:///system", "domuuid", name,
+            "virsh",
+            "--readonly",
+            "--connect",
+            "qemu:///system",
+            "domuuid",
+            name,
             env_override={"LC_ALL": "C"},
         )
         states[name] = state.strip().lower() if state_ok else "unknown"
         uuids[name] = uid.strip() if uuid_ok else ""
     if any("<!DOCTYPE" in xml or "<!ENTITY" in xml for xml in xmls.values()):
-        return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
-                "checks": {"valid_libvirt_xml": False}, "hostId": host_id(), "recordedAt": now_iso()}
+        return {
+            "kind": "static_topology",
+            "status": "BLOCKED_HOST_UNAVAILABLE",
+            "checks": {"valid_libvirt_xml": False},
+            "hostId": host_id(),
+            "recordedAt": now_iso(),
+        }
     try:
         control, execution = (ET.fromstring(xmls[name]) for name in ("aiagent-control", "aiagent-exec"))  # noqa: S314
     except ET.ParseError:
-        return {"kind": "static_topology", "status": "BLOCKED_HOST_UNAVAILABLE",
-                "checks": {"valid_libvirt_xml": False}, "hostId": host_id(), "recordedAt": now_iso()}
+        return {
+            "kind": "static_topology",
+            "status": "BLOCKED_HOST_UNAVAILABLE",
+            "checks": {"valid_libvirt_xml": False},
+            "hostId": host_id(),
+            "recordedAt": now_iso(),
+        }
 
     def sources(root: ET.Element) -> set[str]:
         found: set[str] = set()
@@ -146,9 +183,7 @@ def topology_report() -> dict[str, object]:
                 if s := (node.get("file") or node.get("dev")):
                     found.add(f"path:{s}")
                 elif name := node.get("name"):
-                    hosts = ",".join(
-                        f"{h.get('name', '')}:{h.get('port', '')}" for h in node.findall("host")
-                    )
+                    hosts = ",".join(f"{h.get('name', '')}:{h.get('port', '')}" for h in node.findall("host"))
                     found.add(f"net:{node.get('protocol', '')}:{name}:{hosts}")
                 elif (pool := node.get("pool")) and (vol := node.get("volume")):
                     found.add(f"vol:{pool}/{vol}")
@@ -172,23 +207,22 @@ def topology_report() -> dict[str, object]:
     checks = {
         "both_kvm_domains": all(root.get("type") == "kvm" for root in (control, execution)),
         "distinct_live_guests": all(s == "running" for s in states.values())
-                                and bool(uuids["aiagent-control"])
-                                and bool(uuids["aiagent-exec"])
-                                and uuids["aiagent-control"] != uuids["aiagent-exec"],
+        and bool(uuids["aiagent-control"])
+        and bool(uuids["aiagent-exec"])
+        and uuids["aiagent-control"] != uuids["aiagent-exec"],
         "correct_domain_names": control.findtext("name") == "aiagent-control"
-                                and execution.findtext("name") == "aiagent-exec",
+        and execution.findtext("name") == "aiagent-exec",
         "execution_has_no_nic": not has_forbidden_channel(execution),
         "no_shared_file_devices": not control.findall("./devices/filesystem")
-                                  and not execution.findall("./devices/filesystem"),
+        and not execution.findall("./devices/filesystem"),
         "no_host_device_passthrough": not control.findall("./devices/hostdev")
-                                      and not execution.findall("./devices/hostdev"),
-        "different_disk_sources": bool(sources(control)) and bool(sources(execution))
-                                  and not (sources(control) & sources(execution)),
+        and not execution.findall("./devices/hostdev"),
+        "different_disk_sources": bool(sources(control))
+        and bool(sources(execution))
+        and not (sources(control) & sources(execution)),
         "distinct_static_vsock_cids": cid(control) == "2000" and cid(execution) == "3",
     }
-    digest = "sha256:" + hashlib.sha256(
-        (xmls["aiagent-control"] + "\n" + xmls["aiagent-exec"]).encode()
-    ).hexdigest()
+    digest = "sha256:" + hashlib.sha256((xmls["aiagent-control"] + "\n" + xmls["aiagent-exec"]).encode()).hexdigest()
     return {
         "kind": "static_topology",
         "hostId": host_id(),
@@ -221,11 +255,21 @@ def _read_regular_bytes(path: Path, max_bytes: int) -> bytes:
 
 
 def _valid_record(
-    check: object, identity: object, digest: object, fresh_time: dt.datetime, evidence_dir: Path | None,
+    check: object,
+    identity: object,
+    digest: object,
+    fresh_time: dt.datetime,
+    evidence_dir: Path | None,
 ) -> bool:
     required = {
-        "id", "status", "execution", "evidenceSha256", "evidenceFile",
-        "hostId", "topologyDigest", "recordedAt",
+        "id",
+        "status",
+        "execution",
+        "evidenceSha256",
+        "evidenceFile",
+        "hostId",
+        "topologyDigest",
+        "recordedAt",
     }
     if not isinstance(check, dict) or set(check) != required or evidence_dir is None or evidence_dir.is_symlink():
         return False
@@ -252,19 +296,21 @@ def _valid_record(
         if hashlib.sha256(raw).hexdigest() != proof:
             return False
         when = dt.datetime.fromisoformat(check["recordedAt"].replace("Z", "+00:00"))
-        age = (fresh_time - when).total_seconds() if when.tzinfo else float('inf')
+        age = (fresh_time - when).total_seconds() if when.tzinfo else float("inf")
         if age < -300 or age > 86400:
             return False
     except (AttributeError, OSError, TypeError, ValueError):
         return False
     if check["execution"] in ("REAL_HOST", "OPERATOR"):
-        return check["hostId"] == identity and check["topologyDigest"] == digest
+        return bool(check["hostId"] == identity and check["topologyDigest"] == digest)
     # CI artifacts come from a different machine, and may use a digest of the CI runner image.
     return True
 
 
 def evaluate_evidence(
-    evidence: object, live: dict[str, object] | None = None, evidence_dir: Path | None = None,
+    evidence: object,
+    live: dict[str, object] | None = None,
+    evidence_dir: Path | None = None,
 ) -> dict[str, object]:
     """Evaluate checked artifacts; never promote simulated 2VM results to HOST_VERIFIED.
 
@@ -276,7 +322,7 @@ def evaluate_evidence(
     identity = live.get("hostId", "")
     digest = live.get("topologyDigest", "")
     current = dt.datetime.now(dt.UTC)
-    records: dict[str, dict] = {}
+    records: dict[str, dict[object, object]] = {}
     duplicates: set[str] = set()
     if isinstance(evidence, dict) and isinstance(evidence.get("checks"), list):
         for item in evidence["checks"]:
@@ -300,13 +346,14 @@ def evaluate_evidence(
     # Artifact hashes prove integrity only, not provenance, execution or independent review.
     # Synthetic files with a matching hostId/digest must NEVER promote these gates.
     # A separately authenticated operator/attestation service owns final host/product acceptance.
-    gates = {"CODE_READY": code, "INTEGRATED": integrated,
-             "HOST_VERIFIED": False, "PRODUCTION_READY": False}
+    gates = {"CODE_READY": code, "INTEGRATED": integrated, "HOST_VERIFIED": False, "PRODUCTION_READY": False}
     reached = next((g for g in reversed(tuple(gates)) if gates[g]), "NOT_RUN")
-    required_execution = {**dict.fromkeys(BASE + CI, "CI"), **dict.fromkeys(HOST + PROD[:-1], "REAL_HOST"),
-                          PROD[-1]: "OPERATOR"}
-    pending = [k for k, mode in required_execution.items()
-               if k not in records or records[k]["execution"] != mode]
+    required_execution = {
+        **dict.fromkeys(BASE + CI, "CI"),
+        **dict.fromkeys(HOST + PROD[:-1], "REAL_HOST"),
+        PROD[-1]: "OPERATOR",
+    }
+    pending = [k for k, mode in required_execution.items() if k not in records or records[k]["execution"] != mode]
     return {
         "kind": "acceptance_gate",
         "status": reached,

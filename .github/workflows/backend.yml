@@ -31,9 +31,9 @@ jobs:
       - run: uv sync --locked
       - name: Generated contracts are up to date (canonical JSON Schema -> Pydantic / TS)
         run: uv run python tools/gen_contracts.py --check
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src packages/browser/src packages/context/src packages/memory/src packages/development/src packages/automation/src
+      - run: uv run ruff check . ../deploy/kvm
+      - run: uv run ruff format --check . ../deploy/kvm
+      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src packages/browser/src packages/context/src packages/memory/src packages/development/src packages/automation/src ../deploy/kvm
 
   integration:
     name: integration (py${{ matrix.python }})
@@ -82,6 +82,62 @@ jobs:
       - run: uv sync --locked
       - name: PYRT-T on the formal stack (real gateway/Sentinel processes, worker kills)
         run: uv run pytest -q -rA -p no:cacheprovider tests/test_runtime_faults.py
+
+  host-verification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_PASSWORD: ci}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - run: uv sync --locked
+      - name: Host verification unit & fail-closed gate suite
+        run: uv run pytest -q -rA -p no:cacheprovider tests/host_verification
+      - name: KVM capability, static topology, and dynamic probe (fail-closed without /dev/kvm)
+        run: |
+          uv run python - <<'PY'
+          import json, subprocess, sys
+          for cmd, kind in [
+              ([sys.executable, "../deploy/kvm/acceptance.py", "capabilities"], "host_capabilities"),
+              ([sys.executable, "../deploy/kvm/acceptance.py", "topology"], "static_topology"),
+              ([sys.executable, "../deploy/kvm/dynamic_probe.py"], "dynamic_kvm_probe"),
+          ]:
+              p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+              data = json.loads(p.stdout)
+              assert data["kind"] == kind, data
+              assert p.returncode in (0, 2), (cmd, p.returncode, p.stderr)
+          PY
+      - name: Bounded JQ-SMOKE and quarantined PITR inspection probes against PostgreSQL
+        env:
+          PG_ADMIN_DSN: postgresql://postgres:ci@127.0.0.1:5432/postgres
+          AIAGENT_HV_DISPOSABLE_PG_URL: postgresql://postgres:ci@127.0.0.1:5432/aiagent_hv_disposable
+          AIAGENT_HV_RESTORE_DSN: postgresql://postgres:ci@127.0.0.1:5432/aiagent_hv_restored_quarantine
+          AIAGENT_HV_ALLOW_WRITE: YES
+        run: |
+          uv run python - <<'PY'
+          import os
+          import psycopg
+          from aiagent_core import admin, migrate
+
+          admin_dsn = os.environ["PG_ADMIN_DSN"]
+          with psycopg.connect(admin_dsn, autocommit=True) as c:
+              c.execute("CREATE DATABASE aiagent_hv_disposable")
+              c.execute("ALTER DATABASE aiagent_hv_disposable SET aiagent.hv_disposable = 'aiagent-hv-disposable-v1'")
+              c.execute("CREATE DATABASE aiagent_hv_restored_quarantine")
+          restore_dsn = os.environ["AIAGENT_HV_RESTORE_DSN"]
+          migrate.up(restore_dsn)
+          admin.restore_bump(restore_dsn)
+          with psycopg.connect(restore_dsn, autocommit=True) as c:
+              c.execute("UPDATE queue.queues SET paused = true")
+          PY
+          uv run python ../deploy/kvm/queue_gate.py --rows 100 --relays 1 --consumers 1 --outage 0.5 --max-seconds 60 --execute --ack ALLOW_DISPOSABLE_DB_WRITE
+          uv run python ../deploy/kvm/restore_probe.py --inspect
 
   cell-and-compose:
     runs-on: ubuntu-24.04

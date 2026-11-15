@@ -8,6 +8,7 @@ free-form semantic summarization intentionally remains INTEGRATION_PENDING.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -19,6 +20,7 @@ from .models import (
     ContextRequest,
     RawArtifact,
     SafeStop,
+    Scope,
     SourceInput,
     SummaryClaim,
     SummaryProposal,
@@ -58,6 +60,20 @@ class MockExcerptSummarizer:
             except UnicodeDecodeError as exc:
                 raise SafeStop("UNSUPPORTED_SOURCE_ENCODING") from exc
             text = decoded[:max_chars]
+            if (
+                len(decoded) > max_chars
+                and text
+                and decoded[max_chars].isascii()
+                and decoded[max_chars].isalnum()
+                and text[-1].isascii()
+                and text[-1].isalnum()
+            ):
+                cut = len(text)
+                while cut > 0 and text[cut - 1].isascii() and text[cut - 1].isalnum():
+                    cut -= 1
+                trimmed = text[:cut].rstrip()
+                if trimmed:
+                    text = trimmed
             claims.append(
                 SummaryClaim(
                     text, text, record.artifact_ref, record.sha256, record.observed_at, 0, len(text.encode("utf-8"))
@@ -93,13 +109,56 @@ def verify_tool_pairs(events: tuple[ToolEvent, ...]) -> tuple[str, ...]:
     return tuple(completed)
 
 
+_PRE_NEGATION_RE = re.compile(
+    r"(?i)(?:\b(?:not|no|never|without|except|excluding|unless|neither|nor|cannot|can't|won't|don't|doesn't|didn't|"
+    r"isn't|aren't|wasn't|weren't|prohibited|forbidden|denied|excluded|unavailable)\b|"
+    r"(?:^|\W)(?:non|no|not|un|anti|dis)-\Z|"
+    r"(?:非|不|未|無|反)\Z|"
+    r"(?:ではなく|ではない|を除き|以外|禁止|不可|なし|ない))"
+)
+_POST_NEGATION_RE = re.compile(
+    r"(?i)(?:\b(?:not|never|excluded|unavailable|denied|prohibited|forbidden)\b|"
+    r"(?:不可|禁止|なし|ない|しません|しない|できません|ではない|ではなく|対象外|除外))"
+)
+_CLAUSE_BREAK_RE = re.compile(r"[.!?;:\r\n。！？]")
+
+
+def _check_polarity_preservation(original: bytes, start_byte: int, end_byte: int, quote: str) -> None:
+    prefix_text = original[:start_byte].decode("utf-8", "strict")
+    suffix_text = original[end_byte:].decode("utf-8", "strict")
+    if (
+        prefix_text
+        and prefix_text[-1].isascii()
+        and prefix_text[-1].isalnum()
+        and quote[0].isascii()
+        and quote[0].isalnum()
+    ):
+        raise SafeStop("UNSUPPORTED_CLAIM")
+    if (
+        suffix_text
+        and suffix_text[0].isascii()
+        and suffix_text[0].isalnum()
+        and quote[-1].isascii()
+        and quote[-1].isalnum()
+    ):
+        raise SafeStop("UNSUPPORTED_CLAIM")
+    clause_before = _CLAUSE_BREAK_RE.split(prefix_text)[-1][-128:]
+    if _PRE_NEGATION_RE.search(clause_before):
+        raise SafeStop("UNSUPPORTED_CLAIM")
+    if not _CLAUSE_BREAK_RE.match(quote[-1]):
+        clause_after = _CLAUSE_BREAK_RE.split(suffix_text)[0][:64]
+        if _POST_NEGATION_RE.search(clause_after):
+            raise SafeStop("UNSUPPORTED_CLAIM")
+
+
 def audit_proposal(
     request: ContextRequest, refs: tuple[RawArtifact, ...], store: ArtifactStorePort, candidate: SummaryProposal
 ) -> None:
     """Byte-span/source integrity and strict textual entailment (exact quote only).
 
     A hash or an existing citation alone is never evidence of semantic support.
-    Unsupported paraphrases/derived prices must be rejected, not auto-verified.
+    Unsupported paraphrases, derived prices, and polarity-inverting excerpts
+    (e.g. dropping preceding/following negation) must be rejected.
     """
     if (
         candidate.goal_revision != request.goal_revision
@@ -133,6 +192,7 @@ def audit_proposal(
             raise SafeStop("INVALID_LOCATOR") from exc
         if not quote or quote != claim.quote or claim.text != claim.quote:
             raise SafeStop("UNSUPPORTED_CLAIM")
+        _check_polarity_preservation(original, claim.start_byte, claim.end_byte, quote)
         forbid_secrets(claim.text)
 
 
@@ -175,6 +235,17 @@ def _serialize(
     )
     forbid_secrets(payload)
     return sealed, payload
+
+
+def _revoke_written_summaries(artifacts: ArtifactStorePort, scope: Scope, refs_to_revoke: list[str]) -> None:
+    revoke = getattr(artifacts, "revoke", None)
+    if not callable(revoke):
+        return
+    for ref in refs_to_revoke:
+        try:
+            revoke(scope, ref)
+        except Exception:
+            pass
 
 
 class ContextService:
@@ -239,36 +310,47 @@ class ContextService:
             raise SafeStop("BLOCKED_CONTEXT_CAPACITY")
         self._validate_current(request)
         # Summary is a selection record. Original bytes remain separately retrievable.
-        summary_ref, summary_hash = self.artifacts.put_summary(request.scope, summary)
-        payload_ref, payload_digest = self.artifacts.put_summary(request.scope, payload.encode("utf-8"))
-        plan_digest = stable_digest(
-            {
-                "scope": asdict(request.scope),
-                "oldHead": request.expected_head,
-                "leaseEpoch": request.lease_epoch,
-                "goalRevision": request.goal_revision,
-                "policy": request.policy_version,
-                "memoryEpoch": request.memory_source_epoch,
-                "model": asdict(request.budget),
-                "sources": [asdict(r) for r in refs],
-                "summary": (summary_ref, summary_hash),
-                "anchors": request.anchor_digest,
-                "payload": sha256(payload.encode()).hexdigest(),
-                "cursor": request.raw_event_cursor,
-            }
-        )
-        new_head = self.head.publish(
-            request.scope,
-            request.expected_head,
-            request.goal_revision,
-            request.lease_epoch,
-            request.policy_version,
-            request.memory_source_epoch,
-            plan_digest,
-            ContextPublication(
-                request, refs, request.memory[:memory_count], summary_ref, summary_hash, payload_ref, payload_digest
-            ),
-        )
+        written_summaries: list[str] = []
+        try:
+            summary_ref, summary_hash = self.artifacts.put_summary(request.scope, summary)
+            written_summaries.append(summary_ref)
+            payload_ref, payload_digest = self.artifacts.put_summary(request.scope, payload.encode("utf-8"))
+            written_summaries.append(payload_ref)
+            plan_digest = stable_digest(
+                {
+                    "scope": asdict(request.scope),
+                    "oldHead": request.expected_head,
+                    "leaseEpoch": request.lease_epoch,
+                    "goalRevision": request.goal_revision,
+                    "policy": request.policy_version,
+                    "memoryEpoch": request.memory_source_epoch,
+                    "model": asdict(request.budget),
+                    "sources": [asdict(r) for r in refs],
+                    "summary": (summary_ref, summary_hash),
+                    "anchors": request.anchor_digest,
+                    "payload": sha256(payload.encode()).hexdigest(),
+                    "cursor": request.raw_event_cursor,
+                }
+            )
+            new_head = self.head.publish(
+                request.scope,
+                request.expected_head,
+                request.goal_revision,
+                request.lease_epoch,
+                request.policy_version,
+                request.memory_source_epoch,
+                plan_digest,
+                ContextPublication(
+                    request, refs, request.memory[:memory_count], summary_ref, summary_hash, payload_ref, payload_digest
+                ),
+            )
+        except SafeStop as exc:
+            if exc.code != "SIMULATED_KILL_BEFORE_CAS":
+                _revoke_written_summaries(self.artifacts, request.scope, written_summaries)
+            raise
+        except Exception:
+            _revoke_written_summaries(self.artifacts, request.scope, written_summaries)
+            raise
         return ContextPlan(
             request.scope,
             request.goal_revision,

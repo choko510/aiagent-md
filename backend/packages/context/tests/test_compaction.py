@@ -312,3 +312,69 @@ def test_overflow_retry_reuses_raw_artifacts_and_check_dispatch_guards():
         "EXPIRED_MEMORY",
         lambda: ContextService(store2, head2).check_dispatch(plan2, "11", now=datetime.now(UTC) + timedelta(hours=1)),
     )
+
+
+def test_cas_conflict_and_partial_summary_failure_leave_no_orphan_summary():
+    req, head, store, sources = setup()
+    orig_publish = head.publish
+
+    def conflict_publish(*args, **kwargs):
+        head.head = "head:other"
+        return orig_publish(*args, **kwargs)
+
+    head.publish = conflict_publish  # type: ignore[method-assign]
+    expect_code("STALE_CONTEXT", lambda: ContextService(store, head).compact(req, sources))
+    assert not store._summary
+
+    # Partial put_summary failure (1st summary written, 2nd payload write fails): no orphan survives.
+    req2, head2, store2, sources2 = setup()
+    calls = 0
+    orig_put_summary = store2.put_summary
+
+    def fail_second_put(scope, content):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SafeStop("OFFLOAD_FAILED")
+        return orig_put_summary(scope, content)
+
+    store2.put_summary = fail_second_put  # type: ignore[method-assign]
+    expect_code("OFFLOAD_FAILED", lambda: ContextService(store2, head2).compact(req2, sources2))
+    assert not store2._summary
+
+
+def test_polarity_truncation_and_midword_slice_are_rejected_but_full_negation_passes():
+    req, head, store, _ = setup()
+    raw_src = SourceInput(
+        "offer:neg",
+        "2026-11-11T00:00:00Z",
+        "Parking NOT included. 返金不可。non-refundable unconfirmed.".encode(),
+        locator_ref="line:1",
+    )
+
+    def summarize_slice(needle: str):
+        class SliceSummarizer:
+            def __call__(self, request, refs, artifacts, max_chars):
+                r = refs[0]
+                raw = artifacts.get_raw(request.scope, r)
+                start = raw.index(needle.encode("utf-8"))
+                end = start + len(needle.encode("utf-8"))
+                return SummaryProposal(
+                    request.goal_revision,
+                    request.anchor_digest,
+                    (r.artifact_ref,),
+                    (SummaryClaim(needle, needle, r.artifact_ref, r.sha256, r.observed_at, start, end),),
+                )
+
+        return SliceSummarizer()
+
+    for bad_slice in ("included", "返金", "refundable", "confirmed"):
+        expect_code(
+            "UNSUPPORTED_CLAIM",
+            lambda bad_slice=bad_slice: ContextService(store, head).compact(
+                req, (raw_src,), summarizer=summarize_slice(bad_slice)
+            ),
+        )
+    # Preserving the full negated clause succeeds.
+    plan = ContextService(store, head).compact(req, (raw_src,), summarizer=summarize_slice("Parking NOT included."))
+    assert "Parking NOT included." in plan.model_payload

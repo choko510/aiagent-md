@@ -40,6 +40,12 @@ def restore() -> ModuleType:
     return module("restore_probe")
 
 
+@pytest.fixture(scope="module")
+def dyn_probe(hv: ModuleType) -> ModuleType:
+    sys.modules["hv_acceptance_dep"] = hv
+    return module("dynamic_probe")
+
+
 def fake_live(hv: ModuleType) -> dict:
     return {"status": "TOPOLOGY_READONLY_PASS", "hostId": "sha256:" + "a" * 64, "topologyDigest": "sha256:" + "b" * 64}
 
@@ -364,9 +370,69 @@ def test_queue_gate_metrics_type_and_rls_role_checks(
 
 
 def test_python_syntax_all_host_scripts() -> None:
-    for name in ("acceptance", "queue_gate", "restore_probe"):
+    for name in ("acceptance", "queue_gate", "restore_probe", "dynamic_probe"):
         path = SCRIPTS / (name + ".py")
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+
+def test_dynamic_probe_fails_closed_when_host_unavailable(
+    dyn_probe: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        dyn_probe.acceptance, "capability_report", lambda: {"hostId": "sha256:" + "a" * 64, "checks": {}}
+    )
+    monkeypatch.setattr(
+        dyn_probe.acceptance, "topology_report", lambda: {"status": "BLOCKED_HOST_UNAVAILABLE", "checks": {}}
+    )
+    monkeypatch.setattr(dyn_probe.acceptance, "run_readonly", lambda *a, **kw: (False, ""))
+    report = dyn_probe.dynamic_probe()
+    assert report["status"] == "BLOCKED_HOST_UNAVAILABLE"
+    assert "kvm_api" in report["missingPrerequisites"]
+    assert "nftables_egress_chain" in report["missingPrerequisites"]
+
+
+def test_dynamic_probe_passes_only_with_all_isolated_host_checks(
+    dyn_probe: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        dyn_probe.acceptance,
+        "capability_report",
+        lambda: {
+            "hostId": "sha256:" + "a" * 64,
+            "checks": {
+                "linux_host": True,
+                "kvm_api_open_and_version": True,
+                "qemu_binary": True,
+                "libvirt_readonly_access": True,
+                "vsock_socket_api": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        dyn_probe.acceptance,
+        "topology_report",
+        lambda: {
+            "status": "TOPOLOGY_READONLY_PASS",
+            "topologyDigest": "sha256:" + "b" * 64,
+            "checks": {"execution_has_no_nic": True},
+        },
+    )
+    nft_json = json.dumps(
+        {"nftables": [{"table": {"name": "aiagent_egress"}}, {"chain": {"table": "aiagent_egress", "name": "forward"}}]}
+    )
+    monkeypatch.setattr(dyn_probe.acceptance, "run_readonly", lambda *a, **kw: (True, nft_json))
+    ok_report = dyn_probe.dynamic_probe(probe_vsock=False)
+    assert ok_report["status"] == "DYNAMIC_PROBE_PASS"
+    assert ok_report["missingPrerequisites"] == []
+
+    monkeypatch.setattr(
+        dyn_probe,
+        "probe_vsock_endpoint",
+        lambda cid, port: {"probed": True, "reachable": False, "reason": "ConnectionRefusedError"},
+    )
+    blocked = dyn_probe.dynamic_probe(probe_vsock=True)
+    assert blocked["status"] == "BLOCKED_HOST_UNAVAILABLE"
+    assert blocked["missingPrerequisites"] == ["vsock_control_reachable"]
 
 
 def test_synthetic_artifacts_cannot_automatically_attest_host_or_production(hv: ModuleType, tmp_path: Path) -> None:
