@@ -191,6 +191,10 @@ class PatchArtifact:
     def __post_init__(self) -> None:
         if not self.artifact_ref or not self.paths or not self.workspace_revision:
             raise InvalidEvidence("patch artifact lacks provenance")
+        if len(set(self.paths)) != len(self.paths) or any(
+            not isinstance(p, str) or not p or "\\" in p or "\x00" in p for p in self.paths
+        ):
+            raise InvalidPath("invalid or duplicate path in patch artifact")
         require_digest(self.diff_sha256)
         require_sha(self.parent_sha)
 
@@ -258,7 +262,10 @@ class Cycle:
     reviews: tuple[ReviewVerdict, ...] = ()
     execution_receipts: tuple[ExecutionEvidence, ...] = ()
     submitted_digests: frozenset[str] = field(default_factory=frozenset)
+    round_number: int = 1
+    push_receipt: str | None = None
+    pr_receipt: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.cycle_id or not self.change_request_ref or self.version < 0:
+        if not self.cycle_id or not self.change_request_ref or self.version < 0 or self.round_number < 1:
             raise StateConflict("invalid development cycle")
