@@ -421,6 +421,27 @@ mod windows_acl {
         _attributes: u32,
     }
 
+    #[repr(C)]
+    struct AclSizeInformation {
+        ace_count: u32,
+        _acl_bytes_in_use: u32,
+        _acl_bytes_free: u32,
+    }
+
+    #[repr(C)]
+    struct AceHeader {
+        ace_type: u8,
+        ace_flags: u8,
+        ace_size: u16,
+    }
+
+    #[repr(C)]
+    struct AccessAllowedAce {
+        header: AceHeader,
+        _mask: u32,
+        sid_start: u32,
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> *mut c_void;
@@ -442,6 +463,8 @@ mod windows_acl {
             token_information_length: u32,
             return_length: *mut u32,
         ) -> i32;
+        fn GetLengthSid(p_sid: *const c_void) -> u32;
+        fn EqualSid(p_sid1: *const c_void, p_sid2: *const c_void) -> i32;
         fn ConvertSidToStringSidW(sid: *const c_void, string_sid: *mut *mut u16) -> i32;
         fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
             string_security_descriptor: *const u16,
@@ -449,12 +472,24 @@ mod windows_acl {
             security_descriptor: *mut *mut c_void,
             security_descriptor_size: *mut u32,
         ) -> i32;
+        fn GetSecurityDescriptorControl(
+            p_security_descriptor: *mut c_void,
+            p_control: *mut u16,
+            lpdw_revision: *mut u32,
+        ) -> i32;
         fn GetSecurityDescriptorDacl(
             p_security_descriptor: *mut c_void,
             lpb_dacl_present: *mut i32,
             p_dacl: *mut *mut c_void,
             lpb_dacl_defaulted: *mut i32,
         ) -> i32;
+        fn GetAclInformation(
+            p_acl: *mut c_void,
+            p_acl_information: *mut c_void,
+            n_acl_information_length: u32,
+            dw_acl_information_class: u32,
+        ) -> i32;
+        fn GetAce(p_acl: *mut c_void, dw_ace_index: u32, p_ace: *mut *mut c_void) -> i32;
         fn SetNamedSecurityInfoW(
             p_object_name: *const u16,
             object_type: u32,
@@ -464,13 +499,6 @@ mod windows_acl {
             p_dacl: *mut c_void,
             p_sacl: *mut c_void,
         ) -> u32;
-        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            security_descriptor: *mut c_void,
-            requested_string_sd_revision: u32,
-            security_information: u32,
-            string_security_descriptor: *mut *mut u16,
-            string_security_descriptor_len: *mut u32,
-        ) -> i32;
         fn GetNamedSecurityInfoW(
             p_object_name: *const u16,
             object_type: u32,
@@ -489,6 +517,10 @@ mod windows_acl {
     const SE_FILE_OBJECT: u32 = 1;
     const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
     const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+    const SE_DACL_PROTECTED: u16 = 0x1000;
+    const ACL_SIZE_INFORMATION_CLASS: u32 = 2;
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
+    const INHERITED_ACE: u8 = 0x10;
 
     fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
         s.encode_wide().chain(core::iter::once(0)).collect()
@@ -507,7 +539,20 @@ mod windows_acl {
         String::from_utf16_lossy(slice)
     }
 
-    fn current_user_sid_string() -> Result<String, String> {
+    struct LocalGuard(*mut c_void);
+    impl Drop for LocalGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+    }
+
+    fn with_current_user_sid<T>(
+        f: impl FnOnce(*const c_void) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut token: *mut c_void = core::ptr::null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(format!(
@@ -542,18 +587,32 @@ mod windows_acl {
             ));
         }
         let user = unsafe { &*(buf.as_ptr().cast::<TokenUser>()) };
-        let mut sid_w: *mut u16 = core::ptr::null_mut();
-        if unsafe { ConvertSidToStringSidW(user.sid, &mut sid_w) } == 0 {
-            return Err(format!(
-                "ConvertSidToStringSidW failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let sid = wide_ptr_to_string(sid_w);
-        unsafe {
-            LocalFree(sid_w.cast());
-        }
-        Ok(sid)
+        f(user.sid.cast_const())
+    }
+
+    fn current_user_sid_string() -> Result<String, String> {
+        with_current_user_sid(|sid| {
+            let mut sid_w: *mut u16 = core::ptr::null_mut();
+            if unsafe { ConvertSidToStringSidW(sid, &mut sid_w) } == 0 {
+                return Err(format!(
+                    "ConvertSidToStringSidW failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let _sid_guard = LocalGuard(sid_w.cast());
+            Ok(wide_ptr_to_string(sid_w))
+        })
+    }
+
+    fn current_user_sid_bytes() -> Result<Vec<u8>, String> {
+        with_current_user_sid(|sid| {
+            let len = unsafe { GetLengthSid(sid) } as usize;
+            if len == 0 {
+                return Err("GetLengthSid failed".into());
+            }
+            let slice = unsafe { core::slice::from_raw_parts(sid.cast::<u8>(), len) };
+            Ok(slice.to_vec())
+        })
     }
 
     pub fn restrict_owner_only(path: &Path, is_dir: bool) -> Result<(), String> {
@@ -578,14 +637,6 @@ mod windows_acl {
                 "ConvertStringSecurityDescriptor failed: {}",
                 std::io::Error::last_os_error()
             ));
-        }
-        struct LocalGuard(*mut c_void);
-        impl Drop for LocalGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    LocalFree(self.0);
-                }
-            }
         }
         let _sd_guard = LocalGuard(sd);
 
@@ -618,7 +669,7 @@ mod windows_acl {
     }
 
     pub fn verify_owner_only(path: &Path) -> Result<bool, String> {
-        let sid = current_user_sid_string()?;
+        let user_sid = current_user_sid_bytes()?;
         let path_w = wide(path.as_os_str());
         let mut sd: *mut c_void = core::ptr::null_mut();
         let rc = unsafe {
@@ -636,31 +687,75 @@ mod windows_acl {
         if rc != 0 {
             return Err(format!("GetNamedSecurityInfoW failed: error {rc}"));
         }
-        let mut sddl_w: *mut u16 = core::ptr::null_mut();
-        let ok = unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                sd,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut sddl_w,
-                core::ptr::null_mut(),
-            )
+        let _sd_guard = LocalGuard(sd);
+
+        let mut control: u16 = 0;
+        let mut revision: u32 = 0;
+        if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
+            return Err(format!(
+                "GetSecurityDescriptorControl failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if (control & SE_DACL_PROTECTED) == 0 {
+            return Ok(false);
+        }
+
+        let mut dacl_present: i32 = 0;
+        let mut dacl: *mut c_void = core::ptr::null_mut();
+        let mut dacl_defaulted: i32 = 0;
+        if unsafe {
+            GetSecurityDescriptorDacl(sd, &mut dacl_present, &mut dacl, &mut dacl_defaulted)
+        } == 0
+        {
+            return Err(format!(
+                "GetSecurityDescriptorDacl failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if dacl_present == 0 || dacl.is_null() {
+            return Ok(false);
+        }
+
+        let mut acl_info = AclSizeInformation {
+            ace_count: 0,
+            _acl_bytes_in_use: 0,
+            _acl_bytes_free: 0,
         };
-        unsafe {
-            LocalFree(sd);
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&raw mut acl_info).cast(),
+                u32::try_from(core::mem::size_of::<AclSizeInformation>())
+                    .map_err(|_| "AclSizeInformation size overflow")?,
+                ACL_SIZE_INFORMATION_CLASS,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "GetAclInformation failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
-        if ok == 0 {
-            return Err("ConvertSecurityDescriptorToStringSecurityDescriptorW failed".into());
+        if acl_info.ace_count != 1 {
+            return Ok(false);
         }
-        let sddl = wide_ptr_to_string(sddl_w);
-        unsafe {
-            LocalFree(sddl_w.cast());
+
+        let mut ace_ptr: *mut c_void = core::ptr::null_mut();
+        if unsafe { GetAce(dacl, 0, &mut ace_ptr) } == 0 || ace_ptr.is_null() {
+            return Err(format!(
+                "GetAce failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
-        let header = sddl.split('(').next().unwrap_or("");
-        let has_single_owner_ace = header.starts_with("D:P")
-            && !sddl.contains(";ID;")
-            && sddl.matches('(').count() == 1
-            && sddl.contains(&format!(";;;{sid})"));
-        Ok(has_single_owner_ace)
+        let ace = unsafe { &*(ace_ptr.cast::<AccessAllowedAce>()) };
+        if ace.header.ace_type != ACCESS_ALLOWED_ACE_TYPE
+            || (ace.header.ace_flags & INHERITED_ACE) != 0
+        {
+            return Ok(false);
+        }
+        let ace_sid: *const c_void = (&raw const ace.sid_start).cast();
+        let same = unsafe { EqualSid(ace_sid, user_sid.as_ptr().cast()) } != 0;
+        Ok(same)
     }
 }
