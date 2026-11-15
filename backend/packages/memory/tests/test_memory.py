@@ -120,3 +120,45 @@ def test_readonly_projection_injected_as_data_not_permission():
     head.memory_epoch = "epoch-2"  # revocation after building, before sending
     with pytest.raises(SafeStop, match="STALE_CONTEXT"):
         ContextService(store, head).check_dispatch(plan, "1")
+
+
+def test_port_errors_fail_closed_and_max_bytes_preserves_rank_and_text_secrets_blocked():
+    from types import SimpleNamespace
+
+    class FailingConsent:
+        def permits(self, scope, record, recipient):
+            raise RuntimeError("consent service down")
+
+    repo = MockMemoryRepository((memory(),))
+    m_down = MemoryRetriever(
+        repo, consent=FailingConsent(), retention=MockRetention(True), sources=MockSources({"source:known"})
+    )
+    with pytest.raises(SafeStop, match="MEMORY_POLICY_UNAVAILABLE"):
+        m_down.read(SCOPE, query="walking", recipient="fake:us", now=NOW)
+
+    # Relevance ordering preserved when top record exceeds max_bytes
+    big_first = memory("mem:big", "x" * 100)
+    small_second = memory("mem:small", "x" * 10)
+    repo2, m2 = retriever((big_first, small_second))
+    repo2.index_override = ("mem:big", "mem:small")
+    assert m2.read(SCOPE, query="x", recipient="fake:us", now=NOW, max_bytes=50).projections == ()
+
+    # Untrusted repo returning record containing secret without MemoryRecord.__post_init__
+    repo_raw, m_raw = retriever(())
+    repo_raw.records["mem:raw"] = SimpleNamespace(
+        ref="mem:raw",
+        tenant_id=SCOPE.tenant_id,
+        owner_id=SCOPE.owner_id,
+        scope_task_id=None,
+        text="api_key=sk-live-secret-9999",
+        source_refs=("source:known",),
+        observed_at="2026-11-10T00:00:00Z",
+        expires_at="2026-11-12T00:00:00Z",
+        status="active",
+        consent_basis="user_explicit",
+        revision=1,
+        sensitivity="normal",
+    )
+    repo_raw.index_override = ("mem:raw",)
+    with pytest.raises(SafeStop, match="SECRET_DETECTED"):
+        m_raw.read(SCOPE, query="api", recipient="fake:us", now=NOW)
