@@ -25,7 +25,7 @@ from .contracts import (
     SessionView,
     State,
     WorkerPort,
-    validate_fixture_url,
+    validate_browser_url,
 )
 
 
@@ -39,10 +39,15 @@ def _resolve_redirect(current: str, redirect_to: str) -> str:
     if redir_parts.scheme:
         return redirect_to
     base = urlsplit(current)
-    joined = urlsplit(urljoin(f"http://{base.netloc}{base.path or '/'}", redirect_to))
-    if joined.scheme != "http":
-        raise BrowserError("EGRESS_DENIED")
-    return urlunsplit(("fixture", joined.netloc, joined.path, joined.query, joined.fragment))
+    target_scheme = base.scheme.lower()
+    if target_scheme == "fixture":
+        joined = urlsplit(urljoin(f"http://{base.netloc}{base.path or '/'}", redirect_to))
+        if joined.scheme != "http":
+            raise BrowserError("EGRESS_DENIED")
+        return urlunsplit(("fixture", joined.netloc, joined.path, joined.query, joined.fragment))
+    if target_scheme in ("http", "https"):
+        return urljoin(current, redirect_to)
+    raise BrowserError("EGRESS_DENIED")
 
 
 @dataclass(slots=True)
@@ -51,6 +56,7 @@ class _Entry:
     state: State = State.STARTING
     generation: int = 1
     current_url: str | None = None
+    last_challenge: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -72,6 +78,9 @@ class BrowserSessionService:
         auth_transition: AuthTransitionPort | None = None,
         max_sessions_per_task: int = 2,
         max_observation_chars: int = 4096,
+        allowed_web_hosts: frozenset[str] = frozenset(),
+        allow_https: bool = False,
+        allow_http_web: bool = False,
     ) -> None:
         if (
             not allowed_fixture_hosts
@@ -88,12 +97,24 @@ class BrowserSessionService:
         self._redactor = redactor
         self._new_id = new_id
         self._hosts = allowed_fixture_hosts
+        self._web_hosts = frozenset(h.strip().lower() for h in allowed_web_hosts if h.strip())
+        self._allow_https = allow_https
+        self._allow_http_web = allow_http_web
         self._approval = approval
         self._auth_transition = auth_transition
         self._max_sessions_per_task = max_sessions_per_task
         self._max_chars = max_observation_chars
         self._entries: dict[str, _Entry] = {}
         self._create_lock = asyncio.Lock()
+
+    def _validate_url(self, url: str) -> str:
+        return validate_browser_url(
+            url,
+            self._hosts,
+            allowed_web_hosts=self._web_hosts,
+            allow_https=self._allow_https,
+            allow_http=self._allow_http_web,
+        )
 
     def _entry(self, session_id: str, authority: Authority) -> _Entry:
         entry = self._entries.get(session_id)
@@ -166,7 +187,7 @@ class BrowserSessionService:
         url: str,
         operation: str,
     ) -> Observation:
-        current = validate_fixture_url(url, self._hosts)
+        current = self._validate_url(url)
         visited: set[str] = set()
         try:
             for _ in range(4):
@@ -180,14 +201,32 @@ class BrowserSessionService:
                 if response.status in (301, 302, 303, 307, 308):
                     if response.redirect_to is None or not response.redirect_to.strip():
                         raise BrowserError("INVALID_FIXTURE_REDIRECT")
-                    current = validate_fixture_url(_resolve_redirect(current, response.redirect_to), self._hosts)
+                    current = self._validate_url(_resolve_redirect(current, response.redirect_to))
                     continue
-                if response.status != 200 or len(response.html.encode("utf-8")) > 65536:
+                is_web = current.startswith(("http://", "https://"))
+                max_html_bytes = 524_288 if is_web else 65_536
+                if (
+                    response.status not in ((200, 401, 403) if is_web else (200,))
+                    or len(response.html.encode("utf-8")) > max_html_bytes
+                ):
                     raise BrowserError("FIXTURE_RESPONSE_DENIED")
                 await self._check(session_id, authority, operation)
-                await self._worker.render(session_id, response.html)
+                if is_web and hasattr(self._worker, "render"):
+                    try:
+                        status_str = await self._worker.render(  # type: ignore[call-arg]
+                            session_id, response.html, origin_url=current, status=response.status
+                        )
+                    except TypeError:
+                        status_str = await self._worker.render(session_id, response.html)
+                else:
+                    status_str = await self._worker.render(session_id, response.html)
                 await self._fence.check(session_id, authority)
                 entry.current_url = current
+                if is_web and status_str in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
+                    entry.state = State.NEEDS_LOGIN
+                    entry.last_challenge = status_str
+                else:
+                    entry.last_challenge = None
                 return await self._observe_locked(session_id, authority, entry)
             raise BrowserError("REDIRECT_LIMIT")
         except BrowserError as exc:
@@ -200,6 +239,10 @@ class BrowserSessionService:
         async with entry.lock:
             await self._operation(session_id, authority, "navigate_fixture")
             return await self._fetch_and_render_locked(session_id, authority, entry, url, "navigate_fixture")
+
+    async def navigate(self, session_id: str, authority: Authority, url: str) -> Observation:
+        """Navigate either `fixture://` or explicitly allowed `https://`/`http://` URLs safely."""
+        return await self.navigate_fixture(session_id, authority, url)
 
     async def _observe_locked(self, session_id: str, authority: Authority, entry: _Entry) -> Observation:
         await self._check(session_id, authority, "observe")
@@ -309,7 +352,7 @@ class BrowserSessionService:
         async with entry.lock:
             await self._operation(session_id, authority, "click")
             if entry.current_url is not None:
-                validate_fixture_url(entry.current_url, self._hosts)
+                self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
             try:
@@ -352,7 +395,7 @@ class BrowserSessionService:
             await self._approval.approve(authority, session_id, target)
             await self._operation(session_id, authority, "submit")
             if entry.current_url is not None:
-                validate_fixture_url(entry.current_url, self._hosts)
+                self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
             try:
@@ -381,11 +424,30 @@ class BrowserSessionService:
             entry = await self._check(session_id, authority, "authenticated_navigate")
             if entry.state not in (State.ACTIVE, State.NEEDS_LOGIN):
                 raise BrowserError("INVALID_STATE")
-            target_url = validate_fixture_url(url, self._hosts)
+            target_url = self._validate_url(url)
             await self._auth_transition.permit_transition(authority, session_id, target_url)
             await self._fence.check(session_id, authority)
             obs = await self._fetch_and_render_locked(
                 session_id, authority, entry, target_url, "authenticated_navigate"
             )
             entry.state = State.ACTIVE
+            entry.last_challenge = None
             return obs
+
+    def session_details(self, session_id: str, authority: Authority) -> tuple[State, int, str | None, str | None]:
+        entry = self._entry(session_id, authority)
+        return entry.state, entry.generation, entry.current_url, entry.last_challenge
+
+    async def apply_owner_takeover_resume(
+        self,
+        session_id: str,
+        authority: Authority,
+        *,
+        db_generation: int,
+    ) -> None:
+        entry = await self._check(session_id, authority, "takeover_resume")
+        async with entry.lock:
+            if db_generation > entry.generation and entry.state in (State.PAUSED, State.NEEDS_LOGIN, State.ACTIVE):
+                entry.generation = db_generation
+                entry.state = State.ACTIVE
+                entry.last_challenge = None

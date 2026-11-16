@@ -17,6 +17,7 @@ from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
 from aiagent_core.migrate import check_compatible
 from aiagent_core.step4_gate import capability_snapshot
+from aiagent_domain import is_uuid7
 from aiagent_domain.canonical import sha256_bytes
 from aiagent_domain.generated import (
     ApprovalDecisionCommandV1,
@@ -388,6 +389,7 @@ def create_app(db: Database | None = None) -> FastAPI:
             recipient=body.recipient,
             model=body.model,
             enabled=body.enabled,
+            semantic_verifier_mode=body.semantic_verifier_mode or "HEURISTIC",
             expected_record_version=(
                 int(body.expected_record_version) if body.expected_record_version is not None else None
             ),
@@ -487,7 +489,9 @@ def create_app(db: Database | None = None) -> FastAPI:
         def q() -> list[dict[str, Any]]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 rows = c.execute(
-                    "SELECT id, task_id, run_id, state, mode, generation, goal_revision, lease_epoch, updated_at"
+                    "SELECT id, task_id, run_id, state, mode, generation, goal_revision, lease_epoch,"
+                    " current_url, takeover_reason, (storage_state_sha256 IS NOT NULL) AS has_storage_state,"
+                    " updated_at"
                     " FROM agent.browser_sessions"
                     " WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at DESC LIMIT %s",
                     (s.tenant_id, s.user_id, bounded),
@@ -502,12 +506,161 @@ def create_app(db: Database | None = None) -> FastAPI:
                         "generation": int(r["generation"]),
                         "goalRevision": str(r["goal_revision"]),
                         "leaseEpoch": str(r["lease_epoch"]),
+                        "currentUrl": r.get("current_url"),
+                        "takeoverReason": r.get("takeover_reason"),
+                        "hasStorageState": bool(r.get("has_storage_state")),
                         "updatedAt": r["updated_at"].isoformat(),
                     }
                     for r in rows
                 ]
 
         return {"schemaVersion": "1.0", "items": await asyncio.to_thread(q)}
+
+    @app.get("/v1/browser/sessions/{session_id}/observation")
+    async def get_browser_observation(session_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(session_id):
+            raise HTTPException(404)
+
+        def q() -> dict[str, Any] | None:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT id, task_id, run_id, state, mode, generation, current_url, takeover_reason,"
+                    " last_observation_text, last_observation_truncated, last_observation_at"
+                    " FROM agent.browser_sessions"
+                    " WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
+                    (s.tenant_id, s.user_id, session_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "schemaVersion": "1.0",
+                    "sessionId": str(row["id"]),
+                    "taskId": str(row["task_id"]),
+                    "runId": str(row["run_id"]),
+                    "state": str(row["state"]),
+                    "mode": str(row["mode"]),
+                    "generation": int(row["generation"]),
+                    "currentUrl": row.get("current_url"),
+                    "takeoverReason": row.get("takeover_reason"),
+                    "observation": row.get("last_observation_text") or "",
+                    "truncated": bool(row.get("last_observation_truncated")),
+                    "observedAt": (row["last_observation_at"].isoformat() if row.get("last_observation_at") else None),
+                    "observeOnly": True,
+                }
+
+        out = await asyncio.to_thread(q)
+        if out is None:
+            raise HTTPException(404)
+        return out
+
+    @app.post("/v1/browser/sessions/{session_id}/takeover/start")
+    async def browser_takeover_start(session_id: str, request: Request, s: S) -> dict[str, Any]:
+        if not is_uuid7(session_id):
+            raise HTTPException(404)
+        reason = "USER_REQUESTED"
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                parsed = json.loads(raw_body)
+                if isinstance(parsed, dict) and isinstance(parsed.get("reason"), str) and parsed["reason"].strip():
+                    reason = parsed["reason"].strip()[:128]
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+
+        def tx() -> tuple[str, dict[str, Any] | None]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                exists = c.execute(
+                    "SELECT state FROM agent.browser_sessions WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
+                    (s.tenant_id, s.user_id, session_id),
+                ).fetchone()
+                if exists is None:
+                    return "NOT_FOUND", None
+                row = c.execute(
+                    "SELECT generation, goal_revision, lease_epoch, state, mode"
+                    " FROM agent.browser_session_takeover_start(%s,%s,%s,%s)",
+                    (s.tenant_id, session_id, s.user_id, reason),
+                ).fetchone()
+                if row is None:
+                    return "CONFLICT", None
+                return "OK", {
+                    "schemaVersion": "1.0",
+                    "sessionId": session_id,
+                    "generation": int(row["generation"]),
+                    "goalRevision": str(row["goal_revision"]),
+                    "leaseEpoch": str(row["lease_epoch"]),
+                    "state": str(row["state"]),
+                    "mode": str(row["mode"]),
+                }
+
+        status_flag, data = await asyncio.to_thread(tx)
+        if status_flag == "NOT_FOUND":
+            raise HTTPException(404)
+        if status_flag == "CONFLICT" or data is None:
+            raise HTTPException(409, detail={"error": "TAKEOVER_NOT_ALLOWED"})
+        return data
+
+    @app.post("/v1/browser/sessions/{session_id}/takeover/complete")
+    async def browser_takeover_complete(session_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(session_id):
+            raise HTTPException(404)
+
+        def tx() -> tuple[str, dict[str, Any] | None]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                exists = c.execute(
+                    "SELECT state FROM agent.browser_sessions WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
+                    (s.tenant_id, s.user_id, session_id),
+                ).fetchone()
+                if exists is None:
+                    return "NOT_FOUND", None
+                row = c.execute(
+                    "SELECT generation, goal_revision, lease_epoch, state, mode"
+                    " FROM agent.browser_session_takeover_complete(%s,%s,%s)",
+                    (s.tenant_id, session_id, s.user_id),
+                ).fetchone()
+                if row is None:
+                    return "CONFLICT", None
+                return "OK", {
+                    "schemaVersion": "1.0",
+                    "sessionId": session_id,
+                    "generation": int(row["generation"]),
+                    "goalRevision": str(row["goal_revision"]),
+                    "leaseEpoch": str(row["lease_epoch"]),
+                    "state": str(row["state"]),
+                    "mode": str(row["mode"]),
+                }
+
+        status_flag, data = await asyncio.to_thread(tx)
+        if status_flag == "NOT_FOUND":
+            raise HTTPException(404)
+        if status_flag == "CONFLICT" or data is None:
+            raise HTTPException(409, detail={"error": "TAKEOVER_COMPLETE_CONFLICT"})
+        return data
+
+    @app.post("/v1/browser/sessions/{session_id}/takeover/abort")
+    async def browser_takeover_abort(session_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(session_id):
+            raise HTTPException(404)
+
+        def tx() -> tuple[str, bool]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                exists = c.execute(
+                    "SELECT id FROM agent.browser_sessions WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
+                    (s.tenant_id, s.user_id, session_id),
+                ).fetchone()
+                if exists is None:
+                    return "NOT_FOUND", False
+                res = c.execute(
+                    "SELECT agent.browser_session_takeover_abort(%s,%s,%s) AS ok",
+                    (s.tenant_id, session_id, s.user_id),
+                ).fetchone()
+                return ("OK", True) if (res and res["ok"]) else ("CONFLICT", False)
+
+        status_flag, _ = await asyncio.to_thread(tx)
+        if status_flag == "NOT_FOUND":
+            raise HTTPException(404)
+        if status_flag == "CONFLICT":
+            raise HTTPException(409, detail={"error": "SESSION_ALREADY_CLOSED"})
+        return {"schemaVersion": "1.0", "sessionId": session_id, "state": "CLOSED"}
 
     @app.get("/v1/campaigns")
     async def list_campaigns(s: S, limit: int = 50) -> dict[str, Any]:

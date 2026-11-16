@@ -1,13 +1,20 @@
-"""ToolGateway executor bridging admitted browser tool intents to BrowserSessionService + PostgresFencePort."""
+"""ToolGateway executor bridging admitted browser tool intents to BrowserSessionService + PostgresFencePort.
+
+Supports both offline `fixture://` sessions and Sentinel/SSRF-vetted `https://` sessions with
+AES-GCM encrypted `storageState` persistence and owner-driven Human Takeover resumption.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import os
+import ssl
 import threading
 from collections.abc import Coroutine
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -19,15 +26,18 @@ from aiagent_browser import (
     FixtureResponse,
     FormInput,
     PlaywrightBrowserWorker,
+    State,
 )
 from aiagent_browser.contracts import WorkerPort
 from aiagent_browser.pg_fence import PostgresFencePort
-from aiagent_core import control
+from aiagent_core import config, control
 from aiagent_core.db import Database
 from aiagent_core.logging import redact as redact_secrets
 from aiagent_domain import uuid7
 
+from .context_keys import KeyRing
 from .executors import Destination, ExecutorFailed, ExecutorUnknown
+from .web_fetch import HARD_MAX_FETCH_BYTES, Resolver, parse_safe_http_url, safe_http_get
 
 T = TypeVar("T")
 
@@ -37,6 +47,7 @@ class _DbAuthorityPort:
         self._db = db
 
     async def authorize(self, authority: Authority, operation: str, session_id: str | None) -> None:
+        del operation, session_id
         with self._db.tx() as c:
             row = c.execute(
                 "SELECT t.owner_user_id, t.workspace_id, t.goal_revision, t.active_run_id,"
@@ -85,6 +96,7 @@ class _DbApprovalPort:
         self._ctx = intents_by_session_ctx
 
     async def approve(self, authority: Authority, session_id: str, target: BrowserTarget) -> None:
+        del target
         effect_key = self._ctx.get("__active_effect_key__", {}).get(session_id)
         if not effect_key or effect_key not in self._ctx:
             raise BrowserError("APPROVAL_REQUIRED")
@@ -106,24 +118,80 @@ class _DbApprovalPort:
                 raise BrowserError("APPROVAL_REQUIRED")
 
 
-class _AllowListedFixtureGate:
-    def __init__(self, allowed_hosts: frozenset[str]) -> None:
-        self._hosts = allowed_hosts
+class _BrowserPolicyGate:
+    def __init__(
+        self,
+        allowed_fixture_hosts: frozenset[str],
+        allowed_web_hosts: frozenset[str] = frozenset(),
+        *,
+        allow_https: bool = False,
+        allow_http_web: bool = False,
+    ) -> None:
+        self._fixture_hosts = allowed_fixture_hosts
+        self._web_hosts = allowed_web_hosts
+        self._allow_https = allow_https
+        self._allow_http_web = allow_http_web
 
     async def permit(self, authority: Authority, url: str) -> None:
+        del authority
         from urllib.parse import urlsplit
 
         parts = urlsplit(url)
-        if parts.scheme != "fixture" or (parts.hostname or "").lower() not in self._hosts:
-            raise BrowserError("EGRESS_DENIED")
+        scheme = parts.scheme.lower()
+        host = (parts.hostname or "").lower()
+        if scheme == "fixture":
+            if host not in self._fixture_hosts:
+                raise BrowserError("EGRESS_DENIED")
+            return
+        if scheme == "https" and self._allow_https and ("*" in self._web_hosts or host in self._web_hosts):
+            return
+        if scheme == "http" and self._allow_http_web and ("*" in self._web_hosts or host in self._web_hosts):
+            return
+        raise BrowserError("EGRESS_DENIED")
 
 
-class _CatalogFixturePort:
-    def __init__(self, catalog: dict[str, FixtureResponse]) -> None:
+class _HybridCatalogAndWebPort:
+    """Serves `fixture://` from static catalog and `http(s)://` via SSRF-safe `safe_http_get`."""
+
+    def __init__(
+        self,
+        catalog: dict[str, FixtureResponse],
+        *,
+        proxy: str | None = None,
+        resolver: Resolver | None = None,
+        allow_private_addrs: frozenset[str] = frozenset(),
+        verify: bool | ssl.SSLContext = True,
+        active_permits: dict[str, str | None] | None = None,
+    ) -> None:
         self._catalog = catalog
+        self._proxy = proxy
+        self._resolver = resolver
+        self._allow_private_addrs = allow_private_addrs
+        self._verify = verify
+        self._active_permits = active_permits if active_permits is not None else {}
 
     async def fetch(self, url: str) -> FixtureResponse:
-        return self._catalog.get(url, FixtureResponse(404))
+        if url.startswith("fixture://"):
+            return self._catalog.get(url, FixtureResponse(404))
+        permit = self._active_permits.get("permit")
+        try:
+            resp = await safe_http_get(
+                url,
+                resolver=self._resolver,
+                allow_private_addrs=self._allow_private_addrs,
+                proxy=self._proxy,
+                proxy_permit=permit,
+                max_bytes=min(524_288, HARD_MAX_FETCH_BYTES),
+                verify=self._verify,
+                max_redirects=0,  # BrowserSessionService tracks & re-gates every redirect hop itself
+            )
+            return FixtureResponse(resp.status, resp.body.decode("utf-8", "replace"))
+        except ExecutorFailed as exc:
+            if "egress_denied" in str(exc):
+                raise BrowserError("EGRESS_DENIED") from exc
+            raise BrowserError("FIXTURE_RESPONSE_DENIED") from exc
+        except ExecutorUnknown as exc:
+            raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
 
 
 class _CoreRedactor:
@@ -131,8 +199,14 @@ class _CoreRedactor:
         return redact_secrets(text)
 
 
-class BrowserFixtureExecutor:
-    """Offline fixture Browser executor enforcing PostgresFencePort + ApprovalPort + PlaywrightBrowserWorker."""
+def _storage_aad(authority: Authority, session_id: str) -> bytes:
+    return (
+        f"browser-storage-v1|{authority.tenant_id}|{authority.owner_user_id}|{authority.task_id}|{session_id}".encode()
+    )
+
+
+class BrowserSessionExecutor:
+    """Browser executor enforcing PostgresFencePort + ApprovalPort + PlaywrightBrowserWorker + encrypted storageState."""
 
     def __init__(
         self,
@@ -140,22 +214,47 @@ class BrowserFixtureExecutor:
         *,
         fixtures: dict[str, FixtureResponse] | None = None,
         allowed_hosts: frozenset[str] = frozenset({"alpha.test", "beta.test"}),
+        allowed_web_hosts: frozenset[str] = frozenset(),
+        allow_https: bool = False,
+        allow_http_web: bool = False,
+        allow_private_addrs: frozenset[str] = frozenset(),
+        proxy: str | None = None,
+        resolver: Resolver | None = None,
+        verify_ssl: bool | ssl.SSLContext = True,
+        storage_key_ring: KeyRing | None = None,
         worker: WorkerPort | None = None,
     ) -> None:
         self._db = db
         self.context: dict[str, dict[str, Any]] = {"__active_effect_key__": {}}
+        self._active_permits: dict[str, str | None] = {}
+        self._storage_key_ring = storage_key_ring
         self._worker = worker if worker is not None else PlaywrightBrowserWorker()
         self._fence = PostgresFencePort(db)
         self._service = BrowserSessionService(
             worker=self._worker,
             authority=_DbAuthorityPort(db),
             fence=self._fence,
-            fixture_gate=_AllowListedFixtureGate(allowed_hosts),
-            fixture=_CatalogFixturePort(dict(fixtures or {})),
+            fixture_gate=_BrowserPolicyGate(
+                allowed_hosts,
+                allowed_web_hosts,
+                allow_https=allow_https,
+                allow_http_web=allow_http_web,
+            ),
+            fixture=_HybridCatalogAndWebPort(
+                dict(fixtures or {}),
+                proxy=proxy,
+                resolver=resolver,
+                allow_private_addrs=allow_private_addrs,
+                verify=verify_ssl,
+                active_permits=self._active_permits,
+            ),
             redactor=_CoreRedactor(),
             new_id=uuid7,
             allowed_fixture_hosts=allowed_hosts,
             approval=_DbApprovalPort(db, self.context),
+            allowed_web_hosts=allowed_web_hosts,
+            allow_https=allow_https,
+            allow_http_web=allow_http_web,
         )
         # Task-scoped session tracking keyed by (tenant_id, owner_user_id, task_id).
         self._task_sessions: dict[tuple[str, str, str], tuple[str, Authority]] = {}
@@ -204,19 +303,31 @@ class BrowserFixtureExecutor:
         if loop is not None and not loop.is_closed():
             if hasattr(self._worker, "shutdown"):
                 fut = asyncio.run_coroutine_threadsafe(self._worker.shutdown(), loop)
-                try:
+                with contextlib.suppress(Exception):
                     fut.result(timeout=10.0)
-                except Exception:
-                    pass
             loop.call_soon_threadsafe(loop.stop)
         if thread is not None and thread.is_alive():
             thread.join(timeout=5.0)
 
     def destination(self) -> Destination | None:
-        return None  # Offline fixture-only sandbox; no external network socket exits this executor.
+        return None
+
+    def destination_for(self, args: dict[str, Any]) -> Destination | None:
+        url = args.get("url")
+        if not isinstance(url, str) or url.startswith("fixture://"):
+            return None
+        parsed = parse_safe_http_url(url)
+        return Destination(parsed.scheme, parsed.host, parsed.port, "GET")
 
     @classmethod
-    def from_fixture_file(cls, db: Database, path: str, *, worker: WorkerPort | None = None) -> BrowserFixtureExecutor:
+    def from_fixture_file(
+        cls,
+        db: Database,
+        path: str,
+        *,
+        worker: WorkerPort | None = None,
+        storage_key_ring: KeyRing | None = None,
+    ) -> BrowserSessionExecutor:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         hosts = frozenset(str(h).strip().lower() for h in raw.get("allowedHosts", ["alpha.test", "beta.test"]))
         catalog: dict[str, FixtureResponse] = {}
@@ -229,7 +340,17 @@ class BrowserFixtureExecutor:
                     str(spec.get("html", "")),
                     spec.get("redirectTo"),
                 )
-        return cls(db, fixtures=catalog, allowed_hosts=hosts, worker=worker)
+        web_hosts = frozenset(str(h).strip().lower() for h in raw.get("allowedWebHosts", []))
+        return cls(
+            db,
+            fixtures=catalog,
+            allowed_hosts=hosts,
+            allowed_web_hosts=web_hosts,
+            allow_https=bool(raw.get("allowHttps", bool(web_hosts))),
+            allow_http_web=bool(raw.get("allowHttpWeb", False)) and config.profile() != "production",
+            storage_key_ring=storage_key_ring,
+            worker=worker,
+        )
 
     @staticmethod
     def _authority_from_ctx(ctx: dict[str, Any]) -> Authority:
@@ -252,6 +373,74 @@ class BrowserFixtureExecutor:
             await self._fence.advance(session_id, prev[1], new_auth, "AGENT")
             self._task_sessions[scope_key] = (session_id, new_auth)
 
+    async def _sync_takeover_resume_if_needed(self, session_id: str, authority: Authority) -> None:
+        status_row = await self._fence.read_status(session_id, authority, mode="AGENT")
+        svc_state, svc_gen, _, _ = self._service.session_details(session_id, authority)
+        db_gen = int(status_row["generation"])
+        if status_row["state"] == "ACTIVE" and db_gen > svc_gen and svc_state in (State.PAUSED, State.NEEDS_LOGIN):
+            await self._service.apply_owner_takeover_resume(session_id, authority, db_generation=db_gen)
+            if self._storage_key_ring is not None and hasattr(self._worker, "restore_storage_state"):
+                enc = await self._fence.fetch_storage_state(session_id, authority, mode="AGENT")
+                if enc is not None:
+                    raw_plain = self._decrypt_storage(enc, authority, session_id)
+                    await self._worker.restore_storage_state(session_id, json.loads(raw_plain))  # type: ignore[attr-defined]
+
+    def _encrypt_storage(
+        self, state_dict: dict[str, Any], authority: Authority, session_id: str
+    ) -> tuple[bytes, bytes, str, str]:
+        assert self._storage_key_ring is not None
+        plaintext = json.dumps(state_dict, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        key_id = self._storage_key_ring.active
+        nonce = os.urandom(12)
+        ciphertext = self._storage_key_ring.cipher(key_id).encrypt(
+            nonce, plaintext, _storage_aad(authority, session_id)
+        )
+        return nonce, ciphertext, key_id, sha256(plaintext).hexdigest()
+
+    def _decrypt_storage(self, enc: dict[str, Any], authority: Authority, session_id: str) -> bytes:
+        assert self._storage_key_ring is not None
+        plain = self._storage_key_ring.cipher(enc["key_id"]).decrypt(
+            enc["nonce"], enc["ciphertext"], _storage_aad(authority, session_id)
+        )
+        if sha256(plain).hexdigest() != enc["sha256"]:
+            raise BrowserError("STORAGE_STATE_TAMPERED")
+        return plain
+
+    async def _persist_session_state(
+        self,
+        session_id: str,
+        authority: Authority,
+        obs_text: str,
+        obs_truncated: bool,
+    ) -> None:
+        state, _, cur_url, challenge = self._service.session_details(session_id, authority)
+        if state is State.RECOVERING or state is State.CLOSED:
+            return
+        update_storage = False
+        s_nonce = s_cipher = s_key_id = s_sha = None
+        if self._storage_key_ring is not None and hasattr(self._worker, "export_storage_state"):
+            try:
+                exported = await self._worker.export_storage_state(session_id)  # type: ignore[attr-defined]
+                s_nonce, s_cipher, s_key_id, s_sha = self._encrypt_storage(exported, authority, session_id)
+                update_storage = True
+            except BrowserError:
+                pass
+        await self._fence.record_state(
+            session_id,
+            authority,
+            mode="AGENT",
+            state=state.value,
+            current_url=cur_url,
+            takeover_reason=challenge,
+            obs_text=obs_text,
+            obs_truncated=obs_truncated,
+            update_storage=update_storage,
+            storage_nonce=s_nonce,
+            storage_ciphertext=s_cipher,
+            storage_key_id=s_key_id,
+            storage_sha256=s_sha,
+        )
+
     async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
         return await self._on_persistent_loop(self._execute_on_loop(effect_key, args, permit))
 
@@ -262,6 +451,7 @@ class BrowserFixtureExecutor:
         authority = self._authority_from_ctx(ctx)
         scope_key = (authority.tenant_id, authority.owner_user_id, authority.task_id)
         tool_name = str(ctx["tool"])
+        self._active_permits["permit"] = permit
 
         try:
             if tool_name == "browser_navigate":
@@ -275,22 +465,34 @@ class BrowserFixtureExecutor:
                     else:
                         sid = existing[0]
                         await self._ensure_lease_current(sid, scope_key, authority)
+                        await self._sync_takeover_resume_if_needed(sid, authority)
                 else:
                     await self._ensure_lease_current(sid, scope_key, authority)
-                obs = await self._service.navigate_fixture(sid, authority, str(args["url"]))
-                return {
+                    await self._sync_takeover_resume_if_needed(sid, authority)
+                obs = await self._service.navigate(sid, authority, str(args["url"]))
+                await self._persist_session_state(sid, authority, obs.text, obs.text_truncated)
+                state, _, _, challenge = self._service.session_details(sid, authority)
+                out_nav: dict[str, Any] = {
                     "sessionId": obs.session_id,
                     "generation": obs.generation,
+                    "state": state.value,
                     "observation": obs.text,
                     "truncated": obs.text_truncated,
                 }
+                if challenge is not None:
+                    out_nav["takeoverReason"] = challenge
+                return out_nav
 
             sid = str(args["sessionId"])
             await self._ensure_lease_current(sid, scope_key, authority)
+            await self._sync_takeover_resume_if_needed(sid, authority)
             target = BrowserTarget(args["kind"], str(args["selector"]), args.get("roleName"))
 
             if tool_name == "browser_click":
                 out = await self._service.click(sid, authority, target)
+                await self._persist_session_state(
+                    sid, authority, out.after_observation.text, out.after_observation.text_truncated
+                )
                 return {
                     "sessionId": out.session_id,
                     "generation": out.generation,
@@ -312,6 +514,9 @@ class BrowserFixtureExecutor:
                     out = await self._service.submit(sid, authority, target, form_inputs)
                 finally:
                     self.context["__active_effect_key__"].pop(sid, None)
+                await self._persist_session_state(
+                    sid, authority, out.after_observation.text, out.after_observation.text_truncated
+                )
                 return {
                     "sessionId": out.session_id,
                     "generation": out.generation,
@@ -324,16 +529,49 @@ class BrowserFixtureExecutor:
             if exc.code == "ACTION_OUTCOME_UNKNOWN":
                 raise ExecutorUnknown(exc.code) from exc
             raise ExecutorFailed(exc.code) from exc
+        finally:
+            self._active_permits.pop("permit", None)
         raise ExecutorFailed(f"unsupported browser tool: {tool_name}")
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
+        del effect_key, permit
         return None
 
 
-def browser_from_env(db: Database | None) -> BrowserFixtureExecutor | None:
+BrowserFixtureExecutor = BrowserSessionExecutor
+
+
+def browser_from_env(db: Database | None) -> BrowserSessionExecutor | None:
     if db is None:
         return None
+    from .servers import load_key_ring
+
+    ring: KeyRing | None = None
+    with contextlib.suppress(Exception):
+        ring = load_key_ring()
+
     fixture_file = os.environ.get("AIAGENT_BROWSER_FIXTURE_FILE")
     if fixture_file:
-        return BrowserFixtureExecutor.from_fixture_file(db, fixture_file)
+        return BrowserSessionExecutor.from_fixture_file(db, fixture_file, storage_key_ring=ring)
+
+    web_hosts_raw = os.environ.get("AIAGENT_BROWSER_ALLOWED_WEB_HOSTS")
+    if web_hosts_raw:
+        hosts = frozenset(x.strip().lower() for x in web_hosts_raw.split(",") if x.strip())
+        if hosts:
+            allow_priv: frozenset[str] = frozenset()
+            if config.profile() != "production" and os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE"):
+                allow_priv = frozenset(
+                    x.strip() for x in os.environ["AIAGENT_WEB_FETCH_ALLOW_PRIVATE"].split(",") if x.strip()
+                )
+            return BrowserSessionExecutor(
+                db,
+                allowed_web_hosts=hosts,
+                allow_https=True,
+                allow_http_web=(
+                    os.environ.get("AIAGENT_BROWSER_ALLOW_HTTP_WEB", "0") == "1" and config.profile() != "production"
+                ),
+                allow_private_addrs=allow_priv,
+                proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
+                storage_key_ring=ring,
+            )
     return None

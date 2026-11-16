@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +24,7 @@ from aiagent_domain.tools import TOOLS
 from .netpolicy import EgressDenied, normalize_host
 
 PERMIT_TTL_S = 60
+_PG_PERMIT_HOST = re.compile(r"^[a-z0-9.-]{1,253}$")
 
 
 @dataclass(frozen=True)
@@ -54,10 +56,21 @@ class EgressConfig:
                 {"model_gateway"}
             ):
                 raise ValueError(f"destination {name}: static egress is reserved for model_gateway")
+            raw_host = str(d["host"]).strip()
+            if raw_host == "*":
+                if (
+                    name != "web-fetch"
+                    or not bool(d.get("needs_permit", True))
+                    or not set(d["methods"]) <= {"GET", "HEAD"}
+                ):
+                    raise ValueError(f"destination {name}: wildcard host is restricted to read-only permit web-fetch")
+                norm_host = "*"
+            else:
+                norm_host = normalize_host(raw_host)
             out.destinations[name] = DestinationPolicy(
                 name,
                 d["scheme"],
-                normalize_host(d["host"]),
+                norm_host,
                 int(d["port"]),
                 frozenset(d["methods"]),
                 allow_private,
@@ -70,6 +83,9 @@ class EgressConfig:
     def match(self, scheme: str, host: str, port: int) -> DestinationPolicy | None:
         for d in self.destinations.values():
             if (d.scheme, d.host, d.port) == (scheme, host, port):
+                return d
+        for d in self.destinations.values():
+            if d.host == "*" and d.scheme in (scheme, "http*") and d.port in (0, port):
                 return d
         return None
 
@@ -89,6 +105,8 @@ class Sentinel:
             host = normalize_host(host)
         except EgressDenied as e:
             raise RpcError(e.code) from None
+        if not _PG_PERMIT_HOST.fullmatch(host):
+            raise RpcError("DESTINATION_NOT_ALLOWED")
         dest = self.config.match(scheme, host, port)
         if dest is None or not dest.needs_permit or method not in dest.methods or "tool_gateway" not in dest.identities:
             raise RpcError("DESTINATION_NOT_ALLOWED")

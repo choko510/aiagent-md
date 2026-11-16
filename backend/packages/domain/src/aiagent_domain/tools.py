@@ -49,6 +49,22 @@ TOOLS: dict[str, ToolSpec] = {
         "read",
         False,
         "mock_search",
+        ("search-api",),
+    ),
+    "http_fetch": ToolSpec(
+        "http_fetch",
+        "Fetch a read-only HTTP/HTTPS webpage or JSON endpoint safely with SSRF checks and secret redaction.",
+        _obj(
+            {
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "maxBytes": {"type": "integer", "minimum": 256, "maximum": 1048576},
+            },
+            ["url"],
+        ),
+        "read",
+        False,
+        "http_fetch",
+        ("web-fetch",),
     ),
     "send_message": ToolSpec(
         "send_message",
@@ -91,7 +107,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "browser_navigate": ToolSpec(
         "browser_navigate",
-        "Navigate an offline sandboxed fixture browser session and return redacted visible text.",
+        "Navigate an isolated sandboxed browser session (`fixture://` or policy-permitted `https://`) and return redacted visible text.",
         _obj(
             {
                 "url": {"type": "string", "minLength": 1, "maxLength": 2048},
@@ -102,6 +118,7 @@ TOOLS: dict[str, ToolSpec] = {
         "read",
         False,
         "browser_fixture",
+        ("web-fetch",),
     ),
     "browser_click": ToolSpec(
         "browser_click",
@@ -146,7 +163,8 @@ PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
     "default": ("search", "send_message"),
     "anthropic": ("search", "send_message"),
     "sandbox": ("search", "sandbox_exec"),
-    "browser": ("search", "browser_navigate", "browser_click", "browser_submit"),
+    "research": ("search", "http_fetch", "send_message"),
+    "browser": ("search", "http_fetch", "browser_navigate", "browser_click", "browser_submit"),
 }
 # Framework-internal read-only operations: provider schema is fixed here instead of trusting a runtime-supplied
 # schema. These are NOT external Tool Gateway executors. All results enter HEAD only via grounded admission.

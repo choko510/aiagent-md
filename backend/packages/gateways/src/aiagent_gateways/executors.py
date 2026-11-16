@@ -205,11 +205,33 @@ class SandboxCellExecutor:
 
 
 def from_env(db: Any = None) -> dict[str, Executor]:
+    from aiagent_core import config
     from aiagent_core.config import secret
 
     from .browser_executor import browser_from_env
+    from .web_fetch import HttpFetchExecutor, SearchRouterExecutor
 
-    out: dict[str, Executor] = {"mock_search": MockSearchExecutor()}
+    proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY")
+    allow_priv: frozenset[str] = frozenset()
+    if config.profile() != "production" and os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE"):
+        allow_priv = frozenset(x.strip() for x in os.environ["AIAGENT_WEB_FETCH_ALLOW_PRIVATE"].split(",") if x.strip())
+
+    search_url = os.environ.get("AIAGENT_SEARCH_URL")
+    if search_url:
+        search_exec: Executor = SearchRouterExecutor(
+            search_url,
+            backend_kind=os.environ.get("AIAGENT_SEARCH_BACKEND", "searxng"),
+            api_key=secret("AIAGENT_SEARCH_API_KEY", required=False),
+            proxy=proxy_url,
+            allow_private_addrs=allow_priv,
+        )
+    else:
+        search_exec = MockSearchExecutor()
+
+    out: dict[str, Executor] = {
+        "mock_search": search_exec,
+        "http_fetch": HttpFetchExecutor(proxy=proxy_url, allow_private_addrs=allow_priv),
+    }
     bf = browser_from_env(db)
     if bf is not None:
         out["browser_fixture"] = bf
@@ -217,7 +239,7 @@ def from_env(db: Any = None) -> dict[str, Executor]:
     if url:
         out["http_message"] = HttpMessageExecutor(
             url,
-            proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
+            proxy=proxy_url,
             credential=secret("AIAGENT_MESSAGE_RECEIVER_TOKEN", required=False),
             credential_recipient=os.environ.get("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST"),
         )

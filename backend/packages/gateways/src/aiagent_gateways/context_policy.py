@@ -22,6 +22,7 @@ from .context_memory import PostgresMemoryRepository
 class ContextPolicy:
     recipient: str
     model: str
+    semantic_verifier_mode: str = "HEURISTIC"
 
 
 class ContextPolicyError(RpcError):
@@ -44,4 +45,5 @@ def resolve_policy(
         raise ContextPolicyError("CONTEXT_NOT_ELIGIBLE") from None
     if consent is None or not consent["memory_consent_ok"]:
         raise ContextPolicyError("MEMORY_CONSENT_REQUIRED")
-    return ContextPolicy(str(row["recipient"]), str(row["model"]))
+    mode = str(row.get("semantic_verifier_mode") or "HEURISTIC")
+    return ContextPolicy(str(row["recipient"]), str(row["model"]), mode)

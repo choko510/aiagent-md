@@ -473,7 +473,21 @@ class ToolGateway:
                 effect="FAILED",
             )
         permit = None
-        dest = executor.destination()
+        try:
+            dest_fn = getattr(executor, "destination_for", None)
+            dest = dest_fn(args) if callable(dest_fn) else executor.destination()
+        except ExecutorFailed as e:
+            return self._settle(
+                claim,
+                intent,
+                attempt_id,
+                tool_call_id,
+                tool,
+                stream,
+                "FAILED",
+                {"error": str(e)[:100]},
+                effect="FAILED",
+            )
         if dest is not None:
             if self.sentinel is None:
                 return self._settle(

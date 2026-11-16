@@ -45,21 +45,30 @@ class PlaywrightBrowserWorker:
             raise BrowserError("BROWSER_START_BLOCKED") from exc
         return self._browser
 
-    async def start(self, session_id: str) -> None:
+    async def start(
+        self,
+        session_id: str,
+        *,
+        storage_state: dict[str, Any] | None = None,
+        allow_js: bool = False,
+    ) -> None:
         async with self._lock:
             if session_id in self._pages:
                 raise BrowserError("DUPLICATE_SESSION")
             browser = await self._browser_or_start()
             context: BrowserContext | None = None
             try:
-                context = await browser.new_context(
-                    java_script_enabled=False,
-                    service_workers="block",
-                    accept_downloads=False,
-                    permissions=[],
-                )
+                ctx_kwargs: dict[str, Any] = {
+                    "java_script_enabled": allow_js,
+                    "service_workers": "block",
+                    "accept_downloads": False,
+                    "permissions": [],
+                }
+                if storage_state is not None:
+                    ctx_kwargs["storage_state"] = storage_state
+                context = await browser.new_context(**ctx_kwargs)
 
-                # Nothing in fixture HTML may open a socket (including images, fonts, redirects).
+                # Nothing inside the browser may open a raw socket bypassing the gateway/SSRF layer.
                 async def reject_network(route: Route) -> None:
                     await route.abort("blockedbyclient")
 
@@ -120,17 +129,79 @@ class PlaywrightBrowserWorker:
         return loc
 
     @staticmethod
-    async def _has_auth_wall(page: Page) -> bool:
-        return await page.locator("[data-auth-wall='true'], input[type='password']").count() > 0
+    async def _detect_challenge(page: Page) -> str | None:
+        if await page.locator("[data-auth-wall='true'], input[type='password']").count() > 0:
+            return "NEEDS_LOGIN"
+        if (
+            await page.locator(
+                "[data-captcha='true'], iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
+                "iframe[src*='turnstile'], .g-recaptcha, .cf-turnstile"
+            ).count()
+            > 0
+        ):
+            return "CAPTCHA_CHALLENGE"
+        return None
 
-    async def render(self, session_id: str, html: str) -> None:
+    async def render(
+        self,
+        session_id: str,
+        html: str,
+        *,
+        origin_url: str | None = None,
+        status: int = 200,
+    ) -> str:
         async with self._lock:
             try:
-                await self._page(session_id).set_content(html, wait_until="domcontentloaded", timeout=10_000)
+                page = self._page(session_id)
+                if origin_url is not None:
+                    obj = self._pages[session_id]
+
+                    async def fulfill_main_only(route: Route) -> None:
+                        if route.request.url == origin_url and route.request.resource_type == "document":
+                            await route.fulfill(status=status, body=html, content_type="text/html; charset=utf-8")
+                        else:
+                            await route.abort("blockedbyclient")
+
+                    await obj.context.unroute("**/*")
+                    await obj.context.route("**/*", fulfill_main_only)
+                    try:
+                        await page.goto(origin_url, wait_until="domcontentloaded", timeout=10_000)
+                    finally:
+
+                        async def reject_network(route: Route) -> None:
+                            await route.abort("blockedbyclient")
+
+                        await obj.context.unroute("**/*")
+                        await obj.context.route("**/*", reject_network)
+                else:
+                    await page.set_content(html, wait_until="domcontentloaded", timeout=10_000)
+                if status in (401, 403):
+                    return "NEEDS_LOGIN"
+                challenge = await self._detect_challenge(page)
+                return challenge or "OK"
             except BrowserError:
                 raise
             except Exception as exc:
                 raise self._classify_error(session_id, exc) from exc
+
+    async def export_storage_state(self, session_id: str) -> dict[str, Any]:
+        async with self._lock:
+            obj = self._pages.get(session_id)
+            if obj is None or obj.page.is_closed():
+                raise BrowserError("BROWSER_CRASHED")
+            state = await obj.context.storage_state()
+            return dict(state)
+
+    async def restore_storage_state(
+        self,
+        session_id: str,
+        storage_state: dict[str, Any],
+        *,
+        allow_js: bool = False,
+    ) -> None:
+        async with self._lock:
+            await self._close_locked(session_id)
+        await self.start(session_id, storage_state=storage_state, allow_js=allow_js)
 
     async def observe(self, session_id: str) -> str:
         async with self._lock:
@@ -147,7 +218,7 @@ class PlaywrightBrowserWorker:
                 page = self._page(session_id)
                 loc = await self._strict_target(page, target)
                 await loc.click(timeout=timeout_ms)
-                return "NEEDS_LOGIN" if await self._has_auth_wall(page) else "OK"
+                return "NEEDS_LOGIN" if await self._detect_challenge(page) is not None else "OK"
             except BrowserError:
                 raise
             except Exception as exc:
@@ -171,7 +242,7 @@ class PlaywrightBrowserWorker:
                     await field_loc.fill(item.value, timeout=timeout_ms)
                 submit_loc = await self._strict_target(page, target)
                 await submit_loc.click(timeout=timeout_ms)
-                return "NEEDS_LOGIN" if await self._has_auth_wall(page) else "OK"
+                return "NEEDS_LOGIN" if await self._detect_challenge(page) is not None else "OK"
             except BrowserError:
                 raise
             except Exception as exc:
