@@ -4467,11 +4467,14 @@ def test_takeover_storage_state_expiry_samesite_host_domain_and_prepost_verify_u
                 == 200
             )
 
-            # P2-2: Invalid / cross-origin / downgraded verifyUrl MUST fail 422 BEFORE sending login POST!
+            # P2-2 & malformed URL guard: Invalid / cross-origin / downgraded verifyUrl or malformed login url MUST fail 422 BEFORE sending login POST!
             for bad_verify in (
                 f"https://other.test:{port}/collect",
                 f"http://example.test:{port}/dash",
                 "not-a-valid-url",
+                "https://example.test:abc/dash",
+                "https://example.test:99999/dash",
+                "https://[invalid/dash",
             ):
                 r_bad = client.post(
                     f"/v1/browser/sessions/{sid}/takeover/authenticate",
@@ -4484,6 +4487,22 @@ def test_takeover_storage_state_expiry_samesite_host_domain_and_prepost_verify_u
                     },
                 )
                 assert r_bad.status_code == 422, r_bad.text
+            for bad_login in (
+                "https://example.test:abc/login",
+                "https://example.test:99999/login",
+                "https://[invalid/login",
+            ):
+                r_bad_url = client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                    headers=headers,
+                    json={
+                        "url": bad_login,
+                        "method": "POST",
+                        "formData": {"pw": "GOOD1"},
+                    },
+                )
+                assert r_bad_url.status_code == 422, r_bad_url.text
+                assert r_bad_url.json()["detail"]["error"] == "INVALID_TARGET_URL"
             assert login_post_hits == []
             assert verify_hits == []
 

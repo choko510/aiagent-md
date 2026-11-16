@@ -17,7 +17,7 @@ from hashlib import sha256
 from http.cookies import CookieError, SimpleCookie
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlencode, urlsplit, urlunsplit
 
 from aiagent_core import commands, config, memory_tombstones, memory_writer
 from aiagent_core.commands import CommandError, Scope
@@ -99,6 +99,20 @@ def _encrypt_browser_storage_state(
     nonce = os.urandom(12)
     cipher_bytes = AESGCM(key_bytes).encrypt(nonce, plaintext, aad)
     return nonce, cipher_bytes, key_id, sha256(plaintext).hexdigest()
+
+
+def _parse_http_origin_url(raw_url: str) -> tuple[SplitResult, str, str, int]:
+    """Parse HTTP(S) URL and validate scheme, host, absence of userinfo, and port (1..65535)."""
+    u = urlsplit(raw_url)
+    scheme = u.scheme.lower()
+    host = (u.hostname or "").lower()
+    if scheme not in ("http", "https") or not host or u.username is not None or u.password is not None:
+        raise ValueError("INVALID_TARGET_URL")
+    raw_port = u.port
+    port = (443 if scheme == "https" else 80) if raw_port is None else raw_port
+    if not (1 <= port <= 65535):
+        raise ValueError("INVALID_TARGET_URL")
+    return u, scheme, host, port
 
 
 def _default_cookie_path(origin_url: str) -> str:
@@ -1085,10 +1099,10 @@ def create_app(
         if not isinstance(parsed, dict) or not isinstance(parsed.get("url"), str):
             raise HTTPException(422, detail={"error": "INVALID_TAKEOVER_REQUEST"})
         target_url = str(parsed["url"]).strip()
-        u = urlsplit(target_url)
-        scheme = u.scheme.lower()
-        if scheme not in ("http", "https") or not u.hostname or u.username is not None or u.password is not None:
-            raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+        try:
+            u, scheme, req_host, req_port = _parse_http_origin_url(target_url)
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"}) from None
         if scheme == "http" and config.profile() == "production":
             raise HTTPException(422, detail={"error": "HTTPS_REQUIRED"})
         method = str(parsed.get("method") or "POST").upper()
@@ -1132,10 +1146,8 @@ def create_app(
             req_body = urlencode(encoded_pairs).encode("utf-8")
             req_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-        req_u = urlsplit(req_url)
-        req_scheme = req_u.scheme.lower()
-        req_host = (req_u.hostname or "").lower()
-        req_port = req_u.port or (443 if req_scheme == "https" else 80)
+        req_u = u
+        req_scheme = scheme
 
         verify_url_raw = parsed.get("verifyUrl")
         if verify_url_raw is not None and not isinstance(verify_url_raw, str):
@@ -1144,29 +1156,25 @@ def create_app(
         verify_target: str | None = None
         if explicit_verify:
             candidate = str(verify_url_raw).strip()
-            vu = urlsplit(candidate)
-            v_scheme = vu.scheme.lower()
-            if (
-                v_scheme not in ("http", "https")
-                or not vu.hostname
-                or vu.username is not None
-                or vu.password is not None
-            ):
-                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+            try:
+                _, v_scheme, v_host, v_port = _parse_http_origin_url(candidate)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"}) from None
             if req_scheme == "https" and v_scheme != "https":
                 raise HTTPException(422, detail={"error": "VERIFY_URL_DOWNGRADE"})
-            v_host = vu.hostname.lower()
-            v_port = vu.port or (443 if v_scheme == "https" else 80)
             if (v_scheme, v_host, v_port) != (req_scheme, req_host, req_port):
                 raise HTTPException(422, detail={"error": "VERIFY_URL_ORIGIN_MISMATCH"})
             verify_target = candidate
         elif isinstance(session_current_url, str) and session_current_url.startswith(("http://", "https://")):
-            vu = urlsplit(session_current_url)
-            v_scheme = vu.scheme.lower()
-            v_host = (vu.hostname or "").lower()
-            v_port = vu.port or (443 if v_scheme == "https" else 80)
+            try:
+                vu, v_scheme, v_host, v_port = _parse_http_origin_url(session_current_url)
+            except ValueError:
+                vu = None
+                v_scheme = v_host = ""
+                v_port = 0
             if (
-                (v_scheme, v_host, v_port) == (req_scheme, req_host, req_port)
+                vu is not None
+                and (v_scheme, v_host, v_port) == (req_scheme, req_host, req_port)
                 and (not (req_scheme == "https" and v_scheme != "https"))
                 and (vu.path or "/") != (req_u.path or "/")
             ):
@@ -1189,19 +1197,12 @@ def create_app(
 
             import httpx
 
-            pu = urlsplit(url_str)
-            p_scheme = pu.scheme.lower()
-            if (
-                p_scheme not in ("http", "https")
-                or not pu.hostname
-                or pu.username is not None
-                or pu.password is not None
-            ):
-                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+            try:
+                pu, p_scheme, p_host, target_port = _parse_http_origin_url(url_str)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"}) from None
             if p_scheme == "http" and config.profile() == "production":
                 raise HTTPException(422, detail={"error": "HTTPS_REQUIRED"})
-            p_host = (pu.hostname or "").lower()
-            target_port = pu.port or (443 if p_scheme == "https" else 80)
             hosts_cfg = (
                 allowed_web_hosts
                 if allowed_web_hosts is not None
