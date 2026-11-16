@@ -513,18 +513,43 @@ def test_authority_lease_expiry_and_service_role_rls_enforcement(
     with pytest.raises(StaleReference, match="stale or inactive"):
         run_auth.assert_current(dev_scope, fence2)
 
-    # Restore incarnation bump also invalidates RunFence
-    created3 = submit_task(dbs["api"], scope_core, "dev restore test", profile="sandbox")
-    claim3 = control.claim_run(dbs["runtime"], scope_core.tenant_id, created3["runId"], "dev-w3")
-    fence3 = RunFence(
-        task_id=claim3.task_id,
-        run_id=claim3.run_id,
-        goal_revision=claim3.goal_revision,
-        lease_epoch=claim3.lease_epoch,
-        restore_incarnation=claim3.restore_incarnation,
-        worker_ref="dev-w3",
-    )
-    run_auth.assert_current(dev_scope, fence3)
-    admin.restore_bump(pg.owner)
-    with pytest.raises(StaleReference, match="restore incarnation mismatch"):
-        run_auth.assert_current(dev_scope, fence3)
+    # Restore incarnation bump also invalidates RunFence on isolated DB (do not mutate session pg)
+    from conftest import drop_database, make_database
+
+    iso_env = make_database("aiagent_dev_restore")
+    try:
+        iso_t = admin.provision_tenant(iso_env.owner)
+        iso_scope = Scope(iso_t["tenantId"], iso_t["userId"], iso_t["workspaceId"])
+        iso_api = iso_env.db("api", max_size=2)
+        iso_rt = iso_env.db("runtime", max_size=2)
+        try:
+            created3 = submit_task(iso_api, iso_scope, "dev restore test", profile="sandbox")
+            claim3 = control.claim_run(iso_rt, iso_scope.tenant_id, created3["runId"], "dev-w3")
+            iso_dev_scope = ProjectScope(
+                tenant_id=iso_scope.tenant_id,
+                owner_user_id=iso_scope.user_id,
+                project_id="proj-rls",
+                workspace_id=iso_scope.workspace_id,
+                repository="org/rls-repo",
+                branch="feat/rls",
+                base_sha="a" * 40,
+                workspace_revision="rev-1",
+            )
+            fence3 = RunFence(
+                task_id=claim3.task_id,
+                run_id=claim3.run_id,
+                goal_revision=claim3.goal_revision,
+                lease_epoch=claim3.lease_epoch,
+                restore_incarnation=claim3.restore_incarnation,
+                worker_ref="dev-w3",
+            )
+            iso_auth = PostgresRunAuthority(iso_rt)
+            iso_auth.assert_current(iso_dev_scope, fence3)
+            admin.restore_bump(iso_env.owner)
+            with pytest.raises(StaleReference, match="restore incarnation mismatch"):
+                iso_auth.assert_current(iso_dev_scope, fence3)
+        finally:
+            iso_api.close()
+            iso_rt.close()
+    finally:
+        drop_database(iso_env.name)

@@ -182,31 +182,44 @@ def test_pg_fence_blocks_stale_epoch_and_cross_tenant(
     with pytest.raises(BrowserError, match="STALE_LEASE"):
         _run(fence.check(sid, auth1))
     _run(fence.check(sid, auth2))
-
-    # Restore incarnation bump invalidates active session even on live lease
-    admin.restore_bump(pg.owner)
+    _run(fence.revoke(sid, auth2))
     with pytest.raises(BrowserError, match="STALE_LEASE"):
         _run(fence.check(sid, auth2))
 
-    # Reset cancel/restore test on fresh task for revoke path
-    created2 = submit_task(dbs["api"], scope, "fence revoke test", profile="browser")
-    with dbs["owner"].conn() as c:
-        c.execute("UPDATE agent.schema_control SET dispatch_paused = false")
-    claim3 = control.claim_run(dbs["runtime"], scope.tenant_id, created2["runId"], "w3")
-    sid2 = uuid7()
-    auth3 = Authority(
-        claim3.tenant_id,
-        claim3.owner_user_id,
-        claim3.task_id,
-        claim3.run_id,
-        str(claim3.goal_revision),
-        str(claim3.lease_epoch),
-        worker_ref="w3",
-    )
-    _run(fence.register(sid2, auth3))
-    _run(fence.revoke(sid2, auth3))
-    with pytest.raises(BrowserError, match="STALE_LEASE"):
-        _run(fence.check(sid2, auth3))
+    # Restore incarnation bump invalidates active session on isolated DB (do not mutate session pg)
+    from conftest import drop_database, make_database
+
+    iso_env = make_database("aiagent_br_restore")
+    try:
+        iso_tenant = admin.provision_tenant(iso_env.owner)
+        iso_scope = Scope(iso_tenant["tenantId"], iso_tenant["userId"], iso_tenant["workspaceId"])
+        iso_api = iso_env.db("api", max_size=2)
+        iso_rt = iso_env.db("runtime", max_size=2)
+        iso_gw = iso_env.db("tool_gateway", max_size=2)
+        try:
+            iso_task = submit_task(iso_api, iso_scope, "fence restore test", profile="browser")
+            iso_claim = control.claim_run(iso_rt, iso_scope.tenant_id, iso_task["runId"], "w3")
+            iso_fence = PostgresFencePort(iso_gw)
+            iso_sid = uuid7()
+            iso_auth = Authority(
+                iso_claim.tenant_id,
+                iso_claim.owner_user_id,
+                iso_claim.task_id,
+                iso_claim.run_id,
+                str(iso_claim.goal_revision),
+                str(iso_claim.lease_epoch),
+                worker_ref="w3",
+            )
+            _run(iso_fence.register(iso_sid, iso_auth))
+            admin.restore_bump(iso_env.owner)
+            with pytest.raises(BrowserError, match="STALE_LEASE"):
+                _run(iso_fence.check(iso_sid, iso_auth))
+        finally:
+            iso_api.close()
+            iso_rt.close()
+            iso_gw.close()
+    finally:
+        drop_database(iso_env.name)
 
 
 def test_browser_submit_timeout_records_unknown_ledger(
