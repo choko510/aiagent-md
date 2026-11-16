@@ -56,9 +56,17 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with: {version: '0.12.3'}
       - run: uv sync --locked --python ${{ matrix.python }}
+      - name: Install Chromium and enable unprivileged userns sandbox on Ubuntu 24.04
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          uv run --python ${{ matrix.python }} python -m playwright install --with-deps chromium
       - name: STEP 4 isolated mock and fixture tests (not production integration)
+        env:
+          AIAGENT_REQUIRE_CHROMIUM: "1"
         run: uv run --python ${{ matrix.python }} pytest -q -rs -p no:cacheprovider packages/context/tests packages/memory/tests packages/development/tests packages/automation/tests packages/browser/tests
       - name: Contracts, migrations, Run control, QueuePort/Outbox/Scheduler, gateways, Sentinel, E2E, production gates
+        env:
+          AIAGENT_REQUIRE_CHROMIUM: "1"
         run: >
           uv run --python ${{ matrix.python }} pytest -q -rA -p no:cacheprovider tests
           --ignore=tests/test_runtime_faults.py --ignore=tests/linux --ignore=tests/test_compose_isolation.py

@@ -27,6 +27,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install isolated Browser dependencies
         run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           python -m pip install -e 'backend/packages/browser[test]' 'ruff>=0.14'
           python -m playwright install --with-deps chromium
       - name: Code and style
