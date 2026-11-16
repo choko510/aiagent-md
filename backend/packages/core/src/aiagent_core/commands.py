@@ -82,6 +82,8 @@ def create_task_tx(
     schedule_id: str | None = None,
     trigger_key: str | None = None,
     occurrence_id: str | None = None,
+    token_budget: int | None = None,
+    max_model_calls: int | None = None,
 ) -> dict[str, str]:
     """Task + goal revision 1 + Run attempt 1 + seed HEAD entry + events + run.start outbox, inside caller's TX."""
     if not scope_active(c, tenant_id, owner_user_id, workspace_id):
@@ -99,18 +101,32 @@ def create_task_tx(
     )
     inc = c.execute("SELECT restore_incarnation FROM agent.schema_control").fetchone()
     assert inc is not None
-    c.execute(
-        "INSERT INTO agent.runs(tenant_id, id, task_id, attempt_no, input_goal_revision, status_code, allowed_models,"
-        " restore_incarnation, head_revision, current_checkpoint_id) VALUES (%s,%s,%s,1,1,'CREATED',%s,%s,1,%s)",
-        (
-            tenant_id,
-            run_id,
-            task_id,
-            DEFAULT_MODELS.get(profile, DEFAULT_MODELS["default"]),
-            inc["restore_incarnation"],
-            cp_id,
-        ),
+    cols = (
+        "tenant_id, id, task_id, attempt_no, input_goal_revision, status_code,"
+        " allowed_models, restore_incarnation, head_revision, current_checkpoint_id"
     )
+    vals: list[Any] = [
+        tenant_id,
+        run_id,
+        task_id,
+        DEFAULT_MODELS.get(profile, DEFAULT_MODELS["default"]),
+        inc["restore_incarnation"],
+        cp_id,
+    ]
+    placeholders = "%s,%s,%s,1,1,'CREATED',%s,%s,1,%s"
+    if token_budget is not None:
+        if token_budget < 1:
+            raise CommandError("INVALID_BUDGET", 422)
+        cols += ", token_budget"
+        placeholders += ",%s"
+        vals.append(int(token_budget))
+    if max_model_calls is not None:
+        if max_model_calls < 1:
+            raise CommandError("INVALID_BUDGET", 422)
+        cols += ", max_model_calls"
+        placeholders += ",%s"
+        vals.append(int(max_model_calls))
+    c.execute(f"INSERT INTO agent.runs({cols}) VALUES ({placeholders})", tuple(vals))
     entry = {"kind": "user", "content": goal, "tool_calls": []}
     snap = sha256_hex({"prev": None, "rev": 1, "kind": "user", "stream": "main", "payload": entry})
     c.execute(

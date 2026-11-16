@@ -89,6 +89,8 @@ class CampaignPlan:
     cost_per_cycle: int
     tokens_per_cycle: int
     tools_per_cycle: int
+    goal_text: str = ""
+    work_item_goals: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.campaign_id or not self.tenant_id or not self.goal_revision:
@@ -96,6 +98,18 @@ class CampaignPlan:
         for number in (self.cost_per_cycle, self.tokens_per_cycle, self.tools_per_cycle):
             if not isinstance(number, int) or isinstance(number, bool) or number < 1:
                 raise Rejected("POSITIVE_RESERVATION_REQUIRED")
+
+    def child_task_goal(self, cycle_id: str, work_item_id: str) -> str:
+        """Render the authorized Campaign work instruction and cycle bounds for a spawned child Task."""
+        per_item = dict(self.work_item_goals).get(work_item_id, "").strip()
+        instruction = per_item or self.goal_text.strip()
+        bounds = (
+            f"[campaign={self.campaign_id} cycle={cycle_id} work_item={work_item_id}"
+            f" goal_rev={self.goal_revision} cost_micro_usd={self.cost_per_cycle}"
+            f" tokens_budget={self.tokens_per_cycle} max_tools={self.tools_per_cycle}"
+            f" max_cycles={self.policy.max_cycles} deadline={self.policy.deadline_utc}]"
+        )
+        return f"{instruction}\n{bounds}" if instruction else bounds
 
 
 @dataclass
@@ -178,6 +192,13 @@ class Campaign:
             ),
             max_concurrent_cycles=_as_int(raw_policy.get("max_concurrent_cycles", 1), "max_concurrent_cycles"),
         )
+        raw_wi = _as_list(raw_plan.get("work_item_goals", []), "work_item_goals")
+        wi_pairs: list[tuple[str, str]] = []
+        for pair in raw_wi:
+            items = _as_list(pair, "work_item_goal")
+            if len(items) != 2:
+                raise Rejected("CORRUPT_WIRE_RECORD")
+            wi_pairs.append((_as_str(items[0], "work_item_id"), _as_str(items[1], "work_item_instruction")))
         plan = CampaignPlan(
             campaign_id=_as_str(raw_plan["campaign_id"], "campaign_id"),
             tenant_id=_as_str(raw_plan["tenant_id"], "tenant_id"),
@@ -186,6 +207,8 @@ class Campaign:
             cost_per_cycle=_as_int(raw_plan["cost_per_cycle"], "cost_per_cycle"),
             tokens_per_cycle=_as_int(raw_plan["tokens_per_cycle"], "tokens_per_cycle"),
             tools_per_cycle=_as_int(raw_plan["tools_per_cycle"], "tools_per_cycle"),
+            goal_text=_as_str(raw_plan["goal_text"], "goal_text") if raw_plan.get("goal_text") else "",
+            work_item_goals=tuple(wi_pairs),
         )
         cycles = [
             Cycle(
@@ -789,7 +812,14 @@ class CampaignController:
 
         return self._mutate(campaign_id, op)
 
-    def steer(self, campaign_id: str, *, new_goal_revision: str, expected_control_version: int) -> int:
+    def steer(
+        self,
+        campaign_id: str,
+        *,
+        new_goal_revision: str,
+        expected_control_version: int,
+        new_goal_text: str | None = None,
+    ) -> int:
         """Update goal_revision cleanly, fence in-flight pending dispatches, and emit STEER audit."""
         if not new_goal_revision:
             raise Rejected("GOAL_REVISION_REQUIRED")
@@ -812,6 +842,8 @@ class CampaignController:
                 cost_per_cycle=c.plan.cost_per_cycle,
                 tokens_per_cycle=c.plan.tokens_per_cycle,
                 tools_per_cycle=c.plan.tools_per_cycle,
+                goal_text=new_goal_text if new_goal_text is not None else c.plan.goal_text,
+                work_item_goals=c.plan.work_item_goals,
             )
             c.control_version += 1
             for item in c.outbox:
