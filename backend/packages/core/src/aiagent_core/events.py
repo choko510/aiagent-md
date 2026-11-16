@@ -30,6 +30,10 @@ EVENT_KINDS = frozenset(
         "tool.effect_recorded",
         "tool.effect_unknown",
         "result.published",
+        "campaign.steered",
+        "campaign.quota_wait",
+        "dev.cycle_committed",
+        "dev.preview_leased",
     }
 )
 _FORBIDDEN_PAYLOAD_KEYS = frozenset({"arguments", "args", "content", "secret", "token", "cookie", "password", "prompt"})

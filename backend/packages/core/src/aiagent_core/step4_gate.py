@@ -29,7 +29,7 @@ FEATURES = (
 )
 # Features integrated into the STEP 3 Runtime/Gateway pipeline with explicit owner gating.
 _OWNER_GATED_EGRESS = frozenset({"context", "memory"})
-_SANDBOXED_INTEGRATED = frozenset({"context", "memory", "browser"})
+_SANDBOXED_INTEGRATED = frozenset({"context", "memory", "browser", "development", "automation"})
 _RESERVED_PREFIXES = (*(f + "." for f in FEATURES), "step4.")
 _RESERVED_EXACT = frozenset(FEATURES) | {"step4"}
 

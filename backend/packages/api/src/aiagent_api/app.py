@@ -5,6 +5,7 @@ validated with the generated strict contracts. The API never performs agent work
 """
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,7 +28,7 @@ from aiagent_domain.generated import (
 )
 from aiagent_domain.rpcwire import RpcError
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 
@@ -392,6 +393,92 @@ def create_app(db: Database | None = None) -> FastAPI:
             ),
         )
         return {"schemaVersion": "1.0", "taskId": task_id, "recordVersion": str(version)}
+
+    @app.get("/v1/tasks/{task_id}/events/stream")
+    async def stream_task_events(task_id: str, s: S, after_offset: int = 0, limit: int = 100) -> StreamingResponse:
+        bounded = max(1, min(limit, 500))
+
+        def load_events() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                owned = c.execute(
+                    "SELECT 1 FROM agent.tasks WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                    (s.tenant_id, task_id, s.user_id),
+                ).fetchone()
+                if owned is None:
+                    raise HTTPException(404, "not found")
+                rows = c.execute(
+                    "SELECT id, event_kind, delivery_offset, payload_json, occurred_at"
+                    " FROM agent.domain_events"
+                    " WHERE tenant_id=%s AND task_id=%s AND delivery_offset > %s"
+                    " ORDER BY delivery_offset ASC LIMIT %s",
+                    (s.tenant_id, task_id, after_offset, bounded),
+                ).fetchall()
+                return [
+                    {
+                        "id": str(r["id"]),
+                        "kind": str(r["event_kind"]),
+                        "offset": int(r["delivery_offset"]),
+                        "payload": dict(r["payload_json"]),
+                        "occurredAt": r["occurred_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+
+        events = await asyncio.to_thread(load_events)
+
+        async def sse() -> AsyncIterator[str]:
+            for ev in events:
+                yield f"id: {ev['offset']}\nevent: {ev['kind']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    @app.get("/v1/campaigns/{campaign_id}")
+    async def get_campaign(campaign_id: str, s: S) -> dict[str, Any]:
+        def q() -> dict[str, Any] | None:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT state, control_version, goal_revision, campaign_json"
+                    " FROM agent.automation_campaigns"
+                    " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                    (s.tenant_id, campaign_id, s.user_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "schemaVersion": "1.0",
+                    "campaignId": campaign_id,
+                    "state": str(row["state"]),
+                    "controlVersion": int(row["control_version"]),
+                    "goalRevision": str(row["goal_revision"]),
+                    "campaign": dict(row["campaign_json"]),
+                }
+
+        out = await asyncio.to_thread(q)
+        if out is None:
+            raise HTTPException(404, "not found")
+        return out
+
+    @app.get("/v1/campaigns/{campaign_id}/events/stream")
+    async def stream_campaign_events(campaign_id: str, s: S, after_seq: int = 0) -> StreamingResponse:
+        def load() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT campaign_json FROM agent.automation_campaigns"
+                    " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                    (s.tenant_id, campaign_id, s.user_id),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "not found")
+                raw = dict(row["campaign_json"])
+                return [ev for ev in raw.get("events", []) if int(ev.get("seq", 0)) > after_seq]
+
+        events = await asyncio.to_thread(load)
+
+        async def sse() -> AsyncIterator[str]:
+            for ev in events:
+                yield f"id: {ev['seq']}\nevent: campaign.{str(ev.get('reason', 'event')).lower()}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
 
     return app
 

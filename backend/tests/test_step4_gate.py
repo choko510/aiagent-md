@@ -73,11 +73,11 @@ def test_capabilities_requires_authenticated_scope() -> None:
         for name in ("context", "memory"):
             assert by_feature[name]["integrationState"] == "INTEGRATED_CONDITIONAL"
             assert by_feature[name]["memoryEgressPath"] == "OWNER_ENABLED_CONTEXT"
-        assert by_feature["browser"]["integrationState"] == "INTEGRATED_CONDITIONAL"
-        assert by_feature["browser"]["memoryEgressPath"] == "NONE"
-        for name in ("development", "automation", "device"):
-            assert by_feature[name]["integrationState"] == "INTEGRATION_PENDING"
+        for name in ("browser", "development", "automation"):
+            assert by_feature[name]["integrationState"] == "INTEGRATED_CONDITIONAL"
             assert by_feature[name]["memoryEgressPath"] == "NONE"
+        assert by_feature["device"]["integrationState"] == "INTEGRATION_PENDING"
+        assert by_feature["device"]["memoryEgressPath"] == "NONE"
         # No record may claim autonomous external action or readiness.
         assert all(x["externalActionsEnabled"] is False for x in payload["capabilities"])
         assert all(x["hostVerified"] is False for x in payload["capabilities"])
