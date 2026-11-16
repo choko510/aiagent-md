@@ -382,3 +382,43 @@ def test_source_descriptor_requires_supervisor_owned_directory(tmp_path: Path) -
             run(s._execute(grant(argv), argv, ".", source_fd=fd))
     finally:
         os.close(fd)
+
+
+def test_projected_execution_rejects_wrong_output_descriptor(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires a privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "trusted-source"
+    other = tmp_path / "other-output"
+    source.mkdir()
+    other.mkdir()
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    output_fd = os.open(other, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        argv = ["/bin/true"]
+        with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_MISMATCH"):
+            run(s._execute(grant(argv), argv, ".", source_fd=source_fd, output_fd=output_fd))
+    finally:
+        os.close(source_fd)
+        os.close(output_fd)
+
+
+def test_cell_source_traversal_restores_mode_on_failure(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("requires root for Cell group isolation")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "development" / "src"))
+    from aiagent_development.code_intelligence.models import ReadError
+    from aiagent_development.code_intelligence.projection_stage import cell_source_traversal
+
+    parent = tmp_path / "private-source"
+    parent.mkdir(mode=0o700)
+    gid = parent.stat().st_gid
+    with pytest.raises(RuntimeError, match="fixture"):
+        with cell_source_traversal(parent, cell_gid=20001):
+            assert parent.stat().st_mode & 0o777 == 0o710 and parent.stat().st_gid == 20001
+            raise RuntimeError("fixture")
+    assert parent.stat().st_mode & 0o777 == 0o700 and parent.stat().st_gid == gid
+    parent.chmod(0o755)
+    with pytest.raises(ReadError, match="not private"):
+        with cell_source_traversal(parent, cell_gid=20001):
+            pytest.fail("non-private source parent accepted")

@@ -18,10 +18,12 @@ import struct
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from .models import ReadError
+from .git_proof import GitTreeCheck, GitTreeProof, verify_git_tree_proof
+from .models import Identity, ReadError
 from .paths import validate_git_path
 from .projection import ProjectionManifest
 from .projection_stream import _MAGIC, _MAX_CHUNK, _MAX_WIRE, ProjectionStreamReceipt, _field, _header, _wire_length
@@ -101,6 +103,8 @@ def _validate_manifest(manifest: ProjectionManifest, receipt: ProjectionStreamRe
 
 
 def _open_trusted_parent(path: Path) -> int:
+    if not path.is_absolute():
+        raise ReadError("invalid projection parent")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open("/", flags)
     try:
@@ -228,3 +232,54 @@ def stage_projection(
                 shutil.rmtree(name, dir_fd=parent_fd)
         finally:
             os.close(parent_fd)
+
+
+@contextmanager
+def cell_source_traversal(trusted_parent: Path, *, cell_gid: int) -> Iterator[None]:
+    """Temporarily grant a dedicated Cell group traversal, never directory listing.
+
+    Caller must enforce a separate Landlock domain per execution, use a dedicated
+    Cell identity, and clean up after crashes. This is not an authorization check.
+    """
+    if os.name != "posix" or os.geteuid() != 0 or type(cell_gid) is not int or cell_gid <= 0:
+        raise ReadError("Cell traversal isolation unavailable")
+    fd = _open_trusted_parent(trusted_parent)
+    changed = False
+    try:
+        before = os.fstat(fd)
+        if before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o700:
+            raise ReadError("projection parent is not private")
+        os.fchown(fd, -1, cell_gid)
+        changed = True
+        os.fchmod(fd, 0o710)
+        yield
+    finally:
+        try:
+            if changed:
+                os.fchmod(fd, 0o700)
+                os.fchown(fd, -1, before.st_gid)
+        finally:
+            os.close(fd)
+
+
+@dataclass(frozen=True)
+class GitStagedProjection:
+    root_fd: int
+    check: GitTreeCheck
+
+
+@contextmanager
+def stage_git_projection(
+    trusted_parent: Path,
+    stream: BinaryIO,
+    manifest: ProjectionManifest,
+    receipt: ProjectionStreamReceipt,
+    proof: GitTreeProof,
+    expected_identity: Identity,
+    *,
+    deadline: float,
+) -> Iterator[GitStagedProjection]:
+    """Verify object relationships and expose hash strength; caller owns authorization."""
+    check = verify_git_tree_proof(proof, manifest, expected_identity, deadline=deadline)
+    with stage_projection(trusted_parent, stream, manifest, receipt, deadline=deadline) as root_fd:
+        yield GitStagedProjection(root_fd, check)

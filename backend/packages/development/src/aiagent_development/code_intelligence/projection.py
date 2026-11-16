@@ -34,6 +34,21 @@ class ProjectionManifest:
     issues: tuple[str, ...]
 
 
+def projection_path_selected(path: str) -> bool:
+    """Fixed B2 source policy; this is not proof that selected content is secret-free."""
+    p = PurePosixPath(path)
+    parts = tuple(part.lower() for part in p.parts)
+    name = parts[-1]
+    sensitive = (
+        name.startswith(".env")
+        or name in {"credentials", "id_rsa", "id_ed25519"}
+        or name.endswith((".pem", ".key", ".p12", ".pfx"))
+        or any(word in name for word in ("credential", "secret", "private_key", "token"))
+        or any(part in {".ssh", ".aws", ".config", "secrets", "credentials"} for part in parts)
+    )
+    return not sensitive and (p.suffix.lower() in {".py", ".pyi"} or name == "pyproject.toml")
+
+
 def prepare_projection(reader: GitSnapshot, identity: Identity, tree: str) -> ProjectionManifest:
     """Verify every tree entry before a future broker may materialize a projection.
 
@@ -51,17 +66,7 @@ def prepare_projection(reader: GitSnapshot, identity: Identity, tree: str) -> Pr
     for entry in entries:
         if entry.kind != "BLOB" or entry.mode not in ("100644", "100755"):
             raise ReadError("unsupported snapshot entry")
-        path = PurePosixPath(entry.path)
-        parts = tuple(part.lower() for part in path.parts)
-        name = parts[-1]
-        sensitive = (
-            name.startswith(".env")
-            or name in {"credentials", "id_rsa", "id_ed25519"}
-            or name.endswith((".pem", ".key", ".p12", ".pfx"))
-            or any(word in name for word in ("credential", "secret", "private_key", "token"))
-            or any(part in {".ssh", ".aws", ".config", "secrets", "credentials"} for part in parts)
-        )
-        if sensitive or (path.suffix.lower() not in {".py", ".pyi"} and name != "pyproject.toml"):
+        if not projection_path_selected(entry.path):
             issues.append(f"{display_path(entry.path)}: excluded by source policy")
             continue
         data = reader.read(entry)

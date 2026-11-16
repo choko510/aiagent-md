@@ -208,7 +208,9 @@ class Supervisor:
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
         return await self._execute(token, argv, cwd_rel, source_fd=None)
 
-    async def _execute(self, token: Any, argv: list[str], cwd_rel: str, *, source_fd: int | None) -> dict[str, Any]:
+    async def _execute(
+        self, token: Any, argv: list[str], cwd_rel: str, *, source_fd: int | None, output_fd: int | None = None
+    ) -> dict[str, Any]:
         # source_fd is reserved for a future trusted projection broker. It is
         # deliberately not accepted from RPC and is not an authorization token.
         if source_fd is not None:
@@ -219,9 +221,18 @@ class Supervisor:
                     raise GrantError("SOURCE_OWNER_MISMATCH")
             except OSError as exc:
                 raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
+        if output_fd is not None and (source_fd is None or output_fd == source_fd):
+            raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         g = verify(self.grant_key, token, argv, cwd_rel)
         self._consume(g.grant_id)
         ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+        if output_fd is not None:
+            try:
+                actual, expected = os.fstat(output_fd), os.stat(cwd, follow_symlinks=False)
+                if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                    raise GrantError("OUTPUT_DESCRIPTOR_MISMATCH")
+            except OSError as exc:
+                raise GrantError("OUTPUT_DESCRIPTOR_INVALID") from exc
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
@@ -238,7 +249,7 @@ class Supervisor:
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws, source_fd),
             close_fds=True,
-            pass_fds=() if source_fd is None else (source_fd,),
+            pass_fds=tuple(fd for fd in (source_fd, output_fd) if fd is not None),
         )
         out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
         rc = proc.returncode

@@ -10,9 +10,14 @@ from pathlib import Path
 import pytest
 from test_code_intelligence_projection import make_repo, open_reader
 
+from aiagent_development.code_intelligence.git_proof import build_git_tree_proof
 from aiagent_development.code_intelligence.models import ReadError
 from aiagent_development.code_intelligence.projection import prepare_projection
-from aiagent_development.code_intelligence.projection_stage import stage_projection
+from aiagent_development.code_intelligence.projection_stage import (
+    cell_source_traversal,
+    stage_git_projection,
+    stage_projection,
+)
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow staging")
@@ -154,4 +159,44 @@ def test_staging_rejects_different_identity(tmp_path: Path) -> None:
             deadline=time.monotonic() + 10,
         ):
             pytest.fail("different tenant accepted")
+    assert not list(parent.iterdir())
+
+
+def test_cell_source_traversal_rejects_untrusted_inputs(tmp_path: Path) -> None:
+    with pytest.raises(ReadError):
+        with cell_source_traversal(tmp_path, cell_gid=0):
+            pytest.fail("invalid Cell identity accepted")
+
+
+def test_git_proof_verified_before_staging(tmp_path: Path) -> None:
+    reader = open_reader(make_repo(tmp_path, {"a.py": b"print(1)\n"}))
+    manifest = prepare_projection(reader, reader.snapshot.identity, reader.tree)
+    proof = build_git_tree_proof(reader)
+    encoder = ProjectionEncoder(reader, manifest)
+    data = b"".join(encoder.chunks())
+    assert encoder.receipt is not None
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    with stage_git_projection(
+        parent,
+        io.BytesIO(data),
+        manifest,
+        encoder.receipt,
+        proof,
+        reader.snapshot.identity,
+        deadline=time.monotonic() + 10,
+    ) as staged:
+        assert read_staged(staged.root_fd, "a.py") == b"print(1)\n"
+        assert staged.check.collision_resistance == "LEGACY_SHA1"
+    with pytest.raises(ReadError):
+        with stage_git_projection(
+            parent,
+            io.BytesIO(data),
+            manifest,
+            encoder.receipt,
+            replace(proof, commit=proof.commit + b"x"),
+            reader.snapshot.identity,
+            deadline=time.monotonic() + 10,
+        ):
+            pytest.fail("invalid Git proof exposed")
     assert not list(parent.iterdir())

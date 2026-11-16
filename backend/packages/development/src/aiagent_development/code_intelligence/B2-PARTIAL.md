@@ -235,4 +235,28 @@ unlinked read-only descriptor with a SHA-256 of the exact captured bytes. It
 requires a private trusted parent and assumes all untrusted output writers have
 already stopped. It does not authenticate execution, transfer an Artifact,
 check cancellation/lease, or publish. An official scip-python fixture has been
-captured and revalidated by the B1 decoder; this is not a fresh indexer run.
+captured and revalidated by the B1 decoder. Separately, an opt-in Docker test
+ran scip-python on a new synthetic Git snapshot through the private Supervisor
+hook, captured its output and queried B1 twice. That test bypasses authenticated
+transport and canonical Execution authority and is not a production E2E.
+
+
+The opt-in fixture recipe is in `scripts/scip_cell_fixture/`. Its Node binary,
+indexer, OpenSSL configuration, source/output descriptors, empty environment
+file and argv shape are fixed; the recipe digest covers the argv template and
+environment digest. Image verification and execution authorization are not
+implemented. The fixture grants its dedicated Cell group traverse-only access
+to a source parent during execution while Landlock enforces source read-only;
+this relies on per-task Landlock confinement and must not substitute for
+authenticated transport or distinct-VM validation. Crash-time permission
+restoration and orphan staging cleanup remain unimplemented.
+
+
+A bounded Git tree proof is now independently checked against the caller's
+expected commit and tree before the opt-in source stage. The check hashes raw
+commit and tree objects, verifies selected paths and blob IDs, and rejects
+missing, duplicate, malformed, extra and unsupported objects. The staging step
+independently checks each Git blob ID and SHA-256 against the manifest. This
+proves only object relationships relative to the supplied expected identity; it
+does not authorize a repository or authenticate the execution. SHA-1 Git
+object IDs remain legacy collision-sensitive and are marked `LEGACY_SHA1`.
