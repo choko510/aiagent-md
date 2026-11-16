@@ -16,6 +16,7 @@ from typing import Protocol, TypeVar
 class CampaignState(StrEnum):
     ACTIVE = "ACTIVE"
     PAUSED = "PAUSED"
+    QUOTA_WAIT = "QUOTA_WAIT"
     WAITING_INPUT = "WAITING_INPUT"
     WAITING_APPROVAL = "WAITING_APPROVAL"
     WAITING_RECONCILIATION = "WAITING_RECONCILIATION"
@@ -58,11 +59,18 @@ class StopPolicy:
     max_tokens: int
     max_tool_calls: int
     target_count: int | None = None
+    max_concurrent_cycles: int = 1
 
     def __post_init__(self) -> None:
         if any(
             not isinstance(n, int) or isinstance(n, bool) or n < 1
-            for n in (self.max_cycles, self.max_cost_micro_usd, self.max_tokens, self.max_tool_calls)
+            for n in (
+                self.max_cycles,
+                self.max_cost_micro_usd,
+                self.max_tokens,
+                self.max_tool_calls,
+                self.max_concurrent_cycles,
+            )
         ):
             raise Rejected("FINITE_LIMITS_REQUIRED")
         if self.target_count is not None and (
@@ -147,6 +155,7 @@ class Campaign:
     authorized: bool = True
     pending_approval: bool = False
     control_receipts: dict[str, tuple[str, int]] = field(default_factory=dict)
+    quota_retry_after_utc: str | None = None
 
     def wire(self) -> dict[str, object]:
         return asdict(self)
@@ -167,6 +176,7 @@ class Campaign:
                 if raw_policy.get("target_count") is not None
                 else None
             ),
+            max_concurrent_cycles=_as_int(raw_policy.get("max_concurrent_cycles", 1), "max_concurrent_cycles"),
         )
         plan = CampaignPlan(
             campaign_id=_as_str(raw_plan["campaign_id"], "campaign_id"),
@@ -250,6 +260,11 @@ class Campaign:
             authorized=_as_bool(value.get("authorized", True), "authorized"),
             pending_approval=_as_bool(value.get("pending_approval", False), "pending_approval"),
             control_receipts=receipts,
+            quota_retry_after_utc=(
+                _as_str(value["quota_retry_after_utc"], "quota_retry_after_utc")
+                if value.get("quota_retry_after_utc") is not None
+                else None
+            ),
         )
 
 
@@ -470,7 +485,8 @@ class CampaignController:
             cycle = self._cycle(c, cycle_id)
             if cycle.started:
                 return False
-            if any(x.started and x.phase != Phase.DONE for x in c.cycles if x.cycle_id != cycle_id):
+            active_others = sum(1 for x in c.cycles if x.started and x.phase != Phase.DONE and x.cycle_id != cycle_id)
+            if active_others >= c.plan.policy.max_concurrent_cycles:
                 raise Rejected("ACTIVE_CYCLE_EXISTS")
             cycle.started = True
             self._event(c, "CYCLE_ADMITTED", cycle)
@@ -714,6 +730,101 @@ class CampaignController:
             return c.control_version
 
         return self.store.mutate(campaign_id, op)
+
+    def reserve_parallel_cycle(self, campaign_id: str, work_item_id: str, expected_control_version: int) -> str | None:
+        """Reserve an additional bounded parallel cycle when max_concurrent_cycles > 1."""
+        if not work_item_id:
+            raise Rejected("WORK_ITEM_REQUIRED")
+
+        def op(c: Campaign) -> str | None:
+            self._gate(c, expected_control_version)
+            open_cycles = sum(1 for x in c.cycles if x.phase != Phase.DONE)
+            if open_cycles >= c.plan.policy.max_concurrent_cycles:
+                raise Rejected("CONCURRENCY_LIMIT_REACHED")
+            cycle_id = f"{c.plan.campaign_id}:{len(c.cycles) + 1}"
+            cycle = self._reserve(c, cycle_id, work_item_id)
+            return cycle.cycle_id if cycle is not None else None
+
+        return self._mutate(campaign_id, op)
+
+    def pause_quota(self, campaign_id: str, retry_after_utc: str, expected_control_version: int) -> int:
+        """Enter QUOTA_WAIT on 429/rate-limit while preserving reserved cycle budgets."""
+        parse_utc(retry_after_utc)
+
+        def op(c: Campaign) -> int:
+            self._gate(c, expected_control_version)
+            c.state = CampaignState.QUOTA_WAIT
+            c.quota_retry_after_utc = retry_after_utc
+            c.control_version += 1
+            for item in c.outbox:
+                if item.status == "PENDING":
+                    item.status = "CANCELLED"
+            self._event(c, "QUOTA_WAIT")
+            return c.control_version
+
+        return self._mutate(campaign_id, op)
+
+    def resume_quota(self, campaign_id: str, expected_control_version: int) -> int:
+        def op(c: Campaign) -> int:
+            if expected_control_version != c.control_version:
+                raise Rejected("STALE_CONTROL_VERSION")
+            if not c.authorized or c.state != CampaignState.QUOTA_WAIT or c.quota_retry_after_utc is None:
+                raise Rejected("NOT_QUOTA_WAITING")
+            if self.clock.now() < parse_utc(c.quota_retry_after_utc):
+                raise Rejected("QUOTA_COOLDOWN_ACTIVE")
+            if self.clock.now() >= parse_utc(c.plan.policy.deadline_utc):
+                c.state = CampaignState.LIMIT_REACHED
+                c.control_version += 1
+                self._event(c, "DEADLINE_REACHED")
+                return c.control_version
+            c.state = CampaignState.ACTIVE
+            c.quota_retry_after_utc = None
+            c.control_version += 1
+            for cycle in c.cycles:
+                if cycle.phase != Phase.DONE:
+                    key = f"campaign:{c.plan.campaign_id}:cycle:{cycle.cycle_id}:resume:v{c.control_version}"
+                    c.outbox.append(Dispatch(key, cycle.cycle_id, c.control_version))
+            self._event(c, "QUOTA_RESUMED")
+            return c.control_version
+
+        return self._mutate(campaign_id, op)
+
+    def steer(self, campaign_id: str, *, new_goal_revision: str, expected_control_version: int) -> int:
+        """Update goal_revision cleanly, fence in-flight pending dispatches, and emit STEER audit."""
+        if not new_goal_revision:
+            raise Rejected("GOAL_REVISION_REQUIRED")
+
+        def op(c: Campaign) -> int:
+            if expected_control_version != c.control_version:
+                raise Rejected("STALE_CONTROL_VERSION")
+            if not c.authorized or c.state in (
+                CampaignState.REVOKED,
+                CampaignState.STOPPED,
+                CampaignState.LIMIT_REACHED,
+                CampaignState.TARGET_REACHED,
+            ):
+                raise Rejected(f"CAMPAIGN_{c.state}")
+            c.plan = CampaignPlan(
+                campaign_id=c.plan.campaign_id,
+                tenant_id=c.plan.tenant_id,
+                goal_revision=new_goal_revision,
+                policy=c.plan.policy,
+                cost_per_cycle=c.plan.cost_per_cycle,
+                tokens_per_cycle=c.plan.tokens_per_cycle,
+                tools_per_cycle=c.plan.tools_per_cycle,
+            )
+            c.control_version += 1
+            for item in c.outbox:
+                if item.status == "PENDING":
+                    item.status = "CANCELLED"
+            for cycle in c.cycles:
+                if cycle.phase != Phase.DONE:
+                    key = f"campaign:{c.plan.campaign_id}:cycle:{cycle.cycle_id}:steer:v{c.control_version}"
+                    c.outbox.append(Dispatch(key, cycle.cycle_id, c.control_version))
+            self._event(c, "STEER")
+            return c.control_version
+
+        return self._mutate(campaign_id, op)
 
     def view(self, campaign_id: str) -> dict[str, object]:
         c = self.store.read(campaign_id)
