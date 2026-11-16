@@ -79,6 +79,7 @@ class FixtureResponse:
     status: int
     html: str = ""
     redirect_to: str | None = None
+    truncated: bool = False
 
 
 LocatorKind = Literal["role", "label", "test_id", "css"]

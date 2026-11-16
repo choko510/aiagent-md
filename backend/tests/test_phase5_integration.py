@@ -18,12 +18,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
-from aiagent_api.app import create_app
+from aiagent_api.app import _takeover_via_forward_proxy, create_app
 from aiagent_browser import PlaywrightBrowserWorker
 from aiagent_core import admin, commands, control, memory_tombstones, memory_writer
 from aiagent_core.commands import Scope
 from aiagent_core.config import Secret
 from aiagent_core.db import Database
+from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.browser_executor import BrowserSessionExecutor
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed
@@ -1764,5 +1765,884 @@ def test_browser_egress_cookie_401_takeover_auth_submit_outcome_captcha_and_conc
         if stop_ev_holder:
             lp, ev = stop_ev_holder[0]
             lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def _make_takeover_tls_and_proxy(
+    tmp_path: Path, handler_cls: type[BaseHTTPRequestHandler], pg_dbs: dict[str, Database]
+) -> tuple[
+    ThreadingHTTPServer,
+    int,
+    ssl.SSLContext,
+    Sentinel,
+    EgressProxy,
+    str,
+    list[tuple[asyncio.AbstractEventLoop, asyncio.Event]],
+]:
+    _, _, srv_ctx, cli_ctx = _make_self_signed_tls(tmp_path, "portal.test")
+    https_srv = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    https_srv.socket = srv_ctx.wrap_socket(https_srv.socket, server_side=True)
+    threading.Thread(target=https_srv.serve_forever, daemon=True).start()
+    port = https_srv.server_address[1]
+
+    ecfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "web-fetch": {
+                        "scheme": "https",
+                        "host": "portal.test",
+                        "port": port,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
+    sentinel = Sentinel(pg_dbs["sentinel"], ecfg, secrets.token_bytes(32))
+
+    async def resolver(host: str, rport: int) -> list[str]:
+        del rport
+        return ["127.0.0.1"] if host == "portal.test" else []
+
+    proxy_srv_holder: list[EgressProxy] = []
+    proxy_port_holder: list[int] = []
+    stop_ev_holder: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+    ready = threading.Event()
+
+    def run_proxy() -> None:
+        async def main() -> None:
+            ps = EgressProxy(sentinel, ecfg, resolver=resolver, upstream_ssl=cli_ctx)
+            proxy_srv_holder.append(ps)
+            p = await ps.start("127.0.0.1", 0)
+            proxy_port_holder.append(p)
+            ev = asyncio.Event()
+            stop_ev_holder.append((asyncio.get_running_loop(), ev))
+            ready.set()
+            await ev.wait()
+            await ps.close()
+
+        asyncio.run(main())
+
+    threading.Thread(target=run_proxy, daemon=True).start()
+    assert ready.wait(timeout=10.0)
+    return (
+        https_srv,
+        port,
+        cli_ctx,
+        sentinel,
+        proxy_srv_holder[0],
+        f"http://127.0.0.1:{proxy_port_holder[0]}",
+        stop_ev_holder,
+    )
+
+
+def test_takeover_authenticate_real_egress_proxy_and_observation_scope(
+    pg: PgEnv, dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    seen_proxy_auths: list[str] = []
+
+    class AuthHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            if self.path == "/dashboard":
+                if "sid=proxy-cookie-7" not in self.headers.get("Cookie", ""):
+                    self.send_response(401)
+                    self.end_headers()
+                    self.wfile.write(b"<html><body>Login needed</body></html>")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Authed Proxy Dashboard</h1></body></html>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            if self.path == "/takeover-login" and "pw=PASS42" in raw:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Set-Cookie", "sid=proxy-cookie-7; Path=/; HttpOnly; Secure")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Logged in sk-secret99999999</h1></body></html>")
+                return
+            self.send_response(401)
+            self.end_headers()
+
+    https_srv, port, cli_ctx, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, AuthHandler, dbs
+    )
+    ring = KeyRing.single(b"k" * 32, key_id="p1a")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=ring,
+        sentinel=LocalSentinel(sentinel),
+        egress_proxy=proxy_url,
+        allowed_web_hosts=frozenset({"portal.test"}),
+        takeover_verify_ssl=cli_ctx,
+    )
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, claim = _claim_new(dbs, scope, "real proxy takeover", profile="browser")
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+    try:
+        dash_url = f"https://portal.test:{port}/dashboard"
+        _propose(dbs, claim, "p1a_nav", "browser_navigate", {"url": dash_url})
+        out = _run(gw.submit(claim, "p1a_nav", "browser_navigate", {"url": dash_url}))
+        assert out["result"]["state"] == "NEEDS_LOGIN"
+        sid = out["result"]["sessionId"]
+
+        with TestClient(app) as client:
+            # Must fail before takeover/start switches mode to HUMAN
+            pre_auth = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal.test:{port}/takeover-login",
+                    "method": "POST",
+                    "formData": {"pw": "PASS42"},
+                },
+            )
+            assert pre_auth.status_code in (403, 409)
+
+            assert (
+                client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/start", headers=headers, json={"reason": "login"}
+                ).status_code
+                == 200
+            )
+            # Disallowed host rejected by allowed_web_hosts before proxy
+            bad_host = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"https://evil.test:{port}/takeover-login", "method": "POST"},
+            )
+            assert bad_host.status_code == 403
+
+            # P2-2: Observation endpoint works cleanly with t.workspace_id SQL join while ACTIVE/PAUSED
+            obs_ok = client.get(f"/v1/browser/sessions/{sid}/observation", headers=headers)
+            assert obs_ok.status_code == 200, obs_ok.text
+
+            # Real proxy-forwarded takeover authenticate with takeover_http_fn=None (no CONNECT!)
+            auth_r = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal.test:{port}/takeover-login",
+                    "method": "POST",
+                    "formData": {"pw": "PASS42"},
+                },
+            )
+            assert auth_r.status_code == 200, auth_r.text
+            assert auth_r.json()["authenticated"] is True
+            assert auth_r.json()["cookieCount"] == 1
+            assert "sk-secret99999999" not in auth_r.json()["observation"]
+
+            # Direct CONNECT over EgressProxy remains blocked; single-use human_takeover permit cannot be minted while aborted
+            assert client.post(f"/v1/browser/sessions/{sid}/takeover/complete", headers=headers).status_code == 200
+
+        # Cookie works through EgressProxy afterwards
+        _propose(dbs, claim, "p1a_nav2", "browser_navigate", {"url": dash_url, "sessionId": sid})
+        out2 = _run(gw.submit(claim, "p1a_nav2", "browser_navigate", {"url": dash_url, "sessionId": sid}))
+        assert out2["status"] == "DONE"
+        assert "Authed Proxy Dashboard" in out2["result"]["observation"]
+
+        # P1-A replay / tamper on EgressProxy directly + P2-2 workspace disable check
+        import httpx
+
+        with TestClient(app) as client:
+            assert (
+                client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/start", headers=headers, json={"reason": "login2"}
+                ).status_code
+                == 200
+            )
+            perm = sentinel.authorize_human_takeover(
+                tenant["tenantId"], tenant["userId"], tenant["workspaceId"], sid, "https", "portal.test", port, "POST"
+            )
+            # HTTP CONNECT against EgressProxy is blocked; single-use forward-proxy permit works ONCE and replay is 403!
+            with pytest.raises(httpx.ProxyError):
+                _run(
+                    httpx.AsyncClient(proxy=proxy_url, verify=False, trust_env=False).post(
+                        f"https://portal.test:{port}/takeover-login",
+                        headers={"Proxy-Authorization": f"Bearer {perm}"},
+                        content=b"pw=PASS42",
+                    )
+                )
+            st1, _, _ = _run(
+                _takeover_via_forward_proxy(
+                    proxy_url=proxy_url,
+                    permit=perm,
+                    target_url=f"https://portal.test:{port}/takeover-login",
+                    method="POST",
+                    host_header=f"portal.test:{port}",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=b"pw=PASS42",
+                )
+            )
+            assert st1 == 200
+            from fastapi import HTTPException
+
+            with pytest.raises(HTTPException) as ei_replay:
+                _run(
+                    _takeover_via_forward_proxy(
+                        proxy_url=proxy_url,
+                        permit=perm,
+                        target_url=f"https://portal.test:{port}/takeover-login",
+                        method="POST",
+                        host_header=f"portal.test:{port}",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=b"pw=PASS42",
+                    )
+                )
+            assert ei_replay.value.status_code == 403
+            assert seen_proxy_auths == []
+
+            with dbs["owner"].tx() as c:
+                c.execute("UPDATE agent.workspaces SET disabled_at=now() WHERE id=%s", (tenant["workspaceId"],))
+            obs_disabled = client.get(f"/v1/browser/sessions/{sid}/observation", headers=headers)
+            assert obs_disabled.status_code in (401, 403)
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def test_browser_submit_post_dispatch_302_denied_render_crash_and_db_persist_unknown(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    post_hits: list[str] = []
+
+    class PostEdgeHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            if self.path == "/form-302":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><form action='/post-302-evil' method='POST'>"
+                    b"<input id='note' name='note' value=''/>"
+                    b"<button data-testid='go' type='submit'>Go</button></form></body></html>"
+                )
+                return
+            if self.path == "/form-big":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><form action='/post-big' method='POST'>"
+                    b"<input id='note' name='note' value=''/>"
+                    b"<button data-testid='go' type='submit'>Go</button></form></body></html>"
+                )
+                return
+            if self.path == "/form-db":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><form action='/post-ok' method='POST'>"
+                    b"<input id='note' name='note' value=''/>"
+                    b"<button data-testid='go' type='submit'>Go</button></form></body></html>"
+                )
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n).decode("utf-8", "replace")
+            post_hits.append(f"{self.path}:{body}")
+            if self.path == "/post-302-evil":
+                self.send_response(302)
+                self.send_header("Location", "https://evil.test/steal")
+                self.end_headers()
+                return
+            if self.path == "/post-big":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body>" + b"X" * 600_000 + b"</body></html>")
+                return
+            if self.path == "/post-ok":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Committed!</h1></body></html>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    https_srv, port, cli_ctx, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, PostEdgeHandler, dbs
+    )
+    ring = KeyRing.single(b"p" * 32, key_id="p1b")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+
+    def _run_approved_submit(call_id: str, page_path: str) -> dict[str, Any]:
+        _, cl = _claim_new(dbs, scope, f"post unknown {call_id}", profile="browser")
+        url = f"https://portal.test:{port}{page_path}"
+        _propose(dbs, cl, f"{call_id}_nav", "browser_navigate", {"url": url})
+        nav = _run(gw.submit(cl, f"{call_id}_nav", "browser_navigate", {"url": url}))
+        sid = nav["result"]["sessionId"]
+        args = {
+            "sessionId": sid,
+            "kind": "test_id",
+            "selector": "go",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "pay100"}],
+        }
+        _propose(dbs, cl, call_id, "browser_submit", args)
+        pending = _run(gw.submit(cl, call_id, "browser_submit", args))
+        assert pending["status"] == "PENDING_APPROVAL", pending
+        apr = dbs["owner"].one(
+            "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (scope.tenant_id, pending["approvalId"]),
+        )
+        assert apr is not None
+        commands.decide_approval(
+            dbs["api"], scope, pending["approvalId"], "APPROVED", apr["request_sha256"], apr["record_version"]
+        )
+        res = _run(gw.submit(cl, call_id, "browser_submit", args))
+        # Retrying same tool_call_id must NEVER re-send
+        before_retry = len(post_hits)
+        res_retry = _run(gw.submit(cl, call_id, "browser_submit", args))
+        assert len(post_hits) == before_retry
+        assert res_retry["status"] == "UNKNOWN"
+        eff = dbs["owner"].one(
+            "SELECT outcome_code FROM agent.side_effect_records s JOIN agent.tool_intents t ON t.id=s.tool_intent_id"
+            " WHERE t.tenant_id=%s AND t.invocation_key=%s",
+            (scope.tenant_id, call_id),
+        )
+        assert eff is not None and eff["outcome_code"] == "UNKNOWN"
+        return res
+
+    try:
+        # 1) POST succeeded -> 302 to disallowed host -> UNKNOWN (never FAILED!)
+        out_302 = _run_approved_submit("p1b_302", "/form-302")
+        assert out_302["status"] == "UNKNOWN"
+        assert sum(1 for h in post_hits if h.startswith("/post-302-evil:")) == 1
+
+        # 2) POST succeeded -> oversized response rejected by render guard -> UNKNOWN
+        out_big = _run_approved_submit("p1b_big", "/form-big")
+        assert out_big["status"] == "UNKNOWN"
+        assert sum(1 for h in post_hits if h.startswith("/post-big:")) == 1
+
+        # 3) P2-4: POST succeeded -> DB _persist_session_state fails -> UNKNOWN (never FAILED!)
+        orig_persist = executor._persist_session_state
+
+        async def broken_persist(*a: Any, **kw: Any) -> None:
+            del a, kw
+            raise RuntimeError("db_persist_lost")
+
+        _, cl_db = _claim_new(dbs, scope, "post db persist fail", profile="browser")
+        _propose(dbs, cl_db, "p24_nav", "browser_navigate", {"url": f"https://portal.test:{port}/form-db"})
+        nav_db = _run(gw.submit(cl_db, "p24_nav", "browser_navigate", {"url": f"https://portal.test:{port}/form-db"}))
+        sid_db = nav_db["result"]["sessionId"]
+        args_db = {
+            "sessionId": sid_db,
+            "kind": "test_id",
+            "selector": "go",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "commit1"}],
+        }
+        _propose(dbs, cl_db, "p24_sub", "browser_submit", args_db)
+        pend_db = _run(gw.submit(cl_db, "p24_sub", "browser_submit", args_db))
+        apr_db = dbs["owner"].one(
+            "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (scope.tenant_id, pend_db["approvalId"]),
+        )
+        assert apr_db is not None
+        commands.decide_approval(
+            dbs["api"], scope, pend_db["approvalId"], "APPROVED", apr_db["request_sha256"], apr_db["record_version"]
+        )
+        executor._persist_session_state = broken_persist  # type: ignore[method-assign]
+        try:
+            out_db = _run(gw.submit(cl_db, "p24_sub", "browser_submit", args_db))
+        finally:
+            executor._persist_session_state = orig_persist  # type: ignore[method-assign]
+        assert out_db["status"] == "UNKNOWN"
+        eff_db = dbs["owner"].one(
+            "SELECT outcome_code FROM agent.side_effect_records s JOIN agent.tool_intents t ON t.id=s.tool_intent_id"
+            " WHERE t.tenant_id=%s AND t.invocation_key=%s",
+            (scope.tenant_id, "p24_sub"),
+        )
+        assert eff_db is not None and eff_db["outcome_code"] == "UNKNOWN"
+        assert sum(1 for h in post_hits if h.startswith("/post-ok:")) == 1
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def test_nli_verify_pinned_to_admitted_route_no_unconsented_fallback(
+    pg: PgEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del pg
+    from conftest import drop_database, make_database
+
+    iso_pg = make_database("aiagent_nli_pin")
+    dbs: dict[str, Database] = {k: iso_pg.db(k, max_size=8) for k in iso_pg.dsn}
+    dbs["owner"] = Database(iso_pg.owner, max_size=4)
+    tenant = admin.provision_tenant(iso_pg.owner)
+    seen_a: list[str] = []
+    seen_b: list[str] = []
+    from aiagent_gateways.providers import Capability, FakeModelProvider
+
+    tlog_path = tmp_path / "nli-pin-tomb.jsonl"
+    tlog = memory_tombstones.TombstoneLog(tlog_path, integrity_key=b"p" * 32)
+    tlog.initialize()
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_LOG", str(tlog_path))
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY", (b"p" * 32).hex())
+
+    class StubProvider:
+        def __init__(self, name: str, sink: list[str]) -> None:
+            self.name = name
+            self.sink = sink
+
+        def capability(self, model: str) -> Capability:
+            del model
+            return Capability(False, True, 32_000, self.name, True)
+
+        async def stream(
+            self, model: str, system: str, messages: list[dict[str, Any]], tools: list[Any], *, stream: str = "main"
+        ) -> Any:
+            del model, system, tools, stream
+            self.sink.append(messages[0]["content"])
+            yield ProviderEvent("text", text='{"verdict":"SUPPORTED"}')
+            yield ProviderEvent("usage", usage={"input_tokens": 10, "output_tokens": 4})
+            yield ProviderEvent("stop")
+
+    try:
+        scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+        memory_writer.grant_memory_consent(dbs["api"], scope, recipient="prov_a", consent_basis="user_explicit")
+        task_id, claim = _claim_new(
+            dbs, scope, "nli route pin", profile="default", allowed_models=["fake-gateway", "nli-multi"]
+        )
+        with dbs["model_gateway"].tx() as c:
+            control.append_head(
+                c,
+                claim,
+                "user",
+                {"kind": "user", "content": "Confidential order #441 total is $250."},
+                writer="model_gateway",
+                request_key=secrets.token_hex(32),
+            )
+        app = create_app(dbs["api"])
+        with TestClient(app) as client:
+            assert (
+                client.put(
+                    f"/v1/tasks/{task_id}/context-policy",
+                    headers={"Authorization": f"Bearer {tenant['token']}"},
+                    json={
+                        "schemaVersion": "1.0",
+                        "recipient": "prov_a",
+                        "model": "fake-gateway",
+                        "enabled": True,
+                        "semanticVerifierMode": "LLM_GATED",
+                    },
+                ).status_code
+                == 200
+            )
+
+        r_a = Route("prov_a", "m-a")
+        r_b = Route("prov_b", "m-b")
+        breaker = RouteBreaker(threshold=1, cooldown_s=60.0)
+        mg = ModelGateway(
+            dbs["model_gateway"],
+            {
+                "prov_a": StubProvider("prov_a", seen_a),
+                "prov_b": StubProvider("prov_b", seen_b),
+                "fake": FakeModelProvider(),
+            },  # type: ignore[dict-item]
+            {"fake-gateway": [Route("fake", "fake-1")], "nli-multi": [r_a, r_b]},
+            consent={(scope.tenant_id, "prov_a"), (scope.tenant_id, "prov_b")},
+            breaker=breaker,
+            context_key=KeyRing.single(b"p" * 32),
+            tombstone_log=tlog,
+            nli_model="nli-multi",
+        )
+        orig_admit = mg._admit
+
+        def admit_then_trip(req: Any, *args: Any, **kwargs: Any) -> Any:
+            out = orig_admit(req, *args, **kwargs)
+            if getattr(req, "stream", None) == "verify":
+                # Breaker flips for r_a AFTER admission succeeds; verify stream must NOT fall back to r_b!
+                breaker.record_failure(r_a)
+            return out
+
+        mg._admit = admit_then_trip  # type: ignore[method-assign]
+        with pytest.raises(RpcError, match="SEMANTIC_VERIFIER_UNAVAILABLE"):
+            mg.compact_context(claim, auto_if_needed=False)
+        assert seen_b == []
+        assert seen_a == []
+    finally:
+        for db in dbs.values():
+            db.close()
+        drop_database(iso_pg.name)
+
+
+def test_browser_submit_dom_tamper_after_approval_rejected(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    post_hits: list[str] = []
+
+    class FormTamperHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            if self.path == "/checkout":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><form id='pay' action='/submit-pay' method='POST'>"
+                    b"<input type='hidden' id='amt' name='amount' value='10'/>"
+                    b"<input id='note' name='note' value=''/>"
+                    b"<button data-testid='submit-pay' type='submit'>Pay</button>"
+                    b"</form></body></html>"
+                )
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            post_hits.append(f"{self.path}:{self.rfile.read(n).decode('utf-8', 'replace')}")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body>Done</body></html>")
+
+    https_srv, port, _, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, FormTamperHandler, dbs
+    )
+    ring = KeyRing.single(b"t" * 32, key_id="p1d")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    try:
+        _, cl = _claim_new(dbs, scope, "dom tamper test", profile="browser")
+        url = f"https://portal.test:{port}/checkout"
+        _propose(dbs, cl, "t_nav", "browser_navigate", {"url": url})
+        nav = _run(gw.submit(cl, "t_nav", "browser_navigate", {"url": url}))
+        sid = nav["result"]["sessionId"]
+
+        # Case 1: Action URL tampered after approval
+        args1 = {
+            "sessionId": sid,
+            "kind": "test_id",
+            "selector": "submit-pay",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "coffee"}],
+        }
+        _propose(dbs, cl, "t_sub1", "browser_submit", args1)
+        pend1 = _run(gw.submit(cl, "t_sub1", "browser_submit", args1))
+        apr1 = dbs["owner"].one(
+            "SELECT request_sha256, record_version, safe_summary FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (scope.tenant_id, pend1["approvalId"]),
+        )
+        assert apr1 is not None and "/submit-pay" in apr1["safe_summary"]
+        commands.decide_approval(
+            dbs["api"], scope, pend1["approvalId"], "APPROVED", apr1["request_sha256"], apr1["record_version"]
+        )
+
+        # Mutate form action on live page after user approved!
+        _run(
+            executor._on_persistent_loop(
+                worker._page(sid).evaluate("document.getElementById('pay').setAttribute('action', '/steal-pay')")
+            )
+        )
+        with pytest.raises(RpcError) as ei1:
+            _run(gw.submit(cl, "t_sub1", "browser_submit", args1))
+        assert ei1.value.code == "INTENT_CONFLICT"
+        assert post_hits == []
+
+        # Case 2: Hidden input mutated on live page after approval (even with same action & method!)
+        _propose(dbs, cl, "t_nav2", "browser_navigate", {"url": url, "sessionId": sid})
+        _run(gw.submit(cl, "t_nav2", "browser_navigate", {"url": url, "sessionId": sid}))
+        _propose(dbs, cl, "t_sub2", "browser_submit", args1)
+        pend2 = _run(gw.submit(cl, "t_sub2", "browser_submit", args1))
+        apr2 = dbs["owner"].one(
+            "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (scope.tenant_id, pend2["approvalId"]),
+        )
+        assert apr2 is not None
+        commands.decide_approval(
+            dbs["api"], scope, pend2["approvalId"], "APPROVED", apr2["request_sha256"], apr2["record_version"]
+        )
+        _run(executor._on_persistent_loop(worker._page(sid).evaluate("document.getElementById('amt').value = '9999'")))
+        with pytest.raises(RpcError) as ei2:
+            _run(gw.submit(cl, "t_sub2", "browser_submit", args1))
+        assert ei2.value.code == "INTENT_CONFLICT"
+        assert post_hits == []
+
+        # Case 3: Direct dispatcher mismatch (bind_request passed stale bound_form -> BrowserError APPROVAL_BINDING_MISMATCH)
+        orig_bind = executor.bind_request
+
+        def stale_bind(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
+            return {
+                "action": f"https://portal.test:{port}/submit-pay",
+                "method": "POST",
+                "origin": f"https://portal.test:{port}",
+                "payloadDigest": "0" * 64,
+            }
+
+        executor.bind_request = stale_bind  # type: ignore[method-assign]
+        try:
+            _propose(dbs, cl, "t_sub3", "browser_submit", args1)
+            pend3 = _run(gw.submit(cl, "t_sub3", "browser_submit", args1))
+            apr3 = dbs["owner"].one(
+                "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+                (scope.tenant_id, pend3["approvalId"]),
+            )
+            assert apr3 is not None
+            commands.decide_approval(
+                dbs["api"], scope, pend3["approvalId"], "APPROVED", apr3["request_sha256"], apr3["record_version"]
+            )
+            out3 = _run(gw.submit(cl, "t_sub3", "browser_submit", args1))
+        finally:
+            executor.bind_request = orig_bind  # type: ignore[method-assign]
+        assert out3["status"] == "FAILED"
+        assert "APPROVAL_BINDING_MISMATCH" in str(out3["result"])
+        assert post_hits == []
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def test_redirect_307_308_preserves_method_and_browser_click_anchor_navigation(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    seen_requests: list[tuple[str, str, str]] = []
+
+    class RedirectAndLinkHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            seen_requests.append(("GET", self.path, ""))
+            if self.path == "/home":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body>"
+                    b"<a href='/next-step' data-testid='next-link'>Next Step</a>"
+                    b"<a href='https://evil.test/out' data-testid='evil-link'>Evil</a>"
+                    b"<form action='/post-307' method='POST'>"
+                    b"<input id='note' name='note' value=''/>"
+                    b"<button data-testid='go307' type='submit'>Go307</button></form>"
+                    b"</body></html>"
+                )
+                return
+            if self.path == "/next-step":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Arrived Next Step</h1></body></html>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n).decode("utf-8", "replace")
+            seen_requests.append(("POST", self.path, body))
+            if self.path == "/step1":
+                self.send_response(307)
+                self.send_header("Location", "/step2")
+                self.end_headers()
+                return
+            if self.path == "/step2":
+                self.send_response(308)
+                self.send_header("Location", "/final-post")
+                self.end_headers()
+                return
+            if self.path == "/final-post":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(f"POST_OK:{body}".encode())
+                return
+            if self.path == "/post-307":
+                self.send_response(307)
+                self.send_header("Location", "/next-step")
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    https_srv, port, _, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, RedirectAndLinkHandler, dbs
+    )
+    ring = KeyRing.single(b"r" * 32, key_id="p213")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "307 308 and click nav", profile="browser")
+
+    from aiagent_domain import sha256_hex, uuid7
+    from psycopg.types.json import Jsonb
+
+    hop_intent_id = uuid7()
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.tool_intents(tenant_id, id, task_id, run_id, tool_key, invocation_key,"
+            " request_sha256, safe_arguments_json, risk_class, goal_revision, status_code, stream)"
+            " VALUES (%s,%s,%s,%s,'http_fetch',%s,%s,%s,'read',%s,'SENDING','main')",
+            (
+                cl.tenant_id,
+                hop_intent_id,
+                cl.task_id,
+                cl.run_id,
+                f"hop-{hop_intent_id}",
+                sha256_hex({"url": f"https://portal.test:{port}/step1"}),
+                Jsonb({"url": f"https://portal.test:{port}/step1"}),
+                cl.goal_revision,
+            ),
+        )
+
+    async def permit_issuer(dest: Any) -> str:
+        return sentinel.authorize(cl, hop_intent_id, dest.scheme, dest.host, dest.port, dest.method)
+
+    try:
+        # 1) safe_http_get preserves POST + body across 307 -> 308 -> 200 through EgressProxy
+        p0 = sentinel.authorize(cl, hop_intent_id, "https", "portal.test", port, "POST")
+        r = _run(
+            safe_http_get(
+                f"https://portal.test:{port}/step1",
+                method="POST",
+                request_body=b"payload=keepme",
+                proxy=proxy_url,
+                proxy_permit=p0,
+                permit_issuer=permit_issuer,
+                verify=False,
+                require_proxy=True,
+            )
+        )
+        assert r.body == b"POST_OK:payload=keepme"
+        assert ("POST", "/step1", "payload=keepme") in seen_requests
+        assert ("POST", "/step2", "payload=keepme") in seen_requests
+        assert ("POST", "/final-post", "payload=keepme") in seen_requests
+
+        # 2) browser_submit POST -> 307 halts safely as UNKNOWN (no GET downgrade, no double-POST)
+        home_url = f"https://portal.test:{port}/home"
+        _propose(dbs, cl, "p2_nav", "browser_navigate", {"url": home_url})
+        nav = _run(gw.submit(cl, "p2_nav", "browser_navigate", {"url": home_url}))
+        sid = nav["result"]["sessionId"]
+        sub_args = {
+            "sessionId": sid,
+            "kind": "test_id",
+            "selector": "go307",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "noredir"}],
+        }
+        _propose(dbs, cl, "p2_307", "browser_submit", sub_args)
+        pend = _run(gw.submit(cl, "p2_307", "browser_submit", sub_args))
+        apr = dbs["owner"].one(
+            "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (scope.tenant_id, pend["approvalId"]),
+        )
+        assert apr is not None
+        commands.decide_approval(
+            dbs["api"], scope, pend["approvalId"], "APPROVED", apr["request_sha256"], apr["record_version"]
+        )
+        before_req_count = len(seen_requests)
+        res_307 = _run(gw.submit(cl, "p2_307", "browser_submit", sub_args))
+        assert res_307["status"] == "UNKNOWN"
+        assert [x for x in seen_requests[before_req_count:]] == [("POST", "/post-307", "note=noredir")]
+
+        # 3) browser_click on <a href='/next-step'> navigates through EgressProxy & Sentinel!
+        _propose(dbs, cl, "p2_nav2", "browser_navigate", {"url": home_url, "sessionId": sid})
+        # Session was paused by UNKNOWN; resume first via takeover/complete or open a clean session on new claim
+        _, cl2 = _claim_new(dbs, scope, "click nav clean", profile="browser")
+        _propose(dbs, cl2, "p2_cnav", "browser_navigate", {"url": home_url})
+        cnav = _run(gw.submit(cl2, "p2_cnav", "browser_navigate", {"url": home_url}))
+        sid2 = cnav["result"]["sessionId"]
+        _propose(
+            dbs, cl2, "p2_click_bad", "browser_click", {"sessionId": sid2, "kind": "test_id", "selector": "evil-link"}
+        )
+        bad_click = _run(
+            gw.submit(
+                cl2, "p2_click_bad", "browser_click", {"sessionId": sid2, "kind": "test_id", "selector": "evil-link"}
+            )
+        )
+        assert bad_click["status"] == "FAILED"
+        assert "EGRESS_DENIED" in str(bad_click["result"])
+
+        _propose(
+            dbs, cl2, "p2_click_ok", "browser_click", {"sessionId": sid2, "kind": "test_id", "selector": "next-link"}
+        )
+        ok_click = _run(
+            gw.submit(
+                cl2, "p2_click_ok", "browser_click", {"sessionId": sid2, "kind": "test_id", "selector": "next-link"}
+            )
+        )
+        assert ok_click["status"] == "CONFIRMED", ok_click
+        assert "Arrived Next Step" in ok_click["result"]["after"]
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
         https_srv.shutdown()
         https_srv.server_close()

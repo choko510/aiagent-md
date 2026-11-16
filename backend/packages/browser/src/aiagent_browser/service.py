@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .contracts import (
@@ -29,6 +31,27 @@ from .contracts import (
     WorkerPort,
     validate_browser_url,
 )
+
+
+def compute_form_binding(action_url: str, form_method: str, fields: list[tuple[str, str]]) -> dict[str, Any]:
+    parts = urlsplit(action_url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    port = parts.port or (443 if scheme == "https" else 80)
+    origin = f"{scheme}://{host}:{port}"
+    method = form_method.upper()
+    canonical = json.dumps(
+        {"action": action_url, "method": method, "origin": origin, "fields": [list(p) for p in fields]},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "action": action_url,
+        "method": method,
+        "origin": origin,
+        "payloadDigest": hashlib.sha256(canonical).hexdigest(),
+    }
 
 
 def _resolve_redirect(current: str, redirect_to: str) -> str:
@@ -231,6 +254,7 @@ class BrowserSessionService:
         max_html_bytes = 524_288 if is_web else 65_536
         if (
             response.status not in ((200, 401, 403) if is_web else (200,))
+            or (operation == "submit" and getattr(response, "truncated", False))
             or len(response.html.encode("utf-8")) > max_html_bytes
         ):
             raise BrowserError("FIXTURE_RESPONSE_DENIED")
@@ -374,6 +398,28 @@ class BrowserSessionService:
                 self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
+            is_web = entry.current_url is not None and entry.current_url.startswith(("http://", "https://"))
+            if is_web:
+                extract_nav_fn = getattr(self._worker, "extract_click_navigation", None)
+                if callable(extract_nav_fn):
+                    assert entry.current_url is not None
+                    try:
+                        nav_info = await extract_nav_fn(
+                            session_id, target, current_url=entry.current_url, timeout_ms=timeout_ms
+                        )
+                    except BrowserError as exc:
+                        if exc.code == "BROWSER_CRASHED":
+                            entry.state = State.RECOVERING
+                        raise
+                    nav_url = nav_info.get("navUrl") if isinstance(nav_info, dict) else None
+                    if isinstance(nav_url, str) and nav_url:
+                        after = await self._fetch_and_render_locked(session_id, authority, entry, nav_url, "click")
+                        if entry.state is State.NEEDS_LOGIN:
+                            nav_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                                "CAPTCHA_CHALLENGE" if entry.last_challenge == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                            )
+                            return ActionOutcome(session_id, entry.generation, "click", nav_status, before, after)
+                        return ActionOutcome(session_id, entry.generation, "click", "EXECUTED", before, after)
             try:
                 worker_status = await self._worker.click(session_id, target, timeout_ms=timeout_ms)
             except BrowserError as exc:
@@ -402,6 +448,7 @@ class BrowserSessionService:
         inputs: tuple[FormInput, ...] = (),
         *,
         timeout_ms: int = 5000,
+        expected_bound_form: dict[str, Any] | None = None,
     ) -> ActionOutcome:
         if (
             not isinstance(target, BrowserTarget)
@@ -441,6 +488,15 @@ class BrowserSessionService:
                 action_url = self._validate_url(str(extracted["action"]))
                 form_method = str(extracted.get("method") or "GET").upper()
                 fields = list(extracted.get("fields") or ())
+                if expected_bound_form is not None:
+                    live_binding = compute_form_binding(action_url, form_method, fields)
+                    if (
+                        live_binding["action"] != expected_bound_form.get("action")
+                        or live_binding["method"] != expected_bound_form.get("method")
+                        or live_binding["origin"] != expected_bound_form.get("origin")
+                        or live_binding["payloadDigest"] != expected_bound_form.get("payloadDigest")
+                    ):
+                        raise BrowserError("APPROVAL_BINDING_MISMATCH")
                 await self._gate.permit(authority, action_url)
                 try:
                     sub_resp = await submit_fn(session_id, action_url, form_method, fields)
@@ -448,15 +504,28 @@ class BrowserSessionService:
                     if exc.code == "ACTION_OUTCOME_UNKNOWN":
                         entry.state = State.PAUSED
                     raise
-                if sub_resp.status in (301, 302, 303, 307, 308):
-                    if sub_resp.redirect_to is None or not sub_resp.redirect_to.strip():
-                        raise BrowserError("INVALID_FIXTURE_REDIRECT")
-                    redir_url = self._validate_url(_resolve_redirect(action_url, sub_resp.redirect_to))
-                    after = await self._fetch_and_render_locked(session_id, authority, entry, redir_url, "submit")
-                else:
-                    after = await self._render_response_locked(
-                        session_id, authority, entry, action_url, sub_resp, "submit"
-                    )
+                try:
+                    if sub_resp.status in (301, 302, 303, 307, 308):
+                        if form_method == "POST" and sub_resp.status in (307, 308):
+                            entry.state = State.PAUSED
+                            raise BrowserError("ACTION_OUTCOME_UNKNOWN")
+                        if sub_resp.redirect_to is None or not sub_resp.redirect_to.strip():
+                            raise BrowserError("INVALID_FIXTURE_REDIRECT")
+                        redir_url = self._validate_url(_resolve_redirect(action_url, sub_resp.redirect_to))
+                        after = await self._fetch_and_render_locked(session_id, authority, entry, redir_url, "submit")
+                    else:
+                        after = await self._render_response_locked(
+                            session_id, authority, entry, action_url, sub_resp, "submit"
+                        )
+                except BrowserError as exc:
+                    if exc.code == "ACTION_OUTCOME_UNKNOWN":
+                        entry.state = State.PAUSED
+                        raise
+                    entry.state = State.PAUSED
+                    raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
+                except Exception as exc:
+                    entry.state = State.PAUSED
+                    raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
                 if entry.state is State.NEEDS_LOGIN:
                     out_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
                         "CAPTCHA_CHALLENGE" if entry.last_challenge == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"

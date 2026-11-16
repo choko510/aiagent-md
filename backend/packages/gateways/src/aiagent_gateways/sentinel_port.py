@@ -56,3 +56,17 @@ class LocalSentinel:
 
     def authorize_reconcile(self, tenant_id: str, intent_id: str, dest: Destination) -> str:
         return str(self.s.authorize_reconcile(tenant_id, intent_id, dest.scheme, dest.host, dest.port))
+
+    def authorize_human_takeover(
+        self,
+        tenant_id: str,
+        user_id: str,
+        workspace_id: str,
+        session_id: str,
+        dest: Destination,
+    ) -> str:
+        return str(
+            self.s.authorize_human_takeover(
+                tenant_id, user_id, workspace_id, session_id, dest.scheme, dest.host, dest.port, dest.method
+            )
+        )

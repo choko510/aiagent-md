@@ -1100,21 +1100,27 @@ class ModelGateway:
         allowed = {k: TOOLS[k] for k in req.tools if k in TOOLS}
         allowed.update({k: INTERNAL_TOOL_SPECS[k] for k in req.tools if k in INTERNAL_TOOL_SPECS})
         tool_schemas = [allowed[k].provider_schema() for k in req.tools if k in allowed]
-        msg_chars = _estimate_request_chars(req)
-        candidates = [
-            r
-            for r in self.routes[req.model]
-            if route_rejection_reason(
-                r,
-                self.providers,
-                self.consent,
-                tenant_id=req.claim.tenant_id,
-                requires_tools=bool(req.tools),
-                context_chars=msg_chars,
-            )
-            is None
-        ]
-        ordered = select_ordered_routes(candidates, self._breaker)
+        if req.stream == "verify":
+            admitted = self._attempt_routes.get(attempt_id)
+            if admitted is None or self._breaker.is_open(admitted):
+                raise RpcError("PROVIDER_UNAVAILABLE")
+            ordered = [admitted]
+        else:
+            msg_chars = _estimate_request_chars(req)
+            candidates = [
+                r
+                for r in self.routes[req.model]
+                if route_rejection_reason(
+                    r,
+                    self.providers,
+                    self.consent,
+                    tenant_id=req.claim.tenant_id,
+                    requires_tools=bool(req.tools),
+                    context_chars=msg_chars,
+                )
+                is None
+            ]
+            ordered = select_ordered_routes(candidates, self._breaker)
         attempts = 0
         last: ProviderError | None = None
         for route in ordered[:1] if single_attempt else ordered:

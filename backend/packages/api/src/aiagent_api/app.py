@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 from http.cookies import CookieError, SimpleCookie
+from types import SimpleNamespace
 from typing import Annotated, Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -112,10 +113,113 @@ def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) ->
     return cookies
 
 
+async def _takeover_via_forward_proxy(
+    proxy_url: str,
+    *,
+    method: str,
+    target_url: str,
+    host_header: str,
+    permit: str,
+    headers: dict[str, str],
+    body: bytes | None,
+    timeout_s: float = 15.0,
+) -> tuple[int, list[str], str]:
+    """Send ONE forward-proxy HTTP/HTTPS request for Human Takeover using Aiagent human_takeover permit."""
+    import contextlib
+
+    pu = urlsplit(proxy_url)
+    if pu.scheme != "http" or not pu.hostname:
+        raise HTTPException(502, detail={"error": "INVALID_EGRESS_PROXY"})
+    lines = [
+        f"{method} {target_url} HTTP/1.1",
+        f"Host: {host_header}",
+        f"Proxy-Authorization: Aiagent human_takeover:{permit}",
+        "Connection: close",
+    ]
+    for k, v in headers.items():
+        if k.lower() not in ("host", "proxy-authorization", "connection", "content-length"):
+            lines.append(f"{k}: {v}")
+    if body is not None:
+        lines.append(f"Content-Length: {len(body)}")
+    raw = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    if body:
+        raw += body
+
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(pu.hostname, pu.port or 80), timeout=timeout_s)
+    except OSError:
+        raise HTTPException(502, detail={"error": "EGRESS_PROXY_UNREACHABLE"}) from None
+
+    try:
+        writer.write(raw)
+        await asyncio.wait_for(writer.drain(), timeout=timeout_s)
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout_s)
+        head_lines = head[:-4].decode("latin-1").split("\r\n")
+        parts = head_lines[0].split(" ", 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+        status_code = int(parts[1])
+        set_cookies: list[str] = []
+        hmap: dict[str, str] = {}
+        for ln in head_lines[1:]:
+            if ":" in ln:
+                hk, _, hv = ln.partition(":")
+                kc, vc = hk.strip(), hv.strip()
+                hmap[kc.lower()] = vc
+                if kc.lower() == "set-cookie":
+                    set_cookies.append(vc)
+        if status_code == 403 and hmap.get("x-aiagent-egress") == "denied":
+            raise HTTPException(403, detail={"error": "EGRESS_DENIED"})
+        chunks: list[bytes] = []
+        total = 0
+        cap = 524_288
+        if "chunked" in hmap.get("transfer-encoding", "").lower():
+            while True:
+                sz_line = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
+                if not sz_line:
+                    break
+                sz_hex = sz_line.strip().split(b";", 1)[0]
+                if not sz_hex:
+                    continue
+                clen = int(sz_hex, 16)
+                if clen == 0:
+                    break
+                data = await asyncio.wait_for(reader.readexactly(clen), timeout=timeout_s)
+                await asyncio.wait_for(reader.readexactly(2), timeout=timeout_s)
+                if total < cap:
+                    chunks.append(data[: cap - total])
+                    total += len(data)
+        elif hmap.get("content-length", "").strip().isdigit():
+            to_read = min(int(hmap["content-length"].strip()), cap)
+            while total < to_read:
+                blk = await asyncio.wait_for(reader.read(min(65536, to_read - total)), timeout=timeout_s)
+                if not blk:
+                    break
+                chunks.append(blk)
+                total += len(blk)
+        else:
+            while total < cap:
+                blk = await asyncio.wait_for(reader.read(min(65536, cap - total)), timeout=timeout_s)
+                if not blk:
+                    break
+                chunks.append(blk)
+                total += len(blk)
+        return status_code, set_cookies, b"".join(chunks).decode("utf-8", "replace")
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
 def create_app(
     db: Database | None = None,
     *,
     storage_key_ring: Any = None,
+    sentinel: Any = None,
+    egress_proxy: str | None = None,
+    allowed_web_hosts: frozenset[str] | None = None,
+    takeover_resolver: Callable[[str, int], Awaitable[list[str]]] | None = None,
+    takeover_verify_ssl: Any = True,
     takeover_http_fn: Callable[[str, str, dict[str, str], bytes | None], Awaitable[tuple[int, list[str], str]]]
     | None = None,
 ) -> FastAPI:
@@ -609,12 +713,14 @@ def create_app(
         def q() -> dict[str, Any] | None:
             with get_db().tx(tenant=s.tenant_id) as c:
                 row = c.execute(
-                    "SELECT id, task_id, run_id, state, mode, generation, current_url, takeover_reason,"
-                    " last_observation_text, last_observation_truncated, last_observation_at"
-                    " FROM agent.browser_sessions"
-                    " WHERE tenant_id=%s AND owner_user_id=%s AND id=%s"
-                    " AND closed_at IS NULL AND agent.scope_active(%s,%s,%s)",
-                    (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id, s.workspace_id),
+                    "SELECT bs.id, bs.task_id, bs.run_id, bs.state, bs.mode, bs.generation,"
+                    " bs.current_url, bs.takeover_reason, bs.last_observation_text,"
+                    " bs.last_observation_truncated, bs.last_observation_at"
+                    " FROM agent.browser_sessions bs"
+                    " JOIN agent.tasks t ON t.tenant_id=bs.tenant_id AND t.id=bs.task_id"
+                    " WHERE bs.tenant_id=%s AND bs.owner_user_id=%s AND bs.id=%s"
+                    " AND bs.closed_at IS NULL AND agent.scope_active(%s,%s,t.workspace_id)",
+                    (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id),
                 ).fetchone()
                 if row is None:
                     return None
@@ -714,25 +820,25 @@ def create_app(
             raise HTTPException(422, detail={"error": "INVALID_FORM_DATA"})
         encoded_pairs = [(str(k), str(v)) for k, v in form_data.items()]
 
-        def load_session() -> tuple[str, str | None]:
+        def load_session() -> tuple[str, str | None, str | None]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 row = c.execute(
-                    "SELECT s.task_id, s.state, s.mode FROM agent.browser_sessions s"
+                    "SELECT s.task_id, t.workspace_id, s.state, s.mode FROM agent.browser_sessions s"
                     " JOIN agent.tasks t ON t.tenant_id=s.tenant_id AND t.id=s.task_id"
                     " WHERE s.tenant_id=%s AND s.owner_user_id=%s AND s.id=%s AND s.closed_at IS NULL"
                     " AND agent.scope_active(%s,%s,t.workspace_id)",
                     (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id),
                 ).fetchone()
                 if row is None:
-                    return "NOT_FOUND", None
+                    return "NOT_FOUND", None, None
                 if row["mode"] != "HUMAN" or row["state"] not in ("PAUSED", "NEEDS_LOGIN"):
-                    return "CONFLICT", None
-                return "OK", str(row["task_id"])
+                    return "CONFLICT", None, None
+                return "OK", str(row["task_id"]), str(row["workspace_id"])
 
-        flag, task_id = await asyncio.to_thread(load_session)
+        flag, task_id, task_workspace_id = await asyncio.to_thread(load_session)
         if flag == "NOT_FOUND":
             raise HTTPException(404)
-        if flag != "OK" or task_id is None:
+        if flag != "OK" or task_id is None or task_workspace_id is None:
             raise HTTPException(409, detail={"error": "TAKEOVER_NOT_ACTIVE"})
 
         req_url = target_url
@@ -755,33 +861,92 @@ def create_app(
             import httpx
 
             host = (u.hostname or "").lower()
+            target_port = u.port or (443 if scheme == "https" else 80)
+            hosts_cfg = (
+                allowed_web_hosts
+                if allowed_web_hosts is not None
+                else frozenset(
+                    h.strip().lower()
+                    for h in os.environ.get("AIAGENT_BROWSER_ALLOWED_WEB_HOSTS", "").split(",")
+                    if h.strip()
+                )
+            )
+            if (hosts_cfg or config.profile() == "production") and "*" not in hosts_cfg and host not in hosts_cfg:
+                raise HTTPException(403, detail={"error": "EGRESS_DENIED"})
+
             allow_priv = (
                 {x.strip() for x in os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE", "").split(",") if x.strip()}
                 if config.profile() != "production"
                 else set()
             )
             try:
-                infos = await asyncio.to_thread(socket.getaddrinfo, host, u.port or (443 if scheme == "https" else 80))
-            except OSError:
-                raise HTTPException(422, detail={"error": "EGRESS_DENIED"}) from None
-            for *_, sa in infos:
-                ip_obj = ipaddress.ip_address(str(sa[0]).split("%", 1)[0])
-                if not ip_obj.is_global and str(ip_obj) not in allow_priv:
-                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
-            proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY")
-            if config.profile() == "production" and not proxy_url:
+                lit_ip = ipaddress.ip_address(host)
+            except ValueError:
+                lit_ip = None
+            if lit_ip is not None and not lit_ip.is_global and str(lit_ip) not in allow_priv:
+                raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+
+            proxy_url = egress_proxy if egress_proxy is not None else os.environ.get("AIAGENT_EGRESS_PROXY")
+            if config.profile() == "production" and (not proxy_url or sentinel is None):
                 raise HTTPException(503, detail={"error": "EGRESS_PROXY_REQUIRED"})
 
-            async with httpx.AsyncClient(
-                proxy=proxy_url if proxy_url else None,
-                timeout=15.0,
-                trust_env=False,
-                follow_redirects=False,
-            ) as cli:
-                resp = await cli.request(method, req_url, headers=req_headers, content=req_body)
-                status_code = resp.status_code
-                set_cookies = list(resp.headers.get_list("set-cookie"))
-                resp_text = resp.text
+            default_p = 443 if scheme == "https" else 80
+            host_net = f"[{host}]" if ":" in host else host
+            host_hdr = host_net if target_port == default_p else f"{host_net}:{target_port}"
+
+            if proxy_url:
+                if sentinel is None or not hasattr(sentinel, "authorize_human_takeover"):
+                    raise HTTPException(503, detail={"error": "SENTINEL_REQUIRED"})
+                try:
+                    ht_permit = await asyncio.to_thread(
+                        sentinel.authorize_human_takeover,
+                        s.tenant_id,
+                        s.user_id,
+                        task_workspace_id,
+                        session_id,
+                        SimpleNamespace(scheme=scheme, host=host, port=target_port, method=method),
+                    )
+                except RpcError as exc:
+                    raise HTTPException(403, detail={"error": f"sentinel:{exc.code}"}) from None
+                status_code, set_cookies, resp_text = await _takeover_via_forward_proxy(
+                    proxy_url,
+                    method=method,
+                    target_url=req_url,
+                    host_header=host_hdr,
+                    permit=ht_permit,
+                    headers=req_headers,
+                    body=req_body,
+                )
+            else:
+                # Strict non-production direct dev fallback: resolve + vet EVERY IP + connect pinned with TLS SNI.
+                if takeover_resolver is not None:
+                    raw_addrs = await takeover_resolver(host, target_port)
+                else:
+                    try:
+                        infos = await asyncio.to_thread(socket.getaddrinfo, host, target_port, type=socket.SOCK_STREAM)
+                        raw_addrs = [str(sa[0]).split("%", 1)[0] for *_, sa in infos]
+                    except OSError:
+                        raise HTTPException(422, detail={"error": "EGRESS_DENIED"}) from None
+                if not raw_addrs:
+                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+                for addr in raw_addrs:
+                    ip_obj = ipaddress.ip_address(addr.split("%", 1)[0])
+                    if not ip_obj.is_global and str(ip_obj) not in allow_priv:
+                        raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+                vetted_ip = raw_addrs[0]
+                ip_host = f"[{vetted_ip}]" if ":" in vetted_ip else vetted_ip
+                ru = urlsplit(req_url)
+                pq = (ru.path or "/") + (f"?{ru.query}" if ru.query else "")
+                pinned_url = f"{scheme}://{ip_host}:{target_port}{pq}"
+                pinned_hdrs = {**req_headers, "Host": host_hdr}
+                ext = {"sni_hostname": host} if scheme == "https" else {}
+                async with httpx.AsyncClient(
+                    proxy=None, timeout=15.0, trust_env=False, verify=takeover_verify_ssl, follow_redirects=False
+                ) as cli:
+                    resp = await cli.request(method, pinned_url, headers=pinned_hdrs, content=req_body, extensions=ext)
+                    status_code = resp.status_code
+                    set_cookies = list(resp.headers.get_list("set-cookie"))
+                    resp_text = resp.text
 
         cookies = _cookies_from_set_headers(req_url, set_cookies)
         new_storage = {"cookies": cookies, "origins": []}

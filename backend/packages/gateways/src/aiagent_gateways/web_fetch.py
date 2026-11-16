@@ -448,7 +448,7 @@ async def safe_http_get(
                     set_cookies=set_cookies,
                 )
             current_url = next_url
-            if status_code in (301, 302, 303) or current_method == "POST":
+            if status_code in (301, 302, 303):
                 current_method = "GET"
                 current_body = None
             continue

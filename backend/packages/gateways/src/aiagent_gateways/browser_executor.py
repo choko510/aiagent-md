@@ -33,6 +33,7 @@ from aiagent_browser import (
 )
 from aiagent_browser.contracts import WorkerPort
 from aiagent_browser.pg_fence import PostgresFencePort
+from aiagent_browser.service import compute_form_binding
 from aiagent_core import config, control
 from aiagent_core.db import Database
 from aiagent_core.logging import redact as redact_secrets
@@ -242,7 +243,12 @@ class _HybridCatalogAndWebPort:
                 apply_fn = getattr(self._worker, "apply_set_cookies", None)
                 if callable(apply_fn):
                     await apply_fn(session_id, url, resp.set_cookies)
-            return FixtureResponse(resp.status, resp.body.decode("utf-8", "replace"), redirect_to=resp.location)
+            return FixtureResponse(
+                resp.status,
+                resp.body.decode("utf-8", "replace"),
+                redirect_to=resp.location,
+                truncated=resp.truncated,
+            )
         except ExecutorFailed as exc:
             if "egress_denied" in str(exc) or "sentinel:" in str(exc) or "egress_proxy_required" in str(exc):
                 raise BrowserError("EGRESS_DENIED") from exc
@@ -405,7 +411,46 @@ class BrowserSessionExecutor:
     def destination_for(self, args: dict[str, Any]) -> Destination | None:
         return self.destination_for_tool("browser_navigate", args)
 
-    def destination_for_tool(self, tool_name: str, args: dict[str, Any]) -> Destination | None:
+    async def _preview_submit_binding(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        sid = args.get("sessionId")
+        if not isinstance(sid, str):
+            return None
+        entry = self._service._entries.get(sid)
+        if entry is None or entry.current_url is None or not entry.current_url.startswith(("http://", "https://")):
+            return None
+        extract_fn = getattr(self._worker, "extract_form_submission", None)
+        if not callable(extract_fn):
+            raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
+        target = BrowserTarget(args["kind"], str(args["selector"]), args.get("roleName"))
+        raw_inputs = args.get("inputs") or []
+        form_inputs = tuple(
+            FormInput(BrowserTarget(item["kind"], str(item["selector"]), item.get("roleName")), str(item["value"]))
+            for item in raw_inputs
+        )
+        try:
+            async with entry.lock:
+                extracted = await extract_fn(sid, target, form_inputs, current_url=entry.current_url)
+            if not isinstance(extracted, dict) or not extracted.get("hasForm"):
+                raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
+            action_url = self._service._validate_url(str(extracted["action"]))
+            form_method = str(extracted.get("method") or "GET").upper()
+            fields = list(extracted.get("fields") or ())
+            return compute_form_binding(action_url, form_method, fields)
+        except BrowserError as exc:
+            raise ExecutorFailed(exc.code) from exc
+
+    def bind_request(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        if tool_name != "browser_submit":
+            return None
+        fut = asyncio.run_coroutine_threadsafe(self._preview_submit_binding(args), self._ensure_loop())
+        return fut.result(timeout=15.0)
+
+    def destination_for_tool(
+        self, tool_name: str, args: dict[str, Any], *, bound_form: dict[str, Any] | None = None
+    ) -> Destination | None:
+        if tool_name == "browser_submit" and bound_form is not None and isinstance(bound_form.get("action"), str):
+            parsed = parse_safe_http_url(str(bound_form["action"]))
+            return Destination(parsed.scheme, parsed.host, parsed.port, str(bound_form.get("method") or "POST").upper())
         url = args.get("url")
         method = "POST" if tool_name == "browser_submit" else "GET"
         if not isinstance(url, str):
@@ -551,7 +596,8 @@ class BrowserSessionExecutor:
         authority = self._authority_from_ctx(ctx)
         scope_key = (authority.tenant_id, authority.owner_user_id, authority.task_id)
         tool_name = str(ctx["tool"])
-        hop0_dest = self.destination_for_tool(tool_name, args)
+        bound_form = ctx.get("bound_form") if isinstance(ctx.get("bound_form"), dict) else None
+        hop0_dest = self.destination_for_tool(tool_name, args, bound_form=bound_form)
         token_ctx = _PERMIT_CTX.set(
             _PermitBundle(
                 session_key=effect_key,
@@ -622,12 +668,26 @@ class BrowserSessionExecutor:
                 )
                 self.context["__active_effect_key__"][sid] = effect_key
                 try:
-                    out = await self._service.submit(sid, authority, target, form_inputs)
+                    out = await self._service.submit(
+                        sid,
+                        authority,
+                        target,
+                        form_inputs,
+                        expected_bound_form=bound_form,
+                    )
+                except BrowserError as exc:
+                    if exc.code == "ACTION_OUTCOME_UNKNOWN":
+                        with contextlib.suppress(Exception):
+                            await self._persist_session_state(sid, authority, "", False)
+                    raise
                 finally:
                     self.context["__active_effect_key__"].pop(sid, None)
-                await self._persist_session_state(
-                    sid, authority, out.after_observation.text, out.after_observation.text_truncated
-                )
+                try:
+                    await self._persist_session_state(
+                        sid, authority, out.after_observation.text, out.after_observation.text_truncated
+                    )
+                except Exception as exc:
+                    raise ExecutorUnknown("POST_SEND_PERSIST_UNKNOWN") from exc
                 sub_res: dict[str, Any] = {
                     "sessionId": out.session_id,
                     "generation": out.generation,

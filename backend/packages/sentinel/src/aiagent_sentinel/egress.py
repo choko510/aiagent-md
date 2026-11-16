@@ -109,13 +109,18 @@ class EgressProxy:
             if not auth.startswith("Aiagent ") or ":" not in auth:
                 raise EgressDenied("PROXY_AUTH")
             identity, token = auth[8:].split(":", 1)
-            if identity not in dest.identities:
+            human_takeover = identity == "human_takeover" and dest.needs_permit and method != "CONNECT"
+            if identity not in dest.identities and not human_takeover:
                 raise EgressDenied("IDENTITY_NOT_ALLOWED")
             # A TLS tunnel can contain unlimited operations; only the separate model
-            # provider identity can open one, never a Tool permit.
+            # provider identity can open one, never a Tool or Human Takeover permit.
             if method == "CONNECT" and (dest.needs_permit or identity != "model_gateway"):
                 raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
-            if dest.needs_permit:
+            if identity == "human_takeover":
+                tenant, pid = await asyncio.to_thread(
+                    self.sentinel.verify_human_takeover, token, scheme, host, port, method
+                )
+            elif dest.needs_permit:
                 tenant, pid = await asyncio.to_thread(
                     self.sentinel.verify_and_consume, token, scheme, host, port, method
                 )

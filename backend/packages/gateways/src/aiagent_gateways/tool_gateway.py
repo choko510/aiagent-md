@@ -139,7 +139,34 @@ class ToolGateway:
         self, claim: Claim, tool_call_id: str, tool: str, args: dict[str, Any], stream: str
     ) -> dict[str, Any]:
         spec = TOOLS[tool]
+        executor = self.executors.get(spec.executor)
+        bind_fn = getattr(executor, "bind_request", None) if executor is not None else None
+        bound_form: dict[str, Any] | None = None
+        bind_error: str | None = None
         req_sha = sha256_hex({"tool": tool, "args": args})
+        if callable(bind_fn):
+            with self.db.tx() as peek_c:
+                existing_peek = peek_c.execute(
+                    "SELECT status_code, tool_key, safe_arguments_json, request_sha256 FROM agent.tool_intents"
+                    " WHERE tenant_id=%s AND run_id=%s AND invocation_key=%s",
+                    (claim.tenant_id, claim.run_id, tool_call_id),
+                ).fetchone()
+            if existing_peek is not None and (
+                existing_peek["status_code"] in ("SENDING", "UNKNOWN")
+                or existing_peek["status_code"] in TERMINAL_INTENT
+            ):
+                if existing_peek["tool_key"] != tool or canonical_json(
+                    dict(existing_peek["safe_arguments_json"] or {})
+                ) != canonical_json(args):
+                    raise RpcError("INTENT_CONFLICT")
+                req_sha = str(existing_peek["request_sha256"])
+            else:
+                try:
+                    bound_form = bind_fn(tool, args)
+                except ExecutorFailed as exc:
+                    bind_error = str(exc)[:100]
+                if bound_form is not None:
+                    req_sha = sha256_hex({"tool": tool, "args": args, "bound": bound_form})
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
             try:
@@ -162,6 +189,8 @@ class ToolGateway:
                 (claim.tenant_id, claim.run_id, tool_call_id),
             ).fetchone()
             if intent is not None:
+                if bind_error is not None and intent["status_code"] == "PENDING_APPROVAL":
+                    raise RpcError("INTENT_CONFLICT")
                 if intent["request_sha256"] != req_sha or intent["tool_key"] != tool:
                     raise RpcError("INTENT_CONFLICT")
                 c.execute(
@@ -210,6 +239,19 @@ class ToolGateway:
                         stream,
                         error="tool not allowed for this profile",
                     )
+                if bind_error is not None:
+                    return self._finish_denied(
+                        c,
+                        claim,
+                        tool_call_id,
+                        tool,
+                        args,
+                        req_sha,
+                        spec,
+                        "FAILED",
+                        stream,
+                        error=bind_error,
+                    )
                 n = c.execute(
                     "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s",
                     (claim.tenant_id, claim.run_id),
@@ -255,7 +297,13 @@ class ToolGateway:
                 self._event(c, claim, "tool.intent_recorded", intent_id, {"tool": tool, "risk": spec.risk_class})
                 if spec.approval_required:
                     apr = uuid7()
-                    summary = f"{tool} to={args.get('to', '')}"[:200]
+                    if bound_form is not None:
+                        summary = (
+                            f"{tool} {bound_form['method']} {bound_form['action']}"
+                            f" sha={str(bound_form['payloadDigest'])[:12]}"
+                        )[:200]
+                    else:
+                        summary = f"{tool} to={args.get('to', '')}"[:200]
                     c.execute(
                         "INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id,"
                         " tool_key, request_sha256, goal_revision, safe_summary, expires_at)"
@@ -292,8 +340,10 @@ class ToolGateway:
                 ).fetchone()
         assert intent is not None
         if intent["status_code"] == "PENDING_APPROVAL":
-            return self._final_admission(claim, intent, tool_call_id, tool, args, req_sha, stream)
-        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1)
+            return self._final_admission(
+                claim, intent, tool_call_id, tool, args, req_sha, stream, bound_form=bound_form
+            )
+        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1, bound_form=bound_form)
 
     def _finish_denied(
         self,
@@ -352,7 +402,16 @@ class ToolGateway:
 
     # ------------------------------------------------------------------ final admission
     def _final_admission(
-        self, claim: Claim, intent: Row, tool_call_id: str, tool: str, args: dict[str, Any], req_sha: str, stream: str
+        self,
+        claim: Claim,
+        intent: Row,
+        tool_call_id: str,
+        tool: str,
+        args: dict[str, Any],
+        req_sha: str,
+        stream: str,
+        *,
+        bound_form: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
@@ -424,11 +483,20 @@ class ToolGateway:
             if o["status"] != "CANCELLED":
                 self._record_head(claim, tool_call_id, tool, o, stream)
             return o
-        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1)
+        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1, bound_form=bound_form)
 
     # ------------------------------------------------------------------ dispatch
     def _dispatch(
-        self, claim: Claim, intent: Row, tool_call_id: str, tool: str, args: dict[str, Any], stream: str, *, fence: int
+        self,
+        claim: Claim,
+        intent: Row,
+        tool_call_id: str,
+        tool: str,
+        args: dict[str, Any],
+        stream: str,
+        *,
+        fence: int,
+        bound_form: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = TOOLS[tool]
         effect_key = f"{claim.tenant_id}:{intent['id']}"
@@ -477,7 +545,10 @@ class ToolGateway:
             dest_tool_fn = getattr(executor, "destination_for_tool", None)
             dest_fn = getattr(executor, "destination_for", None)
             if callable(dest_tool_fn):
-                dest = dest_tool_fn(tool, args)
+                try:
+                    dest = dest_tool_fn(tool, args, bound_form=bound_form)
+                except TypeError:
+                    dest = dest_tool_fn(tool, args)
             else:
                 dest = dest_fn(args) if callable(dest_fn) else executor.destination()
         except ExecutorFailed as e:
@@ -540,6 +611,7 @@ class ToolGateway:
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,
                 "permit_issuer": _issue_hop_permit,
+                "bound_form": bound_form,
             }
         fault("gateway_before_send")
         try:

@@ -290,6 +290,39 @@ class PlaywrightBrowserWorker:
                     session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
                 ) from exc
 
+    async def extract_click_navigation(
+        self,
+        session_id: str,
+        target: BrowserTarget,
+        *,
+        current_url: str,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            try:
+                page = self._page(session_id)
+                loc = await self._strict_target(page, target)
+                info = await loc.evaluate(
+                    """el => {
+                        const anchor = el.closest('a[href]');
+                        if (!anchor) return { navUrl: null };
+                        const raw = (anchor.getAttribute('href') || '').trim();
+                        if (!raw || raw.startsWith('#')) return { navUrl: null };
+                        return { navUrl: raw };
+                    }""",
+                    timeout=timeout_ms,
+                )
+                raw = info.get("navUrl") if isinstance(info, dict) else None
+                if not isinstance(raw, str) or not raw:
+                    return {"navUrl": None}
+                return {"navUrl": urljoin(current_url, raw)}
+            except BrowserError:
+                raise
+            except Exception as exc:
+                raise self._classify_error(
+                    session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
+                ) from exc
+
     async def extract_form_submission(
         self,
         session_id: str,
