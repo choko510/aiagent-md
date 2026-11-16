@@ -11,11 +11,12 @@ import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from http.cookies import CookieError, SimpleCookie
 from types import SimpleNamespace
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from aiagent_core import commands, config, memory_tombstones, memory_writer
@@ -117,7 +118,48 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
-def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+_SAME_SITE_MAP: dict[str, Literal["Strict", "Lax", "None"]] = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _CookieRecord:
+    """RFC 6265 cookie record separating matching metadata from Playwright storageState payload."""
+
+    name: str
+    value: str
+    match_domain: str
+    storage_domain: str
+    path: str
+    secure: bool
+    http_only: bool
+    host_only: bool
+    expires_at: float | None = None
+    same_site: Literal["Strict", "Lax", "None"] | None = None
+
+    def dedup_key(self) -> tuple[str, str, str]:
+        return (self.name, self.storage_domain, self.path)
+
+    def to_storage_cookie(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": self.name,
+            "value": self.value,
+            "domain": self.storage_domain,
+            "path": self.path,
+            "secure": self.secure,
+            "httpOnly": self.http_only,
+        }
+        if self.expires_at is not None:
+            payload["expires"] = float(self.expires_at)
+        if self.same_site is not None:
+            payload["sameSite"] = self.same_site
+        return payload
+
+
+def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) -> list[_CookieRecord]:
     import time
     from datetime import UTC
     from email.utils import parsedate_to_datetime
@@ -127,7 +169,7 @@ def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) ->
     is_https = u.scheme.lower() == "https"
     default_path = _default_cookie_path(origin_url)
     now_ts = time.time()
-    cookies: list[dict[str, Any]] = []
+    cookies: list[_CookieRecord] = []
     for raw_hdr in set_cookie_headers:
         jar = SimpleCookie()
         try:
@@ -140,13 +182,30 @@ def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) ->
             secure = bool(morsel["secure"])
             if secure and not is_https:
                 continue
+            same_site_raw = str(morsel["samesite"] or "").strip().lower()
+            same_site = _SAME_SITE_MAP.get(same_site_raw)
+            if same_site == "None" and not secure:
+                continue
             domain_attr = str(morsel["domain"] or "").strip().lstrip(".").lower()
             if domain_attr:
                 if _is_ip_literal(host):
                     if host != domain_attr:
                         continue
-                elif not (host == domain_attr or host.endswith("." + domain_attr)):
+                    match_domain = host
+                    host_only = True
+                    storage_domain = host
+                elif host == domain_attr or host.endswith("." + domain_attr):
+                    match_domain = domain_attr
+                    host_only = False
+                    # Playwright storageState treats a leading dot as a Domain cookie (matching subdomains)
+                    # and a bare domain as a host-only cookie.
+                    storage_domain = f".{domain_attr}"
+                else:
                     continue
+            else:
+                match_domain = host
+                host_only = True
+                storage_domain = host
             raw_path = str(morsel["path"] or "").strip()
             path_attr = raw_path if raw_path.startswith("/") else default_path
             expires_at: float | None = None
@@ -165,48 +224,53 @@ def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) ->
                     except (TypeError, ValueError):
                         expires_at = None
             cookies.append(
-                {
-                    "name": name,
-                    "value": morsel.value,
-                    "domain": domain_attr or host,
-                    "path": path_attr,
-                    "secure": secure,
-                    "httpOnly": bool(morsel["httponly"]),
-                    "_hostOnly": not bool(domain_attr),
-                    "_expiresAt": expires_at,
-                }
+                _CookieRecord(
+                    name=name,
+                    value=morsel.value,
+                    match_domain=match_domain,
+                    storage_domain=storage_domain,
+                    path=path_attr,
+                    secure=secure,
+                    http_only=bool(morsel["httponly"]),
+                    host_only=host_only,
+                    expires_at=expires_at,
+                    same_site=same_site,
+                )
             )
     return cookies
 
 
 def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+    import time
+
+    now_ts = time.time()
     return [
-        {k: v for k, v in rec.items() if not k.startswith("_")}
+        rec.to_storage_cookie()
         for rec in _parse_set_cookie_records(origin_url, set_cookie_headers)
+        if rec.expires_at is None or rec.expires_at > now_ts
     ]
 
 
-def _cookie_matches_url(cookie: dict[str, Any], target_url: str, *, now_ts: float | None = None) -> bool:
+def _cookie_matches_url(cookie: _CookieRecord, target_url: str, *, now_ts: float | None = None) -> bool:
     import time
 
-    exp = cookie.get("_expiresAt")
-    if exp is not None and float(exp) <= (now_ts if now_ts is not None else time.time()):
+    if cookie.expires_at is not None and cookie.expires_at <= (now_ts if now_ts is not None else time.time()):
         return False
     tu = urlsplit(target_url)
     t_scheme = tu.scheme.lower()
     t_host = (tu.hostname or "").lower()
     t_path = tu.path or "/"
-    if bool(cookie.get("secure")) and t_scheme != "https":
+    if cookie.secure and t_scheme != "https":
         return False
-    c_dom = str(cookie.get("domain") or "").lower()
+    c_dom = cookie.match_domain
     if not c_dom or not t_host:
         return False
-    if bool(cookie.get("_hostOnly")) or _is_ip_literal(t_host):
+    if cookie.host_only or _is_ip_literal(t_host):
         if t_host != c_dom:
             return False
     elif t_host != c_dom and not t_host.endswith("." + c_dom):
         return False
-    c_path = str(cookie.get("path") or "/")
+    c_path = cookie.path or "/"
     if t_path == c_path:
         return True
     if c_path.endswith("/"):
@@ -214,8 +278,8 @@ def _cookie_matches_url(cookie: dict[str, Any], target_url: str, *, now_ts: floa
     return t_path.startswith(c_path) and t_path[len(c_path) : len(c_path) + 1] == "/"
 
 
-def _matching_cookie_header(cookies: list[dict[str, Any]], target_url: str) -> str:
-    return "; ".join(f"{c['name']}={c['value']}" for c in cookies if _cookie_matches_url(c, target_url))
+def _matching_cookie_header(cookies: list[_CookieRecord], target_url: str) -> str:
+    return "; ".join(f"{c.name}={c.value}" for c in cookies if _cookie_matches_url(c, target_url))
 
 
 _CHUNK_HEX_RE = re.compile(rb"^[0-9a-fA-F]{1,16}$")
@@ -1068,6 +1132,53 @@ def create_app(
             req_body = urlencode(encoded_pairs).encode("utf-8")
             req_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
+        req_u = urlsplit(req_url)
+        req_scheme = req_u.scheme.lower()
+        req_host = (req_u.hostname or "").lower()
+        req_port = req_u.port or (443 if req_scheme == "https" else 80)
+
+        verify_url_raw = parsed.get("verifyUrl")
+        if verify_url_raw is not None and not isinstance(verify_url_raw, str):
+            raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+        explicit_verify = isinstance(verify_url_raw, str) and bool(verify_url_raw.strip())
+        verify_target: str | None = None
+        if explicit_verify:
+            candidate = str(verify_url_raw).strip()
+            vu = urlsplit(candidate)
+            v_scheme = vu.scheme.lower()
+            if (
+                v_scheme not in ("http", "https")
+                or not vu.hostname
+                or vu.username is not None
+                or vu.password is not None
+            ):
+                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+            if req_scheme == "https" and v_scheme != "https":
+                raise HTTPException(422, detail={"error": "VERIFY_URL_DOWNGRADE"})
+            v_host = vu.hostname.lower()
+            v_port = vu.port or (443 if v_scheme == "https" else 80)
+            if (v_scheme, v_host, v_port) != (req_scheme, req_host, req_port):
+                raise HTTPException(422, detail={"error": "VERIFY_URL_ORIGIN_MISMATCH"})
+            verify_target = candidate
+        elif isinstance(session_current_url, str) and session_current_url.startswith(("http://", "https://")):
+            vu = urlsplit(session_current_url)
+            v_scheme = vu.scheme.lower()
+            v_host = (vu.hostname or "").lower()
+            v_port = vu.port or (443 if v_scheme == "https" else 80)
+            if (
+                (v_scheme, v_host, v_port) == (req_scheme, req_host, req_port)
+                and (not (req_scheme == "https" and v_scheme != "https"))
+                and (vu.path or "/") != (req_u.path or "/")
+            ):
+                verify_target = session_current_url
+
+        expected_marker_raw = parsed.get("verifyContains")
+        expected_marker = (
+            expected_marker_raw.strip()
+            if isinstance(expected_marker_raw, str) and 0 < len(expected_marker_raw.strip()) <= 256
+            else None
+        )
+
         async def _execute_takeover_http(
             url_str: str, req_meth: str, hdrs: dict[str, str], body_bytes: bytes | None
         ) -> tuple[int, list[str], str]:
@@ -1212,50 +1323,6 @@ def create_app(
 
         status_code, set_cookies, resp_text = await _execute_takeover_http(req_url, method, req_headers, req_body)
         cookie_records = _parse_set_cookie_records(req_url, set_cookies)
-        req_u = urlsplit(req_url)
-        req_scheme = req_u.scheme.lower()
-        req_host = (req_u.hostname or "").lower()
-        req_port = req_u.port or (443 if req_scheme == "https" else 80)
-
-        verify_url_raw = parsed.get("verifyUrl")
-        explicit_verify = isinstance(verify_url_raw, str) and bool(verify_url_raw.strip())
-        verify_target: str | None = None
-        if explicit_verify:
-            candidate = str(verify_url_raw).strip()
-            vu = urlsplit(candidate)
-            v_scheme = vu.scheme.lower()
-            if (
-                v_scheme not in ("http", "https")
-                or not vu.hostname
-                or vu.username is not None
-                or vu.password is not None
-            ):
-                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
-            if req_scheme == "https" and v_scheme != "https":
-                raise HTTPException(422, detail={"error": "VERIFY_URL_DOWNGRADE"})
-            v_host = vu.hostname.lower()
-            v_port = vu.port or (443 if v_scheme == "https" else 80)
-            if (v_scheme, v_host, v_port) != (req_scheme, req_host, req_port):
-                raise HTTPException(422, detail={"error": "VERIFY_URL_ORIGIN_MISMATCH"})
-            verify_target = candidate
-        elif isinstance(session_current_url, str) and session_current_url.startswith(("http://", "https://")):
-            vu = urlsplit(session_current_url)
-            v_scheme = vu.scheme.lower()
-            v_host = (vu.hostname or "").lower()
-            v_port = vu.port or (443 if v_scheme == "https" else 80)
-            if (
-                (v_scheme, v_host, v_port) == (req_scheme, req_host, req_port)
-                and (not (req_scheme == "https" and v_scheme != "https"))
-                and (vu.path or "/") != (req_u.path or "/")
-            ):
-                verify_target = session_current_url
-
-        expected_marker_raw = parsed.get("verifyContains")
-        expected_marker = (
-            expected_marker_raw.strip()
-            if isinstance(expected_marker_raw, str) and 0 < len(expected_marker_raw.strip()) <= 256
-            else None
-        )
 
         if not _takeover_authenticated_page(status_code, resp_text):
             auth_status = "FAILED"
@@ -1273,9 +1340,9 @@ def create_app(
                     verify_target, "GET", {"Cookie": cookie_hdr}, None
                 )
                 if v_cookies_raw:
-                    merged = {(c["name"], c["domain"], c["path"]): c for c in cookie_records}
+                    merged = {c.dedup_key(): c for c in cookie_records}
                     for nc in _parse_set_cookie_records(verify_target, v_cookies_raw):
-                        merged[(nc["name"], nc["domain"], nc["path"])] = nc
+                        merged[nc.dedup_key()] = nc
                     cookie_records = list(merged.values())
                 unauth_open = _takeover_authenticated_page(u_status, u_text)
                 auth_open = _takeover_authenticated_page(v_status, v_text)
@@ -1296,9 +1363,7 @@ def create_app(
 
         now_ts = _time.time()
         cookies = [
-            {k: v for k, v in rec.items() if not k.startswith("_")}
-            for rec in cookie_records
-            if rec.get("_expiresAt") is None or float(rec["_expiresAt"]) > now_ts
+            rec.to_storage_cookie() for rec in cookie_records if rec.expires_at is None or rec.expires_at > now_ts
         ]
         new_storage = {"cookies": cookies, "origins": []}
         s_nonce, s_cipher, s_key_id, s_sha = _encrypt_browser_storage_state(

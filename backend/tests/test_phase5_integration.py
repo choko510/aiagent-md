@@ -4346,3 +4346,221 @@ def test_send_message_https_through_sentinel_without_connect_and_reconcile(
         proxy_loop.call_soon_threadsafe(proxy_loop.stop)
         tls_srv.shutdown()
         tls_srv.server_close()
+
+
+def test_takeover_storage_state_expiry_samesite_host_domain_and_prepost_verify_url(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1, P2-1 & P2-2: Pre-POST verifyUrl validation, expires/sameSite storageState persistence, and host-only vs Domain scoping in real Chromium."""
+    import time
+
+    from aiagent_api.app import create_app
+    from aiagent_browser import Authority
+    from aiagent_browser.pg_fence import PostgresFencePort
+    from aiagent_domain import uuid7
+    from aiagent_gateways.browser_executor import _storage_aad
+    from aiagent_sentinel.authority import EgressConfig, Sentinel
+
+    _, _, srv_ctx, cli_ctx = _make_self_signed_tls(tmp_path, "example.test")
+    login_post_hits: list[str] = []
+    verify_hits: list[str] = []
+
+    class _PortalHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            ck = self.headers.get("Cookie", "")
+            verify_hits.append(f"{self.path}:{ck}")
+            if self.path == "/dash":
+                if "h_only=hv" in ck and "d_sub=dv" in ck and "short_strict=s1" in ck:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body>Authenticated Portal</body></html>")
+                    return
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            login_post_hits.append(raw)
+            if self.path == "/login" and "pw=GOOD1" in raw:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Set-Cookie", "expired_now=dead; Path=/; Max-Age=0; Secure")
+                self.send_header("Set-Cookie", "past_exp=dead2; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Secure")
+                self.send_header("Set-Cookie", "short_strict=s1; Path=/; Max-Age=2; SameSite=Strict; Secure; HttpOnly")
+                self.send_header("Set-Cookie", "long_lax=s2; Path=/; Max-Age=120; SameSite=lax; Secure")
+                self.send_header("Set-Cookie", "invalid_ss=s3; Path=/; SameSite=bogus; Secure")
+                self.send_header("Set-Cookie", "bad_none=s4; Path=/; SameSite=None")
+                self.send_header("Set-Cookie", "h_only=hv; Path=/; Secure; HttpOnly")
+                self.send_header("Set-Cookie", "d_sub=dv; Domain=.example.test; Path=/; Secure; HttpOnly")
+                self.end_headers()
+                self.wfile.write(b"<html><body>Signed In</body></html>")
+                return
+            self.send_response(401)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _PortalHandler)
+    srv.socket = srv_ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+
+    async def _resolve(host: str, port_num: int) -> list[str]:
+        del port_num
+        return ["127.0.0.1"] if host in ("example.test", "other.test") else []
+
+    ecfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "portal": {
+                        "scheme": "https",
+                        "host": "example.test",
+                        "port": port,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
+    monkeypatch.setenv("AIAGENT_WEB_FETCH_ALLOW_PRIVATE", "127.0.0.1")
+    sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
+    ring = KeyRing.single(b"s" * 32, key_id="p11-ck")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=ring,
+        sentinel=LocalSentinel(sentinel),
+        egress_proxy="",
+        allowed_web_hosts=frozenset({"example.test", "other.test"}),
+        takeover_resolver=_resolve,
+        takeover_verify_ssl=cli_ctx,
+    )
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "storageState cookie fidelity", profile="browser")
+    sid = uuid7()
+    auth = Authority(
+        cl.tenant_id,
+        cl.owner_user_id,
+        cl.task_id,
+        cl.run_id,
+        str(cl.goal_revision),
+        str(cl.lease_epoch),
+        cl.worker_ref,
+    )
+    _run(PostgresFencePort(dbs["tool_gateway"]).register(sid, auth))
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            assert (
+                client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/start", headers=headers, json={"reason": "login"}
+                ).status_code
+                == 200
+            )
+
+            # P2-2: Invalid / cross-origin / downgraded verifyUrl MUST fail 422 BEFORE sending login POST!
+            for bad_verify in (
+                f"https://other.test:{port}/collect",
+                f"http://example.test:{port}/dash",
+                "not-a-valid-url",
+            ):
+                r_bad = client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                    headers=headers,
+                    json={
+                        "url": f"https://example.test:{port}/login",
+                        "method": "POST",
+                        "formData": {"pw": "GOOD1"},
+                        "verifyUrl": bad_verify,
+                    },
+                )
+                assert r_bad.status_code == 422, r_bad.text
+            assert login_post_hits == []
+            assert verify_hits == []
+
+            # Valid login + verifyUrl
+            r_ok = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://example.test:{port}/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD1"},
+                    "verifyUrl": f"https://example.test:{port}/dash",
+                },
+            )
+            assert r_ok.status_code == 200, r_ok.text
+            assert r_ok.json()["authStatus"] == "VERIFIED"
+            assert r_ok.json()["authenticated"] is True
+            assert len(login_post_hits) == 1
+
+            r_comp = client.post(f"/v1/browser/sessions/{sid}/takeover/complete", headers=headers)
+            assert r_comp.status_code == 200, r_comp.text
+
+        # Decrypt persisted AES-GCM storageState via FencePort & verify fields
+        enc = _run(PostgresFencePort(dbs["tool_gateway"]).fetch_storage_state(sid, auth, mode="AGENT"))
+        assert enc is not None
+        plain = ring.cipher(enc["key_id"]).decrypt(enc["nonce"], enc["ciphertext"], _storage_aad(auth, sid))
+        storage_state = json.loads(plain.decode("utf-8"))
+        by_name = {c["name"]: c for c in storage_state["cookies"]}
+
+        assert "expired_now" not in by_name
+        assert "past_exp" not in by_name
+        assert "bad_none" not in by_name
+
+        assert by_name["short_strict"]["sameSite"] == "Strict"
+        assert isinstance(by_name["short_strict"]["expires"], (int, float))
+        assert by_name["long_lax"]["sameSite"] == "Lax"
+        assert float(by_name["long_lax"]["expires"]) > time.time() + 60.0
+        assert "sameSite" not in by_name["invalid_ss"]
+
+        # P2-1: Host-only cookie has bare domain; Domain cookie keeps leading dot
+        assert by_name["h_only"]["domain"] == "example.test"
+        assert by_name["d_sub"]["domain"] == ".example.test"
+
+        # Real Chromium restoration check
+        async def _verify_chromium() -> None:
+            worker = PlaywrightBrowserWorker()
+            try:
+                await worker.restore_storage_state(sid, storage_state)
+                root_ck = await worker.cookies_for_url(sid, f"https://example.test:{port}/")
+                assert "short_strict=s1" in root_ck
+                assert "long_lax=s2" in root_ck
+                assert "invalid_ss=s3" in root_ck
+                assert "h_only=hv" in root_ck
+                assert "d_sub=dv" in root_ck
+
+                sub_ck = await worker.cookies_for_url(sid, f"https://sub.example.test:{port}/")
+                assert "d_sub=dv" in sub_ck
+                assert "h_only=" not in sub_ck
+
+                evil_ck = await worker.cookies_for_url(sid, f"https://evil-example.test:{port}/")
+                assert evil_ck == ""
+
+                exported = await worker.export_storage_state(sid)
+                exp_by_name = {c["name"]: c for c in exported["cookies"]}
+                assert exp_by_name["short_strict"]["sameSite"] == "Strict"
+                assert float(exp_by_name["short_strict"]["expires"]) > 0.0
+
+                # Wait past short_strict Max-Age=2 and verify Chromium rejects expired cookie on restore
+                await asyncio.sleep(2.4)
+                await worker.restore_storage_state(sid, storage_state)
+                root_after = await worker.cookies_for_url(sid, f"https://example.test:{port}/")
+                assert "short_strict=" not in root_after
+                assert "long_lax=s2" in root_after
+            finally:
+                await worker.shutdown()
+
+        _run(_verify_chromium())
+    finally:
+        srv.shutdown()
+        srv.server_close()
