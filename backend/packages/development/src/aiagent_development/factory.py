@@ -116,6 +116,7 @@ class MultiReviewerRunner:
         change_request_ref: str,
         plan: TaskPlan,
         repo_root: Path,
+        build_requests: Callable[[Cycle], tuple[ExecutionRequest, ...]],
         build_patch: Callable[[Cycle], PatchArtifact],
         test_requests: Callable[[Cycle], tuple[ExecutionRequest, ...]],
         repair_patch: Callable[[Cycle], PatchArtifact] | None = None,
@@ -124,7 +125,7 @@ class MultiReviewerRunner:
         c = self._workflow.create(cycle_id, scope, run, change_request_ref)
         c = self._workflow.plan(scope, cycle_id, plan)
         for attempt in range(max_repairs + 1):
-            for req in test_requests(c):
+            for req in build_requests(c):
                 c = self._workflow.execute(scope, cycle_id, req)
             patch = build_patch(c) if attempt == 0 or repair_patch is None else repair_patch(c)
             c = self._workflow.submit_patch(scope, cycle_id, patch, repo_root)

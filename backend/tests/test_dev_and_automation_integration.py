@@ -137,19 +137,32 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
 
     def repair_patch(c: Cycle) -> PatchArtifact:
         state_holder["repaired"] = True
-        return PatchArtifact("art:p2", digest_2, ("app.py",), git.head(proj_scope), "rev-2", c.run)
+        return PatchArtifact("art:p2", digest_2, ("app.py",), git.head(proj_scope), "rev-1", c.run)
 
-    def test_reqs(c: Cycle) -> tuple[ExecutionRequest, ...]:
-        sha = c.commit.commit_sha if c.commit else git.head(proj_scope)
-        sandbox.source_sha = sha
+    def build_reqs(c: Cycle) -> tuple[ExecutionRequest, ...]:
         req = ExecutionRequest(
             proj_scope,
             c.run,
-            "unit-1",
+            c.plan.plan_ref if c.plan else "plan-1",
+            "build",
+            ("python", "-m", "compileall", "."),
+            toolchain,
+            f"intent:{c.round_number}:build-1",
+        )
+        sandbox.results[req.intent_ref] = (True, 0, None)
+        return (req,)
+
+    def test_reqs(c: Cycle) -> tuple[ExecutionRequest, ...]:
+        assert c.commit is not None
+        sandbox.source_sha = c.commit.commit_sha
+        req = ExecutionRequest(
+            proj_scope,
+            c.run,
+            c.plan.plan_ref if c.plan else "plan-1",
             "test",
             ("pytest", "-q"),
             toolchain,
-            f"intent:{c.round_number}:{'post' if c.commit else 'pre'}:unit-1",
+            f"intent:{c.round_number}:post:unit-1",
         )
         sandbox.results[req.intent_ref] = (True, 0, "unit-1")
         return (req,)
@@ -182,6 +195,7 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
         change_request_ref="cr-1",
         plan=TaskPlan("plan-1", "cr-1", ("unit-1",), claim.goal_revision),
         repo_root=tmp_path,
+        build_requests=build_reqs,
         build_patch=build_patch,
         test_requests=test_reqs,
         repair_patch=repair_patch,
