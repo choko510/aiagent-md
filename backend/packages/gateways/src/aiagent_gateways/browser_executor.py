@@ -411,25 +411,52 @@ class BrowserSessionExecutor:
     def destination_for(self, args: dict[str, Any]) -> Destination | None:
         return self.destination_for_tool("browser_navigate", args)
 
-    async def _preview_submit_binding(self, args: dict[str, Any]) -> dict[str, Any] | None:
+    @staticmethod
+    def _authority_from_claim(claim: control.Claim) -> Authority:
+        return Authority(
+            tenant_id=str(claim.tenant_id),
+            owner_user_id=str(claim.owner_user_id),
+            task_id=str(claim.task_id),
+            run_id=str(claim.run_id),
+            goal_revision=str(claim.goal_revision),
+            lease_epoch=str(claim.lease_epoch),
+            worker_ref=str(claim.worker_ref) if claim.worker_ref is not None else None,
+        )
+
+    async def _preview_submit_binding(self, args: dict[str, Any], claim: control.Claim) -> dict[str, Any] | None:
         sid = args.get("sessionId")
         if not isinstance(sid, str):
             return None
-        entry = self._service._entries.get(sid)
-        if entry is None or entry.current_url is None or not entry.current_url.startswith(("http://", "https://")):
-            return None
-        extract_fn = getattr(self._worker, "extract_form_submission", None)
-        if not callable(extract_fn):
-            raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
-        target = BrowserTarget(args["kind"], str(args["selector"]), args.get("roleName"))
-        raw_inputs = args.get("inputs") or []
-        form_inputs = tuple(
-            FormInput(BrowserTarget(item["kind"], str(item["selector"]), item.get("roleName")), str(item["value"]))
-            for item in raw_inputs
-        )
+        authority = self._authority_from_claim(claim)
+        scope_key = (authority.tenant_id, authority.owner_user_id, authority.task_id)
         try:
+            # Verify caller tenant/owner/task ownership BEFORE any lease lookup, DB touch, or DOM access.
+            entry = self._service._entry(sid, authority)
+            await self._ensure_lease_current(sid, scope_key, authority)
+            await self._sync_takeover_resume_if_needed(sid, authority)
+            entry = await self._service._operation(sid, authority, "submit")
             async with entry.lock:
-                extracted = await extract_fn(sid, target, form_inputs, current_url=entry.current_url)
+                await self._service._operation(sid, authority, "submit")
+                if entry.current_url is None or not entry.current_url.startswith(("http://", "https://")):
+                    return None
+                self._service._validate_url(entry.current_url)
+                extract_fn = getattr(self._worker, "extract_form_submission", None)
+                if not callable(extract_fn):
+                    raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
+                target = BrowserTarget(args["kind"], str(args["selector"]), args.get("roleName"))
+                raw_inputs = args.get("inputs") or []
+                form_inputs = tuple(
+                    FormInput(
+                        BrowserTarget(item["kind"], str(item["selector"]), item.get("roleName")), str(item["value"])
+                    )
+                    for item in raw_inputs
+                )
+                try:
+                    extracted = await extract_fn(
+                        sid, target, form_inputs, current_url=entry.current_url, apply_inputs=False
+                    )
+                except TypeError:
+                    extracted = await extract_fn(sid, target, form_inputs, current_url=entry.current_url)
             if not isinstance(extracted, dict) or not extracted.get("hasForm"):
                 raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
             action_url = self._service._validate_url(str(extracted["action"]))
@@ -439,11 +466,31 @@ class BrowserSessionExecutor:
         except BrowserError as exc:
             raise ExecutorFailed(exc.code) from exc
 
-    def bind_request(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    def bind_request(
+        self, tool_name: str, args: dict[str, Any], *, claim: control.Claim | None = None
+    ) -> dict[str, Any] | None:
         if tool_name != "browser_submit":
             return None
-        fut = asyncio.run_coroutine_threadsafe(self._preview_submit_binding(args), self._ensure_loop())
-        return fut.result(timeout=15.0)
+        if claim is None:
+            raise ExecutorFailed("AUTHORITY_REQUIRED")
+        try:
+            loop = self._ensure_loop()
+            fut = asyncio.run_coroutine_threadsafe(self._preview_submit_binding(args, claim), loop)
+        except RuntimeError as exc:
+            raise ExecutorFailed("BROWSER_UNAVAILABLE") from exc
+        try:
+            return fut.result(timeout=15.0)
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            fut.cancel()
+            raise ExecutorFailed("PREVIEW_TIMEOUT") from None
+        except concurrent.futures.CancelledError:
+            raise ExecutorFailed("PREVIEW_CANCELLED") from None
+        except ExecutorFailed:
+            raise
+        except BrowserError as exc:
+            raise ExecutorFailed(exc.code) from exc
+        except RuntimeError as exc:
+            raise ExecutorFailed("BROWSER_UNAVAILABLE") from exc
 
     def destination_for_tool(
         self, tool_name: str, args: dict[str, Any], *, bound_form: dict[str, Any] | None = None

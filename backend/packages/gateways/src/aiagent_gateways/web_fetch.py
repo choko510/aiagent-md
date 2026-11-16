@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import re
 import ssl
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -32,6 +33,10 @@ PermitIssuer = Callable[[Destination], Awaitable[str]]
 DEFAULT_MAX_FETCH_BYTES = 131_072
 HARD_MAX_FETCH_BYTES = 1_048_576
 MAX_REDIRECTS = 5
+_CHUNK_HEX_RE = re.compile(rb"^[0-9a-fA-F]{1,16}$")
+_MAX_CHUNK_LINE_BYTES = 512
+_MAX_CHUNKS = 4096
+_CHUNK_READ_BLOCK = 8192
 
 
 async def system_resolver(host: str, port: int) -> list[str]:
@@ -228,15 +233,26 @@ async def _send_via_forward_proxy(
     if request_body:
         raw_req += request_body
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+
+    def rem_t() -> float:
+        rem = deadline - loop.time()
+        if rem <= 0:
+            raise TimeoutError("proxy_read_timeout")
+        return rem
+
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(proxy_host, proxy_port), timeout=timeout_s)
-    except OSError as exc:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(proxy_host, proxy_port), timeout=rem_t())
+    except (OSError, TimeoutError) as exc:
         raise ExecutorFailed("connect") from exc
+
+    is_write = method.upper() not in ("GET", "HEAD")
 
     try:
         writer.write(raw_req)
-        await asyncio.wait_for(writer.drain(), timeout=timeout_s)
-        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout_s)
+        await asyncio.wait_for(writer.drain(), timeout=rem_t())
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=rem_t())
         lines = head[:-4].decode("latin-1").split("\r\n")
         parts = lines[0].split(" ", 2)
         if len(parts) < 2 or not parts[1].isdigit():
@@ -252,6 +268,9 @@ async def _send_via_forward_proxy(
                 resp_headers.append((k_clean, v_clean))
                 hmap[k_clean.lower()] = v_clean
 
+        if status_code == 403 and hmap.get("x-aiagent-egress") == "denied":
+            raise ExecutorFailed("egress_denied")
+
         if method == "HEAD" or status_code in (204, 304):
             return status_code, resp_headers, b"", False
 
@@ -259,40 +278,73 @@ async def _send_via_forward_proxy(
         total = 0
         truncated = False
         if "chunked" in hmap.get("transfer-encoding", "").lower():
+            chunk_count = 0
+            saw_eof = False
+            max_single_chunk = max(HARD_MAX_FETCH_BYTES, max_bytes * 4)
             while True:
-                sz_line = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
-                if not sz_line:
-                    break
-                sz_hex = sz_line.strip().split(b";", 1)[0]
-                if not sz_hex:
-                    continue
+                chunk_count += 1
+                if chunk_count > _MAX_CHUNKS:
+                    raise ExecutorUnknown("chunk_count_exceeded")
+                sz_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_t())
+                if len(sz_line) > _MAX_CHUNK_LINE_BYTES:
+                    raise ExecutorUnknown("chunk_line_too_large")
+                sz_hex = sz_line.strip().split(b";", 1)[0].strip()
+                if not _CHUNK_HEX_RE.fullmatch(sz_hex):
+                    raise ExecutorUnknown("invalid_chunk_size")
                 chunk_len = int(sz_hex, 16)
                 if chunk_len == 0:
+                    try:
+                        end_line = await asyncio.wait_for(reader.readline(), timeout=rem_t())
+                        while end_line not in (b"\r\n", b"\n", b""):
+                            end_line = await asyncio.wait_for(reader.readline(), timeout=rem_t())
+                    except (OSError, TimeoutError):
+                        pass
+                    saw_eof = True
                     break
-                data = await asyncio.wait_for(reader.readexactly(chunk_len), timeout=timeout_s)
-                await asyncio.wait_for(reader.readexactly(2), timeout=timeout_s)  # trailing CRLF
-                if total + len(data) > max_bytes:
-                    keep = max_bytes - total
-                    if keep > 0:
-                        chunks.append(data[:keep])
+                if chunk_len > max_single_chunk or (chunk_len > max(max_bytes, 65536) and chunk_len > max_bytes * 4):
+                    if is_write:
+                        raise ExecutorUnknown("response_too_large")
+                    raise ExecutorFailed("response_too_large")
+                if chunk_len > max_bytes - total:
+                    to_take = max(0, max_bytes - total)
+                    while to_take > 0:
+                        blk = await asyncio.wait_for(
+                            reader.readexactly(min(_CHUNK_READ_BLOCK, to_take)), timeout=rem_t()
+                        )
+                        chunks.append(blk)
+                        total += len(blk)
+                        to_take -= len(blk)
                     truncated = True
+                    saw_eof = True
                     break
-                chunks.append(data)
-                total += len(data)
-        elif hmap.get("content-length", "").strip().isdigit():
-            expected_len = int(hmap["content-length"].strip())
+                remaining = chunk_len
+                while remaining > 0:
+                    blk = await asyncio.wait_for(reader.readexactly(min(_CHUNK_READ_BLOCK, remaining)), timeout=rem_t())
+                    chunks.append(blk)
+                    total += len(blk)
+                    remaining -= len(blk)
+                crlf = await asyncio.wait_for(reader.readexactly(2), timeout=rem_t())
+                if crlf != b"\r\n":
+                    raise ExecutorUnknown("invalid_chunk_crlf")
+            if not saw_eof:
+                raise ExecutorUnknown("incomplete_chunked_body")
+        elif hmap.get("content-length", "").strip():
+            cl_str = hmap["content-length"].strip()
+            if not cl_str.isdigit():
+                raise ExecutorUnknown("invalid_content_length")
+            expected_len = int(cl_str)
             to_read = min(expected_len, max_bytes)
             if expected_len > max_bytes:
                 truncated = True
             while total < to_read:
-                blk = await asyncio.wait_for(reader.read(min(65536, to_read - total)), timeout=timeout_s)
+                blk = await asyncio.wait_for(reader.read(min(_CHUNK_READ_BLOCK, to_read - total)), timeout=rem_t())
                 if not blk:
-                    break
+                    raise ExecutorUnknown("incomplete_body")
                 chunks.append(blk)
                 total += len(blk)
         else:
             while True:
-                blk = await asyncio.wait_for(reader.read(65536), timeout=timeout_s)
+                blk = await asyncio.wait_for(reader.read(_CHUNK_READ_BLOCK), timeout=rem_t())
                 if not blk:
                     break
                 if total + len(blk) > max_bytes:
@@ -306,7 +358,7 @@ async def _send_via_forward_proxy(
         return status_code, resp_headers, b"".join(chunks), truncated
     except (ExecutorFailed, ExecutorUnknown):
         raise
-    except (OSError, TimeoutError, asyncio.IncompleteReadError, ValueError) as exc:
+    except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError) as exc:
         raise ExecutorUnknown(type(exc).__name__) from exc
     finally:
         writer.close()
@@ -453,6 +505,8 @@ async def safe_http_get(
                 current_body = None
             continue
         if status_code >= 500 or status_code == 408:
+            raise ExecutorUnknown(f"http_{status_code}")
+        if status_code >= 400 and current_method not in ("GET", "HEAD"):
             raise ExecutorUnknown(f"http_{status_code}")
         if status_code >= 400 and (raise_on_http_error or status_code not in (401, 403)):
             raise ExecutorFailed(f"http_{status_code}")

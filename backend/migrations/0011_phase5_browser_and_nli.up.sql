@@ -394,3 +394,18 @@ END $$;
 CREATE TRIGGER browser_session_wipe_closed
   BEFORE UPDATE ON agent.browser_sessions
   FOR EACH ROW EXECUTE FUNCTION agent.browser_session_wipe_on_close();
+
+CREATE TABLE IF NOT EXISTS agent.human_takeover_nonces (
+  nonce text PRIMARY KEY,
+  tenant_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  expires_at timestamptz NOT NULL,
+  consumed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS human_takeover_nonces_expires_idx ON agent.human_takeover_nonces (expires_at);
+ALTER TABLE agent.human_takeover_nonces ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS human_takeover_nonces_sentinel_all ON agent.human_takeover_nonces;
+CREATE POLICY human_takeover_nonces_sentinel_all ON agent.human_takeover_nonces
+  FOR ALL TO aiagent_sentinel USING (true) WITH CHECK (true);
+REVOKE ALL ON agent.human_takeover_nonces FROM PUBLIC;
+GRANT SELECT, INSERT, DELETE ON agent.human_takeover_nonces TO aiagent_sentinel;

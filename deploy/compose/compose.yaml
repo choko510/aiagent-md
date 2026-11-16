@@ -53,6 +53,7 @@ secrets:
   login_passwords: {file: ./secrets/login_passwords.env}
   model_gateway_rpc_keys: {file: ./secrets/model_gateway_rpc_keys}
   api_model_rpc_key: {file: ./secrets/api_model_rpc_key}
+  api_sentinel_rpc_key: {file: ./secrets/api_sentinel_rpc_key}
   context_artifact_keys: {file: ./secrets/context_artifact_keys}
   memory_tombstone_hmac_key: {file: ./secrets/memory_tombstone_hmac_key}
   tool_gateway_rpc_keys: {file: ./secrets/tool_gateway_rpc_keys}
@@ -109,12 +110,15 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       model-gateway: {condition: service_healthy}
-    secrets: [api_dsn, api_model_rpc_key, memory_tombstone_hmac_key]
+    secrets: [api_dsn, api_model_rpc_key, api_sentinel_rpc_key, memory_tombstone_hmac_key]
     environment:
       <<: *env
       AIAGENT_API_DSN_FILE: /run/secrets/api_dsn
       AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:model-gateway:7101
       AIAGENT_API_MODEL_RPC_KEY_FILE: /run/secrets/api_model_rpc_key
+      AIAGENT_SENTINEL_ENDPOINT: tcp:sentinel:7103
+      AIAGENT_API_SENTINEL_RPC_KEY_FILE: /run/secrets/api_sentinel_rpc_key
+      AIAGENT_EGRESS_PROXY: http://sentinel:3128
       AIAGENT_MEMORY_TOMBSTONE_LOG: /var/lib/aiagent/memory-tombstones/memory.jsonl
       AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY_FILE: /run/secrets/memory_tombstone_hmac_key
       AIAGENT_API_HOST: 0.0.0.0

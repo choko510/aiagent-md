@@ -145,7 +145,18 @@ class ToolGateway:
         bind_error: str | None = None
         req_sha = sha256_hex({"tool": tool, "args": args})
         if callable(bind_fn):
+            needs_bind = False
             with self.db.tx() as peek_c:
+                try:
+                    control.check_current(peek_c, claim)
+                except control.ControlError:
+                    pre_run_ok = False
+                else:
+                    pre_run_ok = True
+                pre_task = peek_c.execute(
+                    "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s",
+                    (claim.tenant_id, claim.task_id),
+                ).fetchone()
                 existing_peek = peek_c.execute(
                     "SELECT status_code, tool_key, safe_arguments_json, request_sha256 FROM agent.tool_intents"
                     " WHERE tenant_id=%s AND run_id=%s AND invocation_key=%s",
@@ -160,9 +171,11 @@ class ToolGateway:
                 ) != canonical_json(args):
                     raise RpcError("INTENT_CONFLICT")
                 req_sha = str(existing_peek["request_sha256"])
-            else:
+            elif pre_run_ok and pre_task is not None and tool in PROFILE_TOOLS.get(pre_task["profile_code"], ()):
+                needs_bind = True
+            if needs_bind:
                 try:
-                    bound_form = bind_fn(tool, args)
+                    bound_form = bind_fn(tool, args, claim=claim)
                 except ExecutorFailed as exc:
                     bind_error = str(exc)[:100]
                 if bound_form is not None:

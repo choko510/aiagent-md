@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import logging
 import socket
@@ -116,9 +117,28 @@ class EgressProxy:
             # provider identity can open one, never a Tool or Human Takeover permit.
             if method == "CONNECT" and (dest.needs_permit or identity != "model_gateway"):
                 raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
+            if hmap.get("transfer-encoding"):
+                raise EgressDenied("CHUNKED_NOT_SUPPORTED")
+            pre_read_body: bytes | None = None
             if identity == "human_takeover":
+                assert inner is not None
+                raw_cl = hmap.get("content-length", "0").strip()
+                if raw_cl and not raw_cl.isdigit():
+                    raise EgressDenied("BODY_TOO_LARGE")
+                cl_val = int(raw_cl or "0")
+                if cl_val < 0 or cl_val > MAX_FORWARD_BODY:
+                    raise EgressDenied("BODY_TOO_LARGE")
+                pre_read_body = await asyncio.wait_for(r.readexactly(cl_val), timeout=10) if cl_val else b""
+                body_sha = hashlib.sha256(pre_read_body).hexdigest()
                 tenant, pid = await asyncio.to_thread(
-                    self.sentinel.verify_human_takeover, token, scheme, host, port, method
+                    self.sentinel.verify_human_takeover,
+                    token,
+                    scheme,
+                    host,
+                    port,
+                    method,
+                    inner,
+                    body_sha,
                 )
             elif dest.needs_permit:
                 tenant, pid = await asyncio.to_thread(
@@ -132,8 +152,6 @@ class EgressProxy:
                 raise EgressDenied("METHOD_NOT_ALLOWED")
             if method == "CONNECT" and (scheme != "https" or not dest.methods):
                 raise EgressDenied("CONNECT_NOT_ALLOWED")
-            if hmap.get("transfer-encoding"):
-                raise EgressDenied("CHUNKED_NOT_SUPPORTED")
             addrs = vet_addresses(await self.resolver(host, port), allow_private=dest.allow_private)
             ip = addrs[0]
             if method != "CONNECT" and scheme == "https":
@@ -177,12 +195,17 @@ class EgressProxy:
                 host_header = host if (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
                 out = [f"{method} {inner} {version}", f"Host: {host_header}", "Connection: close"]
                 out += [f"{k}: {v}" for k, v in headers if k.lower() not in hop and k.lower() != "host"]
-                n = int(hmap.get("content-length", "0") or 0)
-                if n < 0 or n > MAX_FORWARD_BODY:
-                    raise EgressDenied("BODY_TOO_LARGE")
-                uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
-                if n:
-                    uw.write(await r.readexactly(n))
+                if pre_read_body is not None:
+                    uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
+                    if pre_read_body:
+                        uw.write(pre_read_body)
+                else:
+                    n = int(hmap.get("content-length", "0") or 0)
+                    if n < 0 or n > MAX_FORWARD_BODY:
+                        raise EgressDenied("BODY_TOO_LARGE")
+                    uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
+                    if n:
+                        uw.write(await r.readexactly(n))
                 await uw.drain()
             await self._splice(r, w, ur, uw, method == "CONNECT")
         except EgressDenied as e:

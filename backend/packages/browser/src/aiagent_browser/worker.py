@@ -331,37 +331,86 @@ class PlaywrightBrowserWorker:
         *,
         current_url: str,
         timeout_ms: int = 5000,
+        apply_inputs: bool = True,
     ) -> dict[str, Any]:
         async with self._lock:
+            handles: list[Any] = []
             try:
                 page = self._page(session_id)
-                for item in inputs:
-                    field_loc = await self._strict_target(page, item.target)
-                    await field_loc.fill(item.value, timeout=timeout_ms)
-                submit_loc = await self._strict_target(page, target)
-                info = await submit_loc.evaluate(
-                    """el => {
-                        const form = el.form || el.closest('form');
-                        if (!form) return { hasForm: false };
-                        const fields = [];
-                        for (const ctrl of Array.from(form.elements)) {
-                            if (!ctrl.name || ctrl.disabled) continue;
-                            const typ = (ctrl.type || '').toLowerCase();
-                            if ((typ === 'checkbox' || typ === 'radio') && !ctrl.checked) continue;
-                            if (typ === 'submit' || typ === 'button') {
-                                if (ctrl !== el) continue;
+                if apply_inputs:
+                    for item in inputs:
+                        field_loc = await self._strict_target(page, item.target)
+                        await field_loc.fill(item.value, timeout=timeout_ms)
+                    submit_loc = await self._strict_target(page, target)
+                    info = await submit_loc.evaluate(
+                        """el => {
+                            const form = el.form || el.closest('form');
+                            if (!form) return { hasForm: false };
+                            const fields = [];
+                            for (const ctrl of Array.from(form.elements)) {
+                                if (!ctrl.name || ctrl.disabled) continue;
+                                const typ = (ctrl.type || '').toLowerCase();
+                                if ((typ === 'checkbox' || typ === 'radio') && !ctrl.checked) continue;
+                                if (typ === 'submit' || typ === 'button') {
+                                    if (ctrl !== el) continue;
+                                }
+                                fields.push([String(ctrl.name), String(ctrl.value ?? '')]);
                             }
-                            fields.push([String(ctrl.name), String(ctrl.value ?? '')]);
-                        }
-                        return {
-                            hasForm: true,
-                            action: String(form.getAttribute('action') || ''),
-                            method: String(form.getAttribute('method') || 'GET').toUpperCase(),
-                            fields: fields,
-                        };
-                    }""",
-                    timeout=timeout_ms,
-                )
+                            return {
+                                hasForm: true,
+                                action: String(form.getAttribute('action') || ''),
+                                method: String(form.getAttribute('method') || 'GET').toUpperCase(),
+                                fields: fields,
+                            };
+                        }""",
+                        timeout=timeout_ms,
+                    )
+                else:
+                    # Non-mutating DOM preview: resolve elements strictly without writing .fill() values.
+                    override_pairs: list[tuple[Any, str]] = []
+                    for item in inputs:
+                        field_loc = await self._strict_target(page, item.target)
+                        fh = await field_loc.element_handle(timeout=timeout_ms)
+                        if fh is None:
+                            raise BrowserError("ACTION_FAILED")
+                        handles.append(fh)
+                        override_pairs.append((fh, item.value))
+                    submit_loc = await self._strict_target(page, target)
+                    submit_handle = await submit_loc.element_handle(timeout=timeout_ms)
+                    if submit_handle is None:
+                        raise BrowserError("ACTION_FAILED")
+                    handles.append(submit_handle)
+                    info = await asyncio.wait_for(
+                        page.evaluate(
+                            """([submitEl, overrides]) => {
+                                const form = submitEl.form || submitEl.closest('form');
+                                if (!form) return { hasForm: false };
+                                const ov = new Map();
+                                for (const pair of overrides) {
+                                    ov.set(pair[0], String(pair[1] ?? ''));
+                                }
+                                const fields = [];
+                                for (const ctrl of Array.from(form.elements)) {
+                                    if (!ctrl.name || ctrl.disabled) continue;
+                                    const typ = (ctrl.type || '').toLowerCase();
+                                    if ((typ === 'checkbox' || typ === 'radio') && !ctrl.checked) continue;
+                                    if (typ === 'submit' || typ === 'button') {
+                                        if (ctrl !== submitEl) continue;
+                                    }
+                                    const val = ov.has(ctrl) ? ov.get(ctrl) : String(ctrl.value ?? '');
+                                    fields.push([String(ctrl.name), val]);
+                                }
+                                return {
+                                    hasForm: true,
+                                    action: String(form.getAttribute('action') || ''),
+                                    method: String(form.getAttribute('method') || 'GET').toUpperCase(),
+                                    fields: fields,
+                                };
+                            }""",
+                            [submit_handle, [[fh, val] for fh, val in override_pairs]],
+                        ),
+                        timeout=timeout_ms / 1000.0,
+                    )
                 if not isinstance(info, dict) or not info.get("hasForm"):
                     return {"hasForm": False}
                 raw_action = str(info.get("action") or "").strip()
@@ -381,6 +430,12 @@ class PlaywrightBrowserWorker:
                 raise self._classify_error(
                     session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
                 ) from exc
+            finally:
+                for fh in handles:
+                    try:
+                        await fh.dispose()
+                    except Exception:
+                        pass
 
     async def submit(
         self,

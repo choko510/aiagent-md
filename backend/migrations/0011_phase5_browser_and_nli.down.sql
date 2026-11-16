@@ -1,5 +1,9 @@
 -- 0011_phase5_browser_and_nli.down.sql
 
+REVOKE ALL ON agent.human_takeover_nonces FROM aiagent_sentinel;
+DROP POLICY IF EXISTS human_takeover_nonces_sentinel_all ON agent.human_takeover_nonces;
+DROP TABLE IF EXISTS agent.human_takeover_nonces;
+
 DROP TRIGGER IF EXISTS browser_session_wipe_closed ON agent.browser_sessions;
 DROP FUNCTION IF EXISTS agent.browser_session_wipe_on_close();
 

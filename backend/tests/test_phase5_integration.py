@@ -1976,16 +1976,57 @@ def test_takeover_authenticate_real_egress_proxy_and_observation_scope(
                 ).status_code
                 == 200
             )
+            from hashlib import sha256 as _sha256
+
+            from fastapi import HTTPException
+
+            body_pw = b"pw=PASS42"
             perm = sentinel.authorize_human_takeover(
-                tenant["tenantId"], tenant["userId"], tenant["workspaceId"], sid, "https", "portal.test", port, "POST"
+                tenant["tenantId"],
+                tenant["userId"],
+                tenant["workspaceId"],
+                sid,
+                "https",
+                "portal.test",
+                port,
+                "POST",
+                "/takeover-login",
+                _sha256(body_pw).hexdigest(),
             )
+            # Tampered path or tampered body with the same permit is denied BEFORE single-use consumption succeeds!
+            with pytest.raises(HTTPException) as ei_tamper_path:
+                _run(
+                    _takeover_via_forward_proxy(
+                        proxy_url=proxy_url,
+                        permit=perm,
+                        target_url=f"https://portal.test:{port}/other-action",
+                        method="POST",
+                        host_header=f"portal.test:{port}",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=body_pw,
+                    )
+                )
+            assert ei_tamper_path.value.status_code == 403
+            with pytest.raises(HTTPException) as ei_tamper_body:
+                _run(
+                    _takeover_via_forward_proxy(
+                        proxy_url=proxy_url,
+                        permit=perm,
+                        target_url=f"https://portal.test:{port}/takeover-login",
+                        method="POST",
+                        host_header=f"portal.test:{port}",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=b"pw=TAMPERED",
+                    )
+                )
+            assert ei_tamper_body.value.status_code == 403
             # HTTP CONNECT against EgressProxy is blocked; single-use forward-proxy permit works ONCE and replay is 403!
             with pytest.raises(httpx.ProxyError):
                 _run(
                     httpx.AsyncClient(proxy=proxy_url, verify=False, trust_env=False).post(
                         f"https://portal.test:{port}/takeover-login",
                         headers={"Proxy-Authorization": f"Bearer {perm}"},
-                        content=b"pw=PASS42",
+                        content=body_pw,
                     )
                 )
             st1, _, _ = _run(
@@ -1996,10 +2037,11 @@ def test_takeover_authenticate_real_egress_proxy_and_observation_scope(
                     method="POST",
                     host_header=f"portal.test:{port}",
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    body=b"pw=PASS42",
+                    body=body_pw,
                 )
             )
             assert st1 == 200
+
             from fastapi import HTTPException
 
             with pytest.raises(HTTPException) as ei_replay:
@@ -2427,7 +2469,8 @@ def test_browser_submit_dom_tamper_after_approval_rejected(
         # Case 3: Direct dispatcher mismatch (bind_request passed stale bound_form -> BrowserError APPROVAL_BINDING_MISMATCH)
         orig_bind = executor.bind_request
 
-        def stale_bind(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        def stale_bind(tool: str, args: dict[str, Any], *, claim: Any = None) -> dict[str, Any] | None:
+            del tool, args, claim
             return {
                 "action": f"https://portal.test:{port}/submit-pay",
                 "method": "POST",
@@ -2640,6 +2683,688 @@ def test_redirect_307_308_preserves_method_and_browser_click_anchor_navigation(
         )
         assert ok_click["status"] == "CONFIRMED", ok_click
         assert "Arrived Next Step" in ok_click["result"]["after"]
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def test_takeover_production_sentinel_rpc_no_di_and_restart_replay(
+    pg: PgEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1, P2-1, P2-2, P2-3: Real Sentinel process + create_app() without DI + PG nonce durability + strict auth."""
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+    from hashlib import sha256 as _sha256
+
+    from aiagent_core.rpc import RpcClient
+    from aiagent_gateways.executors import Destination
+    from aiagent_gateways.sentinel_port import RpcSentinel
+
+    _, _, srv_ctx, cli_ctx = _make_self_signed_tls(tmp_path, "portal.test")
+    login_mode = {"mode": "ok"}
+
+    class ProdTakeoverHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            if self.path == "/dashboard":
+                if "sid=prod-ck-1" in self.headers.get("Cookie", ""):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body><h1>Prod Authed Dashboard</h1></body></html>")
+                    return
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"<html><body>Need login</body></html>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            if self.path == "/login-302":
+                self.send_response(302)
+                self.send_header("Location", "/dashboard")
+                self.end_headers()
+                return
+            if self.path == "/login-pw":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body><form><input type='password' name='pw'/></form></body></html>")
+                return
+            if self.path == "/login-captcha":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body><div class='g-recaptcha'>Verify</div></body></html>")
+                return
+            if self.path == "/login-ok" and "pw=GOOD99" in raw and login_mode["mode"] == "ok":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Set-Cookie", "sid=prod-ck-1; Path=/")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Signed In Prod</h1></body></html>")
+                return
+            self.send_response(401)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), ProdTakeoverHandler)
+    srv.socket = srv_ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    http_port = srv.server_address[1]
+
+    def _free_port() -> int:
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            return int(sk.getsockname()[1])
+
+    def _wait_listen(p: int) -> None:
+        end = time.time() + 20.0
+        while time.time() < end:
+            with socket.socket() as sk:
+                if sk.connect_ex(("127.0.0.1", p)) == 0:
+                    return
+            time.sleep(0.05)
+        raise TimeoutError(f"port {p} not listening")
+
+    sentinel_port = _free_port()
+    egress_port = _free_port()
+    api_key = secrets.token_hex(32)
+    tool_key = secrets.token_hex(32)
+    permit_key = secrets.token_hex(32)
+    artifact_key = secrets.token_hex(32)
+
+    egress_cfg_file = tmp_path / "egress.json"
+    egress_cfg_file.write_text(
+        json.dumps(
+            {
+                "destinations": {
+                    "web-fetch": {
+                        "scheme": "http",
+                        "host": "portal.test",
+                        "port": http_port,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Wait: Test with plain HTTP upstream inside Sentinel subprocess (no self-signed cert override needed in main.py)
+    srv.shutdown()
+    srv.server_close()
+    plain_srv = ThreadingHTTPServer(("127.0.0.1", http_port), ProdTakeoverHandler)
+    threading.Thread(target=plain_srv.serve_forever, daemon=True).start()
+
+    sent_env = {
+        **os.environ,
+        "AIAGENT_PROFILE": "test",
+        "AIAGENT_SENTINEL_DSN": pg.dsn["sentinel"],
+        "AIAGENT_SENTINEL_ENDPOINT": f"tcp:127.0.0.1:{sentinel_port}",
+        "AIAGENT_SENTINEL_RPC_KEYS": f"tool_gateway={tool_key},api={api_key}",
+        "AIAGENT_SENTINEL_PERMIT_KEY": permit_key,
+        "AIAGENT_EGRESS_LISTEN": f"127.0.0.1:{egress_port}",
+        "AIAGENT_EGRESS_CONFIG_FILE": str(egress_cfg_file),
+    }
+
+    def _spawn_sentinel() -> subprocess.Popen[bytes]:
+        p = subprocess.Popen([sys.executable, "-m", "aiagent_sentinel.main"], env=sent_env)
+        _wait_listen(sentinel_port)
+        _wait_listen(egress_port)
+        return p
+
+    # Note: main.py's EgressProxy uses socket.getaddrinfo; test using /etc/hosts or portal.test via EgressConfig for 127.0.0.1!
+    # Reconfigure target host to 127.0.0.1 with allow_private for the external Sentinel process (real TCP, no monkeypatch)
+    egress_cfg_file.write_text(
+        json.dumps(
+            {
+                "destinations": {
+                    "web-fetch": {
+                        "scheme": "http",
+                        "host": "127.0.0.1",
+                        "port": http_port,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dbs = {k: pg.db(k, max_size=8) for k in pg.dsn}
+    dbs["owner"] = Database(pg.owner, max_size=4)
+    tenant = admin.provision_tenant(pg.owner)
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "prod rpc takeover", profile="browser")
+
+    # Create an active browser_session directly in DB + advance to PAUSED/HUMAN
+    from aiagent_browser.pg_fence import PostgresFencePort
+    from aiagent_domain import uuid7
+
+    sid = uuid7()
+    from aiagent_browser import Authority
+
+    auth = Authority(
+        cl.tenant_id,
+        cl.owner_user_id,
+        cl.task_id,
+        cl.run_id,
+        str(cl.goal_revision),
+        str(cl.lease_epoch),
+        cl.worker_ref,
+    )
+    _run(PostgresFencePort(dbs["tool_gateway"]).register(sid, auth))
+
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+    # API process environment NEVER receives AIAGENT_SENTINEL_PERMIT_KEY!
+    monkeypatch.delenv("AIAGENT_SENTINEL_PERMIT_KEY", raising=False)
+    monkeypatch.setenv("AIAGENT_API_DSN", pg.dsn["api"])
+    monkeypatch.setenv("AIAGENT_SENTINEL_ENDPOINT", f"tcp:127.0.0.1:{sentinel_port}")
+    monkeypatch.setenv("AIAGENT_API_SENTINEL_RPC_KEY", api_key)
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", f"http://127.0.0.1:{egress_port}")
+    monkeypatch.setenv("AIAGENT_BROWSER_ALLOWED_WEB_HOSTS", "127.0.0.1")
+    monkeypatch.setenv("AIAGENT_WEB_FETCH_ALLOW_PRIVATE", "127.0.0.1")
+    monkeypatch.setenv("AIAGENT_CONTEXT_ARTIFACT_KEYS", json.dumps({"active": "k1", "keys": {"k1": artifact_key}}))
+
+    # Construct create_app() with ZERO injected dependencies (mirrors main() production wiring!)
+    app = create_app()
+    sentinel_proc: subprocess.Popen[bytes] | None = None
+    try:
+        with TestClient(app) as client:
+            assert (
+                client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/start", headers=headers, json={"reason": "login"}
+                ).status_code
+                == 200
+            )
+            # 1) Sentinel down -> API fails closed with 503 SENTINEL_UNAVAILABLE
+            down_r = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{http_port}/login-ok", "method": "POST", "formData": {"pw": "GOOD99"}},
+            )
+            assert down_r.status_code == 503
+
+        # Start real separate Sentinel OS process
+        sentinel_proc = _spawn_sentinel()
+
+        # 2) Verify tool_gateway RPC caller CANNOT invoke sentinel.authorize_human_takeover (ACL={'api'})
+        wrong_caller_cli = RpcSentinel(
+            RpcClient(f"tcp:127.0.0.1:{sentinel_port}", "tool_gateway", bytes.fromhex(tool_key))
+        )
+        with pytest.raises(RpcError):
+            wrong_caller_cli.authorize_human_takeover(
+                tenant["tenantId"],
+                tenant["userId"],
+                tenant["workspaceId"],
+                sid,
+                Destination("http", "127.0.0.1", http_port, "POST"),
+                target_path="/login-ok",
+                body_sha256=_sha256(b"pw=GOOD99").hexdigest(),
+            )
+
+        with TestClient(app) as client:
+            # 3) P2-3 strict auth detection: 302 redirect / password re-prompt / captcha -> authenticated=False!
+            r_302 = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{http_port}/login-302", "method": "POST", "formData": {"pw": "GOOD99"}},
+            )
+            assert r_302.status_code == 200 and r_302.json()["authenticated"] is False
+
+            r_pw = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{http_port}/login-pw", "method": "POST", "formData": {"pw": "BAD"}},
+            )
+            assert r_pw.status_code == 200 and r_pw.json()["authenticated"] is False
+
+            r_cap = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{http_port}/login-captcha", "method": "POST", "formData": {}},
+            )
+            assert r_cap.status_code == 200 and r_cap.json()["authenticated"] is False
+
+            # 4) Production RPC authenticate -> EgressProxy -> Set-Cookie persisted in AES-GCM encrypted storageState!
+            r_ok = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{http_port}/login-ok", "method": "POST", "formData": {"pw": "GOOD99"}},
+            )
+            assert r_ok.status_code == 200, r_ok.text
+            assert r_ok.json()["authenticated"] is True
+            assert r_ok.json()["cookieCount"] == 1
+
+        # 5) P2-1 + P2-2: Mint permit via RpcSentinel, consume once through EgressProxy, restart Sentinel, replay -> 403!
+        api_rpc_sentinel = RpcSentinel(RpcClient(f"tcp:127.0.0.1:{sentinel_port}", "api", bytes.fromhex(api_key)))
+        body_bytes = b"pw=GOOD99"
+        perm = api_rpc_sentinel.authorize_human_takeover(
+            tenant["tenantId"],
+            tenant["userId"],
+            tenant["workspaceId"],
+            sid,
+            Destination("http", "127.0.0.1", http_port, "POST"),
+            target_path="/login-ok",
+            body_sha256=_sha256(body_bytes).hexdigest(),
+        )
+        # Path mismatch rejected by EgressProxy (P2-2)
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei_path:
+            _run(
+                _takeover_via_forward_proxy(
+                    f"http://127.0.0.1:{egress_port}",
+                    method="POST",
+                    target_url=f"http://127.0.0.1:{http_port}/other",
+                    host_header=f"127.0.0.1:{http_port}",
+                    permit=perm,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=body_bytes,
+                )
+            )
+        assert ei_path.value.status_code == 403
+
+        # Valid single-use request succeeds
+        st_once, _, _ = _run(
+            _takeover_via_forward_proxy(
+                f"http://127.0.0.1:{egress_port}",
+                method="POST",
+                target_url=f"http://127.0.0.1:{http_port}/login-ok",
+                host_header=f"127.0.0.1:{http_port}",
+                permit=perm,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=body_bytes,
+            )
+        )
+        assert st_once == 200
+
+        # Restart Sentinel process completely -> PostgreSQL durable nonce STILL blocks replay (P2-1)!
+        sentinel_proc.terminate()
+        sentinel_proc.wait(timeout=10)
+        sentinel_proc = _spawn_sentinel()
+        with pytest.raises(HTTPException) as ei_restart:
+            _run(
+                _takeover_via_forward_proxy(
+                    f"http://127.0.0.1:{egress_port}",
+                    method="POST",
+                    target_url=f"http://127.0.0.1:{http_port}/login-ok",
+                    host_header=f"127.0.0.1:{http_port}",
+                    permit=perm,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=body_bytes,
+                )
+            )
+        assert ei_restart.value.status_code == 403
+    finally:
+        if sentinel_proc is not None:
+            sentinel_proc.terminate()
+            sentinel_proc.wait(timeout=10)
+        plain_srv.shutdown()
+        plain_srv.server_close()
+        for d in dbs.values():
+            d.close()
+
+
+def test_browser_submit_post_4xx_unknown_never_failed(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    """P1-2: Server receiving POST and returning 409/422 records UNKNOWN (never FAILED) and prevents retry."""
+    post_hits: list[str] = []
+
+    class Post4xxHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            if self.path in ("/f409", "/f422"):
+                act = "/submit-409" if self.path == "/f409" else "/submit-422"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    f"<html><body><form action='{act}' method='POST'>"
+                    "<input id='note' name='note' value=''/>"
+                    "<button data-testid='go' type='submit'>Go</button></form></body></html>".encode()
+                )
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            post_hits.append(f"{self.path}:{self.rfile.read(n).decode('utf-8', 'replace')}")
+            self.send_response(409 if self.path == "/submit-409" else 422)
+            self.end_headers()
+            self.wfile.write(b"conflict_or_invalid_after_side_effect")
+
+    https_srv, port, _, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, Post4xxHandler, dbs
+    )
+    ring = KeyRing.single(b"4" * 32, key_id="p12")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    try:
+        for cid, path in (("p12_409", "/f409"), ("p12_422", "/f422")):
+            _, cl = _claim_new(dbs, scope, f"post 4xx {cid}", profile="browser")
+            url = f"https://portal.test:{port}{path}"
+            _propose(dbs, cl, f"{cid}_nav", "browser_navigate", {"url": url})
+            nav = _run(gw.submit(cl, f"{cid}_nav", "browser_navigate", {"url": url}))
+            sid = nav["result"]["sessionId"]
+            args = {
+                "sessionId": sid,
+                "kind": "test_id",
+                "selector": "go",
+                "inputs": [{"kind": "css", "selector": "#note", "value": "charge"}],
+            }
+            _propose(dbs, cl, cid, "browser_submit", args)
+            pend = _run(gw.submit(cl, cid, "browser_submit", args))
+            apr = dbs["owner"].one(
+                "SELECT request_sha256, record_version FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+                (scope.tenant_id, pend["approvalId"]),
+            )
+            assert apr is not None
+            commands.decide_approval(
+                dbs["api"], scope, pend["approvalId"], "APPROVED", apr["request_sha256"], apr["record_version"]
+            )
+            before_n = len(post_hits)
+            res = _run(gw.submit(cl, cid, "browser_submit", args))
+            assert res["status"] == "UNKNOWN", res
+            assert len(post_hits) == before_n + 1
+            # Re-submitting same call_id never duplicates the POST
+            res2 = _run(gw.submit(cl, cid, "browser_submit", args))
+            assert res2["status"] == "UNKNOWN"
+            assert len(post_hits) == before_n + 1
+            eff = dbs["owner"].one(
+                "SELECT outcome_code FROM agent.side_effect_records s JOIN agent.tool_intents t ON t.id=s.tool_intent_id"
+                " WHERE t.tenant_id=%s AND t.invocation_key=%s",
+                (scope.tenant_id, cid),
+            )
+            assert eff is not None and eff["outcome_code"] == "UNKNOWN"
+    finally:
+        executor.close()
+        lp, ev = stop_ev_holder[0]
+        lp.call_soon_threadsafe(ev.set)
+        https_srv.shutdown()
+        https_srv.server_close()
+
+
+def test_chunked_response_bounds_split_malformed_and_disconnect(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    """P1-3: Oversized chunk declarations, malformed chunk lines, split arrival, and mid-stream drops fail closed."""
+    import socket
+
+    from aiagent_gateways.executors import ExecutorUnknown
+    from fastapi import HTTPException
+
+    raw_mode = {"kind": "huge_decl", "bytes_sent": 0}
+
+    # Raw socket mock proxy so we test exact wire-level chunked framing in _send_via_forward_proxy & _takeover_via_forward_proxy
+    srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv_sock.bind(("127.0.0.1", 0))
+    srv_sock.listen(16)
+    pport = srv_sock.getsockname()[1]
+    stop_flag = threading.Event()
+
+    def serve_raw() -> None:
+        import time
+
+        while not stop_flag.is_set():
+            srv_sock.settimeout(0.2)
+            try:
+                conn, _ = srv_sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            try:
+                conn.recv(4096)
+                kind = raw_mode["kind"]
+                if kind == "huge_decl":
+                    # Declares 16MB single chunk (0x1000000) without sending 16MB -> client must fail closed pre-read!
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        b"1000000\r\nhello_only_partial"
+                    )
+                elif kind == "split_valid":
+                    hdr = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    conn.sendall(hdr)
+                    for piece in (b"5", b"\r\nhe", b"llo", b"\r\n6\r\n ", b"world\r\n0\r\n\r\n"):
+                        conn.sendall(piece)
+                        time.sleep(0.01)
+                elif kind == "bad_hex":
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nZZZZ\r\nabc\r\n0\r\n\r\n"
+                    )
+                elif kind == "long_line":
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        + b"1;"
+                        + (b"x" * 700)
+                        + b"\r\na\r\n0\r\n\r\n"
+                    )
+                elif kind == "disconnect":
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhi")
+                elif kind == "missing_zero":
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nhi\r\n"
+                    )
+            finally:
+                conn.close()
+
+    t = threading.Thread(target=serve_raw, daemon=True)
+    t.start()
+    proxy_url = f"http://127.0.0.1:{pport}"
+    try:
+        # 1) Split valid chunked arrives smoothly in both transports
+        raw_mode["kind"] = "split_valid"
+        r_ok = _run(
+            safe_http_get(
+                "https://portal.test/chunk-ok",
+                proxy=proxy_url,
+                proxy_permit="p-dummy",
+                max_bytes=2048,
+                verify=False,
+                require_proxy=True,
+            )
+        )
+        assert r_ok.body == b"hello world"
+        st_tk, _, body_tk = _run(
+            _takeover_via_forward_proxy(
+                proxy_url,
+                method="GET",
+                target_url="https://portal.test/chunk-ok",
+                host_header="portal.test",
+                permit="p-dummy",
+                headers={},
+                body=None,
+            )
+        )
+        assert st_tk == 200 and body_tk == "hello world"
+
+        # 2) Oversized declaration, malformed hex, oversized chunk line, and premature disconnects fail closed
+        for bad_kind in ("huge_decl", "bad_hex", "long_line", "disconnect", "missing_zero"):
+            raw_mode["kind"] = bad_kind
+            with pytest.raises((ExecutorFailed, ExecutorUnknown)):
+                _run(
+                    safe_http_get(
+                        "https://portal.test/chunk-bad",
+                        proxy=proxy_url,
+                        proxy_permit="p-dummy",
+                        max_bytes=2048,
+                        verify=False,
+                        require_proxy=True,
+                    )
+                )
+            with pytest.raises(HTTPException) as ei_tk:
+                _run(
+                    _takeover_via_forward_proxy(
+                        proxy_url,
+                        method="GET",
+                        target_url="https://portal.test/chunk-bad",
+                        host_header="portal.test",
+                        permit="p-dummy",
+                        headers={},
+                        body=None,
+                    )
+                )
+            assert ei_tk.value.status_code == 502
+    finally:
+        stop_flag.set()
+        srv_sock.close()
+
+
+def test_browser_preview_cross_session_ownership_non_mutating_and_timeout(
+    pg: PgEnv, dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    """P1-4 & P2-4: Cross-tenant/task preview rejected without touching DOM; preview does not .fill(); timeout fails closed."""
+
+    class FormPreviewHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><form action='/ok' method='POST'>"
+                b"<input id='note' name='note' value='orig'/>"
+                b"<button data-testid='go' type='submit'>Go</button></form></body></html>"
+            )
+
+    https_srv, port, _, sentinel, _, proxy_url, stop_ev_holder = _make_takeover_tls_and_proxy(
+        tmp_path, FormPreviewHandler, dbs
+    )
+    ring = KeyRing.single(b"x" * 32, key_id="p14")
+    worker = PlaywrightBrowserWorker()
+    executor = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"portal.test"}),
+        allow_https=True,
+        allow_private_addrs=frozenset({"127.0.0.1"}),
+        proxy=proxy_url,
+        storage_key_ring=ring,
+        worker=worker,
+        require_proxy=True,
+    )
+    gw = ToolGateway(dbs["tool_gateway"], {"browser_fixture": executor}, sentinel=LocalSentinel(sentinel))
+    scope_a = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    other_t = admin.provision_tenant(pg.owner)
+    scope_b = Scope(other_t["tenantId"], other_t["userId"], other_t["workspaceId"])
+
+    try:
+        _, cl_a = _claim_new(dbs, scope_a, "owner task A", profile="browser")
+        _, cl_a_other_task = _claim_new(dbs, scope_a, "same tenant task B", profile="browser")
+        _, cl_b = _claim_new(dbs, scope_b, "cross tenant C", profile="browser")
+
+        url = f"https://portal.test:{port}/"
+        _propose(dbs, cl_a, "pv_nav", "browser_navigate", {"url": url})
+        nav = _run(gw.submit(cl_a, "pv_nav", "browser_navigate", {"url": url}))
+        sid_a = nav["result"]["sessionId"]
+
+        # 1) Cross-task and cross-tenant bind_request previews are rejected BEFORE DOM access; input stays 'orig'
+        hijack_args = {
+            "sessionId": sid_a,
+            "kind": "test_id",
+            "selector": "go",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "ATTACKED"}],
+        }
+        _propose(dbs, cl_a_other_task, "pv_hijack1", "browser_submit", hijack_args)
+        out_other_task = _run(gw.submit(cl_a_other_task, "pv_hijack1", "browser_submit", hijack_args))
+        assert out_other_task["status"] == "FAILED"
+        assert "SESSION_NOT_FOUND" in str(out_other_task["result"])
+
+        _propose(dbs, cl_b, "pv_hijack2", "browser_submit", hijack_args)
+        out_cross_tenant = _run(gw.submit(cl_b, "pv_hijack2", "browser_submit", hijack_args))
+        assert out_cross_tenant["status"] == "FAILED"
+        assert "SESSION_NOT_FOUND" in str(out_cross_tenant["result"])
+
+        # 2) Even for legitimate owner A, PENDING_APPROVAL preview MUST NOT mutate DOM #note.value!
+        own_args = {
+            "sessionId": sid_a,
+            "kind": "test_id",
+            "selector": "go",
+            "inputs": [{"kind": "css", "selector": "#note", "value": "preview_only"}],
+        }
+        _propose(dbs, cl_a, "pv_own", "browser_submit", own_args)
+        pend = _run(gw.submit(cl_a, "pv_own", "browser_submit", own_args))
+        assert pend["status"] == "PENDING_APPROVAL"
+        dom_val = _run(
+            executor._on_persistent_loop(worker._page(sid_a).evaluate("document.getElementById('note').value"))
+        )
+        assert dom_val == "orig"
+
+        # 3) P2-4: Stopped worker loop, missing claim, cancelled, and timeout map cleanly to ExecutorFailed codes
+        with pytest.raises(ExecutorFailed, match="AUTHORITY_REQUIRED"):
+            executor.bind_request("browser_submit", own_args)
+
+        import concurrent.futures
+
+        class _FakeFuture:
+            def __init__(self, err: BaseException) -> None:
+                self._err = err
+                self.cancelled = False
+
+            def result(self, timeout: float | None = None) -> Any:
+                del timeout
+                raise self._err
+
+            def cancel(self) -> bool:
+                self.cancelled = True
+                return True
+
+        fake_to = _FakeFuture(concurrent.futures.TimeoutError())
+        fake_cancel = _FakeFuture(concurrent.futures.CancelledError())
+        orig_rct = asyncio.run_coroutine_threadsafe
+        cur_fake: list[Any] = [fake_to]
+
+        def _patch_rct(coro: Any, loop: Any) -> Any:
+            del loop
+            coro.close()
+            return cur_fake[0]
+
+        asyncio.run_coroutine_threadsafe = _patch_rct  # type: ignore[assignment]
+        try:
+            with pytest.raises(ExecutorFailed, match="PREVIEW_TIMEOUT"):
+                executor.bind_request("browser_submit", own_args, claim=cl_a)
+            assert fake_to.cancelled is True
+
+            cur_fake[0] = fake_cancel
+            with pytest.raises(ExecutorFailed, match="PREVIEW_CANCELLED"):
+                executor.bind_request("browser_submit", own_args, claim=cl_a)
+        finally:
+            asyncio.run_coroutine_threadsafe = orig_rct  # type: ignore[assignment]
+
+        # Test closed executor fails closed with SESSION_NOT_FOUND / BROWSER_UNAVAILABLE
+        executor.close()
+        with pytest.raises(ExecutorFailed) as ei_down:
+            executor.bind_request("browser_submit", own_args, claim=cl_a)
+        assert str(ei_down.value) in ("BROWSER_UNAVAILABLE", "SESSION_NOT_FOUND", "BROWSER_CRASHED")
     finally:
         executor.close()
         lp, ev = stop_ev_holder[0]

@@ -7,6 +7,7 @@ validated with the generated strict contracts. The API never performs agent work
 import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -40,15 +41,17 @@ from pydantic import ValidationError
 
 def _load_api_storage_keyring() -> tuple[str, bytes] | None:
     """Resolve active (key_id, AES-256 key) matching context_keys KeyRing format."""
-    raw = config.secret("AIAGENT_CONTEXT_KEY_RING_JSON", required=False)
-    if raw is not None:
-        doc = json.loads(raw.reveal())
-        active = str(doc["active"])
-        key_bytes = bytes.fromhex(str(doc["keys"][active]))
-        return active, key_bytes
-    single = config.secret("AIAGENT_CONTEXT_KEY", required=False)
-    if single is not None:
-        return "v1", bytes.fromhex(single.reveal())
+    for env_name in ("AIAGENT_CONTEXT_KEY_RING_JSON", "AIAGENT_CONTEXT_ARTIFACT_KEYS"):
+        raw = config.secret(env_name, required=False)
+        if raw is not None:
+            doc = json.loads(raw.reveal())
+            active = str(doc["active"])
+            key_bytes = bytes.fromhex(str(doc["keys"][active]))
+            return active, key_bytes
+    for env_name in ("AIAGENT_CONTEXT_KEY", "AIAGENT_CONTEXT_ARTIFACT_KEY"):
+        single = config.secret(env_name, required=False)
+        if single is not None:
+            return "v1", bytes.fromhex(single.reveal())
     return None
 
 
@@ -113,6 +116,40 @@ def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) ->
     return cookies
 
 
+_CHUNK_HEX_RE = re.compile(rb"^[0-9a-fA-F]{1,16}$")
+_MAX_CHUNK_LINE_BYTES = 512
+_MAX_CHUNKS = 4096
+_CHUNK_READ_BLOCK = 8192
+_PASSWORD_INPUT_RE = re.compile(r"<input\b[^>]*\btype=[\"']?password\b", re.IGNORECASE)
+_CHALLENGE_MARKERS = (
+    "g-recaptcha",
+    "h-captcha",
+    "cf-turnstile",
+    "verify you are human",
+    "captcha-challenge",
+)
+_AUTH_FAILURE_MARKERS = (
+    "login failed",
+    "invalid password",
+    "invalid credentials",
+    "authentication failed",
+    "sign in failed",
+    "incorrect password",
+)
+
+
+def _takeover_authenticated_page(status_code: int, resp_text: str) -> bool:
+    """Strict authentication signal: require HTTP 2xx without challenge, password prompt, or auth-failure page."""
+    if not (200 <= status_code < 300):
+        return False
+    low = resp_text.lower()
+    if any(marker in low for marker in _CHALLENGE_MARKERS):
+        return False
+    if _PASSWORD_INPUT_RE.search(resp_text) is not None:
+        return False
+    return not any(marker in low for marker in _AUTH_FAILURE_MARKERS)
+
+
 async def _takeover_via_forward_proxy(
     proxy_url: str,
     *,
@@ -145,15 +182,26 @@ async def _takeover_via_forward_proxy(
     if body:
         raw += body
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+
+    def rem_timeout() -> float:
+        rem = deadline - loop.time()
+        if rem <= 0:
+            raise TimeoutError("takeover proxy timeout")
+        return rem
+
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(pu.hostname, pu.port or 80), timeout=timeout_s)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(pu.hostname, pu.port or 80), timeout=rem_timeout()
+        )
     except OSError:
         raise HTTPException(502, detail={"error": "EGRESS_PROXY_UNREACHABLE"}) from None
 
     try:
         writer.write(raw)
-        await asyncio.wait_for(writer.drain(), timeout=timeout_s)
-        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout_s)
+        await asyncio.wait_for(writer.drain(), timeout=rem_timeout())
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=rem_timeout())
         head_lines = head[:-4].decode("latin-1").split("\r\n")
         parts = head_lines[0].split(" ", 2)
         if len(parts) < 2 or not parts[1].isdigit():
@@ -174,37 +222,82 @@ async def _takeover_via_forward_proxy(
         total = 0
         cap = 524_288
         if "chunked" in hmap.get("transfer-encoding", "").lower():
+            chunk_count = 0
+            saw_eof = False
             while True:
-                sz_line = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
-                if not sz_line:
-                    break
-                sz_hex = sz_line.strip().split(b";", 1)[0]
-                if not sz_hex:
-                    continue
+                chunk_count += 1
+                if chunk_count > _MAX_CHUNKS:
+                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+                try:
+                    sz_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_timeout())
+                except asyncio.LimitOverrunError:
+                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
+                except asyncio.IncompleteReadError:
+                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
+                if len(sz_line) > _MAX_CHUNK_LINE_BYTES:
+                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+                sz_hex = sz_line.strip().split(b";", 1)[0].strip()
+                if not _CHUNK_HEX_RE.fullmatch(sz_hex):
+                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
                 clen = int(sz_hex, 16)
                 if clen == 0:
+                    try:
+                        # Consume final chunk trailer terminator cleanly when present.
+                        end_line = await asyncio.wait_for(reader.readline(), timeout=rem_timeout())
+                        if end_line not in (b"\r\n", b"\n", b""):
+                            while end_line not in (b"\r\n", b"\n", b""):
+                                end_line = await asyncio.wait_for(reader.readline(), timeout=rem_timeout())
+                    except (OSError, TimeoutError):
+                        pass
+                    saw_eof = True
                     break
-                data = await asyncio.wait_for(reader.readexactly(clen), timeout=timeout_s)
-                await asyncio.wait_for(reader.readexactly(2), timeout=timeout_s)
-                if total < cap:
-                    chunks.append(data[: cap - total])
-                    total += len(data)
-        elif hmap.get("content-length", "").strip().isdigit():
-            to_read = min(int(hmap["content-length"].strip()), cap)
-            while total < to_read:
-                blk = await asyncio.wait_for(reader.read(min(65536, to_read - total)), timeout=timeout_s)
+                if clen > cap - total:
+                    raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
+                remaining = clen
+                try:
+                    while remaining > 0:
+                        blk = await asyncio.wait_for(
+                            reader.readexactly(min(_CHUNK_READ_BLOCK, remaining)), timeout=rem_timeout()
+                        )
+                        chunks.append(blk)
+                        total += len(blk)
+                        remaining -= len(blk)
+                    crlf = await asyncio.wait_for(reader.readexactly(2), timeout=rem_timeout())
+                except asyncio.IncompleteReadError:
+                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
+                if crlf != b"\r\n":
+                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+            if not saw_eof:
+                raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"})
+        elif hmap.get("content-length", "").strip():
+            cl_str = hmap["content-length"].strip()
+            if not cl_str.isdigit():
+                raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+            expected = int(cl_str)
+            if expected > cap:
+                raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
+            while total < expected:
+                blk = await asyncio.wait_for(
+                    reader.read(min(_CHUNK_READ_BLOCK, expected - total)), timeout=rem_timeout()
+                )
                 if not blk:
-                    break
+                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"})
                 chunks.append(blk)
                 total += len(blk)
         else:
-            while total < cap:
-                blk = await asyncio.wait_for(reader.read(min(65536, cap - total)), timeout=timeout_s)
+            while True:
+                blk = await asyncio.wait_for(reader.read(_CHUNK_READ_BLOCK), timeout=rem_timeout())
                 if not blk:
                     break
+                if total + len(blk) > cap:
+                    raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
                 chunks.append(blk)
                 total += len(blk)
         return status_code, set_cookies, b"".join(chunks).decode("utf-8", "replace")
+    except (HTTPException, TimeoutError):
+        raise
+    except (OSError, asyncio.IncompleteReadError, ValueError):
+        raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
     finally:
         writer.close()
         with contextlib.suppress(Exception):
@@ -887,7 +980,10 @@ def create_app(
                 raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
 
             proxy_url = egress_proxy if egress_proxy is not None else os.environ.get("AIAGENT_EGRESS_PROXY")
-            if config.profile() == "production" and (not proxy_url or sentinel is None):
+            sentinel_endpoint = os.environ.get("AIAGENT_SENTINEL_ENDPOINT")
+            sentinel_rpc_key = config.secret("AIAGENT_API_SENTINEL_RPC_KEY", required=False)
+            has_sentinel_rpc = bool(sentinel_endpoint and sentinel_rpc_key is not None)
+            if config.profile() == "production" and (not proxy_url or (sentinel is None and not has_sentinel_rpc)):
                 raise HTTPException(503, detail={"error": "EGRESS_PROXY_REQUIRED"})
 
             default_p = 443 if scheme == "https" else 80
@@ -895,19 +991,54 @@ def create_app(
             host_hdr = host_net if target_port == default_p else f"{host_net}:{target_port}"
 
             if proxy_url:
-                if sentinel is None or not hasattr(sentinel, "authorize_human_takeover"):
+                ru_req = urlsplit(req_url)
+                target_path = (ru_req.path or "/") + (f"?{ru_req.query}" if ru_req.query else "")
+                body_sha = sha256(req_body or b"").hexdigest()
+                if sentinel is not None:
+                    if not hasattr(sentinel, "authorize_human_takeover"):
+                        raise HTTPException(503, detail={"error": "SENTINEL_REQUIRED"})
+                    try:
+                        ht_permit = await asyncio.to_thread(
+                            sentinel.authorize_human_takeover,
+                            s.tenant_id,
+                            s.user_id,
+                            task_workspace_id,
+                            session_id,
+                            SimpleNamespace(scheme=scheme, host=host, port=target_port, method=method),
+                            target_path=target_path,
+                            body_sha256=body_sha,
+                        )
+                    except RpcError as exc:
+                        raise HTTPException(403, detail={"error": f"sentinel:{exc.code}"}) from None
+                elif has_sentinel_rpc:
+                    from aiagent_core.rpc import RpcClient
+
+                    assert sentinel_endpoint is not None and sentinel_rpc_key is not None
+                    rpc_cli = RpcClient(sentinel_endpoint, "api", bytes.fromhex(sentinel_rpc_key.reveal()))
+                    try:
+                        rpc_res = await rpc_cli.call(
+                            "sentinel.authorize_human_takeover",
+                            {
+                                "tenantId": s.tenant_id,
+                                "userId": s.user_id,
+                                "workspaceId": task_workspace_id,
+                                "sessionId": session_id,
+                                "scheme": scheme,
+                                "host": host,
+                                "port": target_port,
+                                "method": method,
+                                "targetPath": target_path,
+                                "bodySha256": body_sha,
+                            },
+                        )
+                    except RpcError as exc:
+                        status_err = 503 if exc.code in ("SENTINEL_UNAVAILABLE", "CONNECTION_FAILED") else 403
+                        raise HTTPException(status_err, detail={"error": f"sentinel:{exc.code}"}) from None
+                    except Exception:
+                        raise HTTPException(503, detail={"error": "SENTINEL_UNAVAILABLE"}) from None
+                    ht_permit = str(rpc_res["permit"])
+                else:
                     raise HTTPException(503, detail={"error": "SENTINEL_REQUIRED"})
-                try:
-                    ht_permit = await asyncio.to_thread(
-                        sentinel.authorize_human_takeover,
-                        s.tenant_id,
-                        s.user_id,
-                        task_workspace_id,
-                        session_id,
-                        SimpleNamespace(scheme=scheme, host=host, port=target_port, method=method),
-                    )
-                except RpcError as exc:
-                    raise HTTPException(403, detail={"error": f"sentinel:{exc.code}"}) from None
                 status_code, set_cookies, resp_text = await _takeover_via_forward_proxy(
                     proxy_url,
                     method=method,
@@ -985,7 +1116,7 @@ def create_app(
         return {
             "schemaVersion": "1.0",
             "sessionId": session_id,
-            "authenticated": status_code < 400,
+            "authenticated": _takeover_authenticated_page(status_code, resp_text),
             "status": status_code,
             "cookieCount": len(cookies),
             "observation": redacted_obs,

@@ -61,7 +61,7 @@ class Stack:
         for name in ("model", "tool", "sentinel", "egress", "receiver"):
             self.ports[name] = free_port()
         self.provider_log_path = self.tmp / "provider.jsonl"
-        for k in ("rt_model", "rt_tool", "tgw_sentinel", "ops_tool", "api_model"):
+        for k in ("rt_model", "rt_tool", "tgw_sentinel", "ops_tool", "api_model", "api_sentinel"):
             self.keys[k] = secrets.token_hex(32)
         self.permit_key = secrets.token_hex(32)
         self.provider_secret = "sk-fake-provider-SECRET-" + secrets.token_hex(6)
@@ -128,7 +128,7 @@ class Stack:
                 {
                     "AIAGENT_SENTINEL_DSN": self.dsn["sentinel"],
                     "AIAGENT_SENTINEL_ENDPOINT": f"tcp:127.0.0.1:{p['sentinel']}",
-                    "AIAGENT_SENTINEL_RPC_KEYS": f"tool_gateway={self.keys['tgw_sentinel']}",
+                    "AIAGENT_SENTINEL_RPC_KEYS": f"tool_gateway={self.keys['tgw_sentinel']},api={self.keys['api_sentinel']}",
                     "AIAGENT_SENTINEL_PERMIT_KEY": self.permit_key,
                     "AIAGENT_EGRESS_LISTEN": f"127.0.0.1:{p['egress']}",
                     "AIAGENT_EGRESS_CONFIG": json.dumps(self.egress_config()),

@@ -505,6 +505,13 @@ class BrowserSessionService:
                         entry.state = State.PAUSED
                     raise
                 try:
+                    if (
+                        form_method != "GET"
+                        and sub_resp.status >= 400
+                        and sub_resp.status not in (301, 302, 303, 307, 308)
+                    ):
+                        entry.state = State.PAUSED
+                        raise BrowserError("ACTION_OUTCOME_UNKNOWN")
                     if sub_resp.status in (301, 302, 303, 307, 308):
                         if form_method == "POST" and sub_resp.status in (307, 308):
                             entry.state = State.PAUSED

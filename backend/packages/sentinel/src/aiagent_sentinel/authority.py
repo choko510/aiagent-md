@@ -11,7 +11,6 @@ import json
 import os
 import re
 import secrets
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +26,8 @@ from .netpolicy import EgressDenied, normalize_host
 
 PERMIT_TTL_S = 60
 _PG_PERMIT_HOST = re.compile(r"^[a-z0-9.-]{1,253}$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 @dataclass(frozen=True)
@@ -101,8 +102,6 @@ class Sentinel:
         if len(key) < 32:
             raise ValueError("sentinel key must be >= 32 bytes")
         self.db, self.config, self.key = db, config, key
-        self._human_lock = threading.Lock()
-        self._used_human_nonces: dict[str, int] = {}
 
     def authorize(self, claim: Claim, intent_id: str, scheme: str, host: str, port: int, method: str) -> str:
         try:
@@ -188,14 +187,26 @@ class Sentinel:
         host: str,
         port: int,
         method: str,
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
     ) -> str:
-        """Issue single-use Human Takeover permit bound to a PAUSED/HUMAN browser session & destination."""
+        """Issue single-use Human Takeover permit bound to a PAUSED/HUMAN browser session, destination, path, and body."""
         try:
             host = normalize_host(host)
         except EgressDenied as e:
             raise RpcError(e.code) from None
         if not _PG_PERMIT_HOST.fullmatch(host) or method not in ("GET", "POST"):
             raise RpcError("DESTINATION_NOT_ALLOWED")
+        if (
+            not isinstance(target_path, str)
+            or not target_path.startswith("/")
+            or "\r" in target_path
+            or "\n" in target_path
+            or len(target_path) > 2048
+        ):
+            raise RpcError("BAD_REQUEST")
+        if not isinstance(body_sha256, str) or not _SHA256_HEX_RE.fullmatch(body_sha256):
+            raise RpcError("BAD_REQUEST")
         dest = self.config.match(scheme, host, port)
         if dest is None or not dest.needs_permit or method not in dest.methods:
             raise RpcError("DESTINATION_NOT_ALLOWED")
@@ -221,32 +232,72 @@ class Sentinel:
                 raise RpcError("TAKEOVER_NOT_AUTHORIZED")
         nonce = secrets.token_hex(12)
         expires = int(time.time()) + PERMIT_TTL_S
-        mac = _mac(self.key, "human_takeover", tenant_id, session_id, nonce, scheme, host, port, method, expires)
+        mac = _mac(
+            self.key,
+            "human_takeover",
+            tenant_id,
+            session_id,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
         return f"ht.{tenant_id}.{session_id}.{nonce}.{expires}.{mac}"
 
-    def verify_human_takeover(self, token: str, scheme: str, host: str, port: int, method: str) -> tuple[str, None]:
-        """Verify and consume single-use Human Takeover token at send time inside EgressProxy."""
+    def verify_human_takeover(
+        self,
+        token: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
+    ) -> tuple[str, None]:
+        """Verify MAC, destination/path/body binding, and atomically consume nonce in PostgreSQL."""
         parts = token.split(".")
         if len(parts) != 6 or parts[0] != "ht":
             raise EgressDenied("PERMIT_MALFORMED")
         _, tenant, sid, nonce, expires_s, mac = parts
+        if not re.fullmatch(r"[0-9a-f]{24}", nonce):
+            raise EgressDenied("PERMIT_MALFORMED")
         try:
             expires = int(expires_s)
         except ValueError:
             raise EgressDenied("PERMIT_MALFORMED") from None
-        good = _mac(self.key, "human_takeover", tenant, sid, nonce, scheme, host, port, method, expires)
+        good = _mac(
+            self.key,
+            "human_takeover",
+            tenant,
+            sid,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
         if not hmac.compare_digest(mac, good):
             raise EgressDenied("PERMIT_BINDING")
         now_ts = int(time.time())
         if expires < now_ts:
             raise EgressDenied("PERMIT_EXPIRED")
-        with self._human_lock:
-            stale = [k for k, exp in self._used_human_nonces.items() if exp < now_ts]
-            for k in stale:
-                del self._used_human_nonces[k]
-            if nonce in self._used_human_nonces:
+        # Persist single-use nonce consumption atomically in PostgreSQL so restarts and replicas reject replay.
+        with self.db.tx() as c:
+            c.execute("DELETE FROM agent.human_takeover_nonces WHERE expires_at < now()")
+            burned = c.execute(
+                "INSERT INTO agent.human_takeover_nonces(nonce, tenant_id, session_id, expires_at)"
+                " VALUES (%s,%s,%s,to_timestamp(%s)) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",
+                (nonce, tenant, sid, expires),
+            ).fetchone()
+            if burned is None:
                 raise EgressDenied("PERMIT_INVALID_AT_SEND")
-            self._used_human_nonces[nonce] = expires
         with self.db.tx() as c:
             row = c.execute(
                 "SELECT 1 FROM agent.browser_sessions s"
