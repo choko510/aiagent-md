@@ -267,6 +267,8 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
             return LoadResult(IndexStatus.UNAVAILABLE, None, ("dependency lock could not be verified",))
         if lock_digest != manifest.dependency_lock_digest:
             return LoadResult(IndexStatus.STALE, None, ("dependency lock digest mismatch",))
+    if len(manifest.sources) > reader.limits.files:
+        return LoadResult(IndexStatus.UNAVAILABLE, None, ("source provenance count limit exceeded",))
     expected = {s.path: s for s in manifest.sources}
     if len(expected) != len(manifest.sources):
         return LoadResult(IndexStatus.INVALID, None, ("duplicate source provenance",))
@@ -326,6 +328,7 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
                 continue
             elif position_encoding not in (1, 2, 3):
                 return LoadResult(IndexStatus.INVALID, None, ("invalid position encoding",))
+            unknown_roles = False
             for symbol, roles, coords in doc["occurrences"]:
                 if time.monotonic() > reader.deadline:
                     raise ReadError("index validation timeout")
@@ -334,12 +337,14 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
                 if roles < 0 or not _safe_symbol(symbol):
                     raise ValueError("invalid symbol or roles")
                 if roles & ~127:
-                    issues.append(f"{display_path(path)}: unknown symbol role")
+                    unknown_roles = True
                 positions = tuple(coords)
                 span = convert_range(raw, position_encoding, positions)
                 locations.append(
                     SymbolLocation(symbol, path, span, entry.oid, digest, bool(roles & 1), positions, position_encoding)
                 )
+            if unknown_roles:
+                issues.append(f"{display_path(path)}: unknown symbol role")
             for implementer, implemented in doc["relationships"]:
                 if not _safe_symbol(implementer + implemented):
                     raise ValueError("invalid relationship")

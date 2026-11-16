@@ -451,3 +451,14 @@ def test_duplicate_metadata_never_claims_validated(repo: tuple[Path, str, Path])
     result, text = fallback_text(snap, inv, manifest, data, "old")
     assert result is not None and result.status == IndexStatus.UNAVAILABLE
     assert text is not None and text.hits
+
+
+def test_unknown_roles_are_partial_without_issue_amplification(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    idx.documents[0].occurrences[0].symbol_roles = 128
+    idx.documents[0].occurrences.add(symbol="other", symbol_roles=128, range=[0, 0, 3])
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    result = load_index(snap, manifest, data)
+    assert result.status == IndexStatus.PARTIAL
+    assert sum("unknown symbol role" in issue for issue in result.issues) == 1
