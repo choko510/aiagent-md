@@ -25,8 +25,9 @@ from aiagent_domain.rpcwire import RpcError
 from .context_ingest import MemoryIngest, ingest_handler
 from .context_keys import KeyRing
 from .executors import from_env as executors_from_env
-from .model_gateway import ModelGateway, Route, SealedModelRequest
-from .providers import AnthropicProvider, FakeModelProvider
+from .model_gateway import ModelGateway, SealedModelRequest
+from .providers import AnthropicProvider, FakeModelProvider, GeminiProvider, OpenAIProvider
+from .router import Route
 from .sentinel_port import RpcSentinel
 from .tool_gateway import ToolGateway
 
@@ -181,29 +182,143 @@ def load_key_ring() -> KeyRing:
         raise config.ConfigError("invalid Context artifact key") from exc
 
 
+def load_browser_key_ring() -> KeyRing:
+    """Dedicated AES-GCM key ring for browser storageState shared strictly between API and Tool Gateway."""
+    path = os.environ.get("AIAGENT_BROWSER_STORAGE_KEYS_FILE")
+    if path:
+        try:
+            return KeyRing.from_file(path)
+        except (OSError, ValueError) as exc:
+            raise config.ConfigError("invalid browser storage key ring") from exc
+    raw_json = config.secret("AIAGENT_BROWSER_STORAGE_KEYS", required=False)
+    if raw_json is not None:
+        try:
+            return KeyRing.from_json(raw_json.reveal())
+        except ValueError as exc:
+            raise config.ConfigError("invalid browser storage key ring") from exc
+    if config.profile() == "production":
+        raise config.ConfigError("AIAGENT_BROWSER_STORAGE_KEYS_FILE is required in production")
+    return load_key_ring()
+
+
+def load_model_config_from_env() -> tuple[dict[str, Any], dict[str, list[Route]], list[str]]:
+    import json
+
+    providers: dict[str, Any] = {"fake": FakeModelProvider()}
+    routes: dict[str, list[Route]] = {"fake-gateway": [Route("fake", "fake-1")]}
+    proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY_MODEL")
+    proxy_token = config.secret("AIAGENT_EGRESS_MODEL_TOKEN", required=False)
+    secrets: list[str] = []
+
+    def require_model_proxy(label: str) -> None:
+        if config.profile() == "production" and not proxy_url:
+            raise config.ConfigError(f"AIAGENT_EGRESS_PROXY_MODEL is required in production ({label})")
+
+    anth = config.secret("AIAGENT_ANTHROPIC_API_KEY", required=False)
+    if anth is not None:
+        register_secret(anth.reveal())
+        secrets.append(anth.reveal())
+        require_model_proxy("anthropic")
+        providers["anthropic"] = AnthropicProvider(
+            anth,
+            proxy_url,
+            proxy_token=proxy_token,
+            url=os.environ.get("AIAGENT_ANTHROPIC_URL"),  # provider-compatible local test server only
+            timeout_s=float(os.environ.get("AIAGENT_ANTHROPIC_TIMEOUT_S", "120")),
+        )
+        routes["claude-sonnet-5-5"] = [Route("anthropic", "claude-sonnet-5-5"), Route("anthropic", "claude-haiku-5-5")]
+
+    openai_key = config.secret("AIAGENT_OPENAI_API_KEY", required=False)
+    if openai_key is not None:
+        register_secret(openai_key.reveal())
+        secrets.append(openai_key.reveal())
+        require_model_proxy("openai")
+        providers["openai"] = OpenAIProvider(
+            openai_key,
+            proxy_url,
+            proxy_token=proxy_token,
+            url=os.environ.get("AIAGENT_OPENAI_URL"),
+            timeout_s=float(os.environ.get("AIAGENT_OPENAI_TIMEOUT_S", "120")),
+        )
+        for m in [
+            x.strip() for x in os.environ.get("AIAGENT_OPENAI_MODELS", "gpt-4o,gpt-4o-mini").split(",") if x.strip()
+        ]:
+            routes[m] = [Route("openai", m)]
+
+    compat_url = os.environ.get("AIAGENT_OPENAI_COMPAT_URL")
+    if compat_url:
+        from urllib.parse import urlsplit
+
+        compat_key = config.secret("AIAGENT_OPENAI_COMPAT_API_KEY", required=False)
+        if compat_key is not None:
+            register_secret(compat_key.reveal())
+            secrets.append(compat_key.reveal())
+        compat_external = os.environ.get("AIAGENT_OPENAI_COMPAT_EXTERNAL", "1") != "0"
+        if not compat_external:
+            compat_host = (urlsplit(compat_url).hostname or "").lower()
+            if compat_host not in ("127.0.0.1", "::1", "localhost"):
+                raise config.ConfigError("AIAGENT_OPENAI_COMPAT_EXTERNAL=0 is restricted to local loopback endpoints")
+        else:
+            require_model_proxy("openai_compat")
+        providers["openai_compat"] = OpenAIProvider(
+            compat_key,
+            proxy_url if compat_external else None,
+            proxy_token=proxy_token if compat_external else None,
+            url=compat_url,
+            provider_name="openai_compat",
+            external_recipient=compat_external,
+            timeout_s=float(os.environ.get("AIAGENT_OPENAI_COMPAT_TIMEOUT_S", "120")),
+        )
+        for m in [
+            x.strip() for x in os.environ.get("AIAGENT_OPENAI_COMPAT_MODELS", "local-llm").split(",") if x.strip()
+        ]:
+            routes[m] = [Route("openai_compat", m)]
+
+    gemini_key = config.secret("AIAGENT_GEMINI_API_KEY", required=False)
+    if gemini_key is not None:
+        register_secret(gemini_key.reveal())
+        secrets.append(gemini_key.reveal())
+        require_model_proxy("gemini")
+        providers["gemini"] = GeminiProvider(
+            gemini_key,
+            proxy_url,
+            proxy_token=proxy_token,
+            url_template=os.environ.get("AIAGENT_GEMINI_URL_TEMPLATE"),
+            timeout_s=float(os.environ.get("AIAGENT_GEMINI_TIMEOUT_S", "120")),
+        )
+        for m in [
+            x.strip()
+            for x in os.environ.get("AIAGENT_GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-pro").split(",")
+            if x.strip()
+        ]:
+            routes[m] = [Route("gemini", m)]
+
+    custom_routes_raw = os.environ.get("AIAGENT_MODEL_ROUTES_JSON")
+    if custom_routes_raw:
+        try:
+            parsed_routes = json.loads(custom_routes_raw)
+            if not isinstance(parsed_routes, dict):
+                raise ValueError("AIAGENT_MODEL_ROUTES_JSON must be a JSON object")
+            for model_key, items in parsed_routes.items():
+                if not isinstance(items, list) or not items:
+                    raise ValueError(f"invalid route list for {model_key}")
+                routes[str(model_key)] = [
+                    Route(str(it["provider"]), str(it["model"]), int(it.get("weight", 1))) for it in items
+                ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise config.ConfigError("invalid AIAGENT_MODEL_ROUTES_JSON") from exc
+    return providers, routes, secrets
+
+
 def main_model() -> None:
     setup("model_gateway")
     config.require_isolation("model_gateway")
     keys = parse_keys(config.secret("AIAGENT_MODEL_GATEWAY_RPC_KEYS").reveal())  # type: ignore[union-attr]
     dsn = config.secret("AIAGENT_MODEL_GATEWAY_DSN").reveal()  # type: ignore[union-attr]
-    providers: dict[str, Any] = {"fake": FakeModelProvider()}
-    routes: dict[str, list[Route]] = {"fake-gateway": [Route("fake", "fake-1")]}
-    anth = config.secret("AIAGENT_ANTHROPIC_API_KEY", required=False)
-    secrets = []
-    if anth is not None:
-        register_secret(anth.reveal())
-        secrets.append(anth.reveal())
-        proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY_MODEL")
-        if config.profile() == "production" and not proxy_url:
-            raise config.ConfigError("AIAGENT_EGRESS_PROXY_MODEL is required in production")
-        providers["anthropic"] = AnthropicProvider(
-            anth,
-            proxy_url,
-            proxy_token=config.secret("AIAGENT_EGRESS_MODEL_TOKEN", required=False),
-            url=os.environ.get("AIAGENT_ANTHROPIC_URL"),  # provider-compatible local test server only
-            timeout_s=float(os.environ.get("AIAGENT_ANTHROPIC_TIMEOUT_S", "120")),
-        )
-        routes["claude-sonnet-5-5"] = [Route("anthropic", "claude-sonnet-5-5"), Route("anthropic", "claude-haiku-5-5")]
+    import json
+
+    providers, routes, secrets = load_model_config_from_env()
+
     if config.profile() == "production" and providers.keys() == {"fake"}:
         print(
             "model_gateway: no real provider configured (FakeModel only) - refusing to start in production",
@@ -229,6 +344,23 @@ def main_model() -> None:
     except (memory_tombstones.TombstoneError, config.ConfigError) as exc:
         if config.profile() == "production":
             print(f"model_gateway: Memory egress disabled: {type(exc).__name__}", file=sys.stderr)
+    route_rates: dict[str, Any] = {}
+    raw_rates = os.environ.get("AIAGENT_MODEL_RATES_JSON")
+    if raw_rates:
+        from .router import RouteRates
+
+        try:
+            parsed_rates = json.loads(raw_rates)
+            if not isinstance(parsed_rates, dict):
+                raise ValueError("AIAGENT_MODEL_RATES_JSON must be a JSON object")
+            for mk, rspec in parsed_rates.items():
+                if isinstance(rspec, dict):
+                    route_rates[str(mk)] = RouteRates(
+                        input_micro_usd_per_1m=int(rspec["input_micro_usd_per_1m"]),
+                        output_micro_usd_per_1m=int(rspec["output_micro_usd_per_1m"]),
+                    )
+        except Exception as exc:
+            raise config.ConfigError(f"invalid AIAGENT_MODEL_RATES_JSON: {exc}") from exc
     gw = ModelGateway(  # type: ignore[arg-type]
         db,
         providers,
@@ -237,6 +369,8 @@ def main_model() -> None:
         secrets=secrets,
         context_key=context_key,
         tombstone_log=tombstone_log,
+        nli_model=os.environ.get("AIAGENT_NLI_MODEL"),
+        route_rates=route_rates,
     )
     gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
     srv = build_model_server(
@@ -258,11 +392,21 @@ def main_tool() -> None:
     if os.environ.get("AIAGENT_SENTINEL_ENDPOINT"):
         skey = bytes.fromhex(config.secret("AIAGENT_SENTINEL_CLIENT_KEY").reveal())  # type: ignore[union-attr]
         sentinel = RpcSentinel(RpcClient(os.environ["AIAGENT_SENTINEL_ENDPOINT"], "tool_gateway", skey))
+    browser_ring_ok = False
+    if config.profile() == "production":
+        try:
+            ring = load_browser_key_ring()
+            for key in ring.keys.values():
+                register_secret(key.hex())
+            browser_ring_ok = True
+        except config.ConfigError:
+            browser_ring_ok = False
     config.require_production_safety(
         "tool_gateway",
         {
             "Sentinel endpoint configured": sentinel is not None,
             "egress proxy configured": bool(os.environ.get("AIAGENT_EGRESS_PROXY")),
+            "browser storage key ring configured": browser_ring_ok,
         },
     )
     db = Database(dsn, max_size=8, name="tool_gateway")

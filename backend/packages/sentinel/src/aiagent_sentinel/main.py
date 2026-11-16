@@ -52,8 +52,28 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
             )
         }
 
+    async def authorize_human_takeover(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        try:
+            args = (
+                str(body["tenantId"]),
+                str(body["userId"]),
+                str(body["workspaceId"]),
+                str(body["sessionId"]),
+                str(body["scheme"]),
+                str(body["host"]),
+                int(body["port"]),
+                str(body["method"]),
+                str(body.get("targetPath", "/")),
+                str(body.get("bodySha256", "")),
+            )
+        except Exception:
+            raise RpcError("BAD_REQUEST") from None
+        return {"permit": await asyncio.to_thread(s.authorize_human_takeover, *args)}
+
     srv.register("sentinel.authorize", authorize, {"tool_gateway"})
     srv.register("sentinel.authorize_reconcile", authorize_reconcile, {"tool_gateway"})
+    srv.register("sentinel.authorize_human_takeover", authorize_human_takeover, {"api"})
     return srv
 
 

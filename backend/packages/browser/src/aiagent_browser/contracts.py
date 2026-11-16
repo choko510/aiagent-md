@@ -79,6 +79,7 @@ class FixtureResponse:
     status: int
     html: str = ""
     redirect_to: str | None = None
+    truncated: bool = False
 
 
 LocatorKind = Literal["role", "label", "test_id", "css"]
@@ -129,7 +130,7 @@ class ActionOutcome:
     session_id: str
     generation: int
     action: Literal["click", "submit"]
-    status: Literal["EXECUTED", "NEEDS_LOGIN"]
+    status: Literal["EXECUTED", "NEEDS_LOGIN", "CAPTCHA_CHALLENGE"]
     before_observation: Observation
     after_observation: Observation
 
@@ -183,7 +184,7 @@ class RedactionPort(Protocol):
 class WorkerPort(Protocol):
     async def start(self, session_id: str) -> None: ...
 
-    async def render(self, session_id: str, html: str) -> None: ...
+    async def render(self, session_id: str, html: str) -> str | None: ...
 
     async def observe(self, session_id: str) -> str: ...
 
@@ -226,6 +227,47 @@ def validate_fixture_url(url: str, allowed_hosts: frozenset[str]) -> str:
         or parts.fragment
         or not parts.netloc == host
     ):
+        raise BrowserError("EGRESS_DENIED")
+    return url
+
+
+def validate_browser_url(
+    url: str,
+    allowed_fixture_hosts: frozenset[str],
+    *,
+    allowed_web_hosts: frozenset[str] = frozenset(),
+    allow_https: bool = False,
+    allow_http: bool = False,
+) -> str:
+    """Validate either an offline `fixture://` URL or an explicitly permitted `https://`/`http://` URL."""
+    if (
+        not isinstance(url, str)
+        or len(url) > 2048
+        or "\\" in url
+        or any(ord(c) < 32 or ord(c) == 127 or c.isspace() for c in url)
+    ):
+        raise BrowserError("INVALID_FIXTURE_URL")
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise BrowserError("INVALID_FIXTURE_URL") from exc
+    scheme = parts.scheme.lower()
+    if scheme == "fixture":
+        return validate_fixture_url(url, allowed_fixture_hosts)
+    if scheme == "https":
+        if not allow_https:
+            raise BrowserError("EGRESS_DENIED")
+    elif scheme == "http":
+        if not allow_http:
+            raise BrowserError("EGRESS_DENIED")
+    else:
+        raise BrowserError("EGRESS_DENIED")
+    host = (parts.hostname or "").lower()
+    if not host or parts.username is not None or parts.password is not None or not host.isascii():
+        raise BrowserError("EGRESS_DENIED")
+    if allowed_web_hosts and "*" not in allowed_web_hosts and host not in allowed_web_hosts:
+        raise BrowserError("EGRESS_DENIED")
+    if not allowed_web_hosts:
         raise BrowserError("EGRESS_DENIED")
     return url
 

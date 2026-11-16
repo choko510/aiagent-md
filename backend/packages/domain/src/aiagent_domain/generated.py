@@ -89,6 +89,7 @@ class ContextPolicyCommandV1(_Contract):
     recipient: Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9_.:-]{1,256}$')]
     model: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     enabled: bool
+    semantic_verifier_mode: Annotated[Literal["HEURISTIC", "LLM_GATED"] | None, Field(alias="semanticVerifierMode")] = None
     expected_record_version: Annotated[NonNegativeInt64 | None, Field(alias="expectedRecordVersion")] = None
 
 

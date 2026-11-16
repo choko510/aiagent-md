@@ -34,7 +34,7 @@ from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 from jsonschema import Draft202012Validator
 from psycopg.types.json import Jsonb
 
-from .executors import Executor, ExecutorFailed, ExecutorUnknown, valid_receipt
+from .executors import Destination, Executor, ExecutorFailed, ExecutorUnknown, valid_receipt
 
 log = logging.getLogger("aiagent.tool_gateway")
 SERVICE = {"type": "service", "id": "tool_gateway"}
@@ -139,7 +139,53 @@ class ToolGateway:
         self, claim: Claim, tool_call_id: str, tool: str, args: dict[str, Any], stream: str
     ) -> dict[str, Any]:
         spec = TOOLS[tool]
+        executor = self.executors.get(spec.executor)
+        bind_fn = getattr(executor, "bind_request", None) if executor is not None else None
+        bound_form: dict[str, Any] | None = None
+        bind_error: str | None = None
         req_sha = sha256_hex({"tool": tool, "args": args})
+        if callable(bind_fn):
+            needs_bind = False
+            with self.db.tx() as peek_c:
+                try:
+                    control.check_current(peek_c, claim)
+                except control.ControlError:
+                    pre_run_ok = False
+                else:
+                    pre_run_ok = True
+                pre_task = peek_c.execute(
+                    "SELECT profile_code FROM agent.tasks WHERE tenant_id=%s AND id=%s",
+                    (claim.tenant_id, claim.task_id),
+                ).fetchone()
+                existing_peek = peek_c.execute(
+                    "SELECT i.status_code, i.tool_key, i.safe_arguments_json, i.request_sha256, a.decision_code"
+                    " FROM agent.tool_intents i"
+                    " LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id AND a.tool_intent_id=i.id"
+                    " WHERE i.tenant_id=%s AND i.run_id=%s AND i.invocation_key=%s",
+                    (claim.tenant_id, claim.run_id, tool_call_id),
+                ).fetchone()
+            if existing_peek is not None and (
+                existing_peek["status_code"] in ("SENDING", "UNKNOWN")
+                or existing_peek["status_code"] in TERMINAL_INTENT
+                or (
+                    existing_peek["status_code"] == "PENDING_APPROVAL"
+                    and existing_peek["decision_code"] in ("REJECTED", "REVOKED", "EXPIRED")
+                )
+            ):
+                if existing_peek["tool_key"] != tool or canonical_json(
+                    dict(existing_peek["safe_arguments_json"] or {})
+                ) != canonical_json(args):
+                    raise RpcError("INTENT_CONFLICT")
+                req_sha = str(existing_peek["request_sha256"])
+            elif pre_run_ok and pre_task is not None and tool in PROFILE_TOOLS.get(pre_task["profile_code"], ()):
+                needs_bind = True
+            if needs_bind:
+                try:
+                    bound_form = bind_fn(tool, args, claim=claim)
+                except ExecutorFailed as exc:
+                    bind_error = str(exc)[:100]
+                if bound_form is not None:
+                    req_sha = sha256_hex({"tool": tool, "args": args, "bound": bound_form})
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
             try:
@@ -162,6 +208,8 @@ class ToolGateway:
                 (claim.tenant_id, claim.run_id, tool_call_id),
             ).fetchone()
             if intent is not None:
+                if bind_error is not None and intent["status_code"] == "PENDING_APPROVAL":
+                    raise RpcError("INTENT_CONFLICT")
                 if intent["request_sha256"] != req_sha or intent["tool_key"] != tool:
                     raise RpcError("INTENT_CONFLICT")
                 c.execute(
@@ -210,6 +258,19 @@ class ToolGateway:
                         stream,
                         error="tool not allowed for this profile",
                     )
+                if bind_error is not None:
+                    return self._finish_denied(
+                        c,
+                        claim,
+                        tool_call_id,
+                        tool,
+                        args,
+                        req_sha,
+                        spec,
+                        "FAILED",
+                        stream,
+                        error=bind_error,
+                    )
                 n = c.execute(
                     "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s",
                     (claim.tenant_id, claim.run_id),
@@ -255,7 +316,13 @@ class ToolGateway:
                 self._event(c, claim, "tool.intent_recorded", intent_id, {"tool": tool, "risk": spec.risk_class})
                 if spec.approval_required:
                     apr = uuid7()
-                    summary = f"{tool} to={args.get('to', '')}"[:200]
+                    if bound_form is not None:
+                        summary = (
+                            f"{tool} {bound_form['method']} {bound_form['action']}"
+                            f" sha={str(bound_form['payloadDigest'])[:12]}"
+                        )[:200]
+                    else:
+                        summary = f"{tool} to={args.get('to', '')}"[:200]
                     c.execute(
                         "INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id,"
                         " tool_key, request_sha256, goal_revision, safe_summary, expires_at)"
@@ -292,8 +359,10 @@ class ToolGateway:
                 ).fetchone()
         assert intent is not None
         if intent["status_code"] == "PENDING_APPROVAL":
-            return self._final_admission(claim, intent, tool_call_id, tool, args, req_sha, stream)
-        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1)
+            return self._final_admission(
+                claim, intent, tool_call_id, tool, args, req_sha, stream, bound_form=bound_form
+            )
+        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1, bound_form=bound_form)
 
     def _finish_denied(
         self,
@@ -352,7 +421,16 @@ class ToolGateway:
 
     # ------------------------------------------------------------------ final admission
     def _final_admission(
-        self, claim: Claim, intent: Row, tool_call_id: str, tool: str, args: dict[str, Any], req_sha: str, stream: str
+        self,
+        claim: Claim,
+        intent: Row,
+        tool_call_id: str,
+        tool: str,
+        args: dict[str, Any],
+        req_sha: str,
+        stream: str,
+        *,
+        bound_form: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.db.tx() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (claim.run_id,))
@@ -424,11 +502,20 @@ class ToolGateway:
             if o["status"] != "CANCELLED":
                 self._record_head(claim, tool_call_id, tool, o, stream)
             return o
-        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1)
+        return self._dispatch(claim, intent, tool_call_id, tool, args, stream, fence=1, bound_form=bound_form)
 
     # ------------------------------------------------------------------ dispatch
     def _dispatch(
-        self, claim: Claim, intent: Row, tool_call_id: str, tool: str, args: dict[str, Any], stream: str, *, fence: int
+        self,
+        claim: Claim,
+        intent: Row,
+        tool_call_id: str,
+        tool: str,
+        args: dict[str, Any],
+        stream: str,
+        *,
+        fence: int,
+        bound_form: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = TOOLS[tool]
         effect_key = f"{claim.tenant_id}:{intent['id']}"
@@ -473,7 +560,28 @@ class ToolGateway:
                 effect="FAILED",
             )
         permit = None
-        dest = executor.destination()
+        try:
+            dest_tool_fn = getattr(executor, "destination_for_tool", None)
+            dest_fn = getattr(executor, "destination_for", None)
+            if callable(dest_tool_fn):
+                try:
+                    dest = dest_tool_fn(tool, args, bound_form=bound_form)
+                except TypeError:
+                    dest = dest_tool_fn(tool, args)
+            else:
+                dest = dest_fn(args) if callable(dest_fn) else executor.destination()
+        except ExecutorFailed as e:
+            return self._settle(
+                claim,
+                intent,
+                attempt_id,
+                tool_call_id,
+                tool,
+                stream,
+                "FAILED",
+                {"error": str(e)[:100]},
+                effect="FAILED",
+            )
         if dest is not None:
             if self.sentinel is None:
                 return self._settle(
@@ -502,6 +610,15 @@ class ToolGateway:
                     effect="FAILED",
                 )
         if hasattr(executor, "context"):  # executors that need the admitted identity (sandbox grants, browser fence)
+
+            async def _issue_hop_permit(hop_dest: Destination) -> str:
+                if self.sentinel is None:
+                    raise ExecutorFailed("egress requires Sentinel")
+                try:
+                    return await asyncio.to_thread(self.sentinel.authorize, claim, intent["id"], hop_dest)
+                except RpcError as e:
+                    raise ExecutorFailed(f"sentinel:{e.code}") from e
+
             executor.context[effect_key] = {
                 "tool": tool,
                 "tenant_id": claim.tenant_id,
@@ -512,6 +629,8 @@ class ToolGateway:
                 "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,
+                "permit_issuer": _issue_hop_permit,
+                "bound_form": bound_form,
             }
         fault("gateway_before_send")
         try:

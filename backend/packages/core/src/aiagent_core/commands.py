@@ -18,6 +18,7 @@ DEFAULT_MODELS = {
     "default": ["fake-gateway"],
     "sandbox": ["fake-gateway"],
     "browser": ["fake-gateway"],
+    "research": ["fake-gateway"],
     "anthropic": ["claude-sonnet-5-5"],
 }
 

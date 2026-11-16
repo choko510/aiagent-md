@@ -1,2 +1,4 @@
-{"destinations": {"message-receiver": {"scheme": "http", "host": "receiver", "port": 8099, "methods": ["POST", "GET"],
-  "allow_private": ["10.250.250.10"]}}}
+{"destinations": {
+  "message-receiver": {"scheme": "http", "host": "receiver", "port": 8099, "methods": ["POST", "GET"], "allow_private": ["10.250.250.10"]},
+  "web-fetch": {"scheme": "http", "host": "portal", "port": 8099, "methods": ["GET", "POST"], "allow_private": ["10.250.250.10"]}
+}}

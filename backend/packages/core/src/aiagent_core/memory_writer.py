@@ -650,6 +650,7 @@ def set_context_policy(
     recipient: str,
     model: str,
     enabled: bool,
+    semantic_verifier_mode: str = "HEURISTIC",
     expected_record_version: int | None = None,
 ) -> int:
     """Owner-authored switch for the Context path. This is the only way to enable it."""
@@ -658,6 +659,7 @@ def set_context_policy(
         or not _RECIPIENT.fullmatch(recipient)
         or not 1 <= len(model) <= 128
         or not isinstance(enabled, bool)
+        or semantic_verifier_mode not in ("HEURISTIC", "LLM_GATED")
     ):
         raise CommandError("INVALID_CONTEXT_POLICY", 422)
     with db.tx(tenant=scope.tenant_id) as c:
@@ -673,20 +675,22 @@ def set_context_policy(
             if expected_record_version not in (None, 0):
                 raise CommandError("CONTEXT_POLICY_CONFLICT", 409)
             c.execute(
-                "INSERT INTO agent.task_context_policies(tenant_id,task_id,owner_user_id,recipient,model,enabled)"
-                " VALUES (%s,%s,%s,%s,%s,%s)",
-                (scope.tenant_id, task_id, scope.user_id, recipient, model, enabled),
+                "INSERT INTO agent.task_context_policies(tenant_id,task_id,owner_user_id,recipient,model,enabled,semantic_verifier_mode)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (scope.tenant_id, task_id, scope.user_id, recipient, model, enabled, semantic_verifier_mode),
             )
             version = 1
         else:
             if expected_record_version is not None and int(current["record_version"]) != expected_record_version:
                 raise CommandError("CONTEXT_POLICY_CONFLICT", 409)
             c.execute(
-                "UPDATE agent.task_context_policies SET recipient=%s, model=%s, enabled=%s,"
+                "UPDATE agent.task_context_policies SET recipient=%s, model=%s, enabled=%s, semantic_verifier_mode=%s,"
                 " record_version=record_version+1, updated_at=now() WHERE tenant_id=%s AND task_id=%s",
-                (recipient, model, enabled, scope.tenant_id, task_id),
+                (recipient, model, enabled, semantic_verifier_mode, scope.tenant_id, task_id),
             )
             version = int(current["record_version"]) + 1
+        if enabled:
+            _lock_epoch(c, scope, task_id)
         record_audit(
             c,
             tenant_id=scope.tenant_id,
@@ -694,7 +698,13 @@ def set_context_policy(
             target_type="task",
             subject_ref=scope.user_id,
             target_ref=task_id,
-            detail={"recipient": recipient, "model": model, "enabled": enabled, "recordVersion": version},
+            detail={
+                "recipient": recipient,
+                "model": model,
+                "enabled": enabled,
+                "semanticVerifierMode": semantic_verifier_mode,
+                "recordVersion": version,
+            },
         )
         return version
 
@@ -705,7 +715,7 @@ def context_policy(db: Database, scope: Scope, *, task_id: str) -> dict[str, Any
     with db.tx(tenant=scope.tenant_id) as c:
         _owner_scope(c, scope, task_id, allow_revocation=True)
         row = c.execute(
-            "SELECT recipient,model,enabled,record_version,updated_at FROM agent.task_context_policies"
+            "SELECT recipient,model,enabled,semantic_verifier_mode,record_version,updated_at FROM agent.task_context_policies"
             " WHERE tenant_id=%s AND task_id=%s AND owner_user_id=%s",
             (scope.tenant_id, task_id, scope.user_id),
         ).fetchone()
@@ -715,6 +725,7 @@ def context_policy(db: Database, scope: Scope, *, task_id: str) -> dict[str, Any
         "recipient": row["recipient"],
         "model": row["model"],
         "enabled": bool(row["enabled"]),
+        "semanticVerifierMode": str(row.get("semantic_verifier_mode") or "HEURISTIC"),
         "recordVersion": int(row["record_version"]),
         "updatedAt": row["updated_at"].isoformat(),
     }
