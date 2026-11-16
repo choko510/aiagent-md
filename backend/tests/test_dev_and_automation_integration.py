@@ -553,3 +553,108 @@ def test_authority_lease_expiry_and_service_role_rls_enforcement(
             iso_rt.close()
     finally:
         drop_database(iso_env.name)
+
+
+def test_campaign_goal_propagates_to_worker_deliverable(
+    stack, pg: PgEnv, dbs: dict[str, Database], api: TestClient
+) -> None:
+    """P1-6 E2E: Campaign goal_text, work item, budget, and STEER instructions execute in child Worker."""
+    from helpers import approve, state
+
+    t = admin.provision_tenant(pg.owner)
+    n0 = len(stack.sends())
+
+    class _PassVerifier(VerificationPort):
+        def passes(self, *, campaign_id: str, cycle_id: str, evidence_refs: list[str], quality_gate_ref: str) -> bool:
+            return bool(evidence_refs and quality_gate_ref)
+
+    store = PostgresCampaignStore(
+        dbs["relay"], tenant_id=t["tenantId"], owner_user_id=t["userId"], workspace_id=t["workspaceId"]
+    )
+    q = PostgresQueueDispatch(dbs["relay"], owner_user_id=t["userId"], workspace_id=t["workspaceId"])
+    ctrl = CampaignController(store, FakeClock(datetime(2026, 11, 16, 10, 0, tzinfo=UTC)), q, verifier=_PassVerifier())
+    plan = CampaignPlan(
+        campaign_id="camp-e2e-goal",
+        tenant_id=t["tenantId"],
+        goal_revision="1",
+        policy=StopPolicy(
+            max_cycles=4,
+            deadline_utc="2026-11-16T18:00:00+00:00",
+            max_cost_micro_usd=5000,
+            max_tokens=50000,
+            max_tool_calls=50,
+            max_concurrent_cycles=1,
+        ),
+        cost_per_cycle=250,
+        tokens_per_cycle=6000,
+        tools_per_cycle=7,
+        goal_text="Campaign default goal",
+        work_item_goals=(("item-notify", "Find the widget price and notify alice."),),
+    )
+    ctrl.create(plan, "item-notify")
+    assert ctrl.dispatch_pending("camp-e2e-goal") == 1
+    assert len(q.created_runs) == 1
+    child = q.created_runs[0]
+
+    # DB task_goal_revisions & runs reflect real Campaign goal, work item, budget, and deadline
+    with dbs["owner"].conn() as c:
+        row = c.execute(
+            "SELECT g.goal_text, r.token_budget, r.max_model_calls"
+            " FROM agent.task_goal_revisions g"
+            " JOIN agent.runs r ON r.tenant_id = g.tenant_id AND r.task_id = g.task_id"
+            " WHERE g.tenant_id=%s AND g.task_id=%s AND g.revision=1",
+            (t["tenantId"], child["taskId"]),
+        ).fetchone()
+    assert row is not None
+    assert "Find the widget price and notify alice." in row["goal_text"]
+    assert "work_item=item-notify" in row["goal_text"]
+    assert "tokens_budget=6000" in row["goal_text"]
+    assert row["token_budget"] == 6000 and row["max_model_calls"] == 7
+
+    # Real Worker executes the spawned Campaign child Task end-to-end
+    r1 = stack.worker()
+    assert r1.returncode == 0, r1.stderr[-2000:]
+    st1 = state(api, t, child["taskId"])
+    assert st1["state"] == "WAITING_INPUT" and st1["run"]["state"] == "WAITING_APPROVAL", st1
+    approve(api, t, child["taskId"])
+    r2 = stack.worker()
+    assert r2.returncode == 0, r2.stderr[-2000:]
+    st2 = state(api, t, child["taskId"])
+    assert st2["state"] == "SUCCEEDED" and st2["run"]["result"] == "done:CONFIRMED", st2
+    sent = stack.sends()[n0:]
+    assert len(sent) == 1 and sent[0]["body"] == {"to": "alice", "body": "price=42"}
+
+    # STEER updates Campaign goal_text & revision; subsequent cycle carries new goal into child Task
+    v2 = ctrl.steer(
+        "camp-e2e-goal",
+        new_goal_revision="2",
+        expected_control_version=1,
+        new_goal_text="Check DB connection pool status.",
+    )
+    ctrl.admit_cycle("camp-e2e-goal", "camp-e2e-goal:1", expected_control_version=v2)
+    ctrl.advance("camp-e2e-goal", "camp-e2e-goal:1", CampPhase.PLAN, CampPhase.EXECUTE, expected_control_version=v2)
+    ctrl.advance("camp-e2e-goal", "camp-e2e-goal:1", CampPhase.EXECUTE, CampPhase.VERIFY, expected_control_version=v2)
+    ctrl.complete_cycle(
+        "camp-e2e-goal",
+        "camp-e2e-goal:1",
+        claimed_success=True,
+        evidence_refs=["ev:done"],
+        quality_gate_ref="gate:pass",
+        cost_micro_usd=250,
+        tokens=3000,
+        tools=2,
+        next_work_item_id="item-pool-check",
+        expected_control_version=v2,
+    )
+    assert ctrl.dispatch_pending("camp-e2e-goal") >= 1
+    second_child = q.created_runs[-1]
+    assert second_child["taskId"] != child["taskId"]
+    with dbs["owner"].conn() as c:
+        row2 = c.execute(
+            "SELECT goal_text FROM agent.task_goal_revisions WHERE tenant_id=%s AND task_id=%s AND revision=1",
+            (t["tenantId"], second_child["taskId"]),
+        ).fetchone()
+    assert row2 is not None
+    assert "Check DB connection pool status." in row2["goal_text"]
+    assert "work_item=item-pool-check" in row2["goal_text"]
+    assert "goal_rev=2" in row2["goal_text"]

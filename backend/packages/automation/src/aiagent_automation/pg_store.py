@@ -118,11 +118,15 @@ class PostgresQueueDispatch(QueueDispatch):
     ) -> bool:
         with self._db.tx(tenant=tenant_id) as c:
             row = c.execute(
-                "SELECT state, control_version FROM agent.automation_campaigns"
+                "SELECT state, control_version, campaign_json FROM agent.automation_campaigns"
                 " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
                 (tenant_id, campaign_id, self._owner_user_id),
             ).fetchone()
             if row is None or row["state"] != "ACTIVE" or int(row["control_version"]) != control_version:
+                return False
+            camp = Campaign.from_wire(dict(row["campaign_json"]))
+            cycle = next((cy for cy in camp.cycles if cy.cycle_id == cycle_id), None)
+            if cycle is None:
                 return False
             existing = c.execute(
                 "SELECT id FROM agent.tasks WHERE tenant_id=%s AND trigger_key=%s",
@@ -130,15 +134,18 @@ class PostgresQueueDispatch(QueueDispatch):
             ).fetchone()
             if existing is not None:
                 return True
+            child_goal = camp.plan.child_task_goal(cycle.cycle_id, cycle.logical_work_item_id)
             created = create_task_tx(
                 c,
                 tenant_id=tenant_id,
                 owner_user_id=self._owner_user_id,
                 workspace_id=self._workspace_id,
-                goal=f"campaign:{campaign_id}:cycle:{cycle_id}",
+                goal=child_goal,
                 profile=self._profile,
                 actor={"type": "service", "id": "automation"},
                 trigger_key=dedupe_key,
+                token_budget=camp.plan.tokens_per_cycle,
+                max_model_calls=camp.plan.tools_per_cycle,
             )
             self.created_runs.append(created)
             return True
