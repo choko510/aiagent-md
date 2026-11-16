@@ -16,6 +16,7 @@ import contextlib
 import hmac
 import logging
 import socket
+import ssl
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
@@ -24,6 +25,7 @@ from .netpolicy import EgressDenied, normalize_host, vet_addresses
 
 log = logging.getLogger("aiagent.egress")
 MAX_HEAD = 16 * 1024
+MAX_FORWARD_BODY = 1_048_576
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 
 
@@ -46,9 +48,11 @@ class EgressProxy:
         resolver: Resolver = system_resolver,
         connect_timeout_s: float = 10.0,
         idle_timeout_s: float = 120.0,
+        upstream_ssl: ssl.SSLContext | None = None,
     ) -> None:
         self.sentinel, self.config, self.resolver = sentinel, config, resolver
         self.connect_timeout_s, self.idle_timeout_s = connect_timeout_s, idle_timeout_s
+        self.upstream_ssl = upstream_ssl
         self._server: asyncio.base_events.Server | None = None
 
     async def start(self, host: str, port: int) -> int:
@@ -92,9 +96,11 @@ class EgressProxy:
                 scheme, host, port, inner = "https", normalize_host(h), int(p), None
             else:
                 u = urlsplit(target)
-                if u.scheme not in ("http",) or not u.hostname or u.username or u.password:
+                if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password:
                     raise EgressDenied("ORIGIN_FORM_OR_BAD_URL")
-                scheme, host, port = "http", normalize_host(u.hostname), u.port or 80
+                scheme = u.scheme.lower()
+                host = normalize_host(u.hostname)
+                port = u.port or (443 if scheme == "https" else 80)
                 inner = (u.path or "/") + (f"?{u.query}" if u.query else "")
             dest = self.config.match(scheme, host, port)
             if dest is None:
@@ -125,7 +131,14 @@ class EgressProxy:
                 raise EgressDenied("CHUNKED_NOT_SUPPORTED")
             addrs = vet_addresses(await self.resolver(host, port), allow_private=dest.allow_private)
             ip = addrs[0]
-            ur, uw = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=self.connect_timeout_s)
+            if method != "CONNECT" and scheme == "https":
+                ssl_ctx = self.upstream_ssl if self.upstream_ssl is not None else ssl.create_default_context()
+                ur, uw = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port, ssl=ssl_ctx, server_hostname=host),
+                    timeout=self.connect_timeout_s,
+                )
+            else:
+                ur, uw = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=self.connect_timeout_s)
             await asyncio.to_thread(self.sentinel.receipt, tenant, pid, "ALLOWED", "FORWARDED", host, port, ip)
             # Static Model Gateway egress has no Tool permit/receipt, so emit a
             # metadata-only record at the actual forwarding boundary. Never log
@@ -156,10 +169,13 @@ class EgressProxy:
                     "trailer",
                     "upgrade",
                 }
-                out = [f"{method} {inner} {version}", f"Host: {host}:{port}", "Connection: close"]
+                host_header = host if (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
+                out = [f"{method} {inner} {version}", f"Host: {host_header}", "Connection: close"]
                 out += [f"{k}: {v}" for k, v in headers if k.lower() not in hop and k.lower() != "host"]
-                uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
                 n = int(hmap.get("content-length", "0") or 0)
+                if n < 0 or n > MAX_FORWARD_BODY:
+                    raise EgressDenied("BODY_TOO_LARGE")
+                uw.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
                 if n:
                     uw.write(await r.readexactly(n))
                 await uw.drain()

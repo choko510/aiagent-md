@@ -421,6 +421,7 @@ class OpenAIProvider:
         if self.key is not None:
             headers["authorization"] = "Bearer " + self.key.reveal()
         done_seen = False
+        pending_tools: dict[int, dict[str, Any]] = {}
         open_tools: dict[int, str] = {}
         try:
             async with _egress_http_client(self.proxy, self.proxy_token, self.timeout_s, self.verify) as client:
@@ -437,6 +438,8 @@ class OpenAIProvider:
                         raw = line[5:].strip()
                         if raw == "[DONE]":
                             done_seen = True
+                            if pending_tools:
+                                raise ProviderError("INVALID_STREAM", False)
                             for idx in sorted(open_tools):
                                 yield ProviderEvent("tool_end", tool_id=open_tools.pop(idx))
                             yield ProviderEvent("stop")
@@ -468,17 +471,33 @@ class OpenAIProvider:
                         for tc in delta.get("tool_calls") or []:
                             idx = int(tc.get("index", 0))
                             fn = tc.get("function") or {}
-                            if idx not in open_tools:
-                                tid = str(tc.get("id") or f"call_{uuid.uuid4().hex[:16]}")
-                                tname = str(fn.get("name") or "")
-                                if not tname:
-                                    raise ProviderError("INVALID_STREAM", False)
-                                open_tools[idx] = tid
-                                yield ProviderEvent("tool_start", tool_id=tid, tool_name=tname)
+                            if idx in open_tools:
+                                args_part = fn.get("arguments")
+                                if isinstance(args_part, str) and args_part:
+                                    yield ProviderEvent("tool_args", tool_id=open_tools[idx], text=args_part)
+                                continue
+                            buf = pending_tools.setdefault(
+                                idx,
+                                {"id": None, "name": "", "args": []},
+                            )
+                            if tc.get("id"):
+                                buf["id"] = str(tc["id"])
+                            if fn.get("name"):
+                                buf["name"] = str(fn["name"])
                             args_part = fn.get("arguments")
                             if isinstance(args_part, str) and args_part:
-                                yield ProviderEvent("tool_args", tool_id=open_tools[idx], text=args_part)
-                        if choice.get("finish_reason") is not None and open_tools:
+                                buf["args"].append(args_part)
+                            if buf["name"]:
+                                tid = str(buf["id"] or f"call_{uuid.uuid4().hex[:16]}")
+                                open_tools[idx] = tid
+                                yield ProviderEvent("tool_start", tool_id=tid, tool_name=buf["name"])
+                                for buffered_arg in buf["args"]:
+                                    if buffered_arg:
+                                        yield ProviderEvent("tool_args", tool_id=tid, text=buffered_arg)
+                                pending_tools.pop(idx, None)
+                        if choice.get("finish_reason") is not None:
+                            if pending_tools:
+                                raise ProviderError("INVALID_STREAM", False)
                             for idx in sorted(open_tools):
                                 yield ProviderEvent("tool_end", tool_id=open_tools.pop(idx))
         except httpx.TransportError as exc:

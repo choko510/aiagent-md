@@ -34,7 +34,7 @@ from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 from jsonschema import Draft202012Validator
 from psycopg.types.json import Jsonb
 
-from .executors import Executor, ExecutorFailed, ExecutorUnknown, valid_receipt
+from .executors import Destination, Executor, ExecutorFailed, ExecutorUnknown, valid_receipt
 
 log = logging.getLogger("aiagent.tool_gateway")
 SERVICE = {"type": "service", "id": "tool_gateway"}
@@ -474,8 +474,12 @@ class ToolGateway:
             )
         permit = None
         try:
+            dest_tool_fn = getattr(executor, "destination_for_tool", None)
             dest_fn = getattr(executor, "destination_for", None)
-            dest = dest_fn(args) if callable(dest_fn) else executor.destination()
+            if callable(dest_tool_fn):
+                dest = dest_tool_fn(tool, args)
+            else:
+                dest = dest_fn(args) if callable(dest_fn) else executor.destination()
         except ExecutorFailed as e:
             return self._settle(
                 claim,
@@ -516,6 +520,15 @@ class ToolGateway:
                     effect="FAILED",
                 )
         if hasattr(executor, "context"):  # executors that need the admitted identity (sandbox grants, browser fence)
+
+            async def _issue_hop_permit(hop_dest: Destination) -> str:
+                if self.sentinel is None:
+                    raise ExecutorFailed("egress requires Sentinel")
+                try:
+                    return await asyncio.to_thread(self.sentinel.authorize, claim, intent["id"], hop_dest)
+                except RpcError as e:
+                    raise ExecutorFailed(f"sentinel:{e.code}") from e
+
             executor.context[effect_key] = {
                 "tool": tool,
                 "tenant_id": claim.tenant_id,
@@ -526,6 +539,7 @@ class ToolGateway:
                 "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,
+                "permit_issuer": _issue_hop_permit,
             }
         fault("gateway_before_send")
         try:

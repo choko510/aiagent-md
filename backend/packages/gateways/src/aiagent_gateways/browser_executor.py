@@ -9,14 +9,17 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import json
 import os
 import ssl
 import threading
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from aiagent_browser import (
     Authority,
@@ -37,9 +40,21 @@ from aiagent_domain import uuid7
 
 from .context_keys import KeyRing
 from .executors import Destination, ExecutorFailed, ExecutorUnknown
-from .web_fetch import HARD_MAX_FETCH_BYTES, Resolver, parse_safe_http_url, safe_http_get
+from .web_fetch import HARD_MAX_FETCH_BYTES, PermitIssuer, Resolver, parse_safe_http_url, safe_http_get
 
 T = TypeVar("T")
+
+
+@dataclass
+class _PermitBundle:
+    session_key: str
+    hop0_permit: str | None
+    hop0_dest: Destination | None
+    permit_issuer: PermitIssuer | None
+    hop0_used: bool = False
+
+
+_PERMIT_CTX: contextvars.ContextVar[_PermitBundle | None] = contextvars.ContextVar("browser_permit_ctx", default=None)
 
 
 class _DbAuthorityPort:
@@ -151,47 +166,118 @@ class _BrowserPolicyGate:
 
 
 class _HybridCatalogAndWebPort:
-    """Serves `fixture://` from static catalog and `http(s)://` via SSRF-safe `safe_http_get`."""
+    """Serves `fixture://` from static catalog and `http(s)://` via Sentinel/EgressProxy + session Cookie jar."""
 
     def __init__(
         self,
         catalog: dict[str, FixtureResponse],
+        worker: WorkerPort,
         *,
         proxy: str | None = None,
         resolver: Resolver | None = None,
         allow_private_addrs: frozenset[str] = frozenset(),
         verify: bool | ssl.SSLContext = True,
-        active_permits: dict[str, str | None] | None = None,
+        require_proxy: bool = False,
     ) -> None:
         self._catalog = catalog
+        self._worker = worker
         self._proxy = proxy
         self._resolver = resolver
         self._allow_private_addrs = allow_private_addrs
         self._verify = verify
-        self._active_permits = active_permits if active_permits is not None else {}
+        self._require_proxy = require_proxy
 
-    async def fetch(self, url: str) -> FixtureResponse:
-        if url.startswith("fixture://"):
-            return self._catalog.get(url, FixtureResponse(404))
-        permit = self._active_permits.get("permit")
+    async def _permit_for(self, url: str, method: str) -> str | None:
+        parsed = parse_safe_http_url(url)
+        needed = Destination(parsed.scheme, parsed.host, parsed.port, method.upper())
+        bundle = _PERMIT_CTX.get()
+        if bundle is None:
+            return None
+        if not bundle.hop0_used and bundle.hop0_permit is not None and bundle.hop0_dest == needed:
+            bundle.hop0_used = True
+            return bundle.hop0_permit
+        if bundle.permit_issuer is not None:
+            return await bundle.permit_issuer(needed)
+        if self._proxy is not None:
+            raise BrowserError("EGRESS_DENIED")
+        return None
+
+    async def _do_web_request(
+        self,
+        session_id: str | None,
+        url: str,
+        *,
+        method: str = "GET",
+        request_body: bytes | None = None,
+        content_type: str | None = None,
+    ) -> FixtureResponse:
+        permit = await self._permit_for(url, method)
+        extra_headers: dict[str, str] = {}
+        if content_type:
+            extra_headers["Content-Type"] = content_type
+        if session_id is not None:
+            cookies_fn = getattr(self._worker, "cookies_for_url", None)
+            if callable(cookies_fn):
+                cookie_hdr = await cookies_fn(session_id, url)
+                if cookie_hdr:
+                    extra_headers["Cookie"] = cookie_hdr
         try:
             resp = await safe_http_get(
                 url,
+                method=method,
+                request_body=request_body,
                 resolver=self._resolver,
                 allow_private_addrs=self._allow_private_addrs,
                 proxy=self._proxy,
                 proxy_permit=permit,
+                extra_headers=extra_headers or None,
                 max_bytes=min(524_288, HARD_MAX_FETCH_BYTES),
                 verify=self._verify,
-                max_redirects=0,  # BrowserSessionService tracks & re-gates every redirect hop itself
+                max_redirects=0,
+                follow_redirects=False,
+                raise_on_http_error=False,
+                require_proxy=self._require_proxy,
             )
-            return FixtureResponse(resp.status, resp.body.decode("utf-8", "replace"))
+            if session_id is not None and resp.set_cookies:
+                apply_fn = getattr(self._worker, "apply_set_cookies", None)
+                if callable(apply_fn):
+                    await apply_fn(session_id, url, resp.set_cookies)
+            return FixtureResponse(resp.status, resp.body.decode("utf-8", "replace"), redirect_to=resp.location)
         except ExecutorFailed as exc:
-            if "egress_denied" in str(exc):
+            if "egress_denied" in str(exc) or "sentinel:" in str(exc) or "egress_proxy_required" in str(exc):
                 raise BrowserError("EGRESS_DENIED") from exc
             raise BrowserError("FIXTURE_RESPONSE_DENIED") from exc
         except ExecutorUnknown as exc:
             raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
+
+    async def fetch(self, url: str) -> FixtureResponse:
+        if url.startswith("fixture://"):
+            return self._catalog.get(url, FixtureResponse(404))
+        return await self._do_web_request(None, url)
+
+    async def fetch_session(self, session_id: str, url: str) -> FixtureResponse:
+        if url.startswith("fixture://"):
+            return self._catalog.get(url, FixtureResponse(404))
+        return await self._do_web_request(session_id, url)
+
+    async def submit_form(
+        self, session_id: str, url: str, method: str, fields: list[tuple[str, str]]
+    ) -> FixtureResponse:
+        m = method.upper()
+        if m == "GET":
+            encoded = urlencode(fields)
+            parts = urlsplit(url)
+            q = f"{parts.query}&{encoded}" if (parts.query and encoded) else (encoded or parts.query)
+            target_url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", q, ""))
+            return await self._do_web_request(session_id, target_url, method="GET")
+        body = urlencode(fields).encode("utf-8")
+        return await self._do_web_request(
+            session_id,
+            url,
+            method="POST",
+            request_body=body,
+            content_type="application/x-www-form-urlencoded",
+        )
 
 
 class _CoreRedactor:
@@ -223,13 +309,23 @@ class BrowserSessionExecutor:
         verify_ssl: bool | ssl.SSLContext = True,
         storage_key_ring: KeyRing | None = None,
         worker: WorkerPort | None = None,
+        require_proxy: bool = False,
     ) -> None:
         self._db = db
+        self.proxy = proxy
         self.context: dict[str, dict[str, Any]] = {"__active_effect_key__": {}}
-        self._active_permits: dict[str, str | None] = {}
         self._storage_key_ring = storage_key_ring
         self._worker = worker if worker is not None else PlaywrightBrowserWorker()
         self._fence = PostgresFencePort(db)
+        web_port = _HybridCatalogAndWebPort(
+            dict(fixtures or {}),
+            self._worker,
+            proxy=proxy,
+            resolver=resolver,
+            allow_private_addrs=allow_private_addrs,
+            verify=verify_ssl,
+            require_proxy=require_proxy,
+        )
         self._service = BrowserSessionService(
             worker=self._worker,
             authority=_DbAuthorityPort(db),
@@ -240,14 +336,7 @@ class BrowserSessionExecutor:
                 allow_https=allow_https,
                 allow_http_web=allow_http_web,
             ),
-            fixture=_HybridCatalogAndWebPort(
-                dict(fixtures or {}),
-                proxy=proxy,
-                resolver=resolver,
-                allow_private_addrs=allow_private_addrs,
-                verify=verify_ssl,
-                active_permits=self._active_permits,
-            ),
+            fixture=web_port,
             redactor=_CoreRedactor(),
             new_id=uuid7,
             allowed_fixture_hosts=allowed_hosts,
@@ -255,6 +344,7 @@ class BrowserSessionExecutor:
             allowed_web_hosts=allowed_web_hosts,
             allow_https=allow_https,
             allow_http_web=allow_http_web,
+            web_submitter=web_port,
         )
         # Task-scoped session tracking keyed by (tenant_id, owner_user_id, task_id).
         self._task_sessions: dict[tuple[str, str, str], tuple[str, Authority]] = {}
@@ -313,11 +403,21 @@ class BrowserSessionExecutor:
         return None
 
     def destination_for(self, args: dict[str, Any]) -> Destination | None:
+        return self.destination_for_tool("browser_navigate", args)
+
+    def destination_for_tool(self, tool_name: str, args: dict[str, Any]) -> Destination | None:
         url = args.get("url")
+        method = "POST" if tool_name == "browser_submit" else "GET"
+        if not isinstance(url, str):
+            sid = args.get("sessionId")
+            if isinstance(sid, str):
+                entry = self._service._entries.get(sid)
+                if entry is not None:
+                    url = entry.current_url
         if not isinstance(url, str) or url.startswith("fixture://"):
             return None
         parsed = parse_safe_http_url(url)
-        return Destination(parsed.scheme, parsed.host, parsed.port, "GET")
+        return Destination(parsed.scheme, parsed.host, parsed.port, method)
 
     @classmethod
     def from_fixture_file(
@@ -451,7 +551,15 @@ class BrowserSessionExecutor:
         authority = self._authority_from_ctx(ctx)
         scope_key = (authority.tenant_id, authority.owner_user_id, authority.task_id)
         tool_name = str(ctx["tool"])
-        self._active_permits["permit"] = permit
+        hop0_dest = self.destination_for_tool(tool_name, args)
+        token_ctx = _PERMIT_CTX.set(
+            _PermitBundle(
+                session_key=effect_key,
+                hop0_permit=permit,
+                hop0_dest=hop0_dest,
+                permit_issuer=ctx.get("permit_issuer"),
+            )
+        )
 
         try:
             if tool_name == "browser_navigate":
@@ -493,13 +601,16 @@ class BrowserSessionExecutor:
                 await self._persist_session_state(
                     sid, authority, out.after_observation.text, out.after_observation.text_truncated
                 )
-                return {
+                click_res: dict[str, Any] = {
                     "sessionId": out.session_id,
                     "generation": out.generation,
                     "status": out.status,
                     "before": out.before_observation.text,
                     "after": out.after_observation.text,
                 }
+                if out.status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
+                    click_res["takeoverReason"] = out.status
+                return click_res
 
             if tool_name == "browser_submit":
                 raw_inputs = args.get("inputs") or []
@@ -517,7 +628,7 @@ class BrowserSessionExecutor:
                 await self._persist_session_state(
                     sid, authority, out.after_observation.text, out.after_observation.text_truncated
                 )
-                return {
+                sub_res: dict[str, Any] = {
                     "sessionId": out.session_id,
                     "generation": out.generation,
                     "status": out.status,
@@ -525,12 +636,15 @@ class BrowserSessionExecutor:
                     "after": out.after_observation.text,
                     "receipt": f"browser:{ctx['intent_id']}:{out.generation}"[:120],
                 }
+                if out.status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
+                    sub_res["takeoverReason"] = out.status
+                return sub_res
         except BrowserError as exc:
             if exc.code == "ACTION_OUTCOME_UNKNOWN":
                 raise ExecutorUnknown(exc.code) from exc
             raise ExecutorFailed(exc.code) from exc
         finally:
-            self._active_permits.pop("permit", None)
+            _PERMIT_CTX.reset(token_ctx)
         raise ExecutorFailed(f"unsupported browser tool: {tool_name}")
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
@@ -573,5 +687,6 @@ def browser_from_env(db: Database | None) -> BrowserSessionExecutor | None:
                 allow_private_addrs=allow_priv,
                 proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
                 storage_key_ring=ring,
+                require_proxy=(config.profile() == "production"),
             )
     return None

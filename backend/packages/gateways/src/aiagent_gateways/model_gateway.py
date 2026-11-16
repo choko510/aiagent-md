@@ -31,12 +31,52 @@ from .context_dispatch import ContextAdmission
 from .context_keys import KeyRing
 from .privacy import StreamPrivacyGate
 from .providers import FakeModelProvider, ProviderError
-from .router import Route, RouteBreaker, RouteRates, route_rejection_reason
+from .router import Route, RouteBreaker, RouteRates, route_rejection_reason, select_ordered_routes
 from .tombstone_authority import verify as verify_tombstones
 
 log = logging.getLogger("aiagent.model_gateway")
 STREAMS_RE = ("main", "summarize", "verify")
 MAX_CONTEXT_MESSAGES = 2000
+
+
+@dataclass(frozen=True)
+class NliAdmission:
+    """Authoritative Context/Memory verification boundary attached to stream='verify'."""
+
+    memory: Any
+    scope: Any
+    policy_recipient: str
+    expected_head: int
+    expected_source_epoch: int
+
+
+def _estimate_request_chars(req: SealedModelRequest) -> int:
+    msg_chars = len(req.system) + len(req.tools) * 512
+    for m in req.messages:
+        msg_chars += len(m["content"])
+        if m.get("tool_calls"):
+            msg_chars += len(json.dumps(m["tool_calls"], ensure_ascii=False))
+    return msg_chars
+
+
+def _select_evidence_span(full_text: str, quote: str, max_chars: int = 8000) -> str:
+    """Select up to `max_chars` from `full_text` prioritizing spans that match `quote`."""
+    if len(full_text) <= max_chars:
+        return full_text
+    low_full = full_text.lower()
+    low_q = " ".join(quote.lower().split())
+    hit_idx = low_full.find(low_q[:96]) if len(low_q) >= 8 else -1
+    if hit_idx < 0:
+        tokens = sorted({tok for tok in low_q.replace('"', " ").split() if len(tok) >= 4}, key=len, reverse=True)
+        for tok in tokens[:8]:
+            pos = low_full.find(tok)
+            if pos >= 0:
+                hit_idx = pos
+                break
+    if hit_idx < 0:
+        return full_text[:max_chars]
+    start = max(0, min(len(full_text) - max_chars, hit_idx - max_chars // 3))
+    return full_text[start : start + max_chars]
 
 
 def fault(point: str) -> None:
@@ -217,7 +257,13 @@ class ModelGateway:
 
     # -------------------------------------------------------------------- admission
     def _admit(
-        self, req: SealedModelRequest, *, cached: bool, est_tokens: int, context: ContextAdmission | None = None
+        self,
+        req: SealedModelRequest,
+        *,
+        cached: bool,
+        est_tokens: int,
+        context: ContextAdmission | None = None,
+        nli: NliAdmission | None = None,
     ) -> str:
         attempt_id = uuid7()
         reason: str | None = None
@@ -251,14 +297,14 @@ class ModelGateway:
                     req.model not in run["allowed_models"] or req.model not in self.routes or not self.routes[req.model]
                 ):
                     reason = "MODEL_POLICY"
+                elif req.stream == "verify" and (req.tools or nli is None):
+                    reason = "TOOL_SURFACE" if req.tools else "MODEL_POLICY"
                 elif not set(req.tools) <= surface:
                     reason = "TOOL_SURFACE"
-                elif req.stream == "verify" and req.tools:
-                    reason = "TOOL_SURFACE"  # NLI verification never exposes tools
                 elif req.stream.startswith("subagent:") and "task" in req.tools:
                     reason = "TOOL_SURFACE"  # subagents never inherit delegation
                 else:
-                    msg_chars = sum(len(m["content"]) for m in req.messages)
+                    msg_chars = _estimate_request_chars(req)
                     usable_routes: list[Route] = []
                     first_rejection: str | None = None
                     for candidate in self.routes[req.model]:
@@ -277,13 +323,50 @@ class ModelGateway:
                     if not usable_routes:
                         reason = first_rejection or "MODEL_POLICY"
                     else:
-                        closed_routes = [r for r in usable_routes if not self._breaker.is_open(r)]
-                        chosen_route = closed_routes[0] if closed_routes else usable_routes[0]
+                        ordered_routes = select_ordered_routes(usable_routes, self._breaker)
+                        chosen_route = ordered_routes[0]
                         if not cached and (
                             run["model_calls"] + 1 > run["max_model_calls"]
                             or run["tokens_used"] + run["tokens_reserved"] + est_tokens > run["token_budget"]
                         ):
                             reason = "BUDGET_EXHAUSTED"
+                if reason is None and nli is not None:
+                    from aiagent_context.models import SafeStop
+
+                    try:
+                        if int(run["head_revision"]) != nli.expected_head:
+                            reason = "STALE_CONTEXT"
+                        else:
+                            verify_tombstones(c, req.claim, self.tombstone_log)
+                            pol = nli.memory._call_tx(c, "context_policy_lock", nli.scope)
+                            if pol is None or not pol["enabled"] or pol["recipient"] != nli.policy_recipient:
+                                reason = "CONTEXT_NOT_ELIGIBLE"
+                            else:
+                                ep_row = nli.memory._call_tx(
+                                    c, "memory_epoch_lock", nli.scope, nli.expected_source_epoch
+                                )
+                                if ep_row is None or not ep_row["memory_epoch_lock"]:
+                                    reason = "STALE_MEMORY"
+                                else:
+                                    con_row = nli.memory._call_tx(
+                                        c, "memory_consent_lock", nli.scope, nli.policy_recipient
+                                    )
+                                    if con_row is None or not bool(con_row["memory_consent_lock"]):
+                                        reason = "RECIPIENT_CONSENT"
+                                    elif chosen_route is not None:
+                                        chosen_cap = self.providers[chosen_route.provider].capability(
+                                            chosen_route.provider_model
+                                        )
+                                        if chosen_cap.provider != nli.policy_recipient:
+                                            nli_con = nli.memory._call_tx(
+                                                c, "memory_consent_lock", nli.scope, chosen_cap.provider
+                                            )
+                                            if nli_con is None or not bool(nli_con["memory_consent_lock"]):
+                                                reason = "RECIPIENT_CONSENT"
+                    except SafeStop as ss_exc:
+                        reason = ss_exc.code
+                    except RpcError as rpc_exc:
+                        reason = rpc_exc.code
                 if reason is None and context is not None:
                     # External revocation authority, verified in the same transaction
                     # that reserves budget and records the dispatch. The database
@@ -518,14 +601,15 @@ class ModelGateway:
         full_text: str,
         *,
         source_hash: str = "",
+        nli: NliAdmission | None = None,
     ) -> Literal["SUPPORTED", "REFUTED", "UNVERIFIED"]:
-        """Run tool-free Gateway inference on stream='verify' for strict entailment verification."""
+        """Run tool-free Gateway inference on stream='verify' with atomic Memory consent/epoch/tombstone checks."""
         from aiagent_context.models import SafeStop
 
         verify_model = self.nli_model or model
-        if verify_model not in self.routes:
+        if nli is None or verify_model not in self.routes:
             raise SafeStop("SEMANTIC_VERIFIER_UNAVAILABLE")
-        bounded_src = full_text[:8000]
+        bounded_src = _select_evidence_span(full_text, quote, max_chars=8000)
         user_payload = json.dumps(
             {"quote": quote, "sourceHash": source_hash, "sourceText": bounded_src},
             ensure_ascii=False,
@@ -547,8 +631,10 @@ class ModelGateway:
         )
         est = len(user_payload) // 4 + 256
         try:
-            attempt_id = await asyncio.to_thread(self._admit, req, cached=False, est_tokens=est)
+            attempt_id = await asyncio.to_thread(self._admit, req, cached=False, est_tokens=est, nli=nli)
         except RpcError as exc:
+            if exc.code in ("RECIPIENT_CONSENT", "STALE_MEMORY", "STALE_CONTEXT", "MEMORY_TOMBSTONE_UNAVAILABLE"):
+                raise SafeStop(exc.code) from exc
             raise SafeStop("SEMANTIC_VERIFIER_UNAVAILABLE") from exc
         try:
             gate, provider_attempts = await self._stream_with_retry(req, attempt_id, None, single_attempt=True)
@@ -593,18 +679,26 @@ class ModelGateway:
         return "UNVERIFIED"
 
     def _verify_claim_sync(
-        self, claim: Claim, model: str, quote: str, full_text: str, source_hash: str
+        self,
+        claim: Claim,
+        model: str,
+        quote: str,
+        full_text: str,
+        source_hash: str,
+        nli: NliAdmission | None = None,
     ) -> Literal["SUPPORTED", "REFUTED", "UNVERIFIED"]:
         import concurrent.futures
 
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.verify_claim_with_llm(claim, model, quote, full_text, source_hash=source_hash))
+            return asyncio.run(
+                self.verify_claim_with_llm(claim, model, quote, full_text, source_hash=source_hash, nli=nli)
+            )
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(
                 asyncio.run,
-                self.verify_claim_with_llm(claim, model, quote, full_text, source_hash=source_hash),
+                self.verify_claim_with_llm(claim, model, quote, full_text, source_hash=source_hash, nli=nli),
             ).result()
 
     def compact_context(
@@ -752,10 +846,17 @@ class ModelGateway:
             )
             nli_setting = os.environ.get("AIAGENT_CONTEXT_NLI_MODE") or policy.semantic_verifier_mode
             use_llm_nli = nli_setting == "LLM_GATED"
+            nli_adm = NliAdmission(
+                memory=context.memory,
+                scope=context.scope,
+                policy_recipient=policy.recipient,
+                expected_head=head,
+                expected_source_epoch=int(retrieval.source_epoch),
+            )
             verifier: Any = (
                 GatedLlmNliVerifier(
                     lambda quote, full_text, sum_claim: self._verify_claim_sync(
-                        claim, policy.model, quote, full_text, sum_claim.source_hash
+                        claim, policy.model, quote, full_text, sum_claim.source_hash, nli=nli_adm
                     ),
                     require_llm=True,
                 )
@@ -999,7 +1100,7 @@ class ModelGateway:
         allowed = {k: TOOLS[k] for k in req.tools if k in TOOLS}
         allowed.update({k: INTERNAL_TOOL_SPECS[k] for k in req.tools if k in INTERNAL_TOOL_SPECS})
         tool_schemas = [allowed[k].provider_schema() for k in req.tools if k in allowed]
-        msg_chars = sum(len(m["content"]) for m in req.messages)
+        msg_chars = _estimate_request_chars(req)
         candidates = [
             r
             for r in self.routes[req.model]
@@ -1013,8 +1114,7 @@ class ModelGateway:
             )
             is None
         ]
-        closed = [r for r in candidates if not self._breaker.is_open(r)]
-        ordered = closed if closed else candidates[:1]
+        ordered = select_ordered_routes(candidates, self._breaker)
         attempts = 0
         last: ProviderError | None = None
         for route in ordered[:1] if single_attempt else ordered:

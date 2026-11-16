@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
+from typing import Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .contracts import (
@@ -18,6 +19,7 @@ from .contracts import (
     FencePort,
     FixtureGatePort,
     FixturePort,
+    FixtureResponse,
     FormInput,
     IdFactory,
     Observation,
@@ -81,6 +83,7 @@ class BrowserSessionService:
         allowed_web_hosts: frozenset[str] = frozenset(),
         allow_https: bool = False,
         allow_http_web: bool = False,
+        web_submitter: object | None = None,
     ) -> None:
         if (
             not allowed_fixture_hosts
@@ -100,6 +103,7 @@ class BrowserSessionService:
         self._web_hosts = frozenset(h.strip().lower() for h in allowed_web_hosts if h.strip())
         self._allow_https = allow_https
         self._allow_http_web = allow_http_web
+        self._web_submitter = web_submitter
         self._approval = approval
         self._auth_transition = auth_transition
         self._max_sessions_per_task = max_sessions_per_task
@@ -197,42 +201,57 @@ class BrowserSessionService:
                 await self._check(session_id, authority, operation)
                 # Cannot infer a real-network permit from a mock fixture permission.
                 await self._gate.permit(authority, current)
-                response = await self._fixture.fetch(current)
+                fetch_session = getattr(self._fixture, "fetch_session", None)
+                if fetch_session is not None:
+                    response = await fetch_session(session_id, current)
+                else:
+                    response = await self._fixture.fetch(current)
                 if response.status in (301, 302, 303, 307, 308):
                     if response.redirect_to is None or not response.redirect_to.strip():
                         raise BrowserError("INVALID_FIXTURE_REDIRECT")
                     current = self._validate_url(_resolve_redirect(current, response.redirect_to))
                     continue
-                is_web = current.startswith(("http://", "https://"))
-                max_html_bytes = 524_288 if is_web else 65_536
-                if (
-                    response.status not in ((200, 401, 403) if is_web else (200,))
-                    or len(response.html.encode("utf-8")) > max_html_bytes
-                ):
-                    raise BrowserError("FIXTURE_RESPONSE_DENIED")
-                await self._check(session_id, authority, operation)
-                if is_web and hasattr(self._worker, "render"):
-                    try:
-                        status_str = await self._worker.render(  # type: ignore[call-arg]
-                            session_id, response.html, origin_url=current, status=response.status
-                        )
-                    except TypeError:
-                        status_str = await self._worker.render(session_id, response.html)
-                else:
-                    status_str = await self._worker.render(session_id, response.html)
-                await self._fence.check(session_id, authority)
-                entry.current_url = current
-                if is_web and status_str in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
-                    entry.state = State.NEEDS_LOGIN
-                    entry.last_challenge = status_str
-                else:
-                    entry.last_challenge = None
-                return await self._observe_locked(session_id, authority, entry)
+                return await self._render_response_locked(session_id, authority, entry, current, response, operation)
             raise BrowserError("REDIRECT_LIMIT")
         except BrowserError as exc:
             if exc.code == "BROWSER_CRASHED":
                 entry.state = State.RECOVERING
             raise
+
+    async def _render_response_locked(
+        self,
+        session_id: str,
+        authority: Authority,
+        entry: _Entry,
+        current: str,
+        response: FixtureResponse,
+        operation: str,
+    ) -> Observation:
+        is_web = current.startswith(("http://", "https://"))
+        max_html_bytes = 524_288 if is_web else 65_536
+        if (
+            response.status not in ((200, 401, 403) if is_web else (200,))
+            or len(response.html.encode("utf-8")) > max_html_bytes
+        ):
+            raise BrowserError("FIXTURE_RESPONSE_DENIED")
+        await self._check(session_id, authority, operation)
+        if is_web and hasattr(self._worker, "render"):
+            try:
+                status_str = await self._worker.render(  # type: ignore[call-arg]
+                    session_id, response.html, origin_url=current, status=response.status
+                )
+            except TypeError:
+                status_str = await self._worker.render(session_id, response.html)
+        else:
+            status_str = await self._worker.render(session_id, response.html)
+        await self._fence.check(session_id, authority)
+        entry.current_url = current
+        if is_web and status_str in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
+            entry.state = State.NEEDS_LOGIN
+            entry.last_challenge = status_str
+        else:
+            entry.last_challenge = None
+        return await self._observe_locked(session_id, authority, entry)
 
     async def navigate_fixture(self, session_id: str, authority: Authority, url: str) -> Observation:
         entry = await self._operation(session_id, authority, "navigate_fixture")
@@ -366,9 +385,13 @@ class BrowserSessionService:
                 raise
             await self._fence.check(session_id, authority)
             after = await self._observe_locked(session_id, authority, entry)
-            if worker_status == "NEEDS_LOGIN":
+            if worker_status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
                 entry.state = State.NEEDS_LOGIN
-                return ActionOutcome(session_id, entry.generation, "click", "NEEDS_LOGIN", before, after)
+                entry.last_challenge = worker_status
+                outcome_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                    "CAPTCHA_CHALLENGE" if worker_status == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                )
+                return ActionOutcome(session_id, entry.generation, "click", outcome_status, before, after)
             return ActionOutcome(session_id, entry.generation, "click", "EXECUTED", before, after)
 
     async def submit(
@@ -398,6 +421,49 @@ class BrowserSessionService:
                 self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
+            is_web = entry.current_url is not None and entry.current_url.startswith(("http://", "https://"))
+            if is_web:
+                extract_fn = getattr(self._worker, "extract_form_submission", None)
+                submit_fn = getattr(self._web_submitter, "submit_form", None)
+                if extract_fn is None or submit_fn is None:
+                    raise BrowserError("CONTROLLED_EGRESS_REQUIRED")
+                assert entry.current_url is not None
+                try:
+                    extracted = await extract_fn(
+                        session_id, target, inputs, current_url=entry.current_url, timeout_ms=timeout_ms
+                    )
+                except BrowserError as exc:
+                    if exc.code == "BROWSER_CRASHED":
+                        entry.state = State.RECOVERING
+                    raise
+                if not extracted.get("hasForm"):
+                    raise BrowserError("CONTROLLED_EGRESS_REQUIRED")
+                action_url = self._validate_url(str(extracted["action"]))
+                form_method = str(extracted.get("method") or "GET").upper()
+                fields = list(extracted.get("fields") or ())
+                await self._gate.permit(authority, action_url)
+                try:
+                    sub_resp = await submit_fn(session_id, action_url, form_method, fields)
+                except BrowserError as exc:
+                    if exc.code == "ACTION_OUTCOME_UNKNOWN":
+                        entry.state = State.PAUSED
+                    raise
+                if sub_resp.status in (301, 302, 303, 307, 308):
+                    if sub_resp.redirect_to is None or not sub_resp.redirect_to.strip():
+                        raise BrowserError("INVALID_FIXTURE_REDIRECT")
+                    redir_url = self._validate_url(_resolve_redirect(action_url, sub_resp.redirect_to))
+                    after = await self._fetch_and_render_locked(session_id, authority, entry, redir_url, "submit")
+                else:
+                    after = await self._render_response_locked(
+                        session_id, authority, entry, action_url, sub_resp, "submit"
+                    )
+                if entry.state is State.NEEDS_LOGIN:
+                    out_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                        "CAPTCHA_CHALLENGE" if entry.last_challenge == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                    )
+                    return ActionOutcome(session_id, entry.generation, "submit", out_status, before, after)
+                return ActionOutcome(session_id, entry.generation, "submit", "EXECUTED", before, after)
+
             try:
                 worker_status = await self._worker.submit(session_id, target, inputs, timeout_ms=timeout_ms)
             except BrowserError as exc:
@@ -409,9 +475,13 @@ class BrowserSessionService:
                 raise
             await self._fence.check(session_id, authority)
             after = await self._observe_locked(session_id, authority, entry)
-            if worker_status == "NEEDS_LOGIN":
+            if worker_status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
                 entry.state = State.NEEDS_LOGIN
-                return ActionOutcome(session_id, entry.generation, "submit", "NEEDS_LOGIN", before, after)
+                entry.last_challenge = worker_status
+                sub_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                    "CAPTCHA_CHALLENGE" if worker_status == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                )
+                return ActionOutcome(session_id, entry.generation, "submit", sub_status, before, after)
             return ActionOutcome(session_id, entry.generation, "submit", "EXECUTED", before, after)
 
     async def authenticated_navigate(self, session_id: str, authority: Authority, url: str) -> Observation:

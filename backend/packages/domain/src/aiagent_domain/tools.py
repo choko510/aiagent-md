@@ -133,6 +133,7 @@ TOOLS: dict[str, ToolSpec] = {
         "write_reversible",
         False,
         "browser_fixture",
+        ("web-fetch",),
     ),
     "browser_submit": ToolSpec(
         "browser_submit",
@@ -155,6 +156,7 @@ TOOLS: dict[str, ToolSpec] = {
         "external_irreversible",
         True,
         "browser_fixture",
+        ("web-fetch",),
     ),
 }
 

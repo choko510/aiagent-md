@@ -7,14 +7,18 @@ validated with the generated strict contracts. The API never performs agent work
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from hashlib import sha256
+from http.cookies import CookieError, SimpleCookie
 from typing import Annotated, Any
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from aiagent_core import commands, config, memory_tombstones, memory_writer
 from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
+from aiagent_core.logging import redact as redact_secrets
 from aiagent_core.migrate import check_compatible
 from aiagent_core.step4_gate import capability_snapshot
 from aiagent_domain import is_uuid7
@@ -33,7 +37,88 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 
-def create_app(db: Database | None = None) -> FastAPI:
+def _load_api_storage_keyring() -> tuple[str, bytes] | None:
+    """Resolve active (key_id, AES-256 key) matching context_keys KeyRing format."""
+    raw = config.secret("AIAGENT_CONTEXT_KEY_RING_JSON", required=False)
+    if raw is not None:
+        doc = json.loads(raw.reveal())
+        active = str(doc["active"])
+        key_bytes = bytes.fromhex(str(doc["keys"][active]))
+        return active, key_bytes
+    single = config.secret("AIAGENT_CONTEXT_KEY", required=False)
+    if single is not None:
+        return "v1", bytes.fromhex(single.reveal())
+    return None
+
+
+def _encrypt_browser_storage_state(
+    keyring: Any,
+    state_dict: dict[str, Any],
+    *,
+    tenant_id: str,
+    user_id: str,
+    task_id: str,
+    session_id: str,
+) -> tuple[bytes, bytes, str, str]:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    plaintext = json.dumps(state_dict, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    aad = f"browser-storage-v1|{tenant_id}|{user_id}|{task_id}|{session_id}".encode()
+    if keyring is not None and hasattr(keyring, "active") and hasattr(keyring, "cipher"):
+        key_id = str(keyring.active)
+        nonce = os.urandom(12)
+        cipher_bytes = keyring.cipher(key_id).encrypt(nonce, plaintext, aad)
+        return nonce, cipher_bytes, key_id, sha256(plaintext).hexdigest()
+    loaded = _load_api_storage_keyring()
+    if loaded is None:
+        raise HTTPException(503, detail={"error": "STORAGE_KEY_UNAVAILABLE"})
+    key_id, key_bytes = loaded
+    nonce = os.urandom(12)
+    cipher_bytes = AESGCM(key_bytes).encrypt(nonce, plaintext, aad)
+    return nonce, cipher_bytes, key_id, sha256(plaintext).hexdigest()
+
+
+def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+    u = urlsplit(origin_url)
+    host = (u.hostname or "").lower()
+    is_https = u.scheme.lower() == "https"
+    cookies: list[dict[str, Any]] = []
+    for raw_hdr in set_cookie_headers:
+        jar = SimpleCookie()
+        try:
+            jar.load(raw_hdr)
+        except CookieError:
+            jar.clear()
+        for name, morsel in jar.items():
+            if not name:
+                continue
+            secure = bool(morsel["secure"])
+            if secure and not is_https:
+                continue
+            domain_attr = str(morsel["domain"] or "").strip().lstrip(".").lower()
+            if domain_attr and not (host == domain_attr or host.endswith("." + domain_attr)):
+                continue
+            path_attr = str(morsel["path"] or "").strip() or "/"
+            cookies.append(
+                {
+                    "name": name,
+                    "value": morsel.value,
+                    "domain": domain_attr or host,
+                    "path": path_attr,
+                    "secure": secure,
+                    "httpOnly": bool(morsel["httponly"]),
+                }
+            )
+    return cookies
+
+
+def create_app(
+    db: Database | None = None,
+    *,
+    storage_key_ring: Any = None,
+    takeover_http_fn: Callable[[str, str, dict[str, str], bytes | None], Awaitable[tuple[int, list[str], str]]]
+    | None = None,
+) -> FastAPI:
     state: dict[str, Database] = {}
 
     @asynccontextmanager
@@ -527,8 +612,9 @@ def create_app(db: Database | None = None) -> FastAPI:
                     "SELECT id, task_id, run_id, state, mode, generation, current_url, takeover_reason,"
                     " last_observation_text, last_observation_truncated, last_observation_at"
                     " FROM agent.browser_sessions"
-                    " WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
-                    (s.tenant_id, s.user_id, session_id),
+                    " WHERE tenant_id=%s AND owner_user_id=%s AND id=%s"
+                    " AND closed_at IS NULL AND agent.scope_active(%s,%s,%s)",
+                    (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id, s.workspace_id),
                 ).fetchone()
                 if row is None:
                     return None
@@ -599,19 +685,191 @@ def create_app(db: Database | None = None) -> FastAPI:
             raise HTTPException(409, detail={"error": "TAKEOVER_NOT_ALLOWED"})
         return data
 
-    @app.post("/v1/browser/sessions/{session_id}/takeover/complete")
-    async def browser_takeover_complete(session_id: str, s: S) -> dict[str, Any]:
+    @app.post("/v1/browser/sessions/{session_id}/takeover/authenticate")
+    async def browser_takeover_authenticate(session_id: str, request: Request, s: S) -> dict[str, Any]:
+        """Interactive Human Takeover login action executed strictly in HUMAN/PAUSED mode without LLM visibility."""
         if not is_uuid7(session_id):
             raise HTTPException(404)
+        raw_body = await request.body()
+        if len(raw_body) > 64 * 1024:
+            raise HTTPException(413, detail={"error": "BODY_TOO_LARGE"})
+        try:
+            parsed = json.loads(raw_body) if raw_body else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("url"), str):
+            raise HTTPException(422, detail={"error": "INVALID_TAKEOVER_REQUEST"})
+        target_url = str(parsed["url"]).strip()
+        u = urlsplit(target_url)
+        scheme = u.scheme.lower()
+        if scheme not in ("http", "https") or not u.hostname or u.username is not None or u.password is not None:
+            raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+        if scheme == "http" and config.profile() == "production":
+            raise HTTPException(422, detail={"error": "HTTPS_REQUIRED"})
+        method = str(parsed.get("method") or "POST").upper()
+        if method not in ("GET", "POST"):
+            raise HTTPException(422, detail={"error": "INVALID_METHOD"})
+        form_data = parsed.get("formData") or {}
+        if not isinstance(form_data, dict):
+            raise HTTPException(422, detail={"error": "INVALID_FORM_DATA"})
+        encoded_pairs = [(str(k), str(v)) for k, v in form_data.items()]
+
+        def load_session() -> tuple[str, str | None]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT s.task_id, s.state, s.mode FROM agent.browser_sessions s"
+                    " JOIN agent.tasks t ON t.tenant_id=s.tenant_id AND t.id=s.task_id"
+                    " WHERE s.tenant_id=%s AND s.owner_user_id=%s AND s.id=%s AND s.closed_at IS NULL"
+                    " AND agent.scope_active(%s,%s,t.workspace_id)",
+                    (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id),
+                ).fetchone()
+                if row is None:
+                    return "NOT_FOUND", None
+                if row["mode"] != "HUMAN" or row["state"] not in ("PAUSED", "NEEDS_LOGIN"):
+                    return "CONFLICT", None
+                return "OK", str(row["task_id"])
+
+        flag, task_id = await asyncio.to_thread(load_session)
+        if flag == "NOT_FOUND":
+            raise HTTPException(404)
+        if flag != "OK" or task_id is None:
+            raise HTTPException(409, detail={"error": "TAKEOVER_NOT_ACTIVE"})
+
+        req_url = target_url
+        req_body: bytes | None = None
+        req_headers: dict[str, str] = {}
+        if method == "GET" and encoded_pairs:
+            qs = urlencode(encoded_pairs)
+            sep_q = f"{u.query}&{qs}" if u.query else qs
+            req_url = urlunsplit((scheme, u.netloc, u.path or "/", sep_q, ""))
+        elif method == "POST":
+            req_body = urlencode(encoded_pairs).encode("utf-8")
+            req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+        if takeover_http_fn is not None:
+            status_code, set_cookies, resp_text = await takeover_http_fn(req_url, method, req_headers, req_body)
+        else:
+            import ipaddress
+            import socket
+
+            import httpx
+
+            host = (u.hostname or "").lower()
+            allow_priv = (
+                {x.strip() for x in os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE", "").split(",") if x.strip()}
+                if config.profile() != "production"
+                else set()
+            )
+            try:
+                infos = await asyncio.to_thread(socket.getaddrinfo, host, u.port or (443 if scheme == "https" else 80))
+            except OSError:
+                raise HTTPException(422, detail={"error": "EGRESS_DENIED"}) from None
+            for *_, sa in infos:
+                ip_obj = ipaddress.ip_address(str(sa[0]).split("%", 1)[0])
+                if not ip_obj.is_global and str(ip_obj) not in allow_priv:
+                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+            proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY")
+            if config.profile() == "production" and not proxy_url:
+                raise HTTPException(503, detail={"error": "EGRESS_PROXY_REQUIRED"})
+
+            async with httpx.AsyncClient(
+                proxy=proxy_url if proxy_url else None,
+                timeout=15.0,
+                trust_env=False,
+                follow_redirects=False,
+            ) as cli:
+                resp = await cli.request(method, req_url, headers=req_headers, content=req_body)
+                status_code = resp.status_code
+                set_cookies = list(resp.headers.get_list("set-cookie"))
+                resp_text = resp.text
+
+        cookies = _cookies_from_set_headers(req_url, set_cookies)
+        new_storage = {"cookies": cookies, "origins": []}
+        s_nonce, s_cipher, s_key_id, s_sha = _encrypt_browser_storage_state(
+            storage_key_ring,
+            new_storage,
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
+        redacted_obs = redact_secrets(resp_text)[:4096]
+        obs_trunc = len(resp_text) > 4096
+
+        def save_storage() -> bool:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT agent.browser_session_takeover_set_storage(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS ok",
+                    (
+                        s.tenant_id,
+                        session_id,
+                        s.user_id,
+                        s_nonce,
+                        s_cipher,
+                        s_key_id,
+                        s_sha,
+                        redacted_obs,
+                        obs_trunc,
+                        req_url,
+                    ),
+                ).fetchone()
+                return bool(row and row["ok"])
+
+        if not await asyncio.to_thread(save_storage):
+            raise HTTPException(409, detail={"error": "TAKEOVER_STATE_CONFLICT"})
+        return {
+            "schemaVersion": "1.0",
+            "sessionId": session_id,
+            "authenticated": status_code < 400,
+            "status": status_code,
+            "cookieCount": len(cookies),
+            "observation": redacted_obs,
+        }
+
+    @app.post("/v1/browser/sessions/{session_id}/takeover/complete")
+    async def browser_takeover_complete(session_id: str, request: Request, s: S) -> dict[str, Any]:
+        if not is_uuid7(session_id):
+            raise HTTPException(404)
+        supplied_storage: dict[str, Any] | None = None
+        raw_body = await request.body()
+        if raw_body:
+            if len(raw_body) > 64 * 1024:
+                raise HTTPException(413, detail={"error": "BODY_TOO_LARGE"})
+            try:
+                parsed = json.loads(raw_body)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+            if not isinstance(parsed, dict):
+                raise HTTPException(422, detail={"error": "INVALID_JSON"})
+            if "storageState" in parsed and parsed["storageState"] is not None:
+                st = parsed["storageState"]
+                if not isinstance(st, dict) or not isinstance(st.get("cookies", []), list):
+                    raise HTTPException(422, detail={"error": "INVALID_STORAGE_STATE"})
+                supplied_storage = {"cookies": list(st.get("cookies", [])), "origins": list(st.get("origins", []))}
 
         def tx() -> tuple[str, dict[str, Any] | None]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 exists = c.execute(
-                    "SELECT state FROM agent.browser_sessions WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
+                    "SELECT state, task_id FROM agent.browser_sessions WHERE tenant_id=%s AND owner_user_id=%s AND id=%s",
                     (s.tenant_id, s.user_id, session_id),
                 ).fetchone()
                 if exists is None:
                     return "NOT_FOUND", None
+                if supplied_storage is not None:
+                    s_nonce, s_cipher, s_key_id, s_sha = _encrypt_browser_storage_state(
+                        storage_key_ring,
+                        supplied_storage,
+                        tenant_id=s.tenant_id,
+                        user_id=s.user_id,
+                        task_id=str(exists["task_id"]),
+                        session_id=session_id,
+                    )
+                    stored = c.execute(
+                        "SELECT agent.browser_session_takeover_set_storage(%s,%s,%s,%s,%s,%s,%s,NULL,false,NULL) AS ok",
+                        (s.tenant_id, session_id, s.user_id, s_nonce, s_cipher, s_key_id, s_sha),
+                    ).fetchone()
+                    if not (stored and stored["ok"]):
+                        return "CONFLICT", None
                 row = c.execute(
                     "SELECT generation, goal_revision, lease_epoch, state, mode"
                     " FROM agent.browser_session_takeover_complete(%s,%s,%s)",

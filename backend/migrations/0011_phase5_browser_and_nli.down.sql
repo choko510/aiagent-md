@@ -1,7 +1,11 @@
 -- 0011_phase5_browser_and_nli.down.sql
 
+DROP TRIGGER IF EXISTS browser_session_wipe_closed ON agent.browser_sessions;
+DROP FUNCTION IF EXISTS agent.browser_session_wipe_on_close();
+
 REVOKE EXECUTE ON FUNCTION agent.browser_session_takeover_abort(uuid, uuid, uuid) FROM aiagent_api, aiagent_ops;
 REVOKE EXECUTE ON FUNCTION agent.browser_session_takeover_complete(uuid, uuid, uuid) FROM aiagent_api, aiagent_ops;
+REVOKE EXECUTE ON FUNCTION agent.browser_session_takeover_set_storage(uuid, uuid, uuid, bytea, bytea, text, char, text, boolean, text) FROM aiagent_api, aiagent_ops;
 REVOKE EXECUTE ON FUNCTION agent.browser_session_takeover_start(uuid, uuid, uuid, text) FROM aiagent_api, aiagent_ops;
 REVOKE EXECUTE ON FUNCTION agent.browser_session_read_status(uuid, uuid, uuid, uuid, uuid, bigint, bigint, text, text)
   FROM aiagent_tool_gateway, aiagent_runtime, aiagent_ops;
@@ -14,6 +18,7 @@ DROP FUNCTION IF EXISTS agent.browser_session_read_status(uuid, uuid, uuid, uuid
 
 DROP FUNCTION IF EXISTS agent.browser_session_takeover_abort(uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS agent.browser_session_takeover_complete(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS agent.browser_session_takeover_set_storage(uuid, uuid, uuid, bytea, bytea, text, char, text, boolean, text);
 DROP FUNCTION IF EXISTS agent.browser_session_takeover_start(uuid, uuid, uuid, text);
 DROP FUNCTION IF EXISTS agent.browser_session_fetch_storage_state(uuid, uuid, uuid, uuid, uuid, bigint, bigint, text, text);
 DROP FUNCTION IF EXISTS agent.browser_session_record_state(uuid, uuid, uuid, uuid, uuid, bigint, bigint, text, text, text, text, text, text, boolean, boolean, bytea, bytea, text, char);

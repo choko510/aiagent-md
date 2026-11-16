@@ -129,7 +129,7 @@ class ActionOutcome:
     session_id: str
     generation: int
     action: Literal["click", "submit"]
-    status: Literal["EXECUTED", "NEEDS_LOGIN"]
+    status: Literal["EXECUTED", "NEEDS_LOGIN", "CAPTCHA_CHALLENGE"]
     before_observation: Observation
     after_observation: Observation
 

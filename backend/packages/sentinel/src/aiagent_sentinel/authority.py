@@ -202,7 +202,7 @@ class Sentinel:
                 " AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL)"
                 " AND p.method = %s AND p.host = %s AND p.port = %s AND p.scheme = %s"
                 " AND NOT r.pause_requested AND r.status_code <> 'PAUSED'"
-                " AND (p.method = 'GET' OR (NOT r.cancel_requested"
+                " AND (p.method = 'GET' AND i.status_code = 'UNKNOWN' OR (NOT r.cancel_requested"
                 " AND r.status_code NOT IN ('CANCELLED','CANCELLING')"
                 " AND t.goal_revision=i.goal_revision AND r.lease_epoch = p.run_lease_epoch))"
                 " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN'))"

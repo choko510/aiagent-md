@@ -65,6 +65,18 @@ class RouteBreaker:
             self._open_until[key] = time.monotonic() + self.cooldown_s
 
 
+def select_ordered_routes(usable_routes: list[Route], breaker: RouteBreaker) -> list[Route]:
+    """Order routes with closed circuit breakers before open ones, weighted descending within each tier."""
+    closed = sorted(
+        (r for r in usable_routes if not breaker.is_open(r)),
+        key=lambda r: -max(1, r.weight),
+    )
+    if closed:
+        return closed
+    open_routes = sorted(usable_routes, key=lambda r: -max(1, r.weight))
+    return open_routes[:1]
+
+
 def route_rejection_reason(
     route: Route,
     providers: dict[str, Any],

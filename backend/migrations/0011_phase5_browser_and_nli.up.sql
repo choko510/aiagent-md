@@ -269,6 +269,60 @@ BEGIN
    RETURNING s.generation, s.goal_revision, s.lease_epoch, s.state, s.mode;
 END $$;
 
+CREATE FUNCTION agent.browser_session_takeover_set_storage(
+  p_tenant uuid,
+  p_session uuid,
+  p_owner uuid,
+  p_storage_nonce bytea,
+  p_storage_ciphertext bytea,
+  p_storage_key_id text,
+  p_storage_sha256 char(64),
+  p_obs_text text DEFAULT NULL,
+  p_obs_truncated boolean DEFAULT false,
+  p_current_url text DEFAULT NULL
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+DECLARE
+  v_incarnation bigint;
+  v_rows integer;
+BEGIN
+  SELECT restore_incarnation INTO v_incarnation FROM agent.schema_control WHERE singleton;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'CONTROL_MISSING' USING ERRCODE = 'check_violation';
+  END IF;
+
+  UPDATE agent.browser_sessions s
+     SET storage_state_nonce = p_storage_nonce,
+         storage_state_ciphertext = p_storage_ciphertext,
+         storage_state_key_id = p_storage_key_id,
+         storage_state_sha256 = p_storage_sha256,
+         current_url = coalesce(p_current_url, s.current_url),
+         last_observation_text = coalesce(p_obs_text, s.last_observation_text),
+         last_observation_truncated = CASE WHEN p_obs_text IS NOT NULL THEN p_obs_truncated ELSE s.last_observation_truncated END,
+         last_observation_at = CASE WHEN p_obs_text IS NOT NULL THEN now() ELSE s.last_observation_at END,
+         updated_at = now()
+    FROM agent.tasks t, agent.runs r
+   WHERE s.tenant_id = p_tenant
+     AND s.id = p_session
+     AND s.owner_user_id = p_owner
+     AND s.closed_at IS NULL
+     AND s.mode = 'HUMAN'
+     AND s.state IN ('PAUSED', 'NEEDS_LOGIN')
+     AND s.restore_incarnation = v_incarnation
+     AND t.tenant_id = s.tenant_id
+     AND t.id = s.task_id
+     AND t.owner_user_id = p_owner
+     AND t.active_run_id = s.run_id
+     AND r.tenant_id = s.tenant_id
+     AND r.id = s.run_id
+     AND r.restore_incarnation = v_incarnation
+     AND NOT r.cancel_requested
+     AND r.status_code NOT IN ('CANCELLED','CANCELLING','FAILED','SUCCEEDED','PARTIAL','EXPIRED','BUDGET_EXHAUSTED')
+     AND agent.scope_active(p_tenant, p_owner, t.workspace_id);
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END $$;
+
 CREATE FUNCTION agent.browser_session_takeover_abort(
   p_tenant uuid,
   p_session uuid,
@@ -282,6 +336,10 @@ BEGIN
      SET state = 'CLOSED',
          closed_at = now(),
          takeover_reason = 'ABORTED_BY_OWNER',
+         current_url = NULL,
+         last_observation_text = NULL,
+         last_observation_truncated = false,
+         last_observation_at = NULL,
          storage_state_nonce = NULL,
          storage_state_ciphertext = NULL,
          storage_state_key_id = NULL,
@@ -299,6 +357,7 @@ REVOKE ALL ON FUNCTION agent.browser_session_record_state(uuid, uuid, uuid, uuid
 REVOKE ALL ON FUNCTION agent.browser_session_fetch_storage_state(uuid, uuid, uuid, uuid, uuid, bigint, bigint, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION agent.browser_session_read_status(uuid, uuid, uuid, uuid, uuid, bigint, bigint, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION agent.browser_session_takeover_start(uuid, uuid, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION agent.browser_session_takeover_set_storage(uuid, uuid, uuid, bytea, bytea, text, char, text, boolean, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION agent.browser_session_takeover_complete(uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION agent.browser_session_takeover_abort(uuid, uuid, uuid) FROM PUBLIC;
 
@@ -310,7 +369,28 @@ GRANT EXECUTE ON FUNCTION agent.browser_session_read_status(uuid, uuid, uuid, uu
   TO aiagent_tool_gateway, aiagent_runtime, aiagent_ops;
 GRANT EXECUTE ON FUNCTION agent.browser_session_takeover_start(uuid, uuid, uuid, text)
   TO aiagent_api, aiagent_ops;
+GRANT EXECUTE ON FUNCTION agent.browser_session_takeover_set_storage(uuid, uuid, uuid, bytea, bytea, text, char, text, boolean, text)
+  TO aiagent_api, aiagent_ops;
 GRANT EXECUTE ON FUNCTION agent.browser_session_takeover_complete(uuid, uuid, uuid)
   TO aiagent_api, aiagent_ops;
 GRANT EXECUTE ON FUNCTION agent.browser_session_takeover_abort(uuid, uuid, uuid)
   TO aiagent_api, aiagent_ops;
+
+CREATE FUNCTION agent.browser_session_wipe_on_close() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state = 'CLOSED' OR NEW.closed_at IS NOT NULL THEN
+    NEW.current_url := NULL;
+    NEW.last_observation_text := NULL;
+    NEW.last_observation_truncated := false;
+    NEW.last_observation_at := NULL;
+    NEW.storage_state_nonce := NULL;
+    NEW.storage_state_ciphertext := NULL;
+    NEW.storage_state_key_id := NULL;
+    NEW.storage_state_sha256 := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER browser_session_wipe_closed
+  BEFORE UPDATE ON agent.browser_sessions
+  FOR EACH ROW EXECUTE FUNCTION agent.browser_session_wipe_on_close();

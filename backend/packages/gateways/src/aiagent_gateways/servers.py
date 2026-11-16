@@ -182,11 +182,7 @@ def load_key_ring() -> KeyRing:
         raise config.ConfigError("invalid Context artifact key") from exc
 
 
-def main_model() -> None:
-    setup("model_gateway")
-    config.require_isolation("model_gateway")
-    keys = parse_keys(config.secret("AIAGENT_MODEL_GATEWAY_RPC_KEYS").reveal())  # type: ignore[union-attr]
-    dsn = config.secret("AIAGENT_MODEL_GATEWAY_DSN").reveal()  # type: ignore[union-attr]
+def load_model_config_from_env() -> tuple[dict[str, Any], dict[str, list[Route]], list[str]]:
     import json
 
     providers: dict[str, Any] = {"fake": FakeModelProvider()}
@@ -232,12 +228,18 @@ def main_model() -> None:
 
     compat_url = os.environ.get("AIAGENT_OPENAI_COMPAT_URL")
     if compat_url:
+        from urllib.parse import urlsplit
+
         compat_key = config.secret("AIAGENT_OPENAI_COMPAT_API_KEY", required=False)
         if compat_key is not None:
             register_secret(compat_key.reveal())
             secrets.append(compat_key.reveal())
-        compat_external = os.environ.get("AIAGENT_OPENAI_COMPAT_EXTERNAL", "0") == "1"
-        if compat_external:
+        compat_external = os.environ.get("AIAGENT_OPENAI_COMPAT_EXTERNAL", "1") != "0"
+        if not compat_external:
+            compat_host = (urlsplit(compat_url).hostname or "").lower()
+            if compat_host not in ("127.0.0.1", "::1", "localhost"):
+                raise config.ConfigError("AIAGENT_OPENAI_COMPAT_EXTERNAL=0 is restricted to local loopback endpoints")
+        else:
             require_model_proxy("openai_compat")
         providers["openai_compat"] = OpenAIProvider(
             compat_key,
@@ -286,6 +288,17 @@ def main_model() -> None:
                 ]
         except (ValueError, KeyError, TypeError) as exc:
             raise config.ConfigError("invalid AIAGENT_MODEL_ROUTES_JSON") from exc
+    return providers, routes, secrets
+
+
+def main_model() -> None:
+    setup("model_gateway")
+    config.require_isolation("model_gateway")
+    keys = parse_keys(config.secret("AIAGENT_MODEL_GATEWAY_RPC_KEYS").reveal())  # type: ignore[union-attr]
+    dsn = config.secret("AIAGENT_MODEL_GATEWAY_DSN").reveal()  # type: ignore[union-attr]
+    import json
+
+    providers, routes, secrets = load_model_config_from_env()
 
     if config.profile() == "production" and providers.keys() == {"fake"}:
         print(
@@ -312,6 +325,23 @@ def main_model() -> None:
     except (memory_tombstones.TombstoneError, config.ConfigError) as exc:
         if config.profile() == "production":
             print(f"model_gateway: Memory egress disabled: {type(exc).__name__}", file=sys.stderr)
+    route_rates: dict[str, Any] = {}
+    raw_rates = os.environ.get("AIAGENT_MODEL_RATES_JSON")
+    if raw_rates:
+        from .router import RouteRates
+
+        try:
+            parsed_rates = json.loads(raw_rates)
+            if not isinstance(parsed_rates, dict):
+                raise ValueError("AIAGENT_MODEL_RATES_JSON must be a JSON object")
+            for mk, rspec in parsed_rates.items():
+                if isinstance(rspec, dict):
+                    route_rates[str(mk)] = RouteRates(
+                        input_micro_usd_per_1m=int(rspec["input_micro_usd_per_1m"]),
+                        output_micro_usd_per_1m=int(rspec["output_micro_usd_per_1m"]),
+                    )
+        except Exception as exc:
+            raise config.ConfigError(f"invalid AIAGENT_MODEL_RATES_JSON: {exc}") from exc
     gw = ModelGateway(  # type: ignore[arg-type]
         db,
         providers,
@@ -321,6 +351,7 @@ def main_model() -> None:
         context_key=context_key,
         tombstone_log=tombstone_log,
         nli_model=os.environ.get("AIAGENT_NLI_MODEL"),
+        route_rates=route_rates,
     )
     gw.recover_orphans(float(config.env_int("AIAGENT_ATTEMPT_ORPHAN_S", 600)))
     srv = build_model_server(
