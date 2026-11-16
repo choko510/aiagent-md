@@ -158,13 +158,19 @@ class ToolGateway:
                     (claim.tenant_id, claim.task_id),
                 ).fetchone()
                 existing_peek = peek_c.execute(
-                    "SELECT status_code, tool_key, safe_arguments_json, request_sha256 FROM agent.tool_intents"
-                    " WHERE tenant_id=%s AND run_id=%s AND invocation_key=%s",
+                    "SELECT i.status_code, i.tool_key, i.safe_arguments_json, i.request_sha256, a.decision_code"
+                    " FROM agent.tool_intents i"
+                    " LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id AND a.tool_intent_id=i.id"
+                    " WHERE i.tenant_id=%s AND i.run_id=%s AND i.invocation_key=%s",
                     (claim.tenant_id, claim.run_id, tool_call_id),
                 ).fetchone()
             if existing_peek is not None and (
                 existing_peek["status_code"] in ("SENDING", "UNKNOWN")
                 or existing_peek["status_code"] in TERMINAL_INTENT
+                or (
+                    existing_peek["status_code"] == "PENDING_APPROVAL"
+                    and existing_peek["decision_code"] in ("REJECTED", "REVOKED", "EXPIRED")
+                )
             ):
                 if existing_peek["tool_key"] != tool or canonical_json(
                     dict(existing_peek["safe_arguments_json"] or {})

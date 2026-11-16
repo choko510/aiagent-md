@@ -285,12 +285,15 @@ class Sentinel:
         )
         if not hmac.compare_digest(mac, good):
             raise EgressDenied("PERMIT_BINDING")
-        now_ts = int(time.time())
-        if expires < now_ts:
+        if time.time() >= expires:
             raise EgressDenied("PERMIT_EXPIRED")
-        # Persist single-use nonce consumption atomically in PostgreSQL so restarts and replicas reject replay.
+        # Persist single-use nonce consumption atomically in PostgreSQL so restarts, replicas, and expiry boundaries
+        # reject replay; retain expired nonces for a 60s grace window so clock jitter cannot delete and allow reuse.
         with self.db.tx() as c:
-            c.execute("DELETE FROM agent.human_takeover_nonces WHERE expires_at < now()")
+            c.execute("DELETE FROM agent.human_takeover_nonces WHERE expires_at < now() - interval '60 seconds'")
+            clk = c.execute("SELECT to_timestamp(%s) > clock_timestamp() AS valid", (expires,)).fetchone()
+            if clk is None or not clk["valid"]:
+                raise EgressDenied("PERMIT_EXPIRED")
             burned = c.execute(
                 "INSERT INTO agent.human_takeover_nonces(nonce, tenant_id, session_id, expires_at)"
                 " VALUES (%s,%s,%s,to_timestamp(%s)) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",

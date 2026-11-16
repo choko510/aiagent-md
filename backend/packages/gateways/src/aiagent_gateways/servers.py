@@ -182,6 +182,25 @@ def load_key_ring() -> KeyRing:
         raise config.ConfigError("invalid Context artifact key") from exc
 
 
+def load_browser_key_ring() -> KeyRing:
+    """Dedicated AES-GCM key ring for browser storageState shared strictly between API and Tool Gateway."""
+    path = os.environ.get("AIAGENT_BROWSER_STORAGE_KEYS_FILE")
+    if path:
+        try:
+            return KeyRing.from_file(path)
+        except (OSError, ValueError) as exc:
+            raise config.ConfigError("invalid browser storage key ring") from exc
+    raw_json = config.secret("AIAGENT_BROWSER_STORAGE_KEYS", required=False)
+    if raw_json is not None:
+        try:
+            return KeyRing.from_json(raw_json.reveal())
+        except ValueError as exc:
+            raise config.ConfigError("invalid browser storage key ring") from exc
+    if config.profile() == "production":
+        raise config.ConfigError("AIAGENT_BROWSER_STORAGE_KEYS_FILE is required in production")
+    return load_key_ring()
+
+
 def load_model_config_from_env() -> tuple[dict[str, Any], dict[str, list[Route]], list[str]]:
     import json
 
@@ -373,11 +392,21 @@ def main_tool() -> None:
     if os.environ.get("AIAGENT_SENTINEL_ENDPOINT"):
         skey = bytes.fromhex(config.secret("AIAGENT_SENTINEL_CLIENT_KEY").reveal())  # type: ignore[union-attr]
         sentinel = RpcSentinel(RpcClient(os.environ["AIAGENT_SENTINEL_ENDPOINT"], "tool_gateway", skey))
+    browser_ring_ok = False
+    if config.profile() == "production":
+        try:
+            ring = load_browser_key_ring()
+            for key in ring.keys.values():
+                register_secret(key.hex())
+            browser_ring_ok = True
+        except config.ConfigError:
+            browser_ring_ok = False
     config.require_production_safety(
         "tool_gateway",
         {
             "Sentinel endpoint configured": sentinel is not None,
             "egress proxy configured": bool(os.environ.get("AIAGENT_EGRESS_PROXY")),
+            "browser storage key ring configured": browser_ring_ok,
         },
     )
     db = Database(dsn, max_size=8, name="tool_gateway")

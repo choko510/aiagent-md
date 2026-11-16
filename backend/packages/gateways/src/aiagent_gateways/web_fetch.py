@@ -26,7 +26,7 @@ from aiagent_core.config import Secret
 from aiagent_core.logging import redact as redact_secrets
 from aiagent_sentinel.netpolicy import EgressDenied, is_public, normalize_host, vet_addresses
 
-from .executors import Destination, ExecutorFailed, ExecutorUnknown
+from .executors import Destination, ExecutorFailed, ExecutorUnknown, is_authenticated_proxy_denial
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 PermitIssuer = Callable[[Destination], Awaitable[str]]
@@ -268,7 +268,7 @@ async def _send_via_forward_proxy(
                 resp_headers.append((k_clean, v_clean))
                 hmap[k_clean.lower()] = v_clean
 
-        if status_code == 403 and hmap.get("x-aiagent-egress") == "denied":
+        if is_authenticated_proxy_denial(status_code, hmap, permit):
             raise ExecutorFailed("egress_denied")
 
         if method == "HEAD" or status_code in (204, 304):
@@ -293,12 +293,12 @@ async def _send_via_forward_proxy(
                     raise ExecutorUnknown("invalid_chunk_size")
                 chunk_len = int(sz_hex, 16)
                 if chunk_len == 0:
-                    try:
-                        end_line = await asyncio.wait_for(reader.readline(), timeout=rem_t())
-                        while end_line not in (b"\r\n", b"\n", b""):
-                            end_line = await asyncio.wait_for(reader.readline(), timeout=rem_t())
-                    except (OSError, TimeoutError):
-                        pass
+                    while True:
+                        end_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_t())
+                        if len(end_line) > _MAX_CHUNK_LINE_BYTES or not end_line.endswith(b"\r\n"):
+                            raise ExecutorUnknown("invalid_chunk_trailer")
+                        if end_line == b"\r\n":
+                            break
                     saw_eof = True
                     break
                 if chunk_len > max_single_chunk or (chunk_len > max(max_bytes, 65536) and chunk_len > max_bytes * 4):
@@ -458,8 +458,6 @@ async def safe_http_get(
                         status_code = resp.status_code
                         hdr_map = {k.lower(): v for k, v in resp.headers.items()}
                         set_cookies = tuple(resp.headers.get_list("set-cookie"))
-                        if status_code == 403 and hdr_map.get("x-aiagent-egress") == "denied":
-                            raise ExecutorFailed("egress_denied")
                         chunks: list[bytes] = []
                         total = 0
                         truncated = False
@@ -480,8 +478,6 @@ async def safe_http_get(
             except httpx.HTTPError as exc:
                 raise ExecutorUnknown(type(exc).__name__) from exc
 
-        if status_code == 403 and hdr_map.get("x-aiagent-egress") == "denied":
-            raise ExecutorFailed("egress_denied")
         if status_code in (301, 302, 303, 307, 308):
             loc = hdr_map.get("location", "").strip()
             if not loc:

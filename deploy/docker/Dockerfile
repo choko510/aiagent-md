@@ -23,5 +23,11 @@ RUN groupadd -g 10001 aiagent && useradd -u 10001 -g 10001 -M -s /usr/sbin/nolog
 COPY --from=build /opt/venv /opt/venv
 COPY backend/migrations /opt/aiagent/migrations
 ENV PATH=/opt/venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 AIAGENT_PROFILE=production \
-    AIAGENT_MIGRATIONS_DIR=/opt/aiagent/migrations
+    AIAGENT_MIGRATIONS_DIR=/opt/aiagent/migrations PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers HOME=/tmp
+RUN if [ -x /opt/venv/bin/playwright ]; then \
+      apt-get update && apt-get install -y --no-install-recommends libatomic1 && \
+      /opt/venv/bin/playwright install --with-deps chromium && \
+      chmod -R a+rX /opt/pw-browsers && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 USER 10001:10001

@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
+import inspect
 import json
 import os
 import ssl
@@ -451,12 +452,11 @@ class BrowserSessionExecutor:
                     )
                     for item in raw_inputs
                 )
-                try:
-                    extracted = await extract_fn(
-                        sid, target, form_inputs, current_url=entry.current_url, apply_inputs=False
-                    )
-                except TypeError:
-                    extracted = await extract_fn(sid, target, form_inputs, current_url=entry.current_url)
+                if "apply_inputs" not in inspect.signature(extract_fn).parameters:
+                    raise ExecutorFailed("NON_MUTATING_PREVIEW_REQUIRED")
+                extracted = await extract_fn(
+                    sid, target, form_inputs, current_url=entry.current_url, apply_inputs=False
+                )
             if not isinstance(extracted, dict) or not extracted.get("hasForm"):
                 raise ExecutorFailed("CONTROLLED_EGRESS_REQUIRED")
             action_url = self._service._validate_url(str(extracted["action"]))
@@ -569,7 +569,11 @@ class BrowserSessionExecutor:
         status_row = await self._fence.read_status(session_id, authority, mode="AGENT")
         svc_state, svc_gen, _, _ = self._service.session_details(session_id, authority)
         db_gen = int(status_row["generation"])
-        if status_row["state"] == "ACTIVE" and db_gen > svc_gen and svc_state in (State.PAUSED, State.NEEDS_LOGIN):
+        if (
+            status_row["state"] == "ACTIVE"
+            and db_gen > svc_gen
+            and svc_state in (State.PAUSED, State.NEEDS_LOGIN, State.ACTIVE)
+        ):
             await self._service.apply_owner_takeover_resume(session_id, authority, db_generation=db_gen)
             if self._storage_key_ring is not None and hasattr(self._worker, "restore_storage_state"):
                 enc = await self._fence.fetch_storage_state(session_id, authority, mode="AGENT")
@@ -765,20 +769,21 @@ BrowserFixtureExecutor = BrowserSessionExecutor
 def browser_from_env(db: Database | None) -> BrowserSessionExecutor | None:
     if db is None:
         return None
-    from .servers import load_key_ring
-
-    ring: KeyRing | None = None
-    with contextlib.suppress(Exception):
-        ring = load_key_ring()
+    from .servers import load_browser_key_ring
 
     fixture_file = os.environ.get("AIAGENT_BROWSER_FIXTURE_FILE")
     if fixture_file:
+        ring: KeyRing | None = None
+        if os.environ.get("AIAGENT_BROWSER_STORAGE_KEYS_FILE") or os.environ.get("AIAGENT_BROWSER_STORAGE_KEYS"):
+            ring = load_browser_key_ring()
         return BrowserSessionExecutor.from_fixture_file(db, fixture_file, storage_key_ring=ring)
 
     web_hosts_raw = os.environ.get("AIAGENT_BROWSER_ALLOWED_WEB_HOSTS")
     if web_hosts_raw:
         hosts = frozenset(x.strip().lower() for x in web_hosts_raw.split(",") if x.strip())
         if hosts:
+            # Fail closed on missing or invalid storageState encryption keys for real web sessions.
+            ring = load_browser_key_ring()
             allow_priv: frozenset[str] = frozenset()
             if config.profile() != "production" and os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE"):
                 allow_priv = frozenset(

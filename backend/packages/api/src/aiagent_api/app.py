@@ -5,6 +5,7 @@ validated with the generated strict contracts. The API never performs agent work
 """
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -39,19 +40,36 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 
+def _parse_keyring_secret(raw_json: str) -> tuple[str, bytes]:
+    try:
+        doc = json.loads(raw_json)
+        active = str(doc["active"])
+        key_bytes = bytes.fromhex(str(doc["keys"][active]))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise config.ConfigError("invalid browser storage key ring") from exc
+    if not active or len(key_bytes) != 32:
+        raise config.ConfigError("invalid browser storage key ring")
+    return active, key_bytes
+
+
 def _load_api_storage_keyring() -> tuple[str, bytes] | None:
-    """Resolve active (key_id, AES-256 key) matching context_keys KeyRing format."""
+    """Resolve active (key_id, AES-256 key) preferring dedicated browser_storage_keys."""
+    browser_raw = config.secret("AIAGENT_BROWSER_STORAGE_KEYS", required=False)
+    if browser_raw is not None:
+        return _parse_keyring_secret(browser_raw.reveal())
+    if config.profile() == "production":
+        return None
     for env_name in ("AIAGENT_CONTEXT_KEY_RING_JSON", "AIAGENT_CONTEXT_ARTIFACT_KEYS"):
         raw = config.secret(env_name, required=False)
         if raw is not None:
-            doc = json.loads(raw.reveal())
-            active = str(doc["active"])
-            key_bytes = bytes.fromhex(str(doc["keys"][active]))
-            return active, key_bytes
+            return _parse_keyring_secret(raw.reveal())
     for env_name in ("AIAGENT_CONTEXT_KEY", "AIAGENT_CONTEXT_ARTIFACT_KEY"):
         single = config.secret(env_name, required=False)
         if single is not None:
-            return "v1", bytes.fromhex(single.reveal())
+            kb = bytes.fromhex(single.reveal())
+            if len(kb) != 32:
+                raise config.ConfigError("invalid single browser storage key")
+            return "v1", kb
     return None
 
 
@@ -138,6 +156,18 @@ _AUTH_FAILURE_MARKERS = (
 )
 
 
+def _is_authenticated_proxy_denial(status_code: int, hmap: dict[str, str], permit: str) -> bool:
+    if status_code != 403 or hmap.get("x-aiagent-egress") != "denied" or not permit:
+        return False
+    proof = hmap.get("x-aiagent-egress-proof", "")
+    code_part, sep, mac_part = proof.partition(":")
+    if not sep or not code_part or not mac_part:
+        return False
+    key = sha256(permit.encode("utf-8")).digest()
+    expected = hmac.new(key, f"DENIED:{code_part}".encode(), sha256).hexdigest()
+    return hmac.compare_digest(mac_part, expected)
+
+
 def _takeover_authenticated_page(status_code: int, resp_text: str) -> bool:
     """Strict authentication signal: require HTTP 2xx without challenge, password prompt, or auth-failure page."""
     if not (200 <= status_code < 300):
@@ -216,7 +246,7 @@ async def _takeover_via_forward_proxy(
                 hmap[kc.lower()] = vc
                 if kc.lower() == "set-cookie":
                     set_cookies.append(vc)
-        if status_code == 403 and hmap.get("x-aiagent-egress") == "denied":
+        if _is_authenticated_proxy_denial(status_code, hmap, permit):
             raise HTTPException(403, detail={"error": "EGRESS_DENIED"})
         chunks: list[bytes] = []
         total = 0
@@ -241,14 +271,17 @@ async def _takeover_via_forward_proxy(
                     raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
                 clen = int(sz_hex, 16)
                 if clen == 0:
-                    try:
-                        # Consume final chunk trailer terminator cleanly when present.
-                        end_line = await asyncio.wait_for(reader.readline(), timeout=rem_timeout())
-                        if end_line not in (b"\r\n", b"\n", b""):
-                            while end_line not in (b"\r\n", b"\n", b""):
-                                end_line = await asyncio.wait_for(reader.readline(), timeout=rem_timeout())
-                    except (OSError, TimeoutError):
-                        pass
+                    while True:
+                        try:
+                            end_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_timeout())
+                        except asyncio.LimitOverrunError:
+                            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
+                        except asyncio.IncompleteReadError:
+                            raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
+                        if len(end_line) > _MAX_CHUNK_LINE_BYTES or not end_line.endswith(b"\r\n"):
+                            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
+                        if end_line == b"\r\n":
+                            break
                     saw_eof = True
                     break
                 if clen > cap - total:
@@ -320,6 +353,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if storage_key_ring is None and config.profile() == "production":
+            config.require_production_safety(
+                "api",
+                {"browser storage key ring configured": _load_api_storage_keyring() is not None},
+            )
         state["db"] = db or Database(config.secret("AIAGENT_API_DSN").reveal(), max_size=16, name="api")  # type: ignore[union-attr]
         yield
         if db is None:
@@ -913,22 +951,23 @@ def create_app(
             raise HTTPException(422, detail={"error": "INVALID_FORM_DATA"})
         encoded_pairs = [(str(k), str(v)) for k, v in form_data.items()]
 
-        def load_session() -> tuple[str, str | None, str | None]:
+        def load_session() -> tuple[str, str | None, str | None, str | None]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 row = c.execute(
-                    "SELECT s.task_id, t.workspace_id, s.state, s.mode FROM agent.browser_sessions s"
+                    "SELECT s.task_id, t.workspace_id, s.state, s.mode, s.current_url FROM agent.browser_sessions s"
                     " JOIN agent.tasks t ON t.tenant_id=s.tenant_id AND t.id=s.task_id"
                     " WHERE s.tenant_id=%s AND s.owner_user_id=%s AND s.id=%s AND s.closed_at IS NULL"
                     " AND agent.scope_active(%s,%s,t.workspace_id)",
                     (s.tenant_id, s.user_id, session_id, s.tenant_id, s.user_id),
                 ).fetchone()
                 if row is None:
-                    return "NOT_FOUND", None, None
+                    return "NOT_FOUND", None, None, None
                 if row["mode"] != "HUMAN" or row["state"] not in ("PAUSED", "NEEDS_LOGIN"):
-                    return "CONFLICT", None, None
-                return "OK", str(row["task_id"]), str(row["workspace_id"])
+                    return "CONFLICT", None, None, None
+                cur = row.get("current_url")
+                return "OK", str(row["task_id"]), str(row["workspace_id"]), (str(cur) if cur else None)
 
-        flag, task_id, task_workspace_id = await asyncio.to_thread(load_session)
+        flag, task_id, task_workspace_id, session_current_url = await asyncio.to_thread(load_session)
         if flag == "NOT_FOUND":
             raise HTTPException(404)
         if flag != "OK" or task_id is None or task_workspace_id is None:
@@ -945,16 +984,29 @@ def create_app(
             req_body = urlencode(encoded_pairs).encode("utf-8")
             req_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-        if takeover_http_fn is not None:
-            status_code, set_cookies, resp_text = await takeover_http_fn(req_url, method, req_headers, req_body)
-        else:
+        async def _execute_takeover_http(
+            url_str: str, req_meth: str, hdrs: dict[str, str], body_bytes: bytes | None
+        ) -> tuple[int, list[str], str]:
+            if takeover_http_fn is not None:
+                return await takeover_http_fn(url_str, req_meth, hdrs, body_bytes)
             import ipaddress
             import socket
 
             import httpx
 
-            host = (u.hostname or "").lower()
-            target_port = u.port or (443 if scheme == "https" else 80)
+            pu = urlsplit(url_str)
+            p_scheme = pu.scheme.lower()
+            if (
+                p_scheme not in ("http", "https")
+                or not pu.hostname
+                or pu.username is not None
+                or pu.password is not None
+            ):
+                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+            if p_scheme == "http" and config.profile() == "production":
+                raise HTTPException(422, detail={"error": "HTTPS_REQUIRED"})
+            p_host = (pu.hostname or "").lower()
+            target_port = pu.port or (443 if p_scheme == "https" else 80)
             hosts_cfg = (
                 allowed_web_hosts
                 if allowed_web_hosts is not None
@@ -964,7 +1016,7 @@ def create_app(
                     if h.strip()
                 )
             )
-            if (hosts_cfg or config.profile() == "production") and "*" not in hosts_cfg and host not in hosts_cfg:
+            if (hosts_cfg or config.profile() == "production") and "*" not in hosts_cfg and p_host not in hosts_cfg:
                 raise HTTPException(403, detail={"error": "EGRESS_DENIED"})
 
             allow_priv = (
@@ -973,7 +1025,7 @@ def create_app(
                 else set()
             )
             try:
-                lit_ip = ipaddress.ip_address(host)
+                lit_ip = ipaddress.ip_address(p_host)
             except ValueError:
                 lit_ip = None
             if lit_ip is not None and not lit_ip.is_global and str(lit_ip) not in allow_priv:
@@ -986,14 +1038,13 @@ def create_app(
             if config.profile() == "production" and (not proxy_url or (sentinel is None and not has_sentinel_rpc)):
                 raise HTTPException(503, detail={"error": "EGRESS_PROXY_REQUIRED"})
 
-            default_p = 443 if scheme == "https" else 80
-            host_net = f"[{host}]" if ":" in host else host
+            default_p = 443 if p_scheme == "https" else 80
+            host_net = f"[{p_host}]" if ":" in p_host else p_host
             host_hdr = host_net if target_port == default_p else f"{host_net}:{target_port}"
 
             if proxy_url:
-                ru_req = urlsplit(req_url)
-                target_path = (ru_req.path or "/") + (f"?{ru_req.query}" if ru_req.query else "")
-                body_sha = sha256(req_body or b"").hexdigest()
+                target_path = (pu.path or "/") + (f"?{pu.query}" if pu.query else "")
+                body_sha = sha256(body_bytes or b"").hexdigest()
                 if sentinel is not None:
                     if not hasattr(sentinel, "authorize_human_takeover"):
                         raise HTTPException(503, detail={"error": "SENTINEL_REQUIRED"})
@@ -1004,7 +1055,7 @@ def create_app(
                             s.user_id,
                             task_workspace_id,
                             session_id,
-                            SimpleNamespace(scheme=scheme, host=host, port=target_port, method=method),
+                            SimpleNamespace(scheme=p_scheme, host=p_host, port=target_port, method=req_meth),
                             target_path=target_path,
                             body_sha256=body_sha,
                         )
@@ -1023,10 +1074,10 @@ def create_app(
                                 "userId": s.user_id,
                                 "workspaceId": task_workspace_id,
                                 "sessionId": session_id,
-                                "scheme": scheme,
-                                "host": host,
+                                "scheme": p_scheme,
+                                "host": p_host,
                                 "port": target_port,
-                                "method": method,
+                                "method": req_meth,
                                 "targetPath": target_path,
                                 "bodySha256": body_sha,
                             },
@@ -1039,47 +1090,80 @@ def create_app(
                     ht_permit = str(rpc_res["permit"])
                 else:
                     raise HTTPException(503, detail={"error": "SENTINEL_REQUIRED"})
-                status_code, set_cookies, resp_text = await _takeover_via_forward_proxy(
+                return await _takeover_via_forward_proxy(
                     proxy_url,
-                    method=method,
-                    target_url=req_url,
+                    method=req_meth,
+                    target_url=url_str,
                     host_header=host_hdr,
                     permit=ht_permit,
-                    headers=req_headers,
-                    body=req_body,
+                    headers=hdrs,
+                    body=body_bytes,
                 )
-            else:
-                # Strict non-production direct dev fallback: resolve + vet EVERY IP + connect pinned with TLS SNI.
-                if takeover_resolver is not None:
-                    raw_addrs = await takeover_resolver(host, target_port)
-                else:
-                    try:
-                        infos = await asyncio.to_thread(socket.getaddrinfo, host, target_port, type=socket.SOCK_STREAM)
-                        raw_addrs = [str(sa[0]).split("%", 1)[0] for *_, sa in infos]
-                    except OSError:
-                        raise HTTPException(422, detail={"error": "EGRESS_DENIED"}) from None
-                if not raw_addrs:
-                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
-                for addr in raw_addrs:
-                    ip_obj = ipaddress.ip_address(addr.split("%", 1)[0])
-                    if not ip_obj.is_global and str(ip_obj) not in allow_priv:
-                        raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
-                vetted_ip = raw_addrs[0]
-                ip_host = f"[{vetted_ip}]" if ":" in vetted_ip else vetted_ip
-                ru = urlsplit(req_url)
-                pq = (ru.path or "/") + (f"?{ru.query}" if ru.query else "")
-                pinned_url = f"{scheme}://{ip_host}:{target_port}{pq}"
-                pinned_hdrs = {**req_headers, "Host": host_hdr}
-                ext = {"sni_hostname": host} if scheme == "https" else {}
-                async with httpx.AsyncClient(
-                    proxy=None, timeout=15.0, trust_env=False, verify=takeover_verify_ssl, follow_redirects=False
-                ) as cli:
-                    resp = await cli.request(method, pinned_url, headers=pinned_hdrs, content=req_body, extensions=ext)
-                    status_code = resp.status_code
-                    set_cookies = list(resp.headers.get_list("set-cookie"))
-                    resp_text = resp.text
 
+            if takeover_resolver is not None:
+                raw_addrs = await takeover_resolver(p_host, target_port)
+            else:
+                try:
+                    infos = await asyncio.to_thread(socket.getaddrinfo, p_host, target_port, type=socket.SOCK_STREAM)
+                    raw_addrs = [str(sa[0]).split("%", 1)[0] for *_, sa in infos]
+                except OSError:
+                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"}) from None
+            if not raw_addrs:
+                raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+            for addr in raw_addrs:
+                ip_obj = ipaddress.ip_address(addr.split("%", 1)[0])
+                if not ip_obj.is_global and str(ip_obj) not in allow_priv:
+                    raise HTTPException(422, detail={"error": "EGRESS_DENIED"})
+            vetted_ip = raw_addrs[0]
+            ip_host = f"[{vetted_ip}]" if ":" in vetted_ip else vetted_ip
+            pq = (pu.path or "/") + (f"?{pu.query}" if pu.query else "")
+            pinned_url = f"{p_scheme}://{ip_host}:{target_port}{pq}"
+            pinned_hdrs = {**hdrs, "Host": host_hdr}
+            ext = {"sni_hostname": p_host} if p_scheme == "https" else {}
+            async with httpx.AsyncClient(
+                proxy=None, timeout=15.0, trust_env=False, verify=takeover_verify_ssl, follow_redirects=False
+            ) as cli:
+                resp = await cli.request(req_meth, pinned_url, headers=pinned_hdrs, content=body_bytes, extensions=ext)
+                return resp.status_code, list(resp.headers.get_list("set-cookie")), resp.text
+
+        status_code, set_cookies, resp_text = await _execute_takeover_http(req_url, method, req_headers, req_body)
         cookies = _cookies_from_set_headers(req_url, set_cookies)
+
+        verify_url_raw = parsed.get("verifyUrl")
+        if isinstance(verify_url_raw, str) and verify_url_raw.strip():
+            verify_target: str | None = verify_url_raw.strip()
+        elif (
+            isinstance(session_current_url, str)
+            and session_current_url.startswith(("http://", "https://"))
+            and urlsplit(session_current_url).path != (u.path or "/")
+        ):
+            verify_target = session_current_url
+        else:
+            verify_target = None
+
+        if not _takeover_authenticated_page(status_code, resp_text):
+            auth_status = "FAILED"
+            authenticated = False
+        elif verify_target is not None:
+            v_hdrs: dict[str, str] = {}
+            if cookies:
+                v_hdrs["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+            v_status, v_cookies_raw, v_text = await _execute_takeover_http(verify_target, "GET", v_hdrs, None)
+            if v_cookies_raw:
+                merged = {c["name"]: c for c in cookies}
+                for nc in _cookies_from_set_headers(verify_target, v_cookies_raw):
+                    merged[nc["name"]] = nc
+                cookies = list(merged.values())
+            if _takeover_authenticated_page(v_status, v_text):
+                auth_status = "VERIFIED"
+                authenticated = True
+            else:
+                auth_status = "FAILED"
+                authenticated = False
+        else:
+            auth_status = "UNVERIFIED"
+            authenticated = False
+
         new_storage = {"cookies": cookies, "origins": []}
         s_nonce, s_cipher, s_key_id, s_sha = _encrypt_browser_storage_state(
             storage_key_ring,
@@ -1106,7 +1190,7 @@ def create_app(
                         s_sha,
                         redacted_obs,
                         obs_trunc,
-                        req_url,
+                        verify_target if authenticated else None,
                     ),
                 ).fetchone()
                 return bool(row and row["ok"])
@@ -1116,7 +1200,8 @@ def create_app(
         return {
             "schemaVersion": "1.0",
             "sessionId": session_id,
-            "authenticated": _takeover_authenticated_page(status_code, resp_text),
+            "authenticated": authenticated,
+            "authStatus": auth_status,
             "status": status_code,
             "cookieCount": len(cookies),
             "observation": redacted_obs,

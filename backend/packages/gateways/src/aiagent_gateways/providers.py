@@ -133,6 +133,19 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 {"name": "send_message", "args": {"to": "bob", "body": "hi"}},
             ],
         }
+    if "compose browser" in first:
+        navs = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "browser_navigate"]
+        if not navs:
+            return _call("browser_navigate", url="http://portal:8099/portal/entry")
+        first_nav = json.loads(str(navs[0].get("content", "{}")))
+        sid = str(first_nav.get("sessionId") or "")
+        if "browser_submit" not in r:
+            return _call("browser_submit", sessionId=sid, kind="test_id", selector="enter-portal")
+        if len(navs) == 1:
+            return _call("browser_navigate", url="http://portal:8099/portal/dashboard", sessionId=sid)
+        last_nav = json.loads(str(navs[-1].get("content", "{}")))
+        obs = str(last_nav.get("observation") or "")
+        return {"content": f"done:compose-browser:{last_nav.get('state')}:{obs[:120]}"}
     if "sandbox" in first:
         if "sandbox_exec" in r:
             return {"content": f"done:sandbox:{r['sandbox_exec'].get('status')}"}

@@ -67,10 +67,21 @@ class EgressProxy:
                 await self._server.wait_closed()
 
     @staticmethod
-    async def _deny(w: asyncio.StreamWriter, code: str) -> None:
+    def _deny_proof(token: str | None, code: str) -> str | None:
+        if not token:
+            return None
+        key = hashlib.sha256(token.encode("utf-8")).digest()
+        mac = hmac.new(key, f"DENIED:{code}".encode(), hashlib.sha256).hexdigest()
+        return f"{code}:{mac}"
+
+    @staticmethod
+    async def _deny(w: asyncio.StreamWriter, code: str, *, proof: str | None = None) -> None:
         body = f'{{"denied":"{code}"}}'.encode()
+        proof_line = f"x-aiagent-egress-proof: {proof}\r\n".encode("latin-1") if proof else b""
         w.write(
-            b"HTTP/1.1 403 Forbidden\r\nx-aiagent-egress: denied\r\ncontent-type: application/json\r\n"
+            b"HTTP/1.1 403 Forbidden\r\nx-aiagent-egress: denied\r\n"
+            + proof_line
+            + b"content-type: application/json\r\n"
             + f"content-length: {len(body)}\r\nconnection: close\r\n\r\n".encode()
             + body
         )
@@ -80,6 +91,8 @@ class EgressProxy:
     async def _handle(self, r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         tenant = pid = host = ip = None
         port = None
+        auth_token: str | None = None
+        upstream_connected = False
         try:
             head = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), timeout=10)
             if len(head) > MAX_HEAD:
@@ -92,6 +105,9 @@ class EgressProxy:
                     k, _, v = ln.partition(":")
                     headers.append((k.strip(), v.strip()))
             hmap = {k.lower(): v for k, v in headers}
+            auth = hmap.get("proxy-authorization", "")
+            if auth.startswith("Aiagent ") and ":" in auth:
+                _, auth_token = auth[8:].split(":", 1)
             if method == "CONNECT":
                 h, _, p = target.rpartition(":")
                 scheme, host, port, inner = "https", normalize_host(h), int(p), None
@@ -106,7 +122,6 @@ class EgressProxy:
             dest = self.config.match(scheme, host, port)
             if dest is None:
                 raise EgressDenied("DESTINATION_NOT_ALLOWED")
-            auth = hmap.get("proxy-authorization", "")
             if not auth.startswith("Aiagent ") or ":" not in auth:
                 raise EgressDenied("PROXY_AUTH")
             identity, token = auth[8:].split(":", 1)
@@ -162,6 +177,7 @@ class EgressProxy:
                 )
             else:
                 ur, uw = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=self.connect_timeout_s)
+            upstream_connected = True
             await asyncio.to_thread(self.sentinel.receipt, tenant, pid, "ALLOWED", "FORWARDED", host, port, ip)
             # Static Model Gateway egress has no Tool permit/receipt, so emit a
             # metadata-only record at the actual forwarding boundary. Never log
@@ -207,19 +223,54 @@ class EgressProxy:
                     if n:
                         uw.write(await r.readexactly(n))
                 await uw.drain()
-            await self._splice(r, w, ur, uw, method == "CONNECT")
+            if method == "CONNECT":
+                await self._splice(r, w, ur, uw, True)
+            else:
+                await self._forward_http_response_and_splice(r, w, ur, uw)
         except EgressDenied as e:
             await asyncio.to_thread(self.sentinel.receipt, tenant, pid, "DENIED", e.code, host, port, ip)
-            await self._deny(w, e.code)
+            await self._deny(w, e.code, proof=self._deny_proof(auth_token, e.code))
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, ValueError, OSError) as e:
             if host is not None:  # a bare TCP probe (health check) is not an egress attempt
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(self.sentinel.receipt, tenant, pid, "DENIED", "PROXY_ERROR", host, port, ip)
             log.info("egress error", extra={"fields": {"exc": type(e).__name__}})
-            await self._deny(w, "PROXY_ERROR")
+            if upstream_connected:
+                with contextlib.suppress(Exception):
+                    w.write(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    await w.drain()
+            else:
+                await self._deny(w, "PROXY_ERROR", proof=self._deny_proof(auth_token, "PROXY_ERROR"))
         finally:
             with contextlib.suppress(Exception):
                 w.close()
+
+    async def _forward_http_response_and_splice(
+        self,
+        r: asyncio.StreamReader,
+        w: asyncio.StreamWriter,
+        ur: asyncio.StreamReader,
+        uw: asyncio.StreamWriter,
+    ) -> None:
+        """Strip any untrusted upstream `x-aiagent-egress*` control headers before splicing the body."""
+        try:
+            resp_head = await asyncio.wait_for(ur.readuntil(b"\r\n\r\n"), timeout=self.idle_timeout_s)
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, OSError):
+            with contextlib.suppress(Exception):
+                w.close()
+            with contextlib.suppress(Exception):
+                uw.close()
+            return
+        raw_lines = resp_head[:-4].split(b"\r\n")
+        cleaned = [raw_lines[0]]
+        for ln in raw_lines[1:]:
+            hdr_name = ln.split(b":", 1)[0].strip().lower()
+            if hdr_name.startswith(b"x-aiagent-egress"):
+                continue
+            cleaned.append(ln)
+        w.write(b"\r\n".join(cleaned) + b"\r\n\r\n")
+        await w.drain()
+        await self._splice(r, w, ur, uw, False)
 
     async def _splice(
         self,

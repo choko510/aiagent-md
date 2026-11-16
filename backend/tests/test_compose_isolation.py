@@ -140,3 +140,82 @@ def test_e2e_over_compose_network() -> None:
         assert st["run"]["result"] == "done:sandbox:CONFIRMED", st
     log = dc("exec", "-T", "receiver", "cat", "/tmp/receiver.jsonl").stdout.strip().splitlines()
     assert any(json.loads(x)["body"] == {"to": "alice", "body": "price=42"} for x in log)
+
+
+def test_browser_takeover_revisit_over_compose_network() -> None:
+    """Real unmodified Compose stack E2E: Browser navigate -> Human Takeover via Sentinel -> AES-GCM storageState -> Agent revisit."""
+    r = dc("run", "--rm", "--no-deps", "--entrypoint", "python", "migrate", "-m", "aiagent_core.admin", "tenant")
+    assert r.returncode == 0, r.stderr
+    token = next(x.split("=", 1)[1].split()[0] for x in r.stdout.splitlines() if x.startswith("token="))
+    h = {"Authorization": f"Bearer {token}"}
+    with httpx.Client(base_url="http://127.0.0.1:8080", timeout=20) as c:
+        created = c.post(
+            "/v1/tasks",
+            headers=h,
+            json={"schemaVersion": "1.0", "goal": "Run compose browser portal revisit", "profile": "browser"},
+        )
+        assert created.status_code in (200, 201), created.text
+        task = created.json()["taskId"]
+
+        def wait(pred: object, timeout: float = 90) -> dict:
+            st: dict = {}
+            end = time.time() + timeout
+            while time.time() < end:
+                st = c.get(f"/v1/tasks/{task}", headers=h).json()
+                if pred(st):  # type: ignore[operator]
+                    return st
+                time.sleep(1)
+            raise AssertionError(st)
+
+        st = wait(lambda s: s["run"]["state"] == "WAITING_APPROVAL")
+        a = st["approvals"][0]
+
+        sessions = c.get("/v1/browser/sessions", headers=h)
+        assert sessions.status_code == 200, sessions.text
+        bs = next(item for item in sessions.json()["items"] if item["taskId"] == task)
+        sid = bs["id"]
+        assert bs["state"] == "ACTIVE" and bs["mode"] == "AGENT", bs
+
+        # Human Takeover start -> authenticate via API + Sentinel EgressProxy -> AES-GCM storageState -> complete
+        assert (
+            c.post(f"/v1/browser/sessions/{sid}/takeover/start", headers=h, json={"reason": "login"}).status_code == 200
+        )
+        auth_r = c.post(
+            f"/v1/browser/sessions/{sid}/takeover/authenticate",
+            headers=h,
+            json={
+                "url": "http://portal:8099/portal/login",
+                "method": "POST",
+                "formData": {"pw": "COMPOSE_PASS_99"},
+                "verifyUrl": "http://portal:8099/portal/dashboard",
+            },
+        )
+        assert auth_r.status_code == 200, auth_r.text
+        auth_body = auth_r.json()
+        assert auth_body["authenticated"] is True and auth_body["authStatus"] == "VERIFIED", auth_body
+        assert auth_body["cookieCount"] >= 1, auth_body
+
+        sessions_after = c.get("/v1/browser/sessions", headers=h).json()["items"]
+        bs_after = next(item for item in sessions_after if item["id"] == sid)
+        assert bs_after["hasStorageState"] is True, bs_after
+
+        assert c.post(f"/v1/browser/sessions/{sid}/takeover/complete", headers=h).status_code == 200
+
+        # Reject pending form submit so worker resumes under AGENT mode and navigates to the protected dashboard
+        assert (
+            c.post(
+                f"/v1/approvals/{a['id']}/decision",
+                headers=h,
+                json={
+                    "schemaVersion": "1.0",
+                    "decision": "REJECTED",
+                    "requestSha256": a["requestSha256"],
+                    "expectedRecordVersion": a["recordVersion"],
+                },
+            ).status_code
+            == 200
+        )
+        st = wait(lambda s: s["state"] in ("SUCCEEDED", "FAILED", "WAITING_RECONCILIATION"))
+        assert st["state"] == "SUCCEEDED", st
+        assert "done:compose-browser:ACTIVE:" in st["run"]["result"], st
+        assert "SECRET_COMPOSE_PORTAL_OK" in st["run"]["result"], st

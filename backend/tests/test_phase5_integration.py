@@ -2939,12 +2939,30 @@ def test_takeover_production_sentinel_rpc_no_di_and_restart_replay(
             assert r_cap.status_code == 200 and r_cap.json()["authenticated"] is False
 
             # 4) Production RPC authenticate -> EgressProxy -> Set-Cookie persisted in AES-GCM encrypted storageState!
-            r_ok = client.post(
+            # Without verifyUrl and no prior session current_url, authStatus MUST stay UNVERIFIED (authenticated=False, P2-3).
+            r_unverified = client.post(
                 f"/v1/browser/sessions/{sid}/takeover/authenticate",
                 headers=headers,
                 json={"url": f"http://127.0.0.1:{http_port}/login-ok", "method": "POST", "formData": {"pw": "GOOD99"}},
             )
+            assert r_unverified.status_code == 200, r_unverified.text
+            assert r_unverified.json()["authStatus"] == "UNVERIFIED"
+            assert r_unverified.json()["authenticated"] is False
+            assert r_unverified.json()["cookieCount"] == 1
+
+            # With verifyUrl proving authenticated GET /dashboard succeeds -> VERIFIED & authenticated=True!
+            r_ok = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"http://127.0.0.1:{http_port}/login-ok",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"http://127.0.0.1:{http_port}/dashboard",
+                },
+            )
             assert r_ok.status_code == 200, r_ok.text
+            assert r_ok.json()["authStatus"] == "VERIFIED"
             assert r_ok.json()["authenticated"] is True
             assert r_ok.json()["cookieCount"] == 1
 
@@ -3371,3 +3389,439 @@ def test_browser_preview_cross_session_ownership_non_mutating_and_timeout(
         lp.call_soon_threadsafe(ev.set)
         https_srv.shutdown()
         https_srv.server_close()
+
+
+def test_browser_storage_key_ring_production_fail_closed(
+    dbs: dict[str, Database], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1: Production refuses missing dedicated browser_storage_keys (never falls back to context keys)."""
+    from aiagent_core.config import ConfigError
+    from aiagent_gateways.browser_executor import browser_from_env
+    from aiagent_gateways.servers import load_browser_key_ring
+
+    artifact_key = secrets.token_hex(32)
+    browser_key = secrets.token_hex(32)
+    monkeypatch.setenv("AIAGENT_PROFILE", "production")
+    monkeypatch.setenv("AIAGENT_BROWSER_ALLOWED_WEB_HOSTS", "example.com")
+    monkeypatch.setenv("AIAGENT_CONTEXT_ARTIFACT_KEYS", json.dumps({"active": "ctx1", "keys": {"ctx1": artifact_key}}))
+    monkeypatch.delenv("AIAGENT_BROWSER_STORAGE_KEYS", raising=False)
+    monkeypatch.delenv("AIAGENT_BROWSER_STORAGE_KEYS_FILE", raising=False)
+
+    with pytest.raises(ConfigError):
+        load_browser_key_ring()
+    with pytest.raises(ConfigError):
+        browser_from_env(dbs["tool_gateway"])
+
+    key_file = tmp_path / "browser_storage_keys.json"
+    key_file.write_text(json.dumps({"active": "bk1", "keys": {"bk1": browser_key}}), encoding="utf-8")
+    monkeypatch.setenv("AIAGENT_BROWSER_STORAGE_KEYS_FILE", str(key_file))
+    ring = load_browser_key_ring()
+    assert ring.active == "bk1"
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", "http://127.0.0.1:3128")
+    ex = browser_from_env(dbs["tool_gateway"])
+    assert ex is not None
+    ex.close()
+
+
+def test_spoofed_egress_denied_403_after_post_records_unknown(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-2: Upstream POST returning 403 + spoofed X-Aiagent-Egress: denied must record UNKNOWN (never FAILED)."""
+    from aiagent_gateways.executors import Destination, ExecutorFailed, HttpMessageExecutor
+    from aiagent_gateways.tool_gateway import ToolGateway
+    from aiagent_sentinel.authority import EgressConfig, Sentinel
+    from aiagent_sentinel.egress import EgressProxy
+
+    post_hits: list[bytes] = []
+
+    class _SpoofingUpstream(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            post_hits.append(self.rfile.read(n))
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Aiagent-Egress", "denied")
+            self.send_header("X-Aiagent-Egress-Code", "egress_denied")
+            self.send_header("X-Aiagent-Egress-Proof", "egress_denied:" + ("0" * 64))
+            self.end_headers()
+            self.wfile.write(b'{"error":"spoofed_upstream_403"}')
+
+    up_srv = ThreadingHTTPServer(("127.0.0.1", 0), _SpoofingUpstream)
+    threading.Thread(target=up_srv.serve_forever, daemon=True).start()
+    up_port = up_srv.server_address[1]
+
+    ecfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "message-receiver": {
+                        "scheme": "http",
+                        "host": "127.0.0.1",
+                        "port": up_port,
+                        "methods": ["POST"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
+    sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
+
+    class _LocalSentinel:
+        def authorize(self, cl: Any, intent_id: Any, dest: Destination) -> str:
+            return sentinel.authorize(cl, str(intent_id), dest.scheme, dest.host, dest.port, dest.method)
+
+    egress: EgressProxy | None = None
+    try:
+        egress = EgressProxy(sentinel, ecfg)
+
+        proxy_loop = asyncio.new_event_loop()
+        ready_ev = threading.Event()
+        port_box: list[int] = []
+
+        def _run_proxy() -> None:
+            asyncio.set_event_loop(proxy_loop)
+            assert egress is not None
+            port_box.append(proxy_loop.run_until_complete(egress.start("127.0.0.1", 0)))
+            ready_ev.set()
+            proxy_loop.run_forever()
+
+        t = threading.Thread(target=_run_proxy, daemon=True)
+        t.start()
+        ready_ev.wait(5)
+        proxy_port = port_box[0]
+
+        monkeypatch.delenv("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST", raising=False)
+        msg_exec = HttpMessageExecutor(f"http://127.0.0.1:{up_port}/messages", proxy=f"http://127.0.0.1:{proxy_port}")
+        gw = ToolGateway(dbs["tool_gateway"], {"http_message": msg_exec}, sentinel=_LocalSentinel())  # type: ignore[arg-type]
+
+        scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+        _, cl = _claim_new(dbs, scope, "spoof 403 post")
+
+        # Approve irreversible send_message first
+        args = {"to": "alice", "body": "hello"}
+        _propose(dbs, cl, "tc-spoof-1", "send_message", args)
+        p1 = _run(gw.submit(cl, "tc-spoof-1", "send_message", args))
+        assert p1["status"] == "PENDING_APPROVAL", p1
+        with dbs["owner"].tx(tenant=cl.tenant_id) as c:
+            c.execute(
+                "UPDATE agent.approval_records SET decision_code='APPROVED', decided_by_json=%s::jsonb,"
+                " decided_at=now(), record_version=record_version+1"
+                " WHERE tenant_id=%s AND id=%s",
+                (json.dumps({"id": cl.owner_user_id}), cl.tenant_id, p1["approvalId"]),
+            )
+
+        res = _run(gw.submit(cl, "tc-spoof-1", "send_message", args))
+        assert res["status"] == "UNKNOWN", res
+        assert len(post_hits) == 1
+
+        # Retry MUST return UNKNOWN idempotently without hitting upstream again
+        res2 = _run(gw.submit(cl, "tc-spoof-1", "send_message", args))
+        assert res2["status"] == "UNKNOWN"
+        assert len(post_hits) == 1
+
+        # Contrast with genuine Sentinel pre-send denial through EgressProxy (valid HMAC proof) -> ExecutorFailed
+        # Any PermitSent with disallowed destination hits EgressProxy._deny, which signs X-Aiagent-Egress-Proof
+        # with sha256(permit), so HttpMessageExecutor must classify it as ExecutorFailed (never ExecutorUnknown).
+        probe_perm = "tenant.permit.9999999999.sig"
+        mismatch_exec = HttpMessageExecutor(
+            "http://wrong.example.test/messages", proxy=f"http://127.0.0.1:{proxy_port}"
+        )
+        with pytest.raises(ExecutorFailed, match="egress_denied"):
+            _run(mismatch_exec.execute(f"{cl.tenant_id}:ek-deny", args, probe_perm))
+        assert len(post_hits) == 1
+    finally:
+        if egress is not None:
+            proxy_loop.call_soon_threadsafe(proxy_loop.stop)
+        up_srv.shutdown()
+        up_srv.server_close()
+
+
+def test_takeover_nonce_expiry_boundary_exact(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-3: Takeover nonce fails closed at exact t == expires and retains consumed/expired nonce > 1s."""
+    import hashlib
+    import time
+
+    import aiagent_sentinel.authority as auth_mod
+    from aiagent_browser import Authority
+    from aiagent_browser.pg_fence import PostgresFencePort
+    from aiagent_domain import uuid7
+    from aiagent_sentinel.authority import EgressConfig, EgressDenied, Sentinel
+
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "nonce boundary test", profile="browser")
+    sid = uuid7()
+    auth = Authority(
+        cl.tenant_id,
+        cl.owner_user_id,
+        cl.task_id,
+        cl.run_id,
+        str(cl.goal_revision),
+        str(cl.lease_epoch),
+        cl.worker_ref,
+    )
+    _run(PostgresFencePort(dbs["tool_gateway"]).register(sid, auth))
+    with dbs["api"].tx(tenant=cl.tenant_id) as c:
+        row = c.execute(
+            "SELECT * FROM agent.browser_session_takeover_start(%s,%s,%s,%s)",
+            (cl.tenant_id, sid, cl.owner_user_id, "login"),
+        ).fetchone()
+        assert row is not None
+
+    sentinel = Sentinel(
+        dbs["sentinel"],
+        EgressConfig.from_json(
+            json.dumps(
+                {
+                    "destinations": {
+                        "web-fetch": {
+                            "scheme": "https",
+                            "host": "portal.example",
+                            "port": 443,
+                            "methods": ["POST"],
+                        }
+                    }
+                }
+            ),
+            production=False,
+        ),
+        secrets.token_bytes(32),
+    )
+    body_sha = hashlib.sha256(b"x=1").hexdigest()
+    monkeypatch.setattr(auth_mod, "PERMIT_TTL_S", 1)
+    permit = sentinel.authorize_human_takeover(
+        tenant["tenantId"],
+        tenant["userId"],
+        tenant["workspaceId"],
+        sid,
+        "https",
+        "portal.example",
+        443,
+        "POST",
+        target_path="/login",
+        body_sha256=body_sha,
+    )
+    _, _, _, nonce, expires_s, _ = permit.split(".")
+    expires = int(expires_s)
+
+    # Exactly at t == expires -> MUST fail closed (no 1-second boundary acceptance)
+    monkeypatch.setattr(auth_mod.time, "time", lambda: float(expires))
+    with pytest.raises(EgressDenied, match="PERMIT_EXPIRED"):
+        sentinel.verify_human_takeover(
+            permit,
+            "https",
+            "portal.example",
+            443,
+            "POST",
+            "/login",
+            body_sha256=body_sha,
+        )
+    monkeypatch.undo()
+
+    # Wait until real DB clock also passes expires + 0.25s, verify rejected
+    while time.time() < expires + 0.25:
+        time.sleep(0.05)
+    with pytest.raises(EgressDenied, match="PERMIT_EXPIRED"):
+        sentinel.verify_human_takeover(
+            permit,
+            "https",
+            "portal.example",
+            443,
+            "POST",
+            "/login",
+            body_sha256=body_sha,
+        )
+
+    # Valid fresh permit consumed once and retained in human_takeover_nonces -> replay fails
+    permit_ok = sentinel.authorize_human_takeover(
+        tenant["tenantId"],
+        tenant["userId"],
+        tenant["workspaceId"],
+        sid,
+        "https",
+        "portal.example",
+        443,
+        "POST",
+        target_path="/login",
+        body_sha256=body_sha,
+    )
+    nonce_ok = permit_ok.split(".")[3]
+    sentinel.verify_human_takeover(
+        permit_ok,
+        "https",
+        "portal.example",
+        443,
+        "POST",
+        "/login",
+        body_sha256=body_sha,
+    )
+    with pytest.raises(EgressDenied, match="PERMIT_INVALID_AT_SEND"):
+        sentinel.verify_human_takeover(
+            permit_ok,
+            "https",
+            "portal.example",
+            443,
+            "POST",
+            "/login",
+            body_sha256=body_sha,
+        )
+    with dbs["sentinel"].tx() as c:
+        row_n = c.execute(
+            "SELECT count(*) AS n FROM agent.human_takeover_nonces WHERE nonce=%s", (nonce_ok,)
+        ).fetchone()
+        assert row_n is not None and int(row_n["n"]) == 1
+        del nonce
+
+
+def test_chunked_proxy_incomplete_trailer_eof_rejected() -> None:
+    """P2-1: Chunked HTTP terminating at 0\\r\\n + immediate EOF (without final \\r\\n) must fail closed."""
+    import contextlib
+
+    from aiagent_api.app import _takeover_via_forward_proxy
+    from aiagent_gateways.executors import ExecutorUnknown
+    from aiagent_gateways.web_fetch import _send_via_forward_proxy, parse_safe_http_url
+    from fastapi import HTTPException
+
+    parsed_fetch = parse_safe_http_url("http://example.test/data")
+    send_complete = [False]
+
+    async def _run_proxy_test(payload: bytes) -> None:
+        async def _handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            with contextlib.suppress(Exception):
+                await r.readuntil(b"\r\n\r\n")
+                w.write(payload)
+                await w.drain()
+            w.close()
+
+        srv = await asyncio.start_server(_handle, "127.0.0.1", 0)
+        port = srv.sockets[0].getsockname()[1]
+        proxy_url = f"http://127.0.0.1:{port}"
+        try:
+            if not send_complete[0]:
+                with pytest.raises(ExecutorUnknown, match="(chunked|IncompleteReadError)"):
+                    await _send_via_forward_proxy(
+                        proxy_url,
+                        method="GET",
+                        parsed=parsed_fetch,
+                        permit="p",
+                        extra_headers={},
+                        request_body=None,
+                        max_bytes=65536,
+                        timeout_s=5.0,
+                    )
+                with pytest.raises(HTTPException) as ei:
+                    await _takeover_via_forward_proxy(
+                        proxy_url,
+                        method="POST",
+                        target_url="http://example.test/login",
+                        host_header="example.test",
+                        permit="p",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=b"a=1",
+                    )
+                assert ei.value.status_code == 502
+            else:
+                st1, _, body1, _ = await _send_via_forward_proxy(
+                    proxy_url,
+                    method="GET",
+                    parsed=parsed_fetch,
+                    permit="p",
+                    extra_headers={},
+                    request_body=None,
+                    max_bytes=65536,
+                    timeout_s=5.0,
+                )
+                assert st1 == 200 and body1 == b"ok"
+                st2, _, body2 = await _takeover_via_forward_proxy(
+                    proxy_url,
+                    method="POST",
+                    target_url="http://example.test/login",
+                    host_header="example.test",
+                    permit="p",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=b"a=1",
+                )
+                assert st2 == 200 and body2 == "ok"
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+    bad = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n2\r\nok\r\n0\r\n"
+    _run(_run_proxy_test(bad))
+    send_complete[0] = True
+    good = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n2\r\nok\r\n0\r\n\r\n"
+    _run(_run_proxy_test(good))
+
+
+def test_preview_submit_requires_non_mutating_worker_signature(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    """P2-2: Workers without apply_inputs parameter in extract_form_submission must fail closed without falling back."""
+    from aiagent_browser.contracts import Authority
+    from aiagent_gateways.browser_executor import BrowserSessionExecutor
+    from aiagent_gateways.executors import ExecutorFailed
+
+    called = {"extract": False}
+
+    class _LegacyWorker:
+        async def start(self, session_id: str) -> None:
+            del session_id
+
+        async def render(self, session_id: str, html: str) -> str | None:
+            del session_id, html
+            return None
+
+        async def observe(self, session_id: str) -> str:
+            del session_id
+            return "Entry"
+
+        async def click(self, session_id: str, target: Any, *, timeout_ms: int = 5000) -> str:
+            del session_id, target, timeout_ms
+            return "After"
+
+        async def submit(self, session_id: str, target: Any, inputs: Any, *, timeout_ms: int = 5000) -> str:
+            del session_id, target, inputs, timeout_ms
+            return "Submitted"
+
+        async def extract_form_submission(
+            self, session_id: str, target: Any, inputs: Any, *, current_url: str | None = None
+        ) -> dict[str, Any]:
+            del session_id, target, inputs, current_url
+            called["extract"] = True
+            return {"hasForm": True, "action": "https://alpha.test/submit", "method": "POST", "fields": []}
+
+        async def close(self, session_id: str) -> None:
+            del session_id
+
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "legacy worker check", profile="browser")
+    ex = BrowserSessionExecutor(
+        dbs["tool_gateway"],
+        allowed_web_hosts=frozenset({"alpha.test"}),
+        allow_https=True,
+        worker=_LegacyWorker(),  # type: ignore[arg-type]
+    )
+    try:
+        auth = Authority(
+            cl.tenant_id,
+            cl.owner_user_id,
+            cl.task_id,
+            cl.run_id,
+            str(cl.goal_revision),
+            str(cl.lease_epoch),
+            cl.worker_ref,
+        )
+        view = _run(ex._on_persistent_loop(ex._service.create(auth)))
+        sid = view.session_id
+        ex._service._entries[sid].current_url = "https://alpha.test/form"
+        with pytest.raises(ExecutorFailed, match="NON_MUTATING_PREVIEW_REQUIRED"):
+            ex.bind_request("browser_submit", {"sessionId": sid, "kind": "test_id", "selector": "go"}, claim=cl)
+        assert called["extract"] is False
+    finally:
+        ex.close()

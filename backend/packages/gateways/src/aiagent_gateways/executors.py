@@ -6,8 +6,11 @@ effect key (= idempotency key towards the remote side). It must classify failure
 
 from __future__ import annotations
 
+import hmac
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -21,6 +24,22 @@ class ExecutorFailed(Exception):
 
 class ExecutorUnknown(Exception):
     pass
+
+
+def is_authenticated_proxy_denial(status_code: int, headers: Mapping[str, str], permit: str | None) -> bool:
+    """Verify HMAC proof on 403 x-aiagent-egress: denied so spoofed upstream 403s never look like pre-send denials."""
+    if status_code != 403 or not permit:
+        return False
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    if lowered.get("x-aiagent-egress") != "denied":
+        return False
+    proof = lowered.get("x-aiagent-egress-proof", "")
+    code_part, sep, mac_part = proof.partition(":")
+    if not sep or not code_part or not mac_part:
+        return False
+    key = sha256(permit.encode("utf-8")).digest()
+    expected = hmac.new(key, f"DENIED:{code_part}".encode(), sha256).hexdigest()
+    return hmac.compare_digest(mac_part, expected)
 
 
 def valid_receipt(value: Any) -> bool:
@@ -105,9 +124,11 @@ class HttpMessageExecutor:
             raise ExecutorFailed("connect") from e  # nothing was sent: connection never established
         except httpx.HTTPError as e:
             raise ExecutorUnknown(type(e).__name__) from e  # request may have been delivered
-        if r.status_code == 403 and r.headers.get("x-aiagent-egress") == "denied":
+        if self.proxy and is_authenticated_proxy_denial(r.status_code, r.headers, permit):
             raise ExecutorFailed("egress_denied")  # Sentinel refused before forwarding
         if r.status_code >= 500 or r.status_code == 408:
+            raise ExecutorUnknown(f"http_{r.status_code}")
+        if r.status_code == 403 and self.proxy:
             raise ExecutorUnknown(f"http_{r.status_code}")
         if r.status_code >= 400:
             raise ExecutorFailed(f"http_{r.status_code}")

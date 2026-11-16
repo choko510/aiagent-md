@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sys
+from urllib.parse import parse_qs
 
 
 async def main(port: int, log: str, hang: bool, token: str) -> None:
@@ -25,6 +26,8 @@ async def main(port: int, log: str, hang: bool, token: str) -> None:
             h = {k.lower(): v.strip() for k, _, v in (ln.partition(":") for ln in head[1:] if ln)}
             body = await r.readexactly(int(h.get("content-length", "0")))
             key = h.get("idempotency-key", "")
+            content_type = "application/json"
+            extra_headers = ""
             if method == "POST" and path == "/messages":
                 rcpt = "rcpt_" + hashlib.sha256(key.encode()).hexdigest()[:12]
                 seen[key] = rcpt
@@ -46,10 +49,46 @@ async def main(port: int, log: str, hang: bool, token: str) -> None:
             elif method == "GET" and path.startswith("/receipts/"):
                 k = path[len("/receipts/") :]
                 out, code = (json.dumps({"receipt": seen[k]}).encode(), 200) if k in seen else (b"{}", 404)
+            elif method == "GET" and path == "/portal/entry":
+                content_type = "text/html; charset=utf-8"
+                out, code = (
+                    b"<!doctype html><html><head><title>Portal Entry</title></head><body>"
+                    b'<form action="/portal/confirm" method="POST">'
+                    b'<button data-testid="enter-portal" type="submit">Enter</button>'
+                    b"</form></body></html>",
+                    200,
+                )
+            elif method == "POST" and path == "/portal/login":
+                content_type = "text/html; charset=utf-8"
+                qs = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+                if qs.get("pw", [""])[0] == "COMPOSE_PASS_99":
+                    extra_headers = "set-cookie: sid=compose-cookie-42; Path=/; HttpOnly\r\n"
+                    out, code = b"<html><body>Welcome</body></html>", 200
+                else:
+                    out, code = (
+                        b'<html><body><form action="/portal/login" method="POST">'
+                        b'<input type="password" name="pw"></form></body></html>',
+                        401,
+                    )
+            elif method == "GET" and path == "/portal/dashboard":
+                content_type = "text/html; charset=utf-8"
+                if "sid=compose-cookie-42" in h.get("cookie", ""):
+                    out, code = (
+                        b"<html><head><title>Portal Dashboard</title></head>"
+                        b"<body>SECRET_COMPOSE_PORTAL_OK</body></html>",
+                        200,
+                    )
+                else:
+                    out, code = (
+                        b'<html><body><form action="/portal/login" method="POST">'
+                        b'<input type="password" name="pw"></form></body></html>',
+                        401,
+                    )
             else:
                 out, code = b"{}", 404
             w.write(
-                f"HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {len(out)}\r\n"
+                f"HTTP/1.1 {code} X\r\ncontent-type: {content_type}\r\n{extra_headers}"
+                f"content-length: {len(out)}\r\n"
                 "connection: close\r\n\r\n".encode()
                 + out
             )
