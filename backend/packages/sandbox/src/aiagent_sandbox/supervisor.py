@@ -67,6 +67,46 @@ os._exit(125)
 """
 
 
+async def _bounded_output(proc: asyncio.subprocess.Process, wall_seconds: float) -> tuple[bytes, bytes, bool, bool]:
+    """Drain both pipes concurrently with bounded retention; kill on overflow or timeout."""
+    assert proc.stdout is not None and proc.stderr is not None
+    overflow = asyncio.Event()
+    buffers = (bytearray(), bytearray())
+
+    async def drain(stream: asyncio.StreamReader, buf: bytearray) -> None:
+        while chunk := await stream.read(8192):
+            remaining = MAX_OUTPUT - len(buf)
+            buf.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                overflow.set()
+
+    tasks = [asyncio.create_task(drain(proc.stdout, buffers[0])), asyncio.create_task(drain(proc.stderr, buffers[1]))]
+
+    async def complete() -> None:
+        await asyncio.gather(proc.wait(), *tasks)
+
+    finished = asyncio.create_task(complete())
+    wait_overflow = asyncio.create_task(overflow.wait())
+    timed_out = False
+    try:
+        done, _ = await asyncio.wait(
+            {finished, wait_overflow}, timeout=wall_seconds, return_when=asyncio.FIRST_COMPLETED
+        )
+        timed_out = not done
+        if timed_out or overflow.is_set():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        await asyncio.shield(finished)
+    finally:
+        # Also stop children on caller cancellation or unexpected pipe errors.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        wait_overflow.cancel()
+        await asyncio.gather(wait_overflow, return_exceptions=True)
+        await asyncio.gather(finished, *tasks, return_exceptions=True)
+    return bytes(buffers[0]), bytes(buffers[1]), timed_out, overflow.is_set()
+
+
 @dataclass
 class Limits:
     cpu_s: int = 30
@@ -186,17 +226,7 @@ class Supervisor:
             preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws),
             close_fds=True,
         )
-        timed_out = False
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=g.wall_ms / 1000)
-        except TimeoutError:
-            timed_out = True
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            out, err = await proc.communicate()
-        finally:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)  # no surviving children after the execution ends
+        out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
         rc = proc.returncode
         if rc == 98:
             return {
@@ -213,7 +243,7 @@ class Supervisor:
             "wallMs": int((time.monotonic() - started) * 1000),
             "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
             "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
-            "truncated": len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT,
+            "truncated": truncated,
         }
 
 
