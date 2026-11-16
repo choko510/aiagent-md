@@ -125,17 +125,19 @@ class EgressProxy:
             if not auth.startswith("Aiagent ") or ":" not in auth:
                 raise EgressDenied("PROXY_AUTH")
             identity, token = auth[8:].split(":", 1)
-            human_takeover = identity == "human_takeover" and dest.needs_permit and method != "CONNECT"
-            if identity not in dest.identities and not human_takeover:
+            scoped_forward = (
+                identity in ("human_takeover", "notification") and dest.needs_permit and method != "CONNECT"
+            )
+            if identity not in dest.identities and not scoped_forward:
                 raise EgressDenied("IDENTITY_NOT_ALLOWED")
             # A TLS tunnel can contain unlimited operations; only the separate model
-            # provider identity can open one, never a Tool or Human Takeover permit.
+            # provider identity can open one, never a Tool, Human Takeover, or Notification permit.
             if method == "CONNECT" and (dest.needs_permit or identity != "model_gateway"):
                 raise EgressDenied("CONNECT_TOOL_FORBIDDEN")
             if hmap.get("transfer-encoding"):
                 raise EgressDenied("CHUNKED_NOT_SUPPORTED")
             pre_read_body: bytes | None = None
-            if identity == "human_takeover":
+            if identity in ("human_takeover", "notification"):
                 assert inner is not None
                 raw_cl = hmap.get("content-length", "0").strip()
                 if raw_cl and not raw_cl.isdigit():
@@ -145,8 +147,13 @@ class EgressProxy:
                     raise EgressDenied("BODY_TOO_LARGE")
                 pre_read_body = await asyncio.wait_for(r.readexactly(cl_val), timeout=10) if cl_val else b""
                 body_sha = hashlib.sha256(pre_read_body).hexdigest()
+                verifier = (
+                    self.sentinel.verify_human_takeover
+                    if identity == "human_takeover"
+                    else self.sentinel.verify_notification
+                )
                 tenant, pid = await asyncio.to_thread(
-                    self.sentinel.verify_human_takeover,
+                    verifier,
                     token,
                     scheme,
                     host,

@@ -1,515 +1,627 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { TaskState, TaskV1 } from "./api/generated/domain";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ApiClientError,
+  createClientRequest,
+  type ApprovalRow,
+  type BrowserObservation,
+  type BrowserSessionItem,
+  type CampaignItem,
+  type CapabilityItem,
+  type ConsentItem,
+  type ContextPolicyItem,
+  type FullTaskView,
+  type MemoryItem,
+  type MemoryRevisionItem,
+  type NotificationBinding,
+  type NotificationIntentItem,
+  type SessionInfo,
+  type TaskSummary,
+  type WatchItem,
+} from "./api/client";
+import AuthSessionBar from "./components/AuthSessionBar";
+import AutomationAndNotifyPanel from "./components/AutomationAndNotifyPanel";
+import BrowserTakeoverPanel from "./components/BrowserTakeoverPanel";
+import CapabilitiesBanner from "./components/CapabilitiesBanner";
+import MemoryAndPolicyPanel from "./components/MemoryAndPolicyPanel";
+import TaskWorkspace from "./components/TaskWorkspace";
 
-type TaskSummary = {
-  id: string;
-  state: TaskState;
-  profile: string;
-  goalRevision: string;
-  activeRunId: string | null;
-  runState: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type BrowserSessionItem = {
-  id: string;
-  taskId: string;
-  runId: string;
-  state: string;
-  mode: string;
-  generation: number;
-  goalRevision: string;
-  leaseEpoch: string;
-  updatedAt: string;
-};
-
-type CampaignItem = {
-  id: string;
-  state: string;
-  controlVersion: number;
-  goalRevision: string;
-  updatedAt: string;
-};
-
-type WatchItem = {
-  watchId: string;
-  timezoneId: string;
-  maxOccurrences: number;
-  revision: number;
-  active: boolean;
-  createdAt: string;
-};
-
-type CapabilityItem = {
-  component: string;
-  integrationState: string;
-  memoryEgressPath: string;
-  externalActionsEnabled: boolean;
-  ownerConsentRequired: boolean;
-  hostVerified: boolean;
-  productionReady: boolean;
-};
-
-type ApprovalRow = {
-  id: string;
-  tool: string;
-  summary: string;
-  decision: string;
-  requestSha256: string;
-  recordVersion: string;
-  goalRevision: string;
-};
-
-type FullTaskView = {
-  id: TaskV1["id"];
-  state: TaskV1["state"];
-  goalRevision: TaskV1["goalRevision"];
-  recordVersion: TaskV1["recordVersion"];
-  run: {
-    id: string;
-    state: string;
-    attemptNo: number;
-    leaseEpoch: string;
-    headRevision: string;
-    result: string | null;
-    error: string | null;
-  };
-  approvals: ApprovalRow[];
-  effects: Array<{ tool: string; status: string }>;
-};
+type SubTab = "tasks" | "memory" | "browser" | "automation";
 
 export default function ConsoleView() {
-  const [token, setToken] = useState("");
-  const [goal, setGoal] = useState("");
-  const [profile, setProfile] = useState<"default" | "browser" | "sandbox" | "anthropic">("default");
+  const [subTab, setSubTab] = useState<SubTab>("tasks");
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskDetail, setTaskDetail] = useState<FullTaskView | null>(null);
-  const [eventsText, setEventsText] = useState<string>("");
-  const [steerGoal, setSteerGoal] = useState("");
+  const [eventsText, setEventsText] = useState("");
+
   const [sessions, setSessions] = useState<BrowserSessionItem[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [observation, setObservation] = useState<BrowserObservation | null>(null);
+  const [takeoverResult, setTakeoverResult] = useState<{
+    authStatus?: string;
+    authenticated?: boolean;
+    observation?: string;
+  } | null>(null);
+
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [revisionsByMemory, setRevisionsByMemory] = useState<Record<string, MemoryRevisionItem[]>>({});
+  const [consents, setConsents] = useState<ConsentItem[]>([]);
+  const [contextPolicy, setContextPolicy] = useState<ContextPolicyItem | null>(null);
+
   const [campaigns, setCampaigns] = useState<CampaignItem[]>([]);
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
+  const [campaignEventsText, setCampaignEventsText] = useState("");
   const [watches, setWatches] = useState<WatchItem[]>([]);
+  const [bindings, setBindings] = useState<NotificationBinding[]>([]);
+  const [notifications, setNotifications] = useState<NotificationIntentItem[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilityItem[]>([]);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const csrfRef = useRef<string | null>(null);
   const authEpochRef = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
   const taskEpochRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
   const taskAbortRef = useRef<AbortController | null>(null);
 
-  const clearOwnerState = useCallback(() => {
+  const clearAllState = useCallback(() => {
+    authEpochRef.current += 1;
     taskEpochRef.current += 1;
+    abortRef.current?.abort();
     taskAbortRef.current?.abort();
-    taskAbortRef.current = null;
+    csrfRef.current = null;
+    setSession(null);
     setTasks([]);
     setSelectedTaskId(null);
     setTaskDetail(null);
     setEventsText("");
     setSessions([]);
+    setSelectedSessionId(null);
+    setObservation(null);
+    setTakeoverResult(null);
+    setMemories([]);
+    setRevisionsByMemory({});
+    setConsents([]);
+    setContextPolicy(null);
     setCampaigns([]);
+    setSelectedCampaignId(null);
+    setCampaignEventsText("");
     setWatches([]);
+    setBindings([]);
+    setNotifications([]);
     setCapabilities([]);
-    setStatusMsg(null);
   }, []);
 
-  const selectTask = useCallback((nextId: string | null) => {
-    taskEpochRef.current += 1;
-    taskAbortRef.current?.abort();
-    taskAbortRef.current = null;
-    setSelectedTaskId(nextId);
-    setTaskDetail(null);
-    setEventsText("");
-  }, []);
-
-  const handleTokenChange = useCallback(
-    (nextToken: string) => {
-      authEpochRef.current += 1;
-      abortRef.current?.abort();
-      abortRef.current = null;
-      setToken(nextToken);
-      setErrorMsg(null);
-      clearOwnerState();
-    },
-    [clearOwnerState],
+  const apiFetch = useMemo(
+    () => createClientRequest(() => csrfRef.current, clearAllState),
+    [clearAllState],
   );
 
-  const authHeaders = useCallback((): Record<string, string> => {
-    const t = token.trim();
-    return t ? { Authorization: `Bearer ${t}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
-  }, [token]);
+  const loadTaskMetadata = useCallback(
+    async (taskId: string, signal?: AbortSignal) => {
+      const [detail, memRes, polRes] = await Promise.all([
+        apiFetch<FullTaskView>(`/v1/tasks/${taskId}`, { signal }),
+        apiFetch<{ items: MemoryItem[] }>(`/v1/tasks/${taskId}/memory`, { signal }).catch(() => ({ items: [] })),
+        apiFetch<{ policy: ContextPolicyItem | null }>(`/v1/tasks/${taskId}/context-policy`, { signal }).catch(() => ({
+          policy: null,
+        })),
+      ]);
+      return { detail, memories: memRes.items, policy: polRes.policy };
+    },
+    [apiFetch],
+  );
 
-  const loadOverview = useCallback(async () => {
-    if (!token.trim()) {
-      clearOwnerState();
-      return;
-    }
-    const epoch = authEpochRef.current;
+  const refreshWorkspace = useCallback(async () => {
+    const myEpoch = authEpochRef.current + 1;
+    authEpochRef.current = myEpoch;
     abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setErrorMsg(null);
-    try {
-      const headers = authHeaders();
-      const [tRes, bRes, cRes, wRes, capRes] = await Promise.all([
-        fetch("/v1/tasks", { headers, signal: controller.signal }),
-        fetch("/v1/browser/sessions", { headers, signal: controller.signal }),
-        fetch("/v1/campaigns", { headers, signal: controller.signal }),
-        fetch("/v1/watches", { headers, signal: controller.signal }),
-        fetch("/v1/step4/capabilities", { headers, signal: controller.signal }),
-      ]);
-      if (epoch !== authEpochRef.current) return;
-      if (!tRes.ok) {
-        clearOwnerState();
-        setErrorMsg(`認証エラーまたはAPI未接続 (HTTP ${tRes.status})`);
-        return;
-      }
-      const [tJson, bJson, cJson, wJson, capJson] = await Promise.all([
-        tRes.json(),
-        bRes.ok ? bRes.json() : Promise.resolve({ items: [] }),
-        cRes.ok ? cRes.json() : Promise.resolve({ items: [] }),
-        wRes.ok ? wRes.json() : Promise.resolve({ items: [] }),
-        capRes.ok ? capRes.json() : Promise.resolve({ capabilities: [] }),
-      ]);
-      if (epoch !== authEpochRef.current) return;
-      setTasks(tJson.items ?? []);
-      setSessions(bJson.items ?? []);
-      setCampaigns(cJson.items ?? []);
-      setWatches(wJson.items ?? []);
-      setCapabilities(capJson.capabilities ?? []);
-    } catch (err) {
-      if ((err as { name?: string })?.name === "AbortError" || epoch !== authEpochRef.current) return;
-      clearOwnerState();
-      setErrorMsg("Control Plane API (/v1) に接続できませんでした。");
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const isStale = () => authEpochRef.current !== myEpoch || ctrl.signal.aborted;
+
+    const settled = await Promise.allSettled([
+      apiFetch<{ items: TaskSummary[] }>("/v1/tasks", { signal: ctrl.signal }),
+      apiFetch<{ items: BrowserSessionItem[] }>("/v1/browser/sessions", { signal: ctrl.signal }),
+      apiFetch<{ items: CampaignItem[] }>("/v1/campaigns", { signal: ctrl.signal }),
+      apiFetch<{ items: WatchItem[] }>("/v1/watches", { signal: ctrl.signal }),
+      apiFetch<{ items: ConsentItem[] }>("/v1/memory/consents", { signal: ctrl.signal }),
+      apiFetch<{ items: NotificationBinding[] }>("/v1/notifications/bindings", { signal: ctrl.signal }),
+      apiFetch<{ items: NotificationIntentItem[] }>("/v1/notifications", { signal: ctrl.signal }),
+      apiFetch<{ capabilities: CapabilityItem[] }>("/v1/step4/capabilities", { signal: ctrl.signal }),
+    ]);
+    if (isStale()) return;
+
+    const [tRes, bRes, cRes, wRes, conRes, bindRes, notRes, capRes] = settled;
+    if (tRes.status === "fulfilled") setTasks(tRes.value.items);
+    if (bRes.status === "fulfilled") setSessions(bRes.value.items);
+    if (cRes.status === "fulfilled") setCampaigns(cRes.value.items);
+    if (wRes.status === "fulfilled") setWatches(wRes.value.items);
+    if (conRes.status === "fulfilled") setConsents(conRes.value.items);
+    if (bindRes.status === "fulfilled") setBindings(bindRes.value.items);
+    if (notRes.status === "fulfilled") setNotifications(notRes.value.items);
+    if (capRes.status === "fulfilled") setCapabilities(capRes.value.capabilities);
+
+    const partialFailures = settled
+      .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+      .map((r) => (r.reason instanceof ApiClientError ? `${r.reason.status} (${r.reason.code})` : String(r.reason)));
+    if (partialFailures.length > 0) {
+      setErrorMsg(`一部データ取得に失敗: ${partialFailures.join(", ")}`);
     }
-  }, [token, authHeaders, clearOwnerState]);
+  }, [apiFetch]);
 
   const loadTaskDetail = useCallback(
-    async (id: string) => {
-      if (!token.trim()) return;
-      const authEpoch = authEpochRef.current;
-      const taskEpoch = ++taskEpochRef.current;
+    async (taskId: string) => {
+      const myAuthEpoch = authEpochRef.current;
+      const myTaskEpoch = taskEpochRef.current + 1;
+      taskEpochRef.current = myTaskEpoch;
       taskAbortRef.current?.abort();
-      const controller = new AbortController();
-      taskAbortRef.current = controller;
-      const headers = authHeaders();
+      const ctrl = new AbortController();
+      taskAbortRef.current = ctrl;
+      const isStale = () =>
+        authEpochRef.current !== myAuthEpoch || taskEpochRef.current !== myTaskEpoch || ctrl.signal.aborted;
+
       try {
-        const [dRes, eRes] = await Promise.all([
-          fetch(`/v1/tasks/${encodeURIComponent(id)}`, { headers, signal: controller.signal }),
-          fetch(`/v1/tasks/${encodeURIComponent(id)}/events/stream?follow=true&max_polls=4`, {
-            headers,
-            signal: controller.signal,
-          }),
+        const [{ detail, memories: mems, policy }, sseRes] = await Promise.all([
+          loadTaskMetadata(taskId, ctrl.signal),
+          fetch(`/v1/tasks/${taskId}/events/stream?limit=100`, {
+            credentials: "include",
+            signal: ctrl.signal,
+          }).then((r) => (r.ok ? r.text() : "")),
         ]);
-        if (authEpoch !== authEpochRef.current || taskEpoch !== taskEpochRef.current) return;
-        if (!dRes.ok) {
-          if (dRes.status === 401 || dRes.status === 403 || dRes.status === 404) {
-            setTaskDetail(null);
-            setEventsText("");
-          }
-          return;
-        }
-        const detail = (await dRes.json()) as FullTaskView;
-        const evText = eRes.ok ? await eRes.text() : "";
-        if (authEpoch !== authEpochRef.current || taskEpoch !== taskEpochRef.current) return;
-        if (detail.id !== id) return;
+        if (isStale()) return;
         setTaskDetail(detail);
-        if (eRes.ok) setEventsText(evText);
+        setMemories(mems);
+        setContextPolicy(policy);
+        setEventsText(sseRes);
+
+        if (!["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED", "BUDGET_EXHAUSTED"].includes(detail.state)) {
+          const lines = sseRes.split("\n").filter((ln) => ln.startsWith("id: "));
+          const lastOffset = lines.length > 0 ? Number(lines[lines.length - 1].slice(4).trim()) || 0 : 0;
+          void (async () => {
+            try {
+              const streamResp = await fetch(
+                `/v1/tasks/${taskId}/events/stream?after_offset=${lastOffset}&follow=true&max_polls=20`,
+                { credentials: "include", signal: ctrl.signal },
+              );
+              if (!streamResp.ok || !streamResp.body || isStale()) return;
+              const reader = streamResp.body.getReader();
+              const decoder = new TextDecoder();
+              while (true) {
+                const { value, done } = await reader.read();
+                if (done || isStale()) break;
+                const chunk = decoder.decode(value, { stream: true });
+                if (chunk) {
+                  setEventsText((prev) => `${prev}${chunk}`);
+                }
+              }
+            } catch {
+              // Abort or stream close on task switch / terminal state
+            }
+          })();
+        }
       } catch (err) {
-        if ((err as { name?: string })?.name === "AbortError") return;
-        // Transient read failure is ignored if owner or task selection switched.
+        if (isStale()) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setErrorMsg(err instanceof Error ? err.message : "タスク詳細の取得に失敗しました");
       }
     },
-    [token, authHeaders],
+    [loadTaskMetadata],
   );
 
+  // Restore HttpOnly cookie session transparently across page reloads
   useEffect(() => {
-    if (!selectedTaskId) {
-      taskAbortRef.current?.abort();
-      taskAbortRef.current = null;
-      return;
-    }
-    void loadTaskDetail(selectedTaskId);
+    let active = true;
+    (async () => {
+      try {
+        const info = await apiFetch<SessionInfo>("/v1/auth/session");
+        if (!active || !info.authenticated) return;
+        csrfRef.current = info.csrfToken ?? null;
+        setSession(info);
+        await refreshWorkspace();
+      } catch {
+        // 401 when unauthenticated on initial load is expected
+      }
+    })();
     return () => {
+      active = false;
       taskAbortRef.current?.abort();
     };
-  }, [selectedTaskId, loadTaskDetail]);
+  }, [apiFetch, refreshWorkspace]);
 
-  useEffect(() => {
-    if (!selectedTaskId || !token.trim()) return;
-    if (taskDetail && ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(taskDetail.state)) return;
-    const timer = window.setInterval(() => {
-      void loadTaskDetail(selectedTaskId);
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [selectedTaskId, token, taskDetail, loadTaskDetail]);
+  function selectTask(taskId: string) {
+    setSelectedTaskId(taskId);
+    setTaskDetail(null);
+    setEventsText("");
+    setMemories([]);
+    setRevisionsByMemory({});
+    setContextPolicy(null);
+    void loadTaskDetail(taskId);
+  }
 
-  async function submitNewTask(event: FormEvent) {
-    event.preventDefault();
-    if (!token.trim() || !goal.trim()) return;
+  async function runAction(label: string, fn: () => Promise<void>) {
+    setBusy(true);
     setErrorMsg(null);
-    setStatusMsg(null);
-    const res = await fetch("/v1/tasks", {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ schemaVersion: "1.0", goal: goal.trim(), profile }),
-    });
-    if (!res.ok) {
-      setErrorMsg(`タスク投入に失敗しました (HTTP ${res.status})`);
-      return;
+    try {
+      await fn();
+      setStatusMsg(label);
+    } catch (err) {
+      setErrorMsg(err instanceof ApiClientError ? `${err.status} (${err.code})` : String(err));
+    } finally {
+      setBusy(false);
     }
-    const created = (await res.json()) as { taskId: string };
-    setGoal("");
-    setStatusMsg(`タスクを投入しました: ${created.taskId}`);
-    selectTask(created.taskId);
-    await loadOverview();
   }
 
-  async function decideApproval(approval: ApprovalRow, decision: "APPROVED" | "REJECTED") {
-    const targetId = selectedTaskId;
-    if (!targetId || !taskDetail || taskDetail.id !== targetId) return;
-    const res = await fetch(`/v1/approvals/${encodeURIComponent(approval.id)}/decision`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({
-        schemaVersion: "1.0",
-        decision,
-        requestSha256: approval.requestSha256,
-        expectedRecordVersion: approval.recordVersion,
-      }),
+  async function handleLogin(token: string) {
+    await runAction("Cookie セッションを開始しました。", async () => {
+      const info = await apiFetch<SessionInfo>("/v1/auth/session", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+      csrfRef.current = info.csrfToken ?? null;
+      setSession(info);
+      await refreshWorkspace();
     });
-    if (!res.ok) {
-      setErrorMsg(`承認操作に失敗しました (HTTP ${res.status})`);
-      return;
-    }
-    setStatusMsg(`承認操作を確定しました: ${approval.id} -> ${decision}`);
-    await loadTaskDetail(targetId);
   }
 
-  async function controlTask(action: "pause" | "resume" | "cancel") {
-    const targetId = selectedTaskId;
-    if (!targetId || !taskDetail || taskDetail.id !== targetId) return;
-    const res = await fetch(`/v1/tasks/${encodeURIComponent(targetId)}/${action}`, {
-      method: "POST",
-      headers: authHeaders(),
-    });
-    if (!res.ok) {
-      setErrorMsg(`Run 制御 (${action}) に失敗しました (HTTP ${res.status})`);
-      return;
+  async function handleLogout() {
+    setBusy(true);
+    setErrorMsg(null);
+    try {
+      await apiFetch("/v1/auth/session", { method: "DELETE" });
+    } catch {
+      // clear UI even if already expired
+    } finally {
+      clearAllState();
+      setStatusMsg("ログアウトしました。");
+      setBusy(false);
     }
-    setStatusMsg(`Run 制御を実行しました: ${action}`);
-    await loadOverview();
-    await loadTaskDetail(targetId);
   }
 
-  async function sendSteer(event: FormEvent) {
-    event.preventDefault();
-    const targetId = selectedTaskId;
-    if (!targetId || !taskDetail || taskDetail.id !== targetId || !steerGoal.trim()) return;
-    const res = await fetch(`/v1/tasks/${encodeURIComponent(targetId)}/steer`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({
-        schemaVersion: "1.0",
-        goal: steerGoal.trim(),
-        expectedGoalRevision: taskDetail.goalRevision,
-      }),
-    });
-    if (!res.ok) {
-      setErrorMsg(`Steer に失敗しました (HTTP ${res.status})`);
-      return;
-    }
-    setSteerGoal("");
-    setStatusMsg("目標 (Steer) を更新しました");
-    await loadOverview();
-    await loadTaskDetail(targetId);
-  }
-
-  const detailMatchesSelected = Boolean(taskDetail && selectedTaskId && taskDetail.id === selectedTaskId);
+  const detailMatchesSelected = Boolean(selectedTaskId && taskDetail && taskDetail.id === selectedTaskId);
 
   return (
-    <section className="console" aria-label="Control Plane Console">
-      <div className="panel console-auth">
-        <label>
-          <span>Owner API Token（メモリ保持のみ・保存しません）</span>
-          <input
-            type="password"
-            value={token}
-            onChange={(e) => handleTokenChange(e.target.value)}
-            placeholder="aiag_... を入力"
-          />
-        </label>
-        <button type="button" onClick={() => void loadOverview()} disabled={!token.trim()}>
-          状態を読み込む
-        </button>
+    <section className="console" aria-label="Agent Console">
+      <AuthSessionBar
+        session={session}
+        busy={busy}
+        onLogin={handleLogin}
+        onLogout={handleLogout}
+        onRefresh={() => runAction("最新状態を取得しました。", refreshWorkspace)}
+      />
+
+      {statusMsg && (
+        <div className="banner" data-testid="console-status-banner">
+          {statusMsg}
+        </div>
+      )}
+      {errorMsg && (
+        <div className="banner banner-error" role="alert" data-testid="console-error-banner">
+          {errorMsg}
+        </div>
+      )}
+
+      <div className="subtabs" role="tablist" aria-label="Console パネル切替">
+        {(
+          [
+            ["tasks", "Tasks・承認"],
+            ["memory", "Memory・Policy"],
+            ["browser", "Browser Takeover"],
+            ["automation", "Automation・通知"],
+          ] as Array<[SubTab, string]>
+        ).map(([id, text]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={subTab === id}
+            className={subTab === id ? "subtab subtab-active" : "subtab"}
+            onClick={() => setSubTab(id)}
+            data-testid={`tab-${id}`}
+          >
+            {text}
+          </button>
+        ))}
       </div>
 
-      {errorMsg && <div className="banner banner-error" role="alert">{errorMsg}</div>}
-      {statusMsg && <div className="banner">{statusMsg}</div>}
+      {subTab === "tasks" && (
+        <TaskWorkspace
+          authenticated={Boolean(session?.authenticated)}
+          busy={busy}
+          tasks={tasks}
+          selectedTaskId={selectedTaskId}
+          taskDetail={taskDetail}
+          detailMatchesSelected={detailMatchesSelected}
+          eventsText={eventsText}
+          onCreateTask={(goal, profile) =>
+            runAction("タスクを投入しました。", async () => {
+              const res = await apiFetch<{ taskId: string }>("/v1/tasks", {
+                method: "POST",
+                body: JSON.stringify({ schemaVersion: "1.0", goal, profile }),
+              });
+              await refreshWorkspace();
+              selectTask(res.taskId);
+            })
+          }
+          onSelectTask={selectTask}
+          onControlTask={(action) =>
+            runAction(`Task ${action} を実行しました。`, async () => {
+              if (!selectedTaskId) return;
+              await apiFetch(`/v1/tasks/${selectedTaskId}/${action}`, { method: "POST" });
+              await refreshWorkspace();
+              await loadTaskDetail(selectedTaskId);
+            })
+          }
+          onSteerTask={(newGoal) =>
+            runAction("Steer を送信しました。", async () => {
+              if (!taskDetail) return;
+              await apiFetch(`/v1/tasks/${taskDetail.id}/steer`, {
+                method: "POST",
+                body: JSON.stringify({
+                  schemaVersion: "1.0",
+                  goal: newGoal,
+                  expectedGoalRevision: taskDetail.goalRevision,
+                }),
+              });
+              await refreshWorkspace();
+              await loadTaskDetail(taskDetail.id);
+            })
+          }
+          onDecideApproval={(approval: ApprovalRow, decision: "APPROVED" | "REJECTED") =>
+            runAction(`承認 ${decision} を記録しました。`, async () => {
+              try {
+                await apiFetch(`/v1/approvals/${approval.id}/decision`, {
+                  method: "POST",
+                  body: JSON.stringify({
+                    schemaVersion: "1.0",
+                    decision,
+                    requestSha256: approval.requestSha256,
+                    expectedRecordVersion: approval.recordVersion,
+                  }),
+                });
+              } finally {
+                if (selectedTaskId) await loadTaskDetail(selectedTaskId);
+              }
+            })
+          }
+        />
+      )}
 
-      <div className="console-grid">
-        <div className="panel">
-          <h2>新規タスク投入</h2>
-          <form onSubmit={(e) => void submitNewTask(e)} className="stack-form">
-            <input
-              type="text"
-              value={goal}
-              onChange={(e) => setGoal(e.target.value)}
-              placeholder="実行目標を入力"
-              aria-label="タスク目標"
-            />
-            <select
-              value={profile}
-              onChange={(e) => setProfile(e.target.value as typeof profile)}
-              aria-label="プロファイル"
-            >
-              <option value="default">default</option>
-              <option value="browser">browser (offline fixture + approval)</option>
-              <option value="sandbox">sandbox (execution cell)</option>
-              <option value="anthropic">anthropic (provider route)</option>
-            </select>
-            <button type="submit" disabled={!token.trim() || !goal.trim()}>
-              タスク投入
-            </button>
-          </form>
+      {subTab === "memory" && (
+        <MemoryAndPolicyPanel
+          authenticated={Boolean(session?.authenticated)}
+          busy={busy}
+          selectedTaskId={selectedTaskId}
+          memories={memories}
+          revisionsByMemory={revisionsByMemory}
+          consents={consents}
+          contextPolicy={contextPolicy}
+          onRevokeMemory={(memoryId) =>
+            runAction("Memory を削除・Tombstone 記録しました。", async () => {
+              if (!selectedTaskId) return;
+              await apiFetch(`/v1/tasks/${selectedTaskId}/memory/${memoryId}`, { method: "DELETE" });
+              await loadTaskDetail(selectedTaskId);
+            })
+          }
+          onLoadRevisions={(memoryId) =>
+            runAction("Memory 履歴を取得しました。", async () => {
+              if (!selectedTaskId) return;
+              const res = await apiFetch<{ items: MemoryRevisionItem[] }>(
+                `/v1/tasks/${selectedTaskId}/memory/${memoryId}/revisions`,
+              );
+              setRevisionsByMemory((prev) => ({ ...prev, [memoryId]: res.items }));
+            })
+          }
+          onGrantConsent={(recipient) =>
+            runAction(`${recipient} への Memory 送信同意を付与しました。`, async () => {
+              await apiFetch(`/v1/memory/consents/${encodeURIComponent(recipient)}`, { method: "POST" });
+              await refreshWorkspace();
+            })
+          }
+          onRevokeConsent={(recipient) =>
+            runAction(`${recipient} への Memory 送信同意を撤回しました。`, async () => {
+              await apiFetch(`/v1/memory/consents/${encodeURIComponent(recipient)}`, { method: "DELETE" });
+              await refreshWorkspace();
+            })
+          }
+          onSaveContextPolicy={(payload) =>
+            runAction("Context Policy を更新しました。", async () => {
+              if (!selectedTaskId) return;
+              await apiFetch(`/v1/tasks/${selectedTaskId}/context-policy`, {
+                method: "PUT",
+                body: JSON.stringify({ schemaVersion: "1.0", ...payload }),
+              });
+              await loadTaskDetail(selectedTaskId);
+            })
+          }
+        />
+      )}
 
-          <h3>タスク一覧 ({tasks.length})</h3>
-          <ul className="compact-list">
-            {tasks.map((t) => (
-              <li key={t.id}>
-                <button
-                  type="button"
-                  className={selectedTaskId === t.id ? "chip chip-active" : "chip"}
-                  onClick={() => selectTask(t.id)}
-                >
-                  [{t.state}] {t.profile} · {t.id.slice(0, 8)}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {subTab === "browser" && (
+        <BrowserTakeoverPanel
+          authenticated={Boolean(session?.authenticated)}
+          busy={busy}
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
+          observation={observation}
+          takeoverResult={takeoverResult}
+          onSelectSession={async (sid) => {
+            setSelectedSessionId(sid);
+            setTakeoverResult(null);
+            await runAction("Browser 観測を取得しました。", async () => {
+              const obs = await apiFetch<BrowserObservation>(`/v1/browser/sessions/${sid}/observation`);
+              setObservation(obs);
+            });
+          }}
+          onStartTakeover={(sid, reason) =>
+            runAction("Human Takeover を開始しました。", async () => {
+              await apiFetch(`/v1/browser/sessions/${sid}/takeover/start`, {
+                method: "POST",
+                body: JSON.stringify({ reason }),
+              });
+              await refreshWorkspace();
+              const obs = await apiFetch<BrowserObservation>(`/v1/browser/sessions/${sid}/observation`);
+              setObservation(obs);
+            })
+          }
+          onAuthenticate={(sid, payload) =>
+            runAction("認証リクエストを実行しました。", async () => {
+              const res = await apiFetch<{ authStatus: string; authenticated: boolean; observation: string }>(
+                `/v1/browser/sessions/${sid}/takeover/authenticate`,
+                {
+                  method: "POST",
+                  body: JSON.stringify(payload),
+                },
+              );
+              setTakeoverResult(res);
+              await refreshWorkspace();
+            })
+          }
+          onCompleteTakeover={(sid) =>
+            runAction("Human Takeover を完了しました（AGENT へ制御返還）。", async () => {
+              await apiFetch(`/v1/browser/sessions/${sid}/takeover/complete`, { method: "POST" });
+              await refreshWorkspace();
+            })
+          }
+          onAbortTakeover={(sid) =>
+            runAction("Browser セッションを破棄しました。", async () => {
+              await apiFetch(`/v1/browser/sessions/${sid}/takeover/abort`, { method: "POST" });
+              setObservation(null);
+              await refreshWorkspace();
+            })
+          }
+        />
+      )}
 
-        <div className="panel">
-          <h2>Run 詳細・承認・Steer</h2>
-          {!detailMatchesSelected || !taskDetail ? (
-            <p className="muted">
-              {selectedTaskId ? "タスク詳細を読み込み中です..." : "左の一覧からタスクを選択してください。"}
-            </p>
-          ) : (
-            <div className="detail-stack">
-              <p>
-                <strong>Task:</strong> {taskDetail.id} / <strong>State:</strong> {taskDetail.state} (goalRev{" "}
-                {taskDetail.goalRevision})
-              </p>
-              <p>
-                <strong>Run:</strong> {taskDetail.run.id} / {taskDetail.run.state} (leaseEpoch{" "}
-                {taskDetail.run.leaseEpoch}, HEAD {taskDetail.run.headRevision})
-              </p>
-              <div className="btn-row">
-                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("pause")}>
-                  Pause / Takeover
-                </button>
-                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("resume")}>
-                  Resume
-                </button>
-                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("cancel")}>
-                  Cancel
-                </button>
-              </div>
-              <form onSubmit={(e) => void sendSteer(e)} className="inline-form">
-                <input
-                  type="text"
-                  value={steerGoal}
-                  onChange={(e) => setSteerGoal(e.target.value)}
-                  placeholder="Steer 新しい目標"
-                  aria-label="Steer目標"
-                />
-                <button type="submit" disabled={!detailMatchesSelected || !steerGoal.trim()}>
-                  Steer 送信
-                </button>
-              </form>
+      {subTab === "automation" && (
+        <AutomationAndNotifyPanel
+          authenticated={Boolean(session?.authenticated)}
+          busy={busy}
+          watches={watches}
+          campaigns={campaigns}
+          campaignEventsText={campaignEventsText}
+          selectedCampaignId={selectedCampaignId}
+          bindings={bindings}
+          notifications={notifications}
+          onCreateWatch={(payload) =>
+            runAction("Watch を登録しました。", async () => {
+              await apiFetch("/v1/watches", { method: "POST", body: JSON.stringify(payload) });
+              await refreshWorkspace();
+            })
+          }
+          onTriggerWatch={(watchId) =>
+            runAction("Watch スロットを確定し通知 Outbox へ投入しました。", async () => {
+              await apiFetch(`/v1/watches/${encodeURIComponent(watchId)}/trigger`, {
+                method: "POST",
+                body: JSON.stringify({ dispatch: true }),
+              });
+              await refreshWorkspace();
+            })
+          }
+          onDeactivateWatch={(watchId) =>
+            runAction("Watch を停止しました。", async () => {
+              await apiFetch(`/v1/watches/${encodeURIComponent(watchId)}`, { method: "DELETE" });
+              await refreshWorkspace();
+            })
+          }
+          onCreateCampaign={(payload) =>
+            runAction("Campaign を開始しました。", async () => {
+              const res = await apiFetch<{ campaignId: string }>("/v1/campaigns", {
+                method: "POST",
+                body: JSON.stringify(payload),
+              });
+              await refreshWorkspace();
+              setSelectedCampaignId(res.campaignId);
+              const evRes = await fetch(`/v1/campaigns/${encodeURIComponent(res.campaignId)}/events/stream`, {
+                credentials: "include",
+              });
+              setCampaignEventsText(evRes.ok ? await evRes.text() : "");
+            })
+          }
+          onSelectCampaign={(cid) => {
+            setSelectedCampaignId(cid);
+            void fetch(`/v1/campaigns/${encodeURIComponent(cid)}/events/stream`, { credentials: "include" })
+              .then((r) => (r.ok ? r.text() : ""))
+              .then((t) => setCampaignEventsText(t))
+              .catch(() => setCampaignEventsText(""));
+          }}
+          onControlCampaign={(cid, action, expectedCv) =>
+            runAction(`Campaign ${action} を実行しました。`, async () => {
+              await apiFetch(`/v1/campaigns/${encodeURIComponent(cid)}/${action}`, {
+                method: "POST",
+                body: JSON.stringify({ expectedControlVersion: expectedCv }),
+              });
+              await refreshWorkspace();
+              const evRes = await fetch(`/v1/campaigns/${encodeURIComponent(cid)}/events/stream`, {
+                credentials: "include",
+              });
+              setCampaignEventsText(evRes.ok ? await evRes.text() : "");
+            })
+          }
+          onSteerCampaign={(cid, expectedCv, newGoalRev, newGoalText) =>
+            runAction("Campaign Steer を実行しました。", async () => {
+              await apiFetch(`/v1/campaigns/${encodeURIComponent(cid)}/steer`, {
+                method: "POST",
+                body: JSON.stringify({
+                  expectedControlVersion: expectedCv,
+                  newGoalRevision: newGoalRev,
+                  newGoalText: newGoalText || undefined,
+                }),
+              });
+              await refreshWorkspace();
+            })
+          }
+          onCreateBinding={(payload) =>
+            runAction("通知 Binding を暗号化保存しました。", async () => {
+              await apiFetch("/v1/notifications/bindings", { method: "POST", body: JSON.stringify(payload) });
+              await refreshWorkspace();
+            })
+          }
+          onToggleBindingConsent={(bindingId, granted) =>
+            runAction(granted ? "通知同意を付与しました。" : "通知同意を撤回しました。", async () => {
+              await apiFetch(`/v1/notifications/bindings/${bindingId}/consent`, {
+                method: "POST",
+                body: JSON.stringify({ granted }),
+              });
+              await refreshWorkspace();
+            })
+          }
+          onOptOutBinding={(bindingId) =>
+            runAction("通知 Opt-Out を記録しました。", async () => {
+              await apiFetch(`/v1/notifications/bindings/${bindingId}/opt-out`, { method: "POST" });
+              await refreshWorkspace();
+            })
+          }
+          onRevokeBinding={(bindingId) =>
+            runAction("通知 Binding を失効させました。", async () => {
+              await apiFetch(`/v1/notifications/bindings/${bindingId}`, { method: "DELETE" });
+              await refreshWorkspace();
+            })
+          }
+          onSendManualNotification={(payload) =>
+            runAction("通知 Outbox 登録と配送を実行しました。", async () => {
+              await apiFetch("/v1/notifications", { method: "POST", body: JSON.stringify(payload) });
+              await refreshWorkspace();
+            })
+          }
+          onDispatchNotifications={() =>
+            runAction("保留中の通知 Outbox を配送しました。", async () => {
+              await apiFetch("/v1/notifications/dispatch", { method: "POST" });
+              await refreshWorkspace();
+            })
+          }
+          onMarkRead={(notificationId) =>
+            runAction("通知を既読 (READ) にしました。", async () => {
+              await apiFetch(`/v1/notifications/${notificationId}/read`, { method: "POST" });
+              await refreshWorkspace();
+            })
+          }
+        />
+      )}
 
-              <h3>承認リクエスト ({taskDetail.approvals.length})</h3>
-              {taskDetail.approvals.map((a) => (
-                <div key={a.id} className="approval-card">
-                  <div>
-                    <strong>{a.tool}</strong> — {a.summary} ({a.decision})
-                  </div>
-                  {a.decision === "PENDING" && (
-                    <div className="btn-row">
-                      <button
-                        type="button"
-                        disabled={!detailMatchesSelected}
-                        onClick={() => void decideApproval(a, "APPROVED")}
-                      >
-                        承認 (APPROVE)
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!detailMatchesSelected}
-                        onClick={() => void decideApproval(a, "REJECTED")}
-                      >
-                        拒否 (REJECT)
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              <h3>効果台帳 / Intents</h3>
-              <ul className="compact-list">
-                {taskDetail.effects.map((e, i) => (
-                  <li key={`${e.tool}-${i}`}>{e.tool}: {e.status}</li>
-                ))}
-              </ul>
-
-              <h3>SSE ドメインイベント</h3>
-              <pre className="event-log">{eventsText || "(イベントなし)"}</pre>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="console-grid">
-        <div className="panel">
-          <h2>Browser セッション & Takeover ({sessions.length})</h2>
-          <ul className="compact-list">
-            {sessions.map((b) => (
-              <li key={b.id}>
-                {b.id.slice(0, 8)} · {b.state} · mode={b.mode} · gen={b.generation} · lease={b.leaseEpoch}
-              </li>
-            ))}
-          </ul>
-
-          <h2>Automation Campaign / Watch</h2>
-          <p className="muted">Campaigns: {campaigns.length} / Watches: {watches.length}</p>
-          <ul className="compact-list">
-            {campaigns.map((c) => (
-              <li key={c.id}>
-                Campaign {c.id}: {c.state} (v{c.controlVersion}, goalRev {c.goalRevision})
-              </li>
-            ))}
-            {watches.map((w) => (
-              <li key={w.watchId}>
-                Watch {w.watchId} ({w.timezoneId}, max={w.maxOccurrences}, active={String(w.active)})
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div className="panel">
-          <h2>System Capabilities (誠実ステータス)</h2>
-          <ul className="compact-list">
-            {capabilities.map((cap) => (
-              <li key={cap.component}>
-                <strong>{cap.component}</strong>: {cap.integrationState} · externalActions={String(cap.externalActionsEnabled)}{" "}
-                · hostVerified={String(cap.hostVerified)} · prodReady={String(cap.productionReady)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
+      <CapabilitiesBanner capabilities={capabilities} />
     </section>
   );
 }

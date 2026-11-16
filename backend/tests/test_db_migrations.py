@@ -340,6 +340,10 @@ def test_upgrade_from_legacy_pr92_db_preserves_data_and_refuses_tampered() -> No
             # Upgraded objects, columns, and functions all exist cleanly
             assert c.execute("SELECT to_regclass('agent.browser_sessions') AS t").fetchone()["t"] is not None
             assert c.execute("SELECT to_regclass('agent.dev_cycles') AS t").fetchone()["t"] is not None
+            assert c.execute("SELECT to_regclass('agent.web_sessions') AS t").fetchone()["t"] is not None
+            assert c.execute("SELECT to_regclass('agent.notification_bindings') AS t").fetchone()["t"] is not None
+            assert c.execute("SELECT to_regclass('agent.notification_intents') AS t").fetchone()["t"] is not None
+            assert c.execute("SELECT to_regclass('agent.notification_attempts') AS t").fetchone()["t"] is not None
             assert (
                 c.execute(
                     "SELECT 1 FROM information_schema.columns"
@@ -349,8 +353,22 @@ def test_upgrade_from_legacy_pr92_db_preserves_data_and_refuses_tampered() -> No
             )
             assert (
                 c.execute(
+                    "SELECT 1 FROM information_schema.columns"
+                    " WHERE table_schema='agent' AND table_name='automation_watches' AND column_name='local_hour'"
+                ).fetchone()
+                is not None
+            )
+            assert (
+                c.execute(
                     "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace"
                     " WHERE n.nspname='agent' AND p.proname='browser_session_check'"
+                ).fetchone()
+                is not None
+            )
+            assert (
+                c.execute(
+                    "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace"
+                    " WHERE n.nspname='agent' AND p.proname='create_web_session'"
                 ).fetchone()
                 is not None
             )

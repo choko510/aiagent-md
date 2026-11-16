@@ -24,6 +24,7 @@ name = "aiagent-api"
 version = "0.3.0"
 source = { editable = "packages/api" }
 dependencies = [
+    { name = "aiagent-automation" },
     { name = "aiagent-core" },
     { name = "fastapi" },
     { name = "uvicorn" },
@@ -31,6 +32,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiagent-automation", editable = "packages/automation" },
     { name = "aiagent-core", editable = "packages/core" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "uvicorn", specifier = ">=0.38" },
@@ -132,6 +134,7 @@ source = { editable = "packages/core" }
 dependencies = [
     { name = "aiagent-domain" },
     { name = "apscheduler" },
+    { name = "cryptography" },
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
     { name = "tzdata" },
@@ -141,6 +144,7 @@ dependencies = [
 requires-dist = [
     { name = "aiagent-domain", editable = "packages/domain" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
+    { name = "cryptography", specifier = "==50.0.2" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.3.8" },
     { name = "psycopg-pool", specifier = "==3.3.3" },
     { name = "tzdata", specifier = ">=2025.2" },

@@ -323,6 +323,166 @@ class Sentinel:
             raise EgressDenied("PERMIT_INVALID_AT_SEND")
         return tenant, None
 
+    def authorize_notification(
+        self,
+        tenant_id: str,
+        user_id: str,
+        workspace_id: str,
+        intent_id: str,
+        binding_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str = "POST",
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
+    ) -> str:
+        """Issue single-use permit bound to a consented Notification intent, binding version, destination, path, and body."""
+        try:
+            host = normalize_host(host)
+        except EgressDenied as e:
+            raise RpcError(e.code) from None
+        if not _PG_PERMIT_HOST.fullmatch(host) or method != "POST":
+            raise RpcError("DESTINATION_NOT_ALLOWED")
+        if (
+            not isinstance(target_path, str)
+            or not target_path.startswith("/")
+            or "\r" in target_path
+            or "\n" in target_path
+            or len(target_path) > 2048
+        ):
+            raise RpcError("BAD_REQUEST")
+        if not isinstance(body_sha256, str) or not _SHA256_HEX_RE.fullmatch(body_sha256):
+            raise RpcError("BAD_REQUEST")
+        dest = self.config.match(scheme, host, port)
+        if dest is None or not dest.needs_permit or method not in dest.methods:
+            raise RpcError("DESTINATION_NOT_ALLOWED")
+        with self.db.tx() as c:
+            row = c.execute(
+                "SELECT i.id FROM agent.notification_intents i"
+                " JOIN agent.notification_bindings b ON b.tenant_id=i.tenant_id AND b.id=i.binding_id"
+                " JOIN agent.schema_control sc ON sc.singleton"
+                " JOIN agent.tenants tn ON tn.id=i.tenant_id"
+                " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=%s"
+                " JOIN agent.users u ON u.id=m.user_id"
+                " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=%s AND w.owner_user_id=%s"
+                " WHERE i.tenant_id=%s AND i.id=%s AND i.binding_id=%s AND i.owner_user_id=%s AND i.workspace_id=%s"
+                " AND i.status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
+                " AND i.restore_incarnation=sc.restore_incarnation"
+                " AND i.binding_version=b.binding_version AND i.consent_version=b.consent_version"
+                " AND b.owner_user_id=%s AND b.workspace_id=%s AND b.consent_granted=true"
+                " AND b.opted_out_at IS NULL AND b.revoked_at IS NULL"
+                " AND b.destination_scheme=%s AND b.destination_host=%s AND b.destination_port=%s"
+                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
+                (
+                    user_id,
+                    workspace_id,
+                    user_id,
+                    tenant_id,
+                    intent_id,
+                    binding_id,
+                    user_id,
+                    workspace_id,
+                    user_id,
+                    workspace_id,
+                    scheme,
+                    host,
+                    port,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RpcError("NOTIFICATION_NOT_AUTHORIZED")
+        nonce = secrets.token_hex(12)
+        expires = int(time.time()) + PERMIT_TTL_S
+        mac = _mac(
+            self.key,
+            "notification_delivery",
+            tenant_id,
+            intent_id,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
+        return f"nt.{tenant_id}.{intent_id}.{nonce}.{expires}.{mac}"
+
+    def verify_notification(
+        self,
+        token: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
+    ) -> tuple[str, None]:
+        """Verify notification MAC, destination/path/body binding, consume nonce atomically, and revalidate consent."""
+        parts = token.split(".")
+        if len(parts) != 6 or parts[0] != "nt":
+            raise EgressDenied("PERMIT_MALFORMED")
+        _, tenant, intent_id, nonce, expires_s, mac = parts
+        if not re.fullmatch(r"[0-9a-f]{24}", nonce):
+            raise EgressDenied("PERMIT_MALFORMED")
+        try:
+            expires = int(expires_s)
+        except ValueError:
+            raise EgressDenied("PERMIT_MALFORMED") from None
+        good = _mac(
+            self.key,
+            "notification_delivery",
+            tenant,
+            intent_id,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
+        if not hmac.compare_digest(mac, good):
+            raise EgressDenied("PERMIT_BINDING")
+        if time.time() >= expires:
+            raise EgressDenied("PERMIT_EXPIRED")
+        with self.db.tx() as c:
+            c.execute("DELETE FROM agent.notification_delivery_nonces WHERE expires_at < now() - interval '60 seconds'")
+            clk = c.execute("SELECT to_timestamp(%s) > clock_timestamp() AS valid", (expires,)).fetchone()
+            if clk is None or not clk["valid"]:
+                raise EgressDenied("PERMIT_EXPIRED")
+            burned = c.execute(
+                "INSERT INTO agent.notification_delivery_nonces(nonce, tenant_id, intent_id, expires_at)"
+                " VALUES (%s,%s,%s,to_timestamp(%s)) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",
+                (nonce, tenant, intent_id, expires),
+            ).fetchone()
+            if burned is None:
+                raise EgressDenied("PERMIT_INVALID_AT_SEND")
+        with self.db.tx() as c:
+            row = c.execute(
+                "SELECT 1 FROM agent.notification_intents i"
+                " JOIN agent.notification_bindings b ON b.tenant_id=i.tenant_id AND b.id=i.binding_id"
+                " JOIN agent.schema_control sc ON sc.singleton"
+                " JOIN agent.tenants tn ON tn.id=i.tenant_id"
+                " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=i.owner_user_id"
+                " JOIN agent.users u ON u.id=m.user_id"
+                " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=i.workspace_id AND w.owner_user_id=i.owner_user_id"
+                " WHERE i.tenant_id=%s AND i.id=%s"
+                " AND i.status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
+                " AND i.restore_incarnation=sc.restore_incarnation"
+                " AND i.binding_version=b.binding_version AND i.consent_version=b.consent_version"
+                " AND b.consent_granted=true AND b.opted_out_at IS NULL AND b.revoked_at IS NULL"
+                " AND b.destination_scheme=%s AND b.destination_host=%s AND b.destination_port=%s"
+                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
+                (tenant, intent_id, scheme, host, port),
+            ).fetchone()
+        if row is None:
+            raise EgressDenied("PERMIT_INVALID_AT_SEND")
+        return tenant, None
+
     def verify_and_consume(self, token: str, scheme: str, host: str, port: int, method: str) -> tuple[str, str]:
         """Called by the egress proxy at send time. Returns (tenant_id, permit_id) or raises EgressDenied."""
         try:
