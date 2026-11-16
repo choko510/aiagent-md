@@ -22,7 +22,7 @@ import os
 import re
 import socket
 import ssl
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -709,6 +709,45 @@ def preview_notification_dry_run(
     }
 
 
+def preview_pending_dispatch(
+    db: Database,
+    *,
+    tenant_id: str,
+    user_id: str,
+    workspace_id: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Read-only preview of pending QUEUED/DEFERRED notifications scoped strictly to owner+workspace (P2-3)."""
+    bounded = max(1, min(limit, 50))
+    with db.tx(tenant=tenant_id) as c:
+        rows = c.execute(
+            "SELECT i.id AS intent_id, i.title, i.priority, i.status, i.not_before_at, i.binding_id,"
+            " b.label, b.channel, b.redacted_target, b.consent_granted, b.opted_out_at, b.revoked_at"
+            " FROM agent.notification_intents i"
+            " JOIN agent.notification_bindings b ON b.tenant_id=i.tenant_id AND b.id=i.binding_id"
+            " WHERE i.tenant_id=%s AND i.owner_user_id=%s AND i.workspace_id=%s"
+            " AND i.status IN ('QUEUED','DEFERRED_QUIET_HOURS')"
+            " ORDER BY i.next_attempt_at, i.id LIMIT %s",
+            (tenant_id, user_id, workspace_id, bounded),
+        ).fetchall()
+    items = [
+        {
+            "intentId": str(r["intent_id"]),
+            "bindingId": str(r["binding_id"]),
+            "label": str(r["label"]),
+            "channel": str(r["channel"]),
+            "redactedTarget": str(r["redacted_target"]),
+            "title": str(r["title"]),
+            "priority": str(r["priority"]),
+            "status": str(r["status"]),
+            "notBeforeAt": r["not_before_at"].isoformat(),
+            "consentActive": bool(r["consent_granted"]) and r["opted_out_at"] is None and r["revoked_at"] is None,
+        }
+        for r in rows
+    ]
+    return {"dryRun": True, "pendingCount": len(items), "items": items}
+
+
 @dataclass(frozen=True)
 class NotificationClaim:
     tenant_id: str
@@ -814,9 +853,14 @@ class NotificationDeliveryWorker:
         tenant_filter: str | None = None,
         owner_user_id: str | None = None,
         workspace_id: str | None = None,
+        intent_ids: Sequence[str] | None = None,
     ) -> list[NotificationClaim]:
         if (owner_user_id is not None or workspace_id is not None) and not tenant_filter:
             raise NotificationError("TENANT_REQUIRED_FOR_OWNER_SCOPE", http_status=400)
+        if batch <= 0:
+            return []
+        if intent_ids is not None and len(intent_ids) == 0:
+            return []
         claims: list[NotificationClaim] = []
         with self._db.tx(tenant=tenant_filter) as c:
             inc_row = c.execute("SELECT restore_incarnation FROM agent.schema_control").fetchone()
@@ -841,7 +885,11 @@ class NotificationDeliveryWorker:
             if workspace_id is not None:
                 clauses.append("i.workspace_id = %s")
                 params.append(workspace_id)
-            params.append(batch)
+            if intent_ids is not None:
+                clauses.append("i.id = ANY(%s)")
+                params.append([str(x) for x in intent_ids])
+            scan_limit = max(batch, 20)
+            params.append(scan_limit)
 
             rows = c.execute(
                 "SELECT i.* FROM agent.notification_intents i"
@@ -850,6 +898,8 @@ class NotificationDeliveryWorker:
                 tuple(params),
             ).fetchall()
             for r in rows:
+                if len(claims) >= batch:
+                    break
                 tid = str(r["tenant_id"])
                 iid = str(r["id"])
                 if int(r["restore_incarnation"]) != inc:
@@ -948,7 +998,53 @@ class NotificationDeliveryWorker:
                         send_token=send_token,
                     )
                 )
+                if len(claims) >= batch:
+                    break
         return claims
+
+    def _verify_claim_lease_active(self, claim: NotificationClaim) -> bool:
+        """Verify ownership, lease_epoch, SENDING status, and non-expired lease immediately before network send."""
+        with self._db.tx(tenant=claim.tenant_id) as c:
+            row = c.execute(
+                "SELECT status, lease_epoch, lease_owner_ref,"
+                " (lease_until IS NOT NULL AND lease_until > now()) AS lease_valid"
+                " FROM agent.notification_intents WHERE tenant_id=%s AND id=%s FOR UPDATE",
+                (claim.tenant_id, claim.intent_id),
+            ).fetchone()
+            if (
+                row is not None
+                and str(row["status"]) == "SENDING"
+                and int(row["lease_epoch"]) == claim.lease_epoch
+                and str(row["lease_owner_ref"] or "") == self._owner
+                and bool(row["lease_valid"])
+            ):
+                return True
+            reason = (
+                "CLAIM_LEASE_EXPIRED_PRE_SEND"
+                if row is not None and str(row["status"]) == "SENDING" and not bool(row["lease_valid"])
+                else f"CLAIM_STALE_{row['status'] if row is not None else 'MISSING'}"
+            )
+            c.execute(
+                "UPDATE agent.notification_attempts"
+                " SET disposition='TRANSPORT_REJECTED', error_code=%s, finished_at=now()"
+                " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s AND disposition='NOT_STARTED'",
+                (reason, claim.tenant_id, claim.intent_id, claim.attempt_no),
+            )
+            # Only if our exact lease was still SENDING and we stopped BEFORE transmitting bytes on the wire,
+            # return intent cleanly to QUEUED instead of falsely stranding an unsent item as DELIVERY_UNKNOWN.
+            if (
+                row is not None
+                and str(row["status"]) == "SENDING"
+                and int(row["lease_epoch"]) == claim.lease_epoch
+                and str(row["lease_owner_ref"] or "") == self._owner
+            ):
+                c.execute(
+                    "UPDATE agent.notification_intents"
+                    " SET status='QUEUED', last_error_code=%s, lease_until=NULL, next_attempt_at=now(), updated_at=now()"
+                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
+                    (reason, claim.tenant_id, claim.intent_id, claim.lease_epoch),
+                )
+            return False
 
     def _finish_attempt(
         self,
@@ -1234,6 +1330,9 @@ class NotificationDeliveryWorker:
         else:
             permit = ""
 
+        if not await asyncio.to_thread(self._verify_claim_lease_active, claim):
+            return "LEASE_LOST"
+
         if os.environ.get("AIAGENT_NOTIFY_FAULT") == "crash_after_begin":
             raise RuntimeError("simulated crash after transmission began")
 
@@ -1330,6 +1429,7 @@ class NotificationDeliveryWorker:
         tenant_id: str | None = None,
         owner_user_id: str | None = None,
         workspace_id: str | None = None,
+        intent_ids: Sequence[str] | None = None,
         batch: int = 20,
     ) -> dict[str, int]:
         recovered = await asyncio.to_thread(
@@ -1338,17 +1438,24 @@ class NotificationDeliveryWorker:
             owner_user_id=owner_user_id,
             workspace_id=workspace_id,
         )
-        claims = await asyncio.to_thread(
-            self._claim_batch,
-            batch=batch,
-            tenant_filter=tenant_id,
-            owner_user_id=owner_user_id,
-            workspace_id=workspace_id,
-        )
-        if claims and os.environ.get("AIAGENT_NOTIFY_FAULT") == "crash_after_claim":
-            raise RuntimeError("simulated crash immediately after batch claim")
-        counts: dict[str, int] = {"recoveredUnknown": recovered, "claimed": len(claims)}
-        for claim in claims:
-            outcome = await self.deliver_claim(claim)
+        counts: dict[str, int] = {"recoveredUnknown": recovered, "claimed": 0}
+        if intent_ids is not None and len(intent_ids) == 0:
+            return counts
+        bounded = max(1, min(batch, 100))
+        for _ in range(bounded):
+            claims = await asyncio.to_thread(
+                self._claim_batch,
+                batch=1,
+                tenant_filter=tenant_id,
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
+                intent_ids=intent_ids,
+            )
+            if not claims:
+                break
+            if os.environ.get("AIAGENT_NOTIFY_FAULT") == "crash_after_claim":
+                raise RuntimeError("simulated crash immediately after batch claim")
+            counts["claimed"] += 1
+            outcome = await self.deliver_claim(claims[0])
             counts[outcome] = counts.get(outcome, 0) + 1
         return counts

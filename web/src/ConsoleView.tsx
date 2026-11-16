@@ -145,11 +145,15 @@ export default function ConsoleView() {
 
   const csrfRef = useRef<string | null>(null);
   const authEpochRef = useRef(0);
+  const workspaceEpochRef = useRef(0);
   const taskEpochRef = useRef(0);
   const browserEpochRef = useRef(0);
+  const campaignEpochRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const taskAbortRef = useRef<AbortController | null>(null);
   const browserAbortRef = useRef<AbortController | null>(null);
+  const campaignAbortRef = useRef<AbortController | null>(null);
+  const consoleBodyRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef<Record<SubTab, HTMLButtonElement | null>>({
     tasks: null,
     memory: null,
@@ -159,11 +163,14 @@ export default function ConsoleView() {
 
   const clearAllState = useCallback(() => {
     authEpochRef.current += 1;
+    workspaceEpochRef.current += 1;
     taskEpochRef.current += 1;
     browserEpochRef.current += 1;
+    campaignEpochRef.current += 1;
     abortRef.current?.abort();
     taskAbortRef.current?.abort();
     browserAbortRef.current?.abort();
+    campaignAbortRef.current?.abort();
     csrfRef.current = null;
     setConfirmReq(null);
     setSession(null);
@@ -210,12 +217,16 @@ export default function ConsoleView() {
   );
 
   const refreshWorkspace = useCallback(async () => {
-    const myEpoch = authEpochRef.current + 1;
-    authEpochRef.current = myEpoch;
+    const myAuthEpoch = authEpochRef.current;
+    const myWorkspaceEpoch = workspaceEpochRef.current + 1;
+    workspaceEpochRef.current = myWorkspaceEpoch;
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    const isStale = () => authEpochRef.current !== myEpoch || ctrl.signal.aborted;
+    const isStale = () =>
+      authEpochRef.current !== myAuthEpoch ||
+      workspaceEpochRef.current !== myWorkspaceEpoch ||
+      ctrl.signal.aborted;
 
     const settled = await Promise.allSettled([
       apiFetch<{ items: TaskSummary[] }>("/v1/tasks", { signal: ctrl.signal }),
@@ -307,41 +318,54 @@ export default function ConsoleView() {
               }, 200);
             };
             try {
+              let consecutiveFailures = 0;
               while (!isStale() && !TERMINAL_TASK_STATES.has(currentState)) {
-                const streamResp = await fetch(
-                  `/v1/tasks/${taskId}/events/stream?after_offset=${sseState.lastOffset}&follow=true&max_polls=20`,
-                  { credentials: "include", signal: ctrl.signal },
-                );
-                if (!streamResp.ok || !streamResp.body || isStale()) break;
-                const reader = streamResp.body.getReader();
-                const decoder = new TextDecoder();
-                while (true) {
-                  const { value, done } = await reader.read();
-                  if (done || isStale()) break;
-                  const chunk = decoder.decode(value, { stream: true });
-                  if (chunk) {
-                    const added = consumeSseFrames(chunk, sseState, seenOffsets, formattedLines);
-                    if (added > 0) {
-                      setEventsText(formattedLines.join("\n"));
-                      scheduleRefresh();
+                try {
+                  const streamResp = await fetch(
+                    `/v1/tasks/${taskId}/events/stream?after_offset=${sseState.lastOffset}&follow=true&max_polls=20`,
+                    { credentials: "include", signal: ctrl.signal },
+                  );
+                  if (isStale()) break;
+                  if (!streamResp.ok || !streamResp.body) {
+                    consecutiveFailures += 1;
+                    if (consecutiveFailures >= 5) break;
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                    continue;
+                  }
+                  consecutiveFailures = 0;
+                  const reader = streamResp.body.getReader();
+                  const decoder = new TextDecoder();
+                  while (true) {
+                    const { value, done } = await reader.read();
+                    if (done || isStale()) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    if (chunk) {
+                      const added = consumeSseFrames(chunk, sseState, seenOffsets, formattedLines);
+                      if (added > 0) {
+                        setEventsText(formattedLines.join("\n"));
+                        scheduleRefresh();
+                      }
                     }
                   }
-                }
-                const tailAdded = consumeSseFrames(decoder.decode(), sseState, seenOffsets, formattedLines, true);
-                if (tailAdded > 0 && !isStale()) {
-                  setEventsText(formattedLines.join("\n"));
-                }
-                if (debounceTimer) {
-                  clearTimeout(debounceTimer);
-                  debounceTimer = null;
-                }
-                await refreshLive();
-                if (!isStale() && !TERMINAL_TASK_STATES.has(currentState)) {
-                  await new Promise((resolve) => setTimeout(resolve, 250));
+                  const tailAdded = consumeSseFrames(decoder.decode(), sseState, seenOffsets, formattedLines, true);
+                  if (tailAdded > 0 && !isStale()) {
+                    setEventsText(formattedLines.join("\n"));
+                  }
+                  if (debounceTimer) {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = null;
+                  }
+                  await refreshLive();
+                  if (!isStale() && !TERMINAL_TASK_STATES.has(currentState)) {
+                    await new Promise((resolve) => setTimeout(resolve, 250));
+                  }
+                } catch (streamErr) {
+                  if (isStale() || (streamErr instanceof DOMException && streamErr.name === "AbortError")) break;
+                  consecutiveFailures += 1;
+                  if (consecutiveFailures >= 5) break;
+                  await new Promise((resolve) => setTimeout(resolve, 400));
                 }
               }
-            } catch {
-              // Abort or stream close on task switch / logout
             } finally {
               if (debounceTimer) clearTimeout(debounceTimer);
             }
@@ -374,8 +398,47 @@ export default function ConsoleView() {
       active = false;
       taskAbortRef.current?.abort();
       browserAbortRef.current?.abort();
+      campaignAbortRef.current?.abort();
     };
   }, [apiFetch, refreshWorkspace]);
+
+  useEffect(() => {
+    const el = consoleBodyRef.current;
+    if (!el) return;
+    if (confirmReq) {
+      el.setAttribute("inert", "");
+    } else {
+      el.removeAttribute("inert");
+    }
+  }, [confirmReq]);
+
+  const loadCampaignEvents = useCallback(async (cid: string) => {
+    const myAuthEpoch = authEpochRef.current;
+    const myCampaignEpoch = campaignEpochRef.current + 1;
+    campaignEpochRef.current = myCampaignEpoch;
+    campaignAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    campaignAbortRef.current = ctrl;
+    const isStale = () =>
+      authEpochRef.current !== myAuthEpoch ||
+      campaignEpochRef.current !== myCampaignEpoch ||
+      ctrl.signal.aborted;
+
+    setSelectedCampaignId(cid);
+    setCampaignEventsText("");
+    try {
+      const evRes = await fetch(`/v1/campaigns/${encodeURIComponent(cid)}/events/stream`, {
+        credentials: "include",
+        signal: ctrl.signal,
+      });
+      if (isStale()) return;
+      const text = evRes.ok ? await evRes.text() : "";
+      if (isStale()) return;
+      setCampaignEventsText(text);
+    } catch {
+      if (!isStale()) setCampaignEventsText("");
+    }
+  }, []);
 
   function selectTask(taskId: string) {
     setSelectedTaskId(taskId);
@@ -486,7 +549,8 @@ export default function ConsoleView() {
 
   return (
     <section className="console" aria-label="Agent Console">
-      <AuthSessionBar
+      <div className="console" ref={consoleBodyRef}>
+        <AuthSessionBar
         session={session}
         busy={busy}
         onLogin={handleLogin}
@@ -865,19 +929,11 @@ export default function ConsoleView() {
                   body: JSON.stringify(payload),
                 });
                 await refreshWorkspace();
-                setSelectedCampaignId(res.campaignId);
-                const evRes = await fetch(`/v1/campaigns/${encodeURIComponent(res.campaignId)}/events/stream`, {
-                  credentials: "include",
-                });
-                setCampaignEventsText(evRes.ok ? await evRes.text() : "");
+                await loadCampaignEvents(res.campaignId);
               })
             }
             onSelectCampaign={(cid) => {
-              setSelectedCampaignId(cid);
-              void fetch(`/v1/campaigns/${encodeURIComponent(cid)}/events/stream`, { credentials: "include" })
-                .then((r) => (r.ok ? r.text() : ""))
-                .then((t) => setCampaignEventsText(t))
-                .catch(() => setCampaignEventsText(""));
+              void loadCampaignEvents(cid);
             }}
             onControlCampaign={(cid, action, expectedCv) =>
               runAction(`Campaign ${action} を実行しました。`, async () => {
@@ -886,10 +942,7 @@ export default function ConsoleView() {
                   body: JSON.stringify({ expectedControlVersion: expectedCv }),
                 });
                 await refreshWorkspace();
-                const evRes = await fetch(`/v1/campaigns/${encodeURIComponent(cid)}/events/stream`, {
-                  credentials: "include",
-                });
-                setCampaignEventsText(evRes.ok ? await evRes.text() : "");
+                await loadCampaignEvents(cid);
               })
             }
             onSteerCampaign={(cid, expectedCv, newGoalRev, newGoalText) =>
@@ -995,12 +1048,65 @@ export default function ConsoleView() {
                   }),
               );
             }}
-            onDispatchNotifications={() =>
-              runAction("保留中の通知 Outbox を配送しました。", async () => {
-                await apiFetch("/v1/notifications/dispatch", { method: "POST" });
-                await refreshWorkspace();
-              })
-            }
+            onDispatchNotifications={async () => {
+              setBusy(true);
+              setErrorMsg(null);
+              setStatusMsg(null);
+              let preview: {
+                pendingCount: number;
+                items: Array<{
+                  intentId: string;
+                  label: string;
+                  channel: string;
+                  redactedTarget: string;
+                  title: string;
+                  priority: string;
+                }>;
+              };
+              try {
+                const res = await apiFetch<{ preview: typeof preview }>("/v1/notifications/dispatch", {
+                  method: "POST",
+                  body: JSON.stringify({ dryRun: true }),
+                });
+                preview = res.preview;
+              } catch (err) {
+                setErrorMsg(err instanceof ApiClientError ? `${err.status} (${err.code})` : String(err));
+                return false;
+              } finally {
+                setBusy(false);
+              }
+              if (preview.pendingCount === 0) {
+                setStatusMsg("現在、配送待ちの保留 Outbox 通知はありません (0 件)。");
+                return true;
+              }
+              const detailRows: Array<{ label: string; value: string }> = [
+                { label: "対象件数", value: `${preview.pendingCount} 件` },
+                ...preview.items.slice(0, 8).map((it, idx) => ({
+                  label: `宛先 ${idx + 1}`,
+                  value: `${it.label} [${it.channel}] (${it.redactedTarget}) — ${it.title} (${it.priority})`,
+                })),
+              ];
+              if (preview.items.length > 8) {
+                detailRows.push({ label: "ほか", value: `${preview.items.length - 8} 件` });
+              }
+              return askConfirmation(
+                {
+                  title: "保留 Outbox 一括配送の確認",
+                  summary: `保留中の外部通知 ${preview.pendingCount} 件を以下の宛先へ一括送信します。`,
+                  details: detailRows,
+                  warning: "実送信後は外部サーバーへの通知取り消しができません。対象と宛先を確認してください。",
+                  confirmLabel: `${preview.pendingCount} 件を実際に送信する`,
+                },
+                () =>
+                  runAction("保留中の通知 Outbox を配送しました。", async () => {
+                    await apiFetch("/v1/notifications/dispatch", {
+                      method: "POST",
+                      body: JSON.stringify({ dryRun: false }),
+                    });
+                    await refreshWorkspace();
+                  }),
+              );
+            }}
             onMarkRead={(notificationId) =>
               runAction("通知を既読 (READ) にしました。", async () => {
                 await apiFetch(`/v1/notifications/${notificationId}/read`, { method: "POST" });
@@ -1009,9 +1115,10 @@ export default function ConsoleView() {
             }
           />
         )}
-      </div>
+        </div>
 
-      <CapabilitiesBanner capabilities={capabilities} />
+        <CapabilitiesBanner capabilities={capabilities} />
+      </div>
       <ConfirmDialog request={confirmReq} busy={busy} onClose={() => confirmResolveRef.current()} />
     </section>
   );

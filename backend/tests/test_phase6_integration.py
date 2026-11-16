@@ -1715,3 +1715,488 @@ def test_web_ui_regression_sse_races_confirm_mobile_and_a11y(
         uv_srv.should_exit = True
         uv_th.join(timeout=5)
         uv_sock.close()
+
+
+def test_notification_allowlist_and_per_item_lease_isolation(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
+    """P1-1 + P1-2: Explicit Intent allowlist excludes unrelated queued items B/C;
+    per-item sequential claim prevents head-of-line slow send from expiring unstarted tail leases;
+    pre-send lease check rejects expired claims with zero HTTP transmission."""
+    hits: list[dict[str, Any]] = []
+    delay_titles: dict[str, float] = {}
+
+    class _SlowAwareReceiver(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            title = str(payload.get("title", ""))
+            wait_s = delay_titles.get(title, 0.0)
+            if wait_s > 0:
+                time.sleep(wait_s)
+            hits.append(payload)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"allowlist-ok"}')
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _SlowAwareReceiver)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    notify_ring = KeyRing.single(b"L" * 32, key_id="notify-allowlist")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            rb = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Allowlist Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                },
+            )
+            assert rb.status_code == 201
+            bid = rb.json()["binding"]["id"]
+
+            # 1. P1-1: Queue unrelated notification B (dispatch=False), then live-send A -> B must stay QUEUED & unsent!
+            r_b = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "queued-b",
+                    "title": "Pending B",
+                    "summaryText": "Must NOT be dispatched by A",
+                    "dispatch": False,
+                },
+            )
+            assert r_b.status_code == 201
+            b_id = r_b.json()["notification"]["id"]
+
+            r_a = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "live-a",
+                    "title": "Live A",
+                    "summaryText": "Only A should dispatch",
+                    "dispatch": True,
+                },
+            )
+            assert r_a.status_code == 201, r_a.text
+            assert r_a.json()["dispatch"]["PROVIDER_ACCEPTED"] == 1
+            assert [h["title"] for h in hits] == ["Live A"]
+            row_b = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (b_id,))
+            assert row_b is not None and row_b["status"] == "QUEUED"
+
+            # Watch trigger with dispatch=True also dispatches ONLY Watch intents, leaving B untouched
+            r_w = client.post(
+                "/v1/watches",
+                headers=headers,
+                json={"timezoneId": "UTC", "localHour": 11, "localMinute": 0, "maxOccurrences": 2},
+            )
+            assert r_w.status_code == 201
+            wid = r_w.json()["watchId"]
+            r_wt = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={
+                    "slotUtc": "2026-11-17T11:00:00Z",
+                    "bindingId": bid,
+                    "title": "Watch Triggered Only",
+                    "dispatch": True,
+                },
+            )
+            assert r_wt.status_code == 200
+            assert r_wt.json()["dispatch"]["PROVIDER_ACCEPTED"] == 1
+            assert [h["title"] for h in hits] == ["Live A", "Watch Triggered Only"]
+            row_b2 = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (b_id,))
+            assert row_b2 is not None and row_b2["status"] == "QUEUED"
+
+            # Explicit bulk dispatch dryRun previews Pending B without sending; dryRun=false delivers B
+            r_prev = client.post("/v1/notifications/dispatch", headers=headers, json={"dryRun": True})
+            assert r_prev.status_code == 200
+            assert r_prev.json()["dryRun"] is True
+            assert [it["intentId"] for it in r_prev.json()["preview"]["items"]] == [b_id]
+            assert [h["title"] for h in hits] == ["Live A", "Watch Triggered Only"]
+
+            r_bulk = client.post("/v1/notifications/dispatch", headers=headers, json={"dryRun": False})
+            assert r_bulk.status_code == 200
+            assert r_bulk.json()["counts"]["PROVIDER_ACCEPTED"] == 1
+            assert [h["title"] for h in hits] == ["Live A", "Watch Triggered Only", "Pending B"]
+
+            # 2. P1-2: Parallel workers + slow head item X does NOT prematurely expire unstarted tail item Y!
+            hits.clear()
+            delay_titles["Head Slow X"] = 0.6
+            r_x = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "head-x",
+                    "title": "Head Slow X",
+                    "summaryText": "Takes 600ms",
+                    "dispatch": False,
+                },
+            )
+            r_y = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "tail-y",
+                    "title": "Tail Y",
+                    "summaryText": "Should not go DELIVERY_UNKNOWN while X sends",
+                    "dispatch": False,
+                },
+            )
+            x_id = r_x.json()["notification"]["id"]
+            y_id = r_y.json()["notification"]["id"]
+
+            w1 = notifications.NotificationDeliveryWorker(
+                dbs["api"], notify_ring, owner="w-1", egress_proxy="", allow_private_addrs=frozenset({"127.0.0.1"})
+            )
+            w2 = notifications.NotificationDeliveryWorker(
+                dbs["api"], notify_ring, owner="w-2", egress_proxy="", allow_private_addrs=frozenset({"127.0.0.1"})
+            )
+            res_holder: dict[str, dict[str, int]] = {}
+            t1 = threading.Thread(
+                target=lambda: res_holder.__setitem__("w1", _run(w1.run_once(tenant_id=tenant["tenantId"]))),
+                daemon=True,
+            )
+            t1.start()
+            # Give w1 time to claim X and block on HTTP POST before w2 runs recover_abandoned + claim_next
+            time.sleep(0.15)
+            y_before_w2 = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (y_id,))
+            # Key P1-2 invariant: X is in-flight, Y is STILL QUEUED (not pre-claimed into SENDING!)
+            assert y_before_w2 is not None and y_before_w2["status"] == "QUEUED"
+            res_w2 = _run(w2.run_once(tenant_id=tenant["tenantId"]))
+            t1.join(timeout=10)
+            assert res_w2.get("recoveredUnknown", 0) == 0
+            assert sorted(h["title"] for h in hits) == ["Head Slow X", "Tail Y"]
+            assert len(hits) == 2  # Zero duplicate sends!
+            final_xy = dbs["owner"].all(
+                "SELECT id, status FROM agent.notification_intents WHERE id = ANY(%s)",
+                ([x_id, y_id],),
+            )
+            assert {str(r["id"]): str(r["status"]) for r in final_xy} == {
+                x_id: "PROVIDER_ACCEPTED",
+                y_id: "PROVIDER_ACCEPTED",
+            }
+            delay_titles.clear()
+
+            # 3. P1-2: Pre-send lease expiry verification refuses stale Claim with 0 HTTP hits
+            hits.clear()
+            r_z = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "stale-z",
+                    "title": "Stale Lease Z",
+                    "summaryText": "Must reject pre-send expired lease",
+                    "dispatch": False,
+                },
+            )
+            z_id = r_z.json()["notification"]["id"]
+            stale_claims = w1._claim_batch(batch=1, tenant_filter=tenant["tenantId"], intent_ids=[z_id])
+            assert len(stale_claims) == 1
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.notification_intents SET lease_until = now() - interval '5 seconds' WHERE id=%s",
+                    (z_id,),
+                )
+            outcome_stale = _run(w1.deliver_claim(stale_claims[0]))
+            assert outcome_stale == "LEASE_LOST"
+            assert hits == []  # 0 bytes transmitted on the wire!
+            # Cleanly requeued because pre-send abort was proven before wire transmission; w2 delivers once
+            res_after_z = _run(w2.run_once(tenant_id=tenant["tenantId"]))
+            assert res_after_z.get("PROVIDER_ACCEPTED") == 1
+            assert [h["title"] for h in hits] == ["Stale Lease Z"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_web_ui_final_review_regressions_p1_3_and_p2_1_to_4(
+    memory_dbs: dict[str, Database], memory_tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-3 + P2-1 + P2-2 + P2-3 + P2-4:
+    - P1-3: Task SSE continues cleanly across refreshWorkspace() ("状態更新") -> live SUCCEEDED
+    - P2-1: Browser Takeover start updates observation box immediately
+    - P2-2: Campaign A/B fast switch discards delayed A events
+    - P2-3: Pending Outbox Dispatch shows explicit preview+confirm; Cancel sends 0 live requests; Confirm delivers
+    - P2-4: ConfirmDialog traps Tab/Shift+Tab inside dialog and marks background inert."""
+    dbs = memory_dbs
+    tenant = memory_tenant
+    from playwright.async_api import async_playwright
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dist_dir = repo_root / "web" / "dist"
+    assert (dist_dir / "index.html").is_file()
+
+    hook_hits: list[dict[str, Any]] = []
+
+    class _HookSrv(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            hook_hits.append(json.loads(self.rfile.read(n).decode("utf-8")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"p2-3-ok"}')
+
+    wh_srv = ThreadingHTTPServer(("127.0.0.1", 0), _HookSrv)
+    threading.Thread(target=wh_srv.serve_forever, daemon=True).start()
+    wh_port = wh_srv.server_address[1]
+
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    t_live = commands.submit_task(dbs["api"], scope, "SSE After Refresh Task")
+    control.claim_run(dbs["runtime"], tenant["tenantId"], t_live["runId"], "sse-refresh-worker")
+
+    bsid = uuid7()
+    claim_br = control.claim_run(
+        dbs["runtime"],
+        tenant["tenantId"],
+        commands.submit_task(dbs["api"], scope, "Browser Takeover Obs Task")["runId"],
+        "br-p21",
+    )
+    _run(
+        PostgresFencePort(dbs["tool_gateway"]).register(
+            bsid,
+            Authority(
+                claim_br.tenant_id,
+                claim_br.owner_user_id,
+                claim_br.task_id,
+                claim_br.run_id,
+                str(claim_br.goal_revision),
+                str(claim_br.lease_epoch),
+                claim_br.worker_ref,
+            ),
+        )
+    )
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "UPDATE agent.browser_sessions SET current_url='https://login.example', last_observation_text='BEFORE_TAKEOVER' WHERE id=%s",
+            (bsid,),
+        )
+
+    tlog_path = tmp_path / "ui_final_tomb.jsonl"
+    memory_tombstones.TombstoneLog(tlog_path, integrity_key=b"t" * 32).initialize()
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_LOG", str(tlog_path))
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY", (b"t" * 32).hex())
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", "")
+    notify_ring = KeyRing.single(b"Q" * 32, key_id="p2-ui-key")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=KeyRing.single(b"S" * 32, key_id="p2-st-key"),
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+        web_dist_dir=dist_dir,
+    )
+
+    # Seed two campaigns + one queued pending notification via API
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+    with TestClient(app) as cli:
+        c_a = cli.post("/v1/campaigns", headers=headers, json={"goalText": "Camp A", "maxCycles": 2}).json()[
+            "campaignId"
+        ]
+        c_b = cli.post("/v1/campaigns", headers=headers, json={"goalText": "Camp B", "maxCycles": 2}).json()[
+            "campaignId"
+        ]
+        b_id = cli.post(
+            "/v1/notifications/bindings",
+            headers=headers,
+            json={
+                "channel": "webhook",
+                "label": "Bulk Confirm Hook",
+                "destination": {"url": f"http://127.0.0.1:{wh_port}/hook"},
+                "consentGranted": True,
+            },
+        ).json()["binding"]["id"]
+        cli.post(
+            "/v1/notifications",
+            headers=headers,
+            json={
+                "bindingId": b_id,
+                "semanticEventKey": "bulk-pending-1",
+                "title": "Queued Bulk Alert",
+                "summaryText": "Needs confirm before dispatch",
+                "dispatch": False,
+            },
+        )
+
+    api_port, uv_srv, uv_th, uv_sock = _start_uvicorn_thread(app)
+    base_url = f"http://127.0.0.1:{api_port}"
+
+    async def _drive() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto(base_url, wait_until="networkidle")
+                await page.get_by_label("APIトークン").fill(tenant["token"])
+                await page.get_by_role("button", name="セッション開始").click()
+                await page.get_by_text("AUTHENTICATED").wait_for(timeout=10000)
+
+                # P1-3: Select live Task -> click "状態更新" (triggers refreshWorkspace!) -> complete in BG -> still sees SUCCEEDED!
+                await page.get_by_test_id(f"task-item-{t_live['taskId']}").click()
+                await page.get_by_test_id("task-detail-panel").wait_for(timeout=10000)
+                await page.get_by_role("button", name="状態更新").click()
+                await page.get_by_text("最新状態を取得しました。").wait_for(timeout=10000)
+
+                def _finish_live_task() -> None:
+                    time.sleep(0.35)
+                    with dbs["owner"].tx() as c:
+                        c.execute(
+                            "UPDATE agent.tasks SET status_code='SUCCEEDED', updated_at=now() WHERE id=%s",
+                            (t_live["taskId"],),
+                        )
+                        events.append_event(
+                            c,
+                            tenant_id=tenant["tenantId"],
+                            aggregate_type="task",
+                            aggregate_id=t_live["taskId"],
+                            kind="task.state_changed",
+                            payload={"fromState": "RUNNING", "toState": "SUCCEEDED", "reason": "survived-refresh"},
+                            actor={"kind": "worker", "id": "sse-refresh-worker"},
+                            owner_user_id=tenant["userId"],
+                            task_id=t_live["taskId"],
+                            run_id=t_live["runId"],
+                        )
+
+                threading.Thread(target=_finish_live_task, daemon=True).start()
+                await page.get_by_test_id("task-detail-panel").get_by_text("SUCCEEDED").first.wait_for(timeout=10000)
+                await page.get_by_test_id("task-sse-log").get_by_text("survived-refresh").wait_for(timeout=10000)
+                await (
+                    page.get_by_test_id(f"task-item-{t_live['taskId']}")
+                    .get_by_text("[SUCCEEDED]")
+                    .wait_for(timeout=10000)
+                )
+
+                # P2-1: Takeover start immediately reflects updated observation despite refreshWorkspace()
+                await page.get_by_test_id("tab-browser").click()
+                await page.get_by_test_id(f"browser-session-{bsid}").click()
+                await (
+                    page.get_by_test_id("browser-observation-box")
+                    .get_by_text("BEFORE_TAKEOVER")
+                    .wait_for(timeout=10000)
+                )
+
+                async def _update_obs_on_start(route: Any) -> None:
+                    with dbs["owner"].tx() as c:
+                        c.execute(
+                            "UPDATE agent.browser_sessions SET last_observation_text='AFTER_TAKEOVER_LIVE_OBS' WHERE id=%s",
+                            (bsid,),
+                        )
+                    await route.continue_()
+
+                await page.route(f"**/v1/browser/sessions/{bsid}/takeover/start", _update_obs_on_start)
+                await page.get_by_role("button", name="Takeover 開始").click()
+                await (
+                    page.get_by_test_id("browser-observation-box")
+                    .get_by_text("AFTER_TAKEOVER_LIVE_OBS")
+                    .wait_for(timeout=10000)
+                )
+                await page.unroute(f"**/v1/browser/sessions/{bsid}/takeover/start")
+
+                # P2-2: Campaign A slow stream vs B fast stream -> switching rapidly never leaks A onto B
+                await page.get_by_test_id("tab-automation").click()
+
+                async def _camp_a_slow(route: Any) -> None:
+                    await asyncio.sleep(0.35)
+                    await route.fulfill(
+                        status=200, content_type="text/event-stream", body="data: EVENT_FROM_CAMP_A\n\n"
+                    )
+
+                async def _camp_b_fast(route: Any) -> None:
+                    await route.fulfill(
+                        status=200, content_type="text/event-stream", body="data: EVENT_FROM_CAMP_B\n\n"
+                    )
+
+                await page.route(f"**/v1/campaigns/{c_a}/events/stream", _camp_a_slow)
+                await page.route(f"**/v1/campaigns/{c_b}/events/stream", _camp_b_fast)
+                await page.get_by_test_id(f"campaign-item-{c_a}").click()
+                await page.get_by_test_id(f"campaign-item-{c_b}").click()
+                await (
+                    page.get_by_test_id("campaign-events-log").get_by_text("EVENT_FROM_CAMP_B").wait_for(timeout=10000)
+                )
+                await asyncio.sleep(0.45)
+                ev_txt = await page.get_by_test_id("campaign-events-log").inner_text()
+                assert "EVENT_FROM_CAMP_B" in ev_txt
+                assert "EVENT_FROM_CAMP_A" not in ev_txt
+                await page.unroute(f"**/v1/campaigns/{c_a}/events/stream")
+                await page.unroute(f"**/v1/campaigns/{c_b}/events/stream")
+
+                # P2-3 + P2-4: Pending Outbox Dispatch shows preview confirm; Cancel sends 0 live requests & 0 webhooks;
+                # Tab & Shift+Tab stay trapped inside ConfirmDialog!
+                live_dispatch_calls: list[str] = []
+
+                async def _track_dispatch(route: Any) -> None:
+                    raw_post = route.request.post_data or ""
+                    if '"dryRun":false' in raw_post or '"dryRun": false' in raw_post:
+                        live_dispatch_calls.append(raw_post)
+                    await route.continue_()
+
+                await page.route("**/v1/notifications/dispatch", _track_dispatch)
+                await page.get_by_role("button", name="保留 Outbox 配送").click()
+                dlg = page.get_by_test_id("confirm-dialog")
+                await dlg.wait_for(timeout=10000)
+                await dlg.get_by_text("Queued Bulk Alert").wait_for(timeout=10000)
+                await dlg.get_by_text("1 件").first.wait_for(timeout=10000)
+
+                # P2-4: Verify Tab & Shift+Tab trap focus strictly inside ConfirmDialog
+                for _ in range(4):
+                    await page.keyboard.press("Tab")
+                    inside = await page.evaluate(
+                        "() => Boolean(document.querySelector('[data-testid=\"confirm-dialog\"]')?.contains(document.activeElement))"
+                    )
+                    assert inside, "Focus escaped ConfirmDialog on Tab!"
+                for _ in range(3):
+                    await page.keyboard.press("Shift+Tab")
+                    inside = await page.evaluate(
+                        "() => Boolean(document.querySelector('[data-testid=\"confirm-dialog\"]')?.contains(document.activeElement))"
+                    )
+                    assert inside, "Focus escaped ConfirmDialog on Shift+Tab!"
+
+                # Cancel via button -> 0 live dispatch calls, 0 webhook hits
+                await page.get_by_test_id("confirm-dialog-cancel").click()
+                assert await dlg.count() == 0
+                assert live_dispatch_calls == []
+                assert hook_hits == []
+
+                # Re-open and confirm -> 1 live dispatch call, 1 webhook hit
+                await page.get_by_role("button", name="保留 Outbox 配送").click()
+                await dlg.wait_for(timeout=10000)
+                await page.get_by_test_id("confirm-dialog-confirm").click()
+                await page.get_by_text("保留中の通知 Outbox を配送しました。").wait_for(timeout=10000)
+                assert len(live_dispatch_calls) == 1
+                assert [h["title"] for h in hook_hits] == ["Queued Bulk Alert"]
+                await page.unroute("**/v1/notifications/dispatch")
+            finally:
+                await context.close()
+                await browser.close()
+
+    try:
+        _run(_drive())
+    finally:
+        uv_srv.should_exit = True
+        uv_th.join(timeout=5)
+        uv_sock.close()
+        wh_srv.shutdown()
+        wh_srv.server_close()

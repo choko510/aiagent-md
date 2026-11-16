@@ -397,6 +397,7 @@ export default function AutomationAndNotifyPanel({
                   type="button"
                   className={selectedCampaignId === c.id ? "chip chip-active" : "chip"}
                   onClick={() => onSelectCampaign(c.id)}
+                  data-testid={`campaign-item-${c.id}`}
                 >
                   [{c.state}] v{c.controlVersion} · goalRev {c.goalRevision} · {c.id.slice(0, 8)}
                 </button>
@@ -455,7 +456,9 @@ export default function AutomationAndNotifyPanel({
                   Steer
                 </button>
               </form>
-              <pre className="event-log">{campaignEventsText || "(Campaign イベントなし)"}</pre>
+              <pre className="event-log" data-testid="campaign-events-log">
+                {campaignEventsText || "(Campaign イベントなし)"}
+              </pre>
             </div>
           )}
         </div>

@@ -2054,10 +2054,13 @@ def create_app(
 
         res = await asyncio.to_thread(op)
         if res["claimed"] and body.get("dispatch"):
+            intent_ids = [str(q["id"]) for q in res["queuedNotifications"]]
             res["dispatch"] = await _notify_worker().run_once(
                 tenant_id=s.tenant_id,
                 owner_user_id=s.user_id,
                 workspace_id=s.workspace_id,
+                intent_ids=intent_ids,
+                batch=max(1, len(intent_ids)),
             )
         return res
 
@@ -2258,6 +2261,8 @@ def create_app(
                 tenant_id=s.tenant_id,
                 owner_user_id=s.user_id,
                 workspace_id=s.workspace_id,
+                intent_ids=[str(created["id"])],
+                batch=1,
             )
             if body.get("dispatch")
             else None
@@ -2265,14 +2270,34 @@ def create_app(
         return {"schemaVersion": "1.0", "dryRun": False, "notification": created, "dispatch": dispatch_res}
 
     @app.post("/v1/notifications/dispatch")
-    async def dispatch_user_notifications(s: S, limit: int = 20) -> dict[str, Any]:
+    async def dispatch_user_notifications(request: Request, s: S, limit: int = 20) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 8 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+        bounded = max(1, min(limit, 50))
+        if bool(body.get("dryRun", False)):
+            preview = await asyncio.to_thread(
+                notifications.preview_pending_dispatch,
+                get_db(),
+                tenant_id=s.tenant_id,
+                user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                limit=bounded,
+            )
+            return {"schemaVersion": "1.0", "dryRun": True, "preview": preview, "counts": None}
         counts = await _notify_worker().run_once(
             tenant_id=s.tenant_id,
             owner_user_id=s.user_id,
             workspace_id=s.workspace_id,
-            batch=max(1, min(limit, 50)),
+            batch=bounded,
         )
-        return {"schemaVersion": "1.0", "counts": counts}
+        return {"schemaVersion": "1.0", "dryRun": False, "counts": counts}
 
     @app.post("/v1/notifications/{notification_id}/read")
     async def mark_user_notification_read(notification_id: str, s: S) -> dict[str, Any]:
