@@ -8,6 +8,7 @@ export default defineConfig(({ command, mode }) => {
   if (command === "serve" && (!token || token.length < 32)) {
     throw new Error("Set AIAGENT_MARKETPLACE_DEV_TOKEN (32+ chars) for the local dev proxy");
   }
+  const apiTarget = loadEnv(mode, ".", "").AIAGENT_API_URL || "http://127.0.0.1:8080";
   return {
     plugins: [react()],
     server: {
@@ -16,6 +17,9 @@ export default defineConfig(({ command, mode }) => {
         "/api": {
           target: "http://127.0.0.1:8001",
           headers: token ? { Authorization: "Bearer " + token } : {},
+        },
+        "/v1": {
+          target: apiTarget,
         },
       },
     },
