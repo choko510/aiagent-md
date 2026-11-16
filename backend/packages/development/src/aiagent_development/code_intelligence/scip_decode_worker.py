@@ -22,35 +22,41 @@ class ResourceLimit(ValueError):
 
 
 def validate_envelope(data: bytes) -> None:
-    """Validate SCIP top-level framing using the Protobuf runtime, not a decoder.
+    """Validate wire types without losing overwritten message/oneof values.
 
-    SCIP requires metadata first and exactly once. A separate generated-at-
-    runtime descriptor models the three known fields as repeated bytes so the
-    Protobuf runtime preserves duplicate metadata and unknown wire types.
-    Nested messages and all ordinary wire decoding remain the runtime's job.
+    A descriptor derived from the pinned official schema treats message
+    fields as repeated and removes oneofs only in this validation view. The
+    Protobuf runtime decodes both this view and the original schema; the latter
+    remains authoritative for normal merge, oneof and range semantics.
     """
     if not data:
         raise ValueError("missing metadata")
     tag, _ = decoder._DecodeVarint(data, 0)
     if tag != 10:
         raise ValueError("SCIP metadata must be first")
-    schema = descriptor_pb2.FileDescriptorProto(
-        name="scip_envelope_check.proto", package="scip_envelope_check", syntax="proto3"
-    )
-    msg = schema.message_type.add(name="Envelope")
-    for number, name in ((1, "metadata"), (2, "documents"), (3, "external_symbols")):
-        field = msg.field.add(name=name, number=number)
-        field.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
-        field.type = descriptor_pb2.FieldDescriptorProto.TYPE_BYTES
+    schema = descriptor_pb2.FileDescriptorProto()
+    schema.ParseFromString(scip_pb2.DESCRIPTOR.serialized_pb)
+
+    def preserve_messages(message: Any) -> None:
+        for field in message.field:
+            if field.type == descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE:
+                field.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+            if field.HasField("oneof_index"):
+                field.ClearField("oneof_index")
+        message.ClearField("oneof_decl")
+        for nested in message.nested_type:
+            preserve_messages(nested)
+
+    for message in schema.message_type:
+        preserve_messages(message)
     pool = descriptor_pool.DescriptorPool()
     pool.Add(schema)
-    envelope_type = message_factory.GetMessageClass(pool.FindMessageTypeByName("scip_envelope_check.Envelope"))
-    envelope = envelope_type()
-    envelope.ParseFromString(data)
-    if len(envelope.metadata) != 1:
+    probe_type = message_factory.GetMessageClass(pool.FindMessageTypeByName("scip.Index"))
+    probe = probe_type()
+    probe.ParseFromString(data)
+    if len(probe.metadata) != 1:
         raise ValueError("duplicate or missing SCIP metadata")
-    if any(field.field_number in (1, 2, 3) for field in unknown_fields.UnknownFieldSet(envelope)):
-        raise ValueError("invalid wire type for SCIP index field")
+    validate_known_field_wire_types(probe)
 
 
 def validate_known_field_wire_types(root: Any) -> None:
@@ -80,7 +86,6 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         raise ValueError("missing metadata")
     if len(idx.documents) > 10000:
         raise ResourceLimit("document limit")
-    validate_known_field_wire_types(idx)
     output = {
         "version": idx.metadata.version,
         "tool": idx.metadata.tool_info.name,

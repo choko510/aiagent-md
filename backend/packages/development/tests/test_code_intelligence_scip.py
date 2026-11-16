@@ -666,3 +666,19 @@ def test_oversized_position_index_returns_unavailable(repo: tuple[Path, str, Pat
     result = load_index(snap, manifest, data)
     assert result.status == IndexStatus.UNAVAILABLE
     assert "position memory budget exceeded" in result.issues
+
+
+def test_bad_wire_in_overwritten_oneof_is_rejected(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    metadata = scip_pb2.Index()
+    metadata.metadata.CopyFrom(idx.metadata)
+    occurrence = scip_pb2.Occurrence(symbol="symbol", symbol_roles=1).SerializeToString()
+    invalid_single = b"\x0a\x01\x00"  # SingleLineRange.line with wrong wire type
+    occurrence += b"\x42" + _VarintBytes(len(invalid_single)) + invalid_single
+    valid_multi = scip_pb2.MultiLineRange(end_line=0, end_character=3).SerializeToString()
+    occurrence += b"\x4a" + _VarintBytes(len(valid_multi)) + valid_multi
+    document = scip_pb2.Document(relative_path="a.py", position_encoding=1).SerializeToString()
+    document += b"\x12" + _VarintBytes(len(occurrence)) + occurrence
+    data = metadata.SerializeToString() + b"\x12" + _VarintBytes(len(document)) + document
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    assert load_index(snap, manifest, data).status == IndexStatus.INVALID
