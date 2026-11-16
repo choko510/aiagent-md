@@ -32,6 +32,7 @@ from .agent import (
     context_eligible,
     fault,
     from_neutral,
+    maybe_compact_context,
     submit_tool,
     to_neutral,
 )
@@ -220,6 +221,8 @@ class DeepAgentsRuntime:
         # raises here and is never silently downgraded to model.complete.
         try:
             context_head = await context_eligible(rc)
+            if context_head is None:
+                context_head = await maybe_compact_context(rc, auto_if_needed=True)
         except GatewayRejected as e:
             # An unresolved earlier Context send is never retried automatically;
             # other control/transport failures are ordinary retryable errors.

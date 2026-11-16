@@ -21,6 +21,7 @@ from .models import (
     RawArtifact,
     SafeStop,
     Scope,
+    SourceBackedFact,
     SourceInput,
     SummaryClaim,
     SummaryProposal,
@@ -30,6 +31,8 @@ from .models import (
     utc_instant,
 )
 from .ports import ArtifactStorePort, HeadPort
+from .semantic import HeuristicNliVerifier, SemanticVerifierPort
+from .tokenizer import ModelBoundTokenEstimator, TokenEstimatorPort
 
 
 class ProviderOverflow(RuntimeError):
@@ -152,8 +155,13 @@ def _check_polarity_preservation(original: bytes, start_byte: int, end_byte: int
 
 
 def audit_proposal(
-    request: ContextRequest, refs: tuple[RawArtifact, ...], store: ArtifactStorePort, candidate: SummaryProposal
-) -> None:
+    request: ContextRequest,
+    refs: tuple[RawArtifact, ...],
+    store: ArtifactStorePort,
+    candidate: SummaryProposal,
+    *,
+    semantic_verifier: SemanticVerifierPort | None = None,
+) -> tuple[SourceBackedFact, ...]:
     """Byte-span/source integrity and strict textual entailment (exact quote only).
 
     A hash or an existing citation alone is never evidence of semantic support.
@@ -194,6 +202,8 @@ def audit_proposal(
             raise SafeStop("UNSUPPORTED_CLAIM")
         _check_polarity_preservation(original, claim.start_byte, claim.end_byte, quote)
         forbid_secrets(claim.text)
+    verifier = semantic_verifier if semantic_verifier is not None else HeuristicNliVerifier()
+    return verifier.verify_claims(request, refs, store, candidate.claims)
 
 
 def _serialize(
@@ -249,9 +259,18 @@ def _revoke_written_summaries(artifacts: ArtifactStorePort, scope: Scope, refs_t
 
 
 class ContextService:
-    def __init__(self, artifacts: ArtifactStorePort, head: HeadPort):
+    def __init__(
+        self,
+        artifacts: ArtifactStorePort,
+        head: HeadPort,
+        *,
+        semantic_verifier: SemanticVerifierPort | None = None,
+        tokenizer: TokenEstimatorPort | None = None,
+    ):
         self.artifacts = artifacts
         self.head = head
+        self.semantic_verifier = semantic_verifier if semantic_verifier is not None else HeuristicNliVerifier()
+        self.tokenizer = tokenizer if tokenizer is not None else ModelBoundTokenEstimator()
 
     def _validate_current(self, request: ContextRequest) -> None:
         self.head.assert_current(
@@ -288,13 +307,19 @@ class ContextService:
         for ref in refs:
             self.artifacts.get_raw(request.scope, ref)
         candidate = (summarizer or MockExcerptSummarizer())(request, refs, self.artifacts, max_excerpt_chars)
-        audit_proposal(request, refs, self.artifacts, candidate)
+        verified_facts = audit_proposal(
+            request, refs, self.artifacts, candidate, semantic_verifier=self.semantic_verifier
+        )
         memory_count = len(request.memory)
         while True:
             summary, payload = _serialize(request, refs, candidate, tool_pairs, memory_count)
-            # Byte length is a conservative *fixture estimator*, not verified model tokenizer.
+            payload_tokens = self.tokenizer.count_tokens(
+                payload,
+                model_id=request.budget.model_id,
+                tokenizer_id=request.budget.tokenizer_id,
+            )
             estimated = (
-                len(payload.encode("utf-8"))
+                payload_tokens
                 + request.budget.system_tokens
                 + request.budget.tool_schema_tokens
                 + request.budget.framing_tokens
@@ -374,6 +399,7 @@ class ContextService:
             request.budget.tokenizer_id,
             tool_pairs,
             request.raw_event_cursor,
+            verified_facts=verified_facts,
         )
 
     def check_dispatch(self, plan: ContextPlan, lease_epoch: str, *, now: datetime | None = None) -> None:

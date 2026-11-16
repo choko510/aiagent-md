@@ -200,6 +200,35 @@ async def context_eligible(rc: RunCtx) -> str | None:
     return str(out["head"])
 
 
+async def maybe_compact_context(rc: RunCtx, *, auto_if_needed: bool = True) -> str | None:
+    """Ask Model Gateway to autonomously compact Run HEAD + Memory when policy + threshold apply."""
+    import os
+
+    raw_threshold = os.environ.get("AIAGENT_CONTEXT_AUTO_COMPACT_CHARS", "4096")
+    try:
+        threshold_chars = max(1, int(raw_threshold))
+    except ValueError:
+        threshold_chars = 4096
+    try:
+        out = await rc.gw.model.call(
+            "model.context_compact",
+            {
+                "claim": rc.claim.to_wire(),
+                "autoIfNeeded": auto_if_needed,
+                "thresholdChars": threshold_chars,
+            },
+        )
+    except RpcError as e:
+        if e.code in ("CONTEXT_NOT_ELIGIBLE", "CONTEXT_INTEGRATION_PENDING", "MEMORY_CONSENT_REQUIRED"):
+            return None
+        raise GatewayRejected(e.code) from None
+    except (OSError, EOFError, TimeoutError) as e:
+        raise GatewayRejected("GATEWAY_UNAVAILABLE") from e
+    if not out.get("compacted"):
+        return None
+    return str(out["head"])
+
+
 async def call_context_model(rc: RunCtx, context_head: str) -> dict[str, Any]:
     """Use a committed Context reference; plaintext is loaded only inside Model Gateway."""
     try:
@@ -260,7 +289,15 @@ class GatewayChatModel(BaseChatModel):
                     object.__setattr__(rc, "context", None)
                 else:
                     raise
-        resp = await call_model(rc, self.gw_stream, system, to_neutral(messages), names)
+        try:
+            resp = await call_model(rc, self.gw_stream, system, to_neutral(messages), names)
+        except GatewayRejected as e:
+            if self.gw_stream == "main" and e.code == "PROVIDER_CONTEXT_OVERFLOW":
+                compacted_head = await maybe_compact_context(rc, auto_if_needed=False)
+                if compacted_head is not None:
+                    resp = await call_context_model(rc, compacted_head)
+                    return ChatResult(generations=[ChatGeneration(message=from_neutral([resp])[0])])
+            raise
         return ChatResult(generations=[ChatGeneration(message=from_neutral([resp])[0])])
 
 
