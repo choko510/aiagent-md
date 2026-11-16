@@ -93,12 +93,14 @@ class RunFence:
     goal_revision: int
     lease_epoch: int
     restore_incarnation: int
+    worker_ref: str | None = None
 
     def __post_init__(self) -> None:
         if (
             not self.task_id
             or not self.run_id
             or min(self.goal_revision, self.lease_epoch, self.restore_incarnation) < 0
+            or (self.worker_ref is not None and not self.worker_ref.strip())
         ):
             raise ScopeDenied("invalid Run fence")
 

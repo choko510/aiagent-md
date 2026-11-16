@@ -154,12 +154,17 @@ class PostgresWatchStore:
 
     def register(self, watch: DailyWatch) -> None:
         with self._db.tx(tenant=watch.tenant_id) as c:
-            c.execute(
+            row = c.execute(
                 "INSERT INTO agent.automation_watches(tenant_id, watch_id, owner_user_id, workspace_id,"
                 " revision, max_occurrences, timezone_id, start_utc)"
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s::timestamptz)"
                 " ON CONFLICT (tenant_id, watch_id) DO UPDATE"
-                " SET revision=EXCLUDED.revision, max_occurrences=EXCLUDED.max_occurrences",
+                " SET revision=EXCLUDED.revision, max_occurrences=EXCLUDED.max_occurrences,"
+                " timezone_id=EXCLUDED.timezone_id, start_utc=EXCLUDED.start_utc"
+                " WHERE agent.automation_watches.owner_user_id = EXCLUDED.owner_user_id"
+                " AND agent.automation_watches.workspace_id = EXCLUDED.workspace_id"
+                " AND EXCLUDED.revision >= agent.automation_watches.revision"
+                " RETURNING watch_id",
                 (
                     watch.tenant_id,
                     watch.watch_id,
@@ -170,17 +175,24 @@ class PostgresWatchStore:
                     watch.timezone_id,
                     watch.start_utc,
                 ),
-            )
+            ).fetchone()
+            if row is None:
+                raise Rejected("WATCH_OWNER_OR_REVISION_CONFLICT")
 
     def claim_bounded(self, watch: DailyWatch, slot: datetime) -> bool:
         dedupe = f"watch:{watch.tenant_id}:{watch.watch_id}:r{watch.revision}:{slot.isoformat()}"
         with self._db.tx(tenant=watch.tenant_id) as c:
             parent = c.execute(
-                "SELECT max_occurrences, active FROM agent.automation_watches"
+                "SELECT owner_user_id, revision, max_occurrences, active FROM agent.automation_watches"
                 " WHERE tenant_id=%s AND watch_id=%s FOR UPDATE",
                 (watch.tenant_id, watch.watch_id),
             ).fetchone()
-            if parent is None or not parent["active"]:
+            if (
+                parent is None
+                or not parent["active"]
+                or str(parent["owner_user_id"]) != self._owner_user_id
+                or int(parent["revision"]) != watch.revision
+            ):
                 return False
             existing = c.execute(
                 "SELECT count(*) AS n FROM agent.automation_watch_slots WHERE tenant_id=%s AND watch_id=%s",

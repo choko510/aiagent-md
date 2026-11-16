@@ -41,12 +41,14 @@ def _serialize_cycle(c: Cycle) -> dict[str, Any]:
 
 
 def _deserialize_fence(raw: dict[str, Any]) -> RunFence:
+    worker_ref = raw.get("worker_ref")
     return RunFence(
         task_id=str(raw["task_id"]),
         run_id=str(raw["run_id"]),
         goal_revision=int(raw["goal_revision"]),
         lease_epoch=int(raw["lease_epoch"]),
         restore_incarnation=int(raw["restore_incarnation"]),
+        worker_ref=str(worker_ref) if worker_ref is not None else None,
     )
 
 
@@ -179,7 +181,8 @@ class PostgresRunAuthority:
                 raise StaleReference("restore incarnation mismatch")
             row = c.execute(
                 "SELECT t.owner_user_id, t.workspace_id, t.goal_revision, t.active_run_id,"
-                " r.lease_epoch, r.restore_incarnation, r.cancel_requested, r.pause_requested, r.status_code"
+                " r.lease_epoch, r.lease_owner_ref, (r.lease_expires_at > clock_timestamp()) AS lease_alive,"
+                " r.restore_incarnation, r.cancel_requested, r.pause_requested, r.status_code"
                 " FROM agent.tasks t JOIN agent.runs r ON r.tenant_id = t.tenant_id AND r.id = %s"
                 " WHERE t.tenant_id = %s AND t.id = %s AND r.task_id = t.id",
                 (run.run_id, scope.tenant_id, run.task_id),
@@ -194,10 +197,23 @@ class PostgresRunAuthority:
                 str(row["active_run_id"]) != run.run_id
                 or int(row["goal_revision"]) != run.goal_revision
                 or int(row["lease_epoch"]) != run.lease_epoch
+                or not row["lease_owner_ref"]
+                or not row["lease_alive"]
+                or (run.worker_ref is not None and str(row["lease_owner_ref"]) != run.worker_ref)
                 or int(row["restore_incarnation"]) != run.restore_incarnation
                 or row["cancel_requested"]
                 or row["pause_requested"]
-                or row["status_code"] in ("CANCELLED", "CANCELLING", "PAUSED", "FAILED", "SUCCEEDED", "EXPIRED")
+                or row["status_code"]
+                in (
+                    "CANCELLED",
+                    "CANCELLING",
+                    "PAUSED",
+                    "FAILED",
+                    "SUCCEEDED",
+                    "PARTIAL",
+                    "EXPIRED",
+                    "BUDGET_EXHAUSTED",
+                )
             ):
                 raise StaleReference("run fence stale or inactive")
 

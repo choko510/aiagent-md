@@ -334,3 +334,222 @@ def test_automation_pg_quota_wait_multicycle_steer_watch_and_sse(
         ).status_code
         == 404
     )
+
+
+def test_authority_lease_expiry_and_service_role_rls_enforcement(
+    pg: PgEnv, dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    """Verify P1-2 (RunFence expiry/worker_ref/reclaim), P1-3 (service-role RLS), and P2 (Watch owner/revision)."""
+    import psycopg
+    from aiagent_core.commands import cancel
+    from aiagent_development import StaleReference
+
+    scope_core = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    created = submit_task(dbs["api"], scope_core, "dev authority test", profile="sandbox")
+    claim1 = control.claim_run(dbs["runtime"], scope_core.tenant_id, created["runId"], "dev-w1")
+    dev_scope = ProjectScope(
+        tenant_id=scope_core.tenant_id,
+        owner_user_id=scope_core.user_id,
+        project_id="proj-rls",
+        workspace_id=scope_core.workspace_id,
+        repository="org/rls-repo",
+        branch="feat/rls",
+        base_sha="a" * 40,
+        workspace_revision="rev-1",
+    )
+    run_auth = PostgresRunAuthority(dbs["runtime"])
+    fence1 = RunFence(
+        task_id=claim1.task_id,
+        run_id=claim1.run_id,
+        goal_revision=claim1.goal_revision,
+        lease_epoch=claim1.lease_epoch,
+        restore_incarnation=claim1.restore_incarnation,
+        worker_ref="dev-w1",
+    )
+    run_auth.assert_current(dev_scope, fence1)
+
+    # Wrong worker_ref denied
+    with pytest.raises(StaleReference, match="stale or inactive"):
+        run_auth.assert_current(
+            dev_scope,
+            RunFence(
+                task_id=claim1.task_id,
+                run_id=claim1.run_id,
+                goal_revision=claim1.goal_revision,
+                lease_epoch=claim1.lease_epoch,
+                restore_incarnation=claim1.restore_incarnation,
+                worker_ref="dev-rogue",
+            ),
+        )
+
+    # Expired lease BEFORE re-claim must fail closed
+    assert control.release(dbs["runtime"], claim1)
+    with pytest.raises(StaleReference, match="stale or inactive"):
+        run_auth.assert_current(dev_scope, fence1)
+
+    # Re-claim advances lease_epoch; fence2 passes, fence1 remains rejected
+    claim2 = control.claim_run(dbs["runtime"], scope_core.tenant_id, created["runId"], "dev-w2")
+    fence2 = RunFence(
+        task_id=claim2.task_id,
+        run_id=claim2.run_id,
+        goal_revision=claim2.goal_revision,
+        lease_epoch=claim2.lease_epoch,
+        restore_incarnation=claim2.restore_incarnation,
+        worker_ref="dev-w2",
+    )
+    with pytest.raises(StaleReference, match="stale or inactive"):
+        run_auth.assert_current(dev_scope, fence1)
+    run_auth.assert_current(dev_scope, fence2)
+
+    # Service-role DSN RLS enforcement on PR #97 tables: runtime + tool_gateway + relay succeed in own tenant
+    runtime_store = PostgresCycleStore(dbs["runtime"])
+    cycle = Cycle(
+        cycle_id="cycle-rls-1",
+        scope=dev_scope,
+        run=fence2,
+        phase=Phase.CODE_READY,
+        change_request_ref="cr-rls",
+        commit=CommitEvidence("a" * 40, "b" * 40, "c" * 64, "art:rls", "rec:rls"),
+    )
+    runtime_store.create(cycle)
+    gw_store = PostgresCycleStore(dbs["tool_gateway"])
+    loaded = gw_store.load(dev_scope, "cycle-rls-1")
+    assert loaded.cycle_id == "cycle-rls-1"
+
+    other = admin.provision_tenant(pg.owner)
+    other_scope = ProjectScope(
+        tenant_id=other["tenantId"],
+        owner_user_id=other["userId"],
+        project_id="proj-rls",
+        workspace_id=other["workspaceId"],
+        repository="org/rls-repo",
+        branch="feat/rls",
+        base_sha="a" * 40,
+        workspace_revision="rev-1",
+    )
+    # Cross-tenant read via tool_gateway blocked by RLS + scope check
+    with pytest.raises(Exception):
+        gw_store.load(other_scope, "cycle-rls-1")
+    # Cross-tenant write with mismatched GUC blocked by RLS WITH CHECK
+    with dbs["tool_gateway"].tx(tenant=other["tenantId"]) as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute(
+            "INSERT INTO agent.dev_diff_claims(tenant_id, project_id, diff_sha256, cycle_id) VALUES (%s,%s,%s,%s)",
+            (tenant["tenantId"], "proj-rls", "d" * 64, "cycle-rls-1"),
+        )
+
+    # Relay service role can persist and query automation tables in own tenant, blocked cross-tenant
+    relay_camp = PostgresCampaignStore(
+        dbs["relay"], tenant_id=tenant["tenantId"], owner_user_id=tenant["userId"], workspace_id=tenant["workspaceId"]
+    )
+    relay_plan = CampaignPlan(
+        campaign_id="camp-rls-1",
+        tenant_id=tenant["tenantId"],
+        goal_revision="1",
+        policy=StopPolicy(2, "2026-11-16T18:00:00+00:00", 1000, 10000, 10),
+        cost_per_cycle=100,
+        tokens_per_cycle=1000,
+        tools_per_cycle=2,
+    )
+
+    class _PassVerifier(VerificationPort):
+        def passes(self, *, campaign_id: str, cycle_id: str, evidence_refs: list[str], quality_gate_ref: str) -> bool:
+            return bool(evidence_refs and quality_gate_ref)
+
+    relay_ctrl = CampaignController(
+        relay_camp,
+        FakeClock(datetime(2026, 11, 16, 0, 0, tzinfo=UTC)),
+        PostgresQueueDispatch(dbs["relay"], owner_user_id=tenant["userId"], workspace_id=tenant["workspaceId"]),
+        verifier=_PassVerifier(),
+    )
+    relay_ctrl.create(relay_plan, "w1")
+    assert relay_camp.read("camp-rls-1").plan.campaign_id == "camp-rls-1"
+    with dbs["relay"].tx(tenant=other["tenantId"]) as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute(
+            "INSERT INTO agent.automation_watch_slots(tenant_id, watch_id, slot_iso, dedupe_key, status)"
+            " VALUES (%s,%s,%s,%s,'PENDING')",
+            (tenant["tenantId"], "w-other", "2026-11-16T00:00:00Z", "dk-x"),
+        )
+
+    # Watch owner collision and stale revision checks
+    w_owner1 = PostgresWatchStore(dbs["relay"], owner_user_id=tenant["userId"], workspace_id=tenant["workspaceId"])
+    w_owner2 = PostgresWatchStore(dbs["relay"], owner_user_id=other["userId"], workspace_id=tenant["workspaceId"])
+    watch1 = DailyWatch(
+        watch_id="watch-rls-1",
+        tenant_id=tenant["tenantId"],
+        timezone_id="Asia/Tokyo",
+        local_hour=9,
+        local_minute=0,
+        start_utc="2026-11-16T00:00:00+00:00",
+        max_occurrences=2,
+        revision=2,
+    )
+    w_owner1.register(watch1)
+    with pytest.raises(Rejected, match="WATCH_OWNER_OR_REVISION_CONFLICT"):
+        w_owner2.register(watch1)
+    # Downgrade revision rejected
+    stale_watch = DailyWatch(
+        watch_id="watch-rls-1",
+        tenant_id=tenant["tenantId"],
+        timezone_id="Asia/Tokyo",
+        local_hour=9,
+        local_minute=0,
+        start_utc="2026-11-16T00:00:00+00:00",
+        max_occurrences=2,
+        revision=1,
+    )
+    with pytest.raises(Rejected, match="WATCH_OWNER_OR_REVISION_CONFLICT"):
+        w_owner1.register(stale_watch)
+    # Claim with mismatched revision returns False
+    assert (
+        w_owner1.claim_bounded(
+            stale_watch,
+            datetime(2026, 11, 16, 0, 0, tzinfo=UTC),
+        )
+        is False
+    )
+
+    # STOP/cancel invalidates RunFence immediately
+    cancel(dbs["api"], scope_core, claim2.task_id)
+    with pytest.raises(StaleReference, match="stale or inactive"):
+        run_auth.assert_current(dev_scope, fence2)
+
+    # Restore incarnation bump also invalidates RunFence on isolated DB (do not mutate session pg)
+    from conftest import drop_database, make_database
+
+    iso_env = make_database("aiagent_dev_restore")
+    try:
+        iso_t = admin.provision_tenant(iso_env.owner)
+        iso_scope = Scope(iso_t["tenantId"], iso_t["userId"], iso_t["workspaceId"])
+        iso_api = iso_env.db("api", max_size=2)
+        iso_rt = iso_env.db("runtime", max_size=2)
+        try:
+            created3 = submit_task(iso_api, iso_scope, "dev restore test", profile="sandbox")
+            claim3 = control.claim_run(iso_rt, iso_scope.tenant_id, created3["runId"], "dev-w3")
+            iso_dev_scope = ProjectScope(
+                tenant_id=iso_scope.tenant_id,
+                owner_user_id=iso_scope.user_id,
+                project_id="proj-rls",
+                workspace_id=iso_scope.workspace_id,
+                repository="org/rls-repo",
+                branch="feat/rls",
+                base_sha="a" * 40,
+                workspace_revision="rev-1",
+            )
+            fence3 = RunFence(
+                task_id=claim3.task_id,
+                run_id=claim3.run_id,
+                goal_revision=claim3.goal_revision,
+                lease_epoch=claim3.lease_epoch,
+                restore_incarnation=claim3.restore_incarnation,
+                worker_ref="dev-w3",
+            )
+            iso_auth = PostgresRunAuthority(iso_rt)
+            iso_auth.assert_current(iso_dev_scope, fence3)
+            admin.restore_bump(iso_env.owner)
+            with pytest.raises(StaleReference, match="restore incarnation mismatch"):
+                iso_auth.assert_current(iso_dev_scope, fence3)
+        finally:
+            iso_api.close()
+            iso_rt.close()
+    finally:
+        drop_database(iso_env.name)

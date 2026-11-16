@@ -39,8 +39,13 @@ class _DbAuthorityPort:
     async def authorize(self, authority: Authority, operation: str, session_id: str | None) -> None:
         with self._db.tx() as c:
             row = c.execute(
-                "SELECT t.owner_user_id, t.workspace_id, t.goal_revision"
-                " FROM agent.tasks t JOIN agent.runs r ON r.tenant_id = t.tenant_id AND r.id = %s"
+                "SELECT t.owner_user_id, t.workspace_id, t.goal_revision, t.active_run_id,"
+                " r.lease_epoch, r.lease_owner_ref, (r.lease_expires_at > clock_timestamp()) AS lease_alive,"
+                " r.restore_incarnation, r.cancel_requested, r.pause_requested, r.status_code,"
+                " sc.restore_incarnation AS current_incarnation"
+                " FROM agent.tasks t"
+                " JOIN agent.runs r ON r.tenant_id = t.tenant_id AND r.id = %s"
+                " JOIN agent.schema_control sc ON sc.singleton"
                 " WHERE t.tenant_id = %s AND t.id = %s AND r.task_id = t.id",
                 (authority.run_id, authority.tenant_id, authority.task_id),
             ).fetchone()
@@ -48,6 +53,25 @@ class _DbAuthorityPort:
                 row is None
                 or str(row["owner_user_id"]) != authority.owner_user_id
                 or int(row["goal_revision"]) != int(authority.goal_revision)
+                or str(row["active_run_id"]) != authority.run_id
+                or int(row["lease_epoch"]) != int(authority.lease_epoch)
+                or not row["lease_owner_ref"]
+                or not row["lease_alive"]
+                or (authority.worker_ref is not None and str(row["lease_owner_ref"]) != authority.worker_ref)
+                or int(row["restore_incarnation"]) != int(row["current_incarnation"])
+                or row["cancel_requested"]
+                or row["pause_requested"]
+                or row["status_code"]
+                in (
+                    "CANCELLED",
+                    "CANCELLING",
+                    "PAUSED",
+                    "FAILED",
+                    "SUCCEEDED",
+                    "PARTIAL",
+                    "EXPIRED",
+                    "BUDGET_EXHAUSTED",
+                )
                 or not control.scope_active(c, authority.tenant_id, authority.owner_user_id, str(row["workspace_id"]))
             ):
                 raise BrowserError("AUTH_DENIED")
@@ -209,6 +233,7 @@ class BrowserFixtureExecutor:
 
     @staticmethod
     def _authority_from_ctx(ctx: dict[str, Any]) -> Authority:
+        worker_ref = ctx.get("worker_ref")
         return Authority(
             tenant_id=str(ctx["tenant_id"]),
             owner_user_id=str(ctx["owner_user_id"]),
@@ -216,6 +241,7 @@ class BrowserFixtureExecutor:
             run_id=str(ctx["run_id"]),
             goal_revision=str(ctx["goal_revision"]),
             lease_epoch=str(ctx["lease_epoch"]),
+            worker_ref=str(worker_ref) if worker_ref is not None else None,
         )
 
     async def _ensure_lease_current(
