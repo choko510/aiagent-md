@@ -32,10 +32,13 @@ class Grant:
     memory_bytes: int
     expires: int
     attempt_id: str | None = None
+    attempt_binding_version: int | None = None
 
     def payload(self) -> dict[str, Any]:
         d = asdict(self)
         d["argv"] = list(self.argv)
+        if self.attempt_binding_version is None:
+            del d["attempt_binding_version"]
         return d
 
 
@@ -60,6 +63,12 @@ def verify(key: bytes, token: Any, argv: list[str], cwd: str, *, now: float | No
         g = Grant(**{**p, "argv": tuple(p["argv"])})
     except TypeError as e:
         raise GrantError("MALFORMED") from e
+    if g.attempt_binding_version is not None and (
+        type(g.attempt_binding_version) is not int or g.attempt_binding_version != 1
+    ):
+        raise GrantError("UNSUPPORTED_ATTEMPT_BINDING")
+    if g.attempt_binding_version == 1 and not g.attempt_id:
+        raise GrantError("MISSING_ATTEMPT")
     if g.attempt_id is not None and (not isinstance(g.attempt_id, str) or not 1 <= len(g.attempt_id) <= 128):
         raise GrantError("MALFORMED")
     if list(g.argv) != argv or g.cwd != cwd:

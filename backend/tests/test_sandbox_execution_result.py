@@ -204,3 +204,20 @@ def test_attempt_grant_tampering_is_rejected(field: str, value: object) -> None:
     token["grant"][field] = value
     with pytest.raises(GrantError, match="BAD_SIGNATURE"):
         verify(key, token, ["tool"], ".")
+
+
+def test_attempt_binding_versions_fail_closed() -> None:
+    from aiagent_sandbox.grant import Grant, GrantError, sign, verify
+
+    key = b"g" * 32
+    values = ("g", "tenant", "task", "run", "intent", 1, ("tool",), ".", 1000, 1024, 9999999999)
+    legacy = Grant(*values)
+    assert "attempt_binding_version" not in legacy.payload()
+    assert verify(key, sign(key, legacy), ["tool"], ".").attempt_binding_version is None
+    with pytest.raises(GrantError, match="MISSING_ATTEMPT"):
+        verify(key, sign(key, Grant(*values, attempt_binding_version=1)), ["tool"], ".")
+    for invalid_version in (2, True):
+        with pytest.raises(GrantError, match="UNSUPPORTED_ATTEMPT_BINDING"):
+            verify(
+                key, sign(key, Grant(*values, attempt_id="a", attempt_binding_version=invalid_version)), ["tool"], "."
+            )

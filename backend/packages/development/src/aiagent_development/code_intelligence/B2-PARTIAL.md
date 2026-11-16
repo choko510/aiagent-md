@@ -142,3 +142,29 @@ but an older Supervisor will reject the additional signed field rather than
 execute it. Roll out the Supervisor before the Gateway change; mixed-version
 operation has not been verified. Generic legacy grant acceptance does not
 satisfy the B2b-1 execution-identity requirement.
+
+## B2b-2: attempt binding version and real-DB fixture
+
+Attempt binding version 1 is a signed field and requires an attempt ID. An
+absent field is the legacy form; unknown or malformed versions are rejected.
+The existing Gateway emits v1 when it has a Gateway-owned attempt ID. This is a
+versioned Tool Attempt binding, not a B2b Execution contract or a verified
+Workspace/Plan/Artifact binding. No version number upgrades legacy evidence to
+B2b identity, and old Supervisors reject the additional field. Deployment
+requires explicit capability negotiation; mixed versions remain unverified.
+
+An isolated PostgreSQL fixture and a Fake Cell exercise the existing Authority
+and Gateway: the signed grant's attempt ID matches the Tool Gateway's DB row,
+foreign attempt responses settle UNKNOWN, and stale/cancelled requests are
+refused before the fake Cell. This test does not authenticate a workspace or
+artifact, check cancellation during execution, establish atomic publication,
+or exercise a real Cell. The real Development adapter remains fail-closed.
+
+The existing Tool Attempt, Run fence, Workspace projection and Context Artifact
+have different owners and do not together supply an authenticated Execution
+record. An owner-approved cross-service Execution contract is needed for
+verified Commit/Tree/Revision, Plan Test ID and recipe/toolchain binding, with
+canonical DB serialization of publication against cancellation and lease
+revocation. Artifact transfer must be authenticated before enabling the adapter.
+These owner changes are not implemented by inventing a Development-owned
+canonical table or treating the Fake Cell output as authority.

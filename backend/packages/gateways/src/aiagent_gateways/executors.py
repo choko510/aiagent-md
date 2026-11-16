@@ -180,6 +180,7 @@ class SandboxCellExecutor:
             self.memory_bytes,
             int(time.time()) + 120,
             attempt_id=ctx.get("attempt_id"),
+            attempt_binding_version=1 if ctx.get("attempt_id") is not None else None,
         )
         client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
         try:
