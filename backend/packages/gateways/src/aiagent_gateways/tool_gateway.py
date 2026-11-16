@@ -214,9 +214,22 @@ class ToolGateway:
                     "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s",
                     (claim.tenant_id, claim.run_id),
                 ).fetchone()
-                if n is not None and n["n"] >= self.max_tool_calls:
+                run_tool_cap = (
+                    int(run["max_tool_calls"]) if run.get("max_tool_calls") is not None else self.max_tool_calls
+                )
+                effective_limit = min(self.max_tool_calls, run_tool_cap)
+                if n is not None and n["n"] >= effective_limit:
                     return self._finish_denied(
-                        c, claim, tool_call_id, tool, args, req_sha, spec, "BUDGET_EXHAUSTED", stream
+                        c,
+                        claim,
+                        tool_call_id,
+                        tool,
+                        args,
+                        req_sha,
+                        spec,
+                        "BUDGET_EXHAUSTED",
+                        stream,
+                        error="tool_budget_exceeded",
                     )
                 intent_id = uuid7()
                 status = "PENDING_APPROVAL" if spec.approval_required else "SENDING"

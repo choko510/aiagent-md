@@ -599,7 +599,7 @@ def test_campaign_goal_propagates_to_worker_deliverable(
     # DB task_goal_revisions & runs reflect real Campaign goal, work item, budget, and deadline
     with dbs["owner"].conn() as c:
         row = c.execute(
-            "SELECT g.goal_text, r.token_budget, r.max_model_calls"
+            "SELECT g.goal_text, r.token_budget, r.max_tool_calls"
             " FROM agent.task_goal_revisions g"
             " JOIN agent.runs r ON r.tenant_id = g.tenant_id AND r.task_id = g.task_id"
             " WHERE g.tenant_id=%s AND g.task_id=%s AND g.revision=1",
@@ -609,7 +609,7 @@ def test_campaign_goal_propagates_to_worker_deliverable(
     assert "Find the widget price and notify alice." in row["goal_text"]
     assert "work_item=item-notify" in row["goal_text"]
     assert "tokens_budget=6000" in row["goal_text"]
-    assert row["token_budget"] == 6000 and row["max_model_calls"] == 7
+    assert row["token_budget"] == 6000 and row["max_tool_calls"] == 7
 
     # Real Worker executes the spawned Campaign child Task end-to-end
     r1 = stack.worker()
@@ -658,3 +658,80 @@ def test_campaign_goal_propagates_to_worker_deliverable(
     assert "Check DB connection pool status." in row2["goal_text"]
     assert "work_item=item-pool-check" in row2["goal_text"]
     assert "goal_rev=2" in row2["goal_text"]
+
+
+def test_campaign_tool_budget_enforced_atomically_by_tool_gateway(pg: PgEnv, dbs: dict[str, Database]) -> None:
+    """P1-1: Dedicated runs.max_tool_calls is enforced inside ToolGateway before exceeding Campaign tools_per_cycle."""
+    import asyncio
+
+    import psycopg
+    from aiagent_gateways.executors import MockSearchExecutor
+    from aiagent_gateways.tool_gateway import ToolGateway
+
+    t = admin.provision_tenant(pg.owner)
+    store = PostgresCampaignStore(
+        dbs["relay"], tenant_id=t["tenantId"], owner_user_id=t["userId"], workspace_id=t["workspaceId"]
+    )
+    q = PostgresQueueDispatch(dbs["relay"], owner_user_id=t["userId"], workspace_id=t["workspaceId"])
+
+    class _PassVerifier(VerificationPort):
+        def passes(self, *, campaign_id: str, cycle_id: str, evidence_refs: list[str], quality_gate_ref: str) -> bool:
+            return bool(evidence_refs and quality_gate_ref)
+
+    ctrl = CampaignController(store, FakeClock(datetime(2026, 11, 16, 10, 0, tzinfo=UTC)), q, verifier=_PassVerifier())
+    plan = CampaignPlan(
+        campaign_id="camp-tool-cap",
+        tenant_id=t["tenantId"],
+        goal_revision="1",
+        policy=StopPolicy(
+            max_cycles=2,
+            deadline_utc="2026-11-16T18:00:00+00:00",
+            max_cost_micro_usd=2000,
+            max_tokens=20000,
+            max_tool_calls=10,
+        ),
+        cost_per_cycle=200,
+        tokens_per_cycle=5000,
+        tools_per_cycle=2,
+        goal_text="Cap tool calls per cycle to 2.",
+    )
+    ctrl.create(plan, "work-cap")
+    assert ctrl.dispatch_pending("camp-tool-cap") == 1
+    child = q.created_runs[0]
+
+    # Least-privilege runtime cannot raise runs.max_tool_calls
+    with dbs["runtime"].conn() as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute(
+            "UPDATE agent.runs SET max_tool_calls = 999 WHERE tenant_id=%s AND id=%s", (t["tenantId"], child["runId"])
+        )
+
+    claim = control.claim_run(dbs["runtime"], t["tenantId"], child["runId"], "w-cap")
+    gw = ToolGateway(dbs["tool_gateway"], {"mock_search": MockSearchExecutor()}, max_tool_calls=32)
+
+    async def _submit_search(idx: int) -> dict:
+        call_id = f"call-cap-{idx}"
+        args = {"query": f"q{idx}"}
+        with dbs["model_gateway"].tx() as mc:
+            control.append_head(
+                mc,
+                claim,
+                "assistant",
+                {"kind": "assistant", "content": "", "tool_calls": [{"id": call_id, "name": "search", "args": args}]},
+                writer="model_gateway",
+            )
+        return await gw.submit(claim, call_id, "search", args)
+
+    out1 = asyncio.run(_submit_search(1))
+    out2 = asyncio.run(_submit_search(2))
+    out3 = asyncio.run(_submit_search(3))
+    assert out1["status"] == "DONE"
+    assert out2["status"] == "DONE"
+    assert out3["status"] == "BUDGET_EXHAUSTED"
+    assert out3["result"] == {"error": "tool_budget_exceeded"}
+
+    # 3rd denied attempt must NOT have created a 3rd active tool_intent
+    n_intents = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s AND status_code <> 'BUDGET_EXHAUSTED'",
+        (t["tenantId"], claim.run_id),
+    )
+    assert n_intents is not None and n_intents["n"] == 2

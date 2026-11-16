@@ -34,13 +34,13 @@ def test_checksum_mismatch_fails_closed(pg: PgEnv, tmp_path: Path) -> None:
 def test_failed_migration_rolls_back_atomically(pg: PgEnv, tmp_path: Path) -> None:
     d = tmp_path / "m"
     shutil.copytree(migrate.default_dir(), d)
-    (d / "0010_broken.up.sql").write_text("CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n")
+    (d / "0011_broken.up.sql").write_text("CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n")
     with pytest.raises(psycopg.errors.UndefinedTable):
         migrate.up(pg.owner, d)
     with connect(pg.owner) as c:
         assert c.execute("SELECT to_regclass('agent.half_done') AS t").fetchone()["t"] is None
-        assert c.execute("SELECT max(version) AS v FROM aiagent_meta.schema_migrations").fetchone()["v"] == 9
-        assert c.execute("SELECT schema_version FROM agent.schema_control").fetchone()["schema_version"] == 9
+        assert c.execute("SELECT max(version) AS v FROM aiagent_meta.schema_migrations").fetchone()["v"] == 10
+        assert c.execute("SELECT schema_version FROM agent.schema_control").fetchone()["schema_version"] == 10
 
 
 def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path) -> None:
@@ -51,8 +51,8 @@ def test_upgrade_from_previous_version_and_unknown_future_refused(tmp_path: Path
         import os
 
         os.environ["AIAGENT_ALLOW_DOWN"] = "1"
-        assert migrate.down(env.owner, 3) == [9, 8, 7, 6, 5, 4]
-        assert migrate.up(env.owner) == [4, 5, 6, 7, 8, 9]
+        assert migrate.down(env.owner, 3) == [10, 9, 8, 7, 6, 5, 4]
+        assert migrate.up(env.owner) == [4, 5, 6, 7, 8, 9, 10]
         with connect(env.owner) as c:
             c.execute(
                 "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
@@ -90,7 +90,7 @@ def test_concurrent_runners_apply_once() -> None:
     [t.join() for t in ts]
     try:
         assert not errors
-        assert sorted(len(r) for r in results) == [0, 0, 0, 9]
+        assert sorted(len(r) for r in results) == [0, 0, 0, 10]
     finally:
         drop_database(name)
 
@@ -172,75 +172,199 @@ def test_append_only_head_and_events_even_for_owner(pg: PgEnv, tenant: dict[str,
 
 
 def test_upgrade_from_legacy_pr92_db_preserves_data_and_refuses_tampered() -> None:
+    import hashlib
+    import secrets
+    from datetime import UTC, datetime, timedelta
+
     from aiagent_core.commands import Scope, submit_task
     from aiagent_core.db import Database
+    from aiagent_domain import uuid7
+    from conftest import PG, ROLE_PW, SESSION, _with_db
 
-    env = make_database("aiagent_legacy92")
+    name = f"aiagent_real92_{secrets.token_hex(4)}"
+    with connect(PG) as c:  # type: ignore[arg-type]
+        c.execute(f'CREATE DATABASE "{name}"')
+    owner = _with_db(PG, name)  # type: ignore[arg-type]
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "legacy_pr92"
     try:
-        import os
+        # 1. Build a genuine PR #92 PostgreSQL 16 database from 0001..0005 + real 0006..0016 SQLs.
+        assert migrate.up(owner, target=5) == [1, 2, 3, 4, 5]
+        legacy_files = sorted(fixture_dir.glob("*.up.sql"))
+        assert len(legacy_files) == 11
+        with connect(owner) as c:
+            for sql_file in legacy_files:
+                ver = int(sql_file.name[:4])
+                mig_name = sql_file.stem.removesuffix(".up")[5:]
+                raw_bytes = sql_file.read_bytes()
+                sha = hashlib.sha256(raw_bytes).hexdigest()
+                with c.transaction():
+                    c.execute(raw_bytes.decode("utf-8"))
+                    c.execute(
+                        "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name,"
+                        " app_min_reader, app_min_writer) VALUES (%s,%s,%s,5,5)",
+                        (ver, sha, mig_name),
+                    )
+                    c.execute("UPDATE agent.schema_control SET schema_version=%s WHERE singleton", (ver,))
 
-        os.environ["AIAGENT_ALLOW_DOWN"] = "1"
-        assert migrate.down(env.owner, 6) == [9, 8, 7]
-        seeded_tenant = admin.provision_tenant(env.owner)
-        api_db = Database(env.dsn["api"])
+        logins = admin.create_logins(owner, {k: ROLE_PW for k in admin.GROUPS}, prefix=f"aiagent_t{SESSION}_")
+        dsn = {k: _with_db(PG, name, v, ROLE_PW) for k, v in logins.items()}
+        seeded_tenant = admin.provision_tenant(owner)
+        api_db = Database(dsn["api"], max_size=2)
         try:
             task = submit_task(
                 api_db,
                 Scope(seeded_tenant["tenantId"], seeded_tenant["userId"], seeded_tenant["workspaceId"]),
-                "legacy-92-preserve",
+                "authentic-legacy-92-task",
             )
         finally:
             api_db.close()
 
-        # Simulate legacy PR #92 metadata rows 0006..0016 + persisted consent data before upgrade.
-        with connect(env.owner) as c:
+        # Seed real rows in legacy PR #92 Context/Memory/Restore/Consent tables before upgrade.
+        art_raw_id, art_proj_id, mem_id = uuid7(), uuid7(), uuid7()
+        now = datetime.now(UTC)
+        with connect(owner) as c:
             with c.transaction():
+                c.execute(
+                    "INSERT INTO agent.context_artifacts(tenant_id, id, task_id, run_id, owner_user_id, kind,"
+                    " content_sha256, byte_length, nonce, ciphertext, key_id, expires_at)"
+                    " VALUES (%s,%s,%s,%s,%s,'raw',%s,5,%s,%s,'k1',%s),"
+                    "        (%s,%s,%s,%s,%s,'raw',%s,5,%s,%s,'k1',%s)",
+                    (
+                        seeded_tenant["tenantId"],
+                        art_raw_id,
+                        task["taskId"],
+                        task["runId"],
+                        seeded_tenant["userId"],
+                        "a" * 64,
+                        b"\x01" * 12,
+                        b"cipher-raw",
+                        now + timedelta(hours=1),
+                        seeded_tenant["tenantId"],
+                        art_proj_id,
+                        task["taskId"],
+                        task["runId"],
+                        seeded_tenant["userId"],
+                        "b" * 64,
+                        b"\x02" * 12,
+                        b"cipher-sum",
+                        now + timedelta(hours=1),
+                    ),
+                )
                 c.execute(
                     "INSERT INTO agent.memory_scope_epochs(tenant_id, owner_user_id, task_id, source_epoch)"
                     " VALUES (%s, %s, %s, 1)",
                     (seeded_tenant["tenantId"], seeded_tenant["userId"], task["taskId"]),
                 )
-                c.execute("DELETE FROM aiagent_meta.schema_migrations WHERE version >= 6")
-                for ver, (name, sha) in migrate.LEGACY_PR92_MIGRATIONS.items():
-                    c.execute(
-                        "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
-                        " app_min_writer) VALUES (%s,%s,%s,5,5)",
-                        (ver, sha, name),
-                    )
-                c.execute("UPDATE agent.schema_control SET schema_version = 16 WHERE singleton")
+                c.execute(
+                    "INSERT INTO agent.memory_records(tenant_id, owner_user_id, task_id, id, revision,"
+                    " source_artifact_id, projection_artifact_id, recipient, consent_basis, observed_at, expires_at)"
+                    " VALUES (%s,%s,%s,%s,1,%s,%s,'anthropic','user_explicit',%s,%s)",
+                    (
+                        seeded_tenant["tenantId"],
+                        seeded_tenant["userId"],
+                        task["taskId"],
+                        mem_id,
+                        art_raw_id,
+                        art_proj_id,
+                        now,
+                        now + timedelta(days=7),
+                    ),
+                )
+                c.execute(
+                    "INSERT INTO agent.memory_consents(tenant_id, owner_user_id, recipient, consent_basis,"
+                    " granted_at, record_version) VALUES (%s,%s,'anthropic','user_explicit',now(),1)",
+                    (seeded_tenant["tenantId"], seeded_tenant["userId"]),
+                )
+                c.execute(
+                    "UPDATE agent.memory_tombstone_coverage SET covered_revocation_generation=3,"
+                    " chain_head=repeat('c',64) WHERE singleton"
+                )
 
-        # Tampered legacy checksum must still fail closed.
-        with connect(env.owner) as c:
+        # 2. Tampered legacy checksum still fails closed.
+        with connect(owner) as c:
             with c.transaction():
                 c.execute(
                     "UPDATE aiagent_meta.schema_migrations SET checksum_sha256 = repeat('0', 64) WHERE version = 11"
                 )
         with pytest.raises(migrate.MigrationError, match="checksum mismatch for legacy migration"):
-            migrate.up(env.owner)
+            migrate.up(owner)
 
-        # Restore genuine PR #92 checksum -> non-destructive upgrade reconciles 6..16 -> 6 and advances 7,8,9.
-        with connect(env.owner) as c:
+        # 3. Genuine legacy DB upgrades non-destructively to latest APP_SCHEMA_VERSION.
+        with connect(owner) as c:
             with c.transaction():
                 _name, real_sha = migrate.LEGACY_PR92_MIGRATIONS[11]
                 c.execute(
                     "UPDATE aiagent_meta.schema_migrations SET checksum_sha256 = %s WHERE version = 11", (real_sha,)
                 )
 
-        applied = migrate.up(env.owner)
-        assert applied == [7, 8, 9]
-        with connect(env.owner) as c:
+        applied = migrate.up(owner)
+        assert applied == [7, 8, 9, 10]
+        with connect(owner) as c:
             migrate.check_compatible(c)
-            epoch_row = c.execute(
-                "SELECT source_epoch FROM agent.memory_scope_epochs WHERE tenant_id=%s AND task_id=%s",
-                (seeded_tenant["tenantId"], task["taskId"]),
-            ).fetchone()
-            assert epoch_row is not None and epoch_row["source_epoch"] == 1
+            # Legacy rows preserved intact
+            assert (
+                c.execute(
+                    "SELECT count(*) AS n FROM agent.context_artifacts WHERE tenant_id=%s AND task_id=%s",
+                    (seeded_tenant["tenantId"], task["taskId"]),
+                ).fetchone()["n"]
+                == 2
+            )
+            assert (
+                c.execute(
+                    "SELECT source_epoch FROM agent.memory_scope_epochs WHERE tenant_id=%s AND task_id=%s",
+                    (seeded_tenant["tenantId"], task["taskId"]),
+                ).fetchone()["source_epoch"]
+                == 2
+            )
+            assert (
+                c.execute(
+                    "SELECT recipient FROM agent.memory_records WHERE tenant_id=%s AND id=%s",
+                    (seeded_tenant["tenantId"], mem_id),
+                ).fetchone()["recipient"]
+                == "anthropic"
+            )
+            assert (
+                c.execute(
+                    "SELECT covered_revocation_generation FROM agent.memory_tombstone_coverage WHERE singleton"
+                ).fetchone()["covered_revocation_generation"]
+                == 3
+            )
+            # Upgraded objects, columns, and functions all exist cleanly
+            assert c.execute("SELECT to_regclass('agent.browser_sessions') AS t").fetchone()["t"] is not None
+            assert c.execute("SELECT to_regclass('agent.dev_cycles') AS t").fetchone()["t"] is not None
+            assert (
+                c.execute(
+                    "SELECT 1 FROM information_schema.columns"
+                    " WHERE table_schema='agent' AND table_name='runs' AND column_name='max_tool_calls'"
+                ).fetchone()
+                is not None
+            )
+            assert (
+                c.execute(
+                    "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace"
+                    " WHERE n.nspname='agent' AND p.proname='browser_session_check'"
+                ).fetchone()
+                is not None
+            )
             versions = [
                 r["version"] for r in c.execute("SELECT version FROM aiagent_meta.schema_migrations ORDER BY version")
             ]
             assert versions == list(range(1, migrate.APP_SCHEMA_VERSION + 1))
-    finally:
-        import os
 
-        os.environ.pop("AIAGENT_ALLOW_DOWN", None)
-        drop_database(env.name)
+        # 4. Post-upgrade RLS works cleanly for least-privilege roles and blocks cross-tenant.
+        with connect(dsn["runtime"]) as rc:
+            with rc.transaction():
+                rc.execute("SELECT set_config('aiagent.tenant_id', %s, true)", (seeded_tenant["tenantId"],))
+                assert rc.execute("SELECT count(*) AS n FROM agent.dev_cycles").fetchone()["n"] == 0
+        other = admin.provision_tenant(owner)
+        with connect(dsn["api"]) as ac:
+            with ac.transaction():
+                ac.execute("SELECT set_config('aiagent.tenant_id', %s, true)", (other["tenantId"],))
+                assert ac.execute("SELECT count(*) AS n FROM agent.tasks").fetchone()["n"] == 0
+
+        # 5. Post-upgrade restore bump still succeeds cleanly on migrated DB.
+        assert admin.restore_bump(owner) == 2
+        with connect(owner) as c:
+            migrate.check_compatible(c)
+    finally:
+        drop_database(name)

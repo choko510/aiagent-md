@@ -145,7 +145,7 @@ class PostgresQueueDispatch(QueueDispatch):
                 actor={"type": "service", "id": "automation"},
                 trigger_key=dedupe_key,
                 token_budget=camp.plan.tokens_per_cycle,
-                max_model_calls=camp.plan.tools_per_cycle,
+                max_tool_calls=camp.plan.tools_per_cycle,
             )
             self.created_runs.append(created)
             return True
