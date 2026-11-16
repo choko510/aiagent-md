@@ -497,11 +497,15 @@ class ModelGateway:
             ContextRequest,
             ContextService,
             HeuristicNliVerifier,
+            HybridCompactionPipeline,
+            HybridOptimizer,
             ModelBoundTokenEstimator,
             ModelBudget,
             SafeStop,
             SourceInput,
         )
+        from aiagent_context.hybrid import SourceClass
+        from aiagent_context.tokenizer import tokenizer_for_model
 
         from .context_head import PostgresHeadPort
         from .context_policy import ContextPolicyError, resolve_policy
@@ -553,7 +557,7 @@ class ModelGateway:
             return {"compacted": False, "reason": "BELOW_THRESHOLD"}
 
         now_iso = datetime.now(UTC).isoformat()
-        sources: list[SourceInput] = []
+        sources: list[tuple[SourceInput, SourceClass]] = []
         for idx, r in enumerate(rows[-32:]):
             kind = str(r["entry_kind"])
             if kind not in ("user", "assistant", "tool"):
@@ -563,11 +567,14 @@ class ModelGateway:
                 continue
             try:
                 sources.append(
-                    SourceInput(
-                        source_ref=f"head:{claim.run_id}:{r['checkpoint_revision']}:{idx}",
-                        observed_at=now_iso,
-                        body=body_text.encode("utf-8"),
-                        locator_ref=f"run_checkpoint:{r['checkpoint_revision']}",
+                    (
+                        SourceInput(
+                            source_ref=f"head:{claim.run_id}:{r['checkpoint_revision']}:{idx}",
+                            observed_at=now_iso,
+                            body=body_text.encode("utf-8"),
+                            locator_ref=f"run_checkpoint:{r['checkpoint_revision']}",
+                        ),
+                        "json_data",
                     )
                 )
             except SafeStop as exc:
@@ -575,11 +582,14 @@ class ModelGateway:
         if not sources:
             try:
                 sources.append(
-                    SourceInput(
-                        source_ref=f"goal:{claim.goal_revision}",
-                        observed_at=now_iso,
-                        body=str(task["goal_text"]).encode("utf-8"),
-                        locator_ref=f"goal:{claim.goal_revision}",
+                    (
+                        SourceInput(
+                            source_ref=f"goal:{claim.goal_revision}",
+                            observed_at=now_iso,
+                            body=str(task["goal_text"]).encode("utf-8"),
+                            locator_ref=f"goal:{claim.goal_revision}",
+                        ),
+                        "prose",
                     )
                 )
             except SafeStop as exc:
@@ -590,6 +600,8 @@ class ModelGateway:
             retrieval = context.memory.retrieval(
                 context.scope, query=str(task["goal_text"]), recipient=policy.recipient
             )
+            tok_id = tokenizer_for_model(policy.model)
+            tok = ModelBoundTokenEstimator()
             req = ContextRequest(
                 scope=context.scope,
                 expected_head=str(head),
@@ -602,7 +614,7 @@ class ModelGateway:
                 budget=ModelBudget(
                     policy.model,
                     "v1",
-                    "cl100k_base",
+                    tok_id,
                     max(8000, int(run["token_budget"])),
                     1024,
                     512,
@@ -614,9 +626,10 @@ class ModelGateway:
                 context.store,
                 head_port,
                 semantic_verifier=HeuristicNliVerifier(),
-                tokenizer=ModelBoundTokenEstimator(),
+                tokenizer=tok,
             )
-            plan = svc.compact(req, tuple(sources))
+            pipeline = HybridCompactionPipeline(svc, HybridOptimizer(tok))
+            plan = pipeline.compact(req, tuple(sources))
         except SafeStop as exc:
             raise RpcError(exc.code) from None
         return {
@@ -624,6 +637,10 @@ class ModelGateway:
             "head": plan.committed_head,
             "planDigest": plan.context_digest,
             "factCount": len(plan.verified_facts),
+            "optimizationOutcome": plan.optimization_receipt.outcome if plan.optimization_receipt else "NONE",
+            "tokenizerId": tok_id,
+            "tokenizerMode": tok.mode,
+            "verifierMode": "HEURISTIC_NLI",
             "reused": False,
         }
 
