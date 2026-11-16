@@ -8,8 +8,8 @@ type Props = {
   selectedSessionId: string | null;
   observation: BrowserObservation | null;
   takeoverResult: { authStatus?: string; authenticated?: boolean; observation?: string } | null;
-  onSelectSession: (sessionId: string) => Promise<void>;
-  onStartTakeover: (sessionId: string, reason: string) => Promise<void>;
+  onSelectSession: (sessionId: string) => Promise<boolean>;
+  onStartTakeover: (sessionId: string, reason: string) => Promise<boolean>;
   onAuthenticate: (
     sessionId: string,
     payload: {
@@ -19,9 +19,9 @@ type Props = {
       verifyUrl?: string;
       verifyContains?: string;
     },
-  ) => Promise<void>;
-  onCompleteTakeover: (sessionId: string) => Promise<void>;
-  onAbortTakeover: (sessionId: string) => Promise<void>;
+  ) => Promise<boolean>;
+  onCompleteTakeover: (sessionId: string) => Promise<boolean>;
+  onAbortTakeover: (sessionId: string) => Promise<boolean>;
 };
 
 export default function BrowserTakeoverPanel({
@@ -61,15 +61,17 @@ export default function BrowserTakeoverPanel({
     const formData: Record<string, string> = {};
     if (formKey.trim()) formData[formKey.trim()] = formVal;
     if (secretKey.trim() && secretVal) formData[secretKey.trim()] = secretVal;
-    await onAuthenticate(selectedSessionId, {
+    const ok = await onAuthenticate(selectedSessionId, {
       url: loginUrl.trim(),
       method,
       formData,
       verifyUrl: verifyUrl.trim() || undefined,
       verifyContains: verifyContains.trim() || undefined,
     });
-    // Clear password/input field immediately after submission.
-    setSecretVal("");
+    if (ok) {
+      // Clear password field only on successful submission; preserve inputs on error for retry.
+      setSecretVal("");
+    }
   }
 
   return (
@@ -96,7 +98,7 @@ export default function BrowserTakeoverPanel({
           </ul>
         )}
 
-        {observation && (
+        {observation && observation.sessionId === selectedSessionId && (
           <div className="detail-stack" data-testid="browser-observation-box">
             <h3>
               Observe-only ビュー <span className="badge badge-info">READ-ONLY</span>

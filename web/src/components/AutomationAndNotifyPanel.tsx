@@ -1,10 +1,24 @@
 import { FormEvent, useState } from "react";
 import type {
   CampaignItem,
+  DryRunPreview,
   NotificationBinding,
   NotificationIntentItem,
   WatchItem,
 } from "../api/client";
+
+const NOTIFY_STATUS_LABELS: Record<string, string> = {
+  QUEUED: "送信待機中 (QUEUED)",
+  DEFERRED_QUIET_HOURS: "おやすみ時間待機 (DEFERRED_QUIET_HOURS)",
+  SENDING: "送信中 (SENDING)",
+  PROVIDER_ACCEPTED: "配信先サーバー受理済み（ユーザー未確認）",
+  READ: "ユーザー確認済み (READ)",
+  DELIVERY_UNKNOWN: "到達不明・自動再送なし（要手動確認）",
+  FAILED: "送信失敗 (FAILED)",
+  SUPPRESSED: "同意無効・失効により抑止 (SUPPRESSED)",
+};
+
+type WatchTarget = { bindingId?: string; allConsentedBindings?: boolean };
 
 type Props = {
   authenticated: boolean;
@@ -15,25 +29,28 @@ type Props = {
   selectedCampaignId: string | null;
   bindings: NotificationBinding[];
   notifications: NotificationIntentItem[];
+  watchPreview: DryRunPreview | null;
+  manualPreview: DryRunPreview | null;
   onCreateWatch: (payload: {
     watchId?: string;
     timezoneId: string;
     localHour: number;
     localMinute: number;
     maxOccurrences: number;
-  }) => Promise<void>;
-  onTriggerWatch: (watchId: string) => Promise<void>;
-  onDeactivateWatch: (watchId: string) => Promise<void>;
+  }) => Promise<boolean>;
+  onDryRunWatch: (watchId: string, target: WatchTarget) => Promise<boolean>;
+  onTriggerWatch: (watchId: string, target: WatchTarget) => Promise<boolean>;
+  onDeactivateWatch: (watchId: string) => Promise<boolean>;
   onCreateCampaign: (payload: {
     goalText: string;
     profile: "default" | "browser" | "sandbox" | "anthropic";
     maxCycles: number;
     tokensPerCycle: number;
     toolsPerCycle: number;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   onSelectCampaign: (campaignId: string) => void;
-  onControlCampaign: (campaignId: string, action: "pause" | "resume" | "stop", expectedCv: number) => Promise<void>;
-  onSteerCampaign: (campaignId: string, expectedCv: number, newGoalRev: string, newGoalText: string) => Promise<void>;
+  onControlCampaign: (campaignId: string, action: "pause" | "resume" | "stop", expectedCv: number) => Promise<boolean>;
+  onSteerCampaign: (campaignId: string, expectedCv: number, newGoalRev: string, newGoalText: string) => Promise<boolean>;
   onCreateBinding: (payload: {
     channel: "webhook" | "telegram";
     label: string;
@@ -42,19 +59,25 @@ type Props = {
     timezoneId: string;
     quietStartHour?: number;
     quietEndHour?: number;
-  }) => Promise<void>;
-  onToggleBindingConsent: (bindingId: string, granted: boolean) => Promise<void>;
-  onOptOutBinding: (bindingId: string) => Promise<void>;
-  onRevokeBinding: (bindingId: string) => Promise<void>;
+  }) => Promise<boolean>;
+  onToggleBindingConsent: (bindingId: string, granted: boolean) => Promise<boolean>;
+  onOptOutBinding: (bindingId: string) => Promise<boolean>;
+  onRevokeBinding: (bindingId: string) => Promise<boolean>;
+  onDryRunNotification: (payload: {
+    bindingId: string;
+    title: string;
+    summaryText: string;
+    priority: "critical" | "standard" | "low";
+  }) => Promise<boolean>;
   onSendManualNotification: (payload: {
     bindingId: string;
     title: string;
     summaryText: string;
     priority: "critical" | "standard" | "low";
     dispatch: boolean;
-  }) => Promise<void>;
-  onDispatchNotifications: () => Promise<void>;
-  onMarkRead: (notificationId: string) => Promise<void>;
+  }) => Promise<boolean>;
+  onDispatchNotifications: () => Promise<boolean>;
+  onMarkRead: (notificationId: string) => Promise<boolean>;
 };
 
 export default function AutomationAndNotifyPanel({
@@ -66,7 +89,10 @@ export default function AutomationAndNotifyPanel({
   selectedCampaignId,
   bindings,
   notifications,
+  watchPreview,
+  manualPreview,
   onCreateWatch,
+  onDryRunWatch,
   onTriggerWatch,
   onDeactivateWatch,
   onCreateCampaign,
@@ -77,6 +103,7 @@ export default function AutomationAndNotifyPanel({
   onToggleBindingConsent,
   onOptOutBinding,
   onRevokeBinding,
+  onDryRunNotification,
   onSendManualNotification,
   onDispatchNotifications,
   onMarkRead,
@@ -86,6 +113,7 @@ export default function AutomationAndNotifyPanel({
   const [watchHour, setWatchHour] = useState(9);
   const [watchMin, setWatchMin] = useState(0);
   const [watchMax, setWatchMax] = useState(5);
+  const [watchBindingSel, setWatchBindingSel] = useState("");
 
   // Campaign state
   const [campGoal, setCampGoal] = useState("");
@@ -105,13 +133,23 @@ export default function AutomationAndNotifyPanel({
   const [consentInit, setConsentInit] = useState(true);
   const [notifyTz, setNotifyTz] = useState("UTC");
 
-  // Manual notification state
+  // Manual notification state (NO implicit fallback; explicit selection required)
   const [notifyBindingId, setNotifyBindingId] = useState("");
   const [notifyTitle, setNotifyTitle] = useState("");
   const [notifyBody, setNotifyBody] = useState("");
   const [notifyPriority, setNotifyPriority] = useState<"critical" | "standard" | "low">("standard");
 
   const selectedCamp = campaigns.find((c) => c.id === selectedCampaignId) ?? null;
+  const activeBindings = bindings.filter((b) => b.consentGranted && !b.optedOutAt && !b.revokedAt);
+  const selectedManualBinding = activeBindings.find((b) => b.id === notifyBindingId) ?? null;
+  const watchTarget: WatchTarget | null =
+    watchBindingSel === "__ALL__"
+      ? activeBindings.length > 0
+        ? { allConsentedBindings: true }
+        : null
+      : activeBindings.some((b) => b.id === watchBindingSel)
+        ? { bindingId: watchBindingSel }
+        : null;
 
   async function handleWatchSubmit(e: FormEvent) {
     e.preventDefault();
@@ -126,14 +164,17 @@ export default function AutomationAndNotifyPanel({
   async function handleCampaignSubmit(e: FormEvent) {
     e.preventDefault();
     if (!campGoal.trim()) return;
-    await onCreateCampaign({
-      goalText: campGoal.trim(),
-      profile: campProfile,
-      maxCycles: Number(campCycles),
-      tokensPerCycle: 4096,
-      toolsPerCycle: Number(campTools),
-    });
-    setCampGoal("");
+    if (
+      await onCreateCampaign({
+        goalText: campGoal.trim(),
+        profile: campProfile,
+        maxCycles: Number(campCycles),
+        tokensPerCycle: 4096,
+        toolsPerCycle: Number(campTools),
+      })
+    ) {
+      setCampGoal("");
+    }
   }
 
   async function handleBindingSubmit(e: FormEvent) {
@@ -143,39 +184,57 @@ export default function AutomationAndNotifyPanel({
       channel === "webhook"
         ? { url: webhookUrl.trim() }
         : { botToken: tgToken.trim(), chatId: tgChat.trim(), apiBaseUrl: tgApiBase.trim() };
-    await onCreateBinding({
-      channel,
-      label: label.trim(),
-      destination,
-      consentGranted: consentInit,
-      timezoneId: notifyTz.trim() || "UTC",
+    if (
+      await onCreateBinding({
+        channel,
+        label: label.trim(),
+        destination,
+        consentGranted: consentInit,
+        timezoneId: notifyTz.trim() || "UTC",
+      })
+    ) {
+      setLabel("");
+      setWebhookUrl("");
+      setTgToken("");
+      setTgChat("");
+    }
+  }
+
+  async function handleNotifyDryRun() {
+    if (!selectedManualBinding || !notifyTitle.trim() || !notifyBody.trim()) return;
+    await onDryRunNotification({
+      bindingId: selectedManualBinding.id,
+      title: notifyTitle.trim(),
+      summaryText: notifyBody.trim(),
+      priority: notifyPriority,
     });
-    setLabel("");
-    setWebhookUrl("");
-    setTgToken("");
-    setTgChat("");
   }
 
   async function handleNotifySubmit(e: FormEvent) {
     e.preventDefault();
-    const targetBinding = notifyBindingId || bindings.find((b) => b.consentGranted && !b.revokedAt)?.id || "";
-    if (!targetBinding || !notifyTitle.trim() || !notifyBody.trim()) return;
-    await onSendManualNotification({
-      bindingId: targetBinding,
-      title: notifyTitle.trim(),
-      summaryText: notifyBody.trim(),
-      priority: notifyPriority,
-      dispatch: true,
-    });
-    setNotifyTitle("");
-    setNotifyBody("");
+    if (!selectedManualBinding || !notifyTitle.trim() || !notifyBody.trim()) return;
+    if (
+      await onSendManualNotification({
+        bindingId: selectedManualBinding.id,
+        title: notifyTitle.trim(),
+        summaryText: notifyBody.trim(),
+        priority: notifyPriority,
+        dispatch: true,
+      })
+    ) {
+      setNotifyTitle("");
+      setNotifyBody("");
+    }
   }
 
   return (
     <div className="console" data-testid="automation-notify-panel">
       <div className="console-grid">
         <div className="panel">
-          <h2>Watches (定期監視)</h2>
+          <h2>Watches（定期スケジュール / 通知トリガー）</h2>
+          <p className="muted">
+            時刻スケジュール枠と通知トリガーを管理します（Web ページ差分の内容監視条件は未設定です）。
+          </p>
           <form onSubmit={(e) => void handleWatchSubmit(e)} className="stack-form">
             <div className="inline-form">
               <input
@@ -215,6 +274,40 @@ export default function AutomationAndNotifyPanel({
             </button>
           </form>
 
+          <div className="inline-form">
+            <select
+              value={watchBindingSel}
+              onChange={(e) => setWatchBindingSel(e.target.value)}
+              aria-label="Watch通知送信先Binding"
+            >
+              <option value="">-- Watch 通知先 Binding を選択してください --</option>
+              {activeBindings.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.label} ({b.redactedTarget})
+                </option>
+              ))}
+              {activeBindings.length > 0 && (
+                <option value="__ALL__">同意済み全 Binding に明示送信 ({activeBindings.length}件)</option>
+              )}
+            </select>
+          </div>
+
+          {watchPreview && (
+            <div className="preview-box" data-testid="watch-dryrun-preview">
+              <strong>Watch Dry-Run プレビュー（DB 書込み・外部送信なし）:</strong> 送信可能 {watchPreview.sendableCount} /{" "}
+              {watchPreview.recipientCount} 件
+              <ul className="compact-list">
+                {watchPreview.recipients.map((r) => (
+                  <li key={r.bindingId}>
+                    {r.label} [{r.channel}] ({r.redactedTarget}) —{" "}
+                    {r.eligible ? "送信対象" : `抑止: ${r.blockedReason}`}
+                    {r.wouldDeferUntil ? ` / 待機予定: ${r.wouldDeferUntil}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <ul className="compact-list">
             {watches.map((w) => (
               <li key={w.watchId} className="row-between" data-testid={`watch-${w.watchId}`}>
@@ -226,10 +319,18 @@ export default function AutomationAndNotifyPanel({
                   <div className="btn-row">
                     <button
                       type="button"
-                      disabled={!authenticated || busy}
-                      onClick={() => void onTriggerWatch(w.watchId)}
+                      className="secondary-btn"
+                      disabled={!authenticated || busy || !watchTarget}
+                      onClick={() => watchTarget && void onDryRunWatch(w.watchId, watchTarget)}
                     >
-                      発火テスト
+                      プレビュー (Dry-Run)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!authenticated || busy || !watchTarget}
+                      onClick={() => watchTarget && void onTriggerWatch(w.watchId, watchTarget)}
+                    >
+                      実際に送信する
                     </button>
                     <button
                       type="button"
@@ -484,14 +585,12 @@ export default function AutomationAndNotifyPanel({
               onChange={(e) => setNotifyBindingId(e.target.value)}
               aria-label="送信先Binding"
             >
-              <option value="">(有効な Binding を自動選択)</option>
-              {bindings
-                .filter((b) => b.consentGranted && !b.revokedAt)
-                .map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label} ({b.redactedTarget})
-                  </option>
-                ))}
+              <option value="">-- 送信先 Binding を選択してください --</option>
+              {activeBindings.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.label} ({b.redactedTarget})
+                </option>
+              ))}
             </select>
             <input
               type="text"
@@ -517,8 +616,23 @@ export default function AutomationAndNotifyPanel({
               <option value="low">low</option>
             </select>
             <div className="btn-row">
-              <button type="submit" disabled={!authenticated || busy || !notifyTitle.trim() || !notifyBody.trim()}>
-                Outbox 送信テスト
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={
+                  !authenticated || busy || !selectedManualBinding || !notifyTitle.trim() || !notifyBody.trim()
+                }
+                onClick={() => void handleNotifyDryRun()}
+              >
+                プレビュー (Dry-Run)
+              </button>
+              <button
+                type="submit"
+                disabled={
+                  !authenticated || busy || !selectedManualBinding || !notifyTitle.trim() || !notifyBody.trim()
+                }
+              >
+                実際に送信する
               </button>
               <button
                 type="button"
@@ -530,13 +644,37 @@ export default function AutomationAndNotifyPanel({
             </div>
           </form>
 
+          {manualPreview && (
+            <div className="preview-box" data-testid="manual-dryrun-preview">
+              <strong>手動通知 Dry-Run プレビュー（DB 書込み・外部送信なし）:</strong> 送信可能{" "}
+              {manualPreview.sendableCount} / {manualPreview.recipientCount} 件
+              <ul className="compact-list">
+                {manualPreview.recipients.map((r) => (
+                  <li key={r.bindingId}>
+                    {r.label} [{r.channel}] ({r.redactedTarget}) —{" "}
+                    {r.eligible ? "送信対象" : `抑止: ${r.blockedReason}`}
+                    {r.wouldDeferUntil ? ` / 待機予定: ${r.wouldDeferUntil}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <ul className="compact-list">
             {notifications.map((n) => (
-              <li key={n.id} className="card-subtle" data-testid={`notification-${n.id}`}>
+              <li key={n.id} className="card-subtle" data-testid={`notification-${n.id}`} data-status={n.status}>
                 <div className="row-between">
                   <strong>{n.title}</strong>
-                  <span className={n.status === "DELIVERY_UNKNOWN" ? "badge badge-warn" : "badge badge-info"}>
-                    {n.status}
+                  <span
+                    className={
+                      n.status === "DELIVERY_UNKNOWN" || n.status === "FAILED"
+                        ? "badge badge-warn"
+                        : n.status === "READ"
+                          ? "badge badge-ok"
+                          : "badge badge-info"
+                    }
+                  >
+                    {NOTIFY_STATUS_LABELS[n.status] ?? n.status}
                   </span>
                 </div>
                 <div>{n.summaryText}</div>

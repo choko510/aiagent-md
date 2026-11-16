@@ -60,6 +60,7 @@ RM=$(r); RT=$(r); TS=$(r); OPS=$(r); API_MODEL=$(r)
 w model_gateway_rpc_keys "runtime=$RM,api=$API_MODEL"; w runtime_model_rpc_key "$RM"; w api_model_rpc_key "$API_MODEL"
 CONTEXT_KEY=$(r); w context_artifact_keys "{\"active\":\"context-1\",\"keys\":{\"context-1\":\"$CONTEXT_KEY\"}}"
 BROWSER_KEY=$(r); w browser_storage_keys "{\"active\":\"browser-1\",\"keys\":{\"browser-1\":\"$BROWSER_KEY\"}}"
+NOTIFY_KEY=$(r); w notification_secret_keys "{\"active\":\"notify-1\",\"keys\":{\"notify-1\":\"$NOTIFY_KEY\"}}"
 w memory_tombstone_hmac_key "$(r)"
 w tool_gateway_rpc_keys "runtime=$RT,ops=$OPS"; w runtime_tool_rpc_key "$RT"
 API_SENTINEL=$(r)

@@ -10,11 +10,11 @@ type Props = {
   taskDetail: FullTaskView | null;
   detailMatchesSelected: boolean;
   eventsText: string;
-  onCreateTask: (goal: string, profile: "default" | "browser" | "sandbox" | "anthropic") => Promise<void>;
+  onCreateTask: (goal: string, profile: "default" | "browser" | "sandbox" | "anthropic") => Promise<boolean>;
   onSelectTask: (taskId: string) => void;
-  onControlTask: (action: "pause" | "resume" | "cancel") => Promise<void>;
-  onSteerTask: (newGoal: string) => Promise<void>;
-  onDecideApproval: (approval: ApprovalRow, decision: "APPROVED" | "REJECTED") => Promise<void>;
+  onControlTask: (action: "pause" | "resume" | "cancel") => Promise<boolean>;
+  onSteerTask: (newGoal: string) => Promise<boolean>;
+  onDecideApproval: (approval: ApprovalRow, decision: "APPROVED" | "REJECTED") => Promise<boolean>;
 };
 
 export default function TaskWorkspace({
@@ -38,15 +38,17 @@ export default function TaskWorkspace({
   async function submitGoal(e: FormEvent) {
     e.preventDefault();
     if (!goal.trim()) return;
-    await onCreateTask(goal.trim(), profile);
-    setGoal("");
+    if (await onCreateTask(goal.trim(), profile)) {
+      setGoal("");
+    }
   }
 
   async function submitSteer(e: FormEvent) {
     e.preventDefault();
     if (!steerGoal.trim()) return;
-    await onSteerTask(steerGoal.trim());
-    setSteerGoal("");
+    if (await onSteerTask(steerGoal.trim())) {
+      setSteerGoal("");
+    }
   }
 
   const hasUnknownEffect = Boolean(
@@ -90,7 +92,14 @@ export default function TaskWorkspace({
                 onClick={() => onSelectTask(t.id)}
                 data-testid={`task-item-${t.id}`}
               >
-                [{t.state}] {t.profile} · {t.id.slice(0, 8)}
+                <div>
+                  <strong>[{t.state}]</strong> {t.goalSummary ? t.goalSummary : `Task ${t.id.slice(0, 8)}`}
+                </div>
+                <div className="meta-row">
+                  <span>{t.profile}</span>
+                  <span>{t.id.slice(0, 8)}</span>
+                  <span>更新: {new Date(t.updatedAt).toLocaleString()}</span>
+                </div>
               </button>
             </li>
           ))}

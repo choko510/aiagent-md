@@ -4,9 +4,9 @@ import type { SessionInfo } from "../api/client";
 type Props = {
   session: SessionInfo | null;
   busy: boolean;
-  onLogin: (token: string) => Promise<void>;
+  onLogin: (token: string) => Promise<boolean>;
   onLogout: () => Promise<void>;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
 };
 
 export default function AuthSessionBar({ session, busy, onLogin, onLogout, onRefresh }: Props) {
@@ -16,9 +16,11 @@ export default function AuthSessionBar({ session, busy, onLogin, onLogout, onRef
     e.preventDefault();
     const trimmed = tokenInput.trim();
     if (!trimmed) return;
-    await onLogin(trimmed);
-    // Clear credential from React state and DOM immediately after Cookie session exchange.
-    setTokenInput("");
+    const ok = await onLogin(trimmed);
+    // Clear credential only after successful Cookie session exchange; preserve on error so user can fix input.
+    if (ok) {
+      setTokenInput("");
+    }
   }
 
   return (

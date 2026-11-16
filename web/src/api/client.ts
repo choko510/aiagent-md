@@ -15,6 +15,7 @@ export type TaskSummary = {
   state: TaskState;
   profile: string;
   goalRevision: string;
+  goalSummary?: string;
   activeRunId: string | null;
   runState: string | null;
   createdAt: string;
@@ -178,6 +179,24 @@ export type NotificationIntentItem = {
   deliveredAt: string | null;
   readAt: string | null;
   createdAt: string;
+};
+
+export type DryRunRecipient = {
+  bindingId: string;
+  label: string;
+  channel: "webhook" | "telegram";
+  redactedTarget: string;
+  eligible: boolean;
+  blockedReason: string | null;
+  wouldDeferUntil: string | null;
+};
+
+export type DryRunPreview = {
+  dryRun: true;
+  evaluatedAt: string;
+  recipientCount: number;
+  sendableCount: number;
+  recipients: DryRunRecipient[];
 };
 
 export type CapabilityItem = {

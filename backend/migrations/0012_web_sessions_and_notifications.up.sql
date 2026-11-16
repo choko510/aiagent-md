@@ -216,17 +216,23 @@ BEGIN
     EXECUTE format($p$CREATE POLICY api_tenant ON agent.%I TO aiagent_api
       USING (tenant_id = nullif(current_setting('aiagent.tenant_id', true), '')::uuid)
       WITH CHECK (tenant_id = nullif(current_setting('aiagent.tenant_id', true), '')::uuid)$p$, t);
-    EXECUTE format($p$CREATE POLICY service_all ON agent.%I TO aiagent_runtime, aiagent_model_gateway,
-      aiagent_tool_gateway, aiagent_relay, aiagent_sentinel, aiagent_ops USING (true) WITH CHECK (true)$p$, t);
+    EXECUTE format($p$CREATE POLICY service_all ON agent.%I TO aiagent_sentinel, aiagent_ops
+      USING (true) WITH CHECK (true)$p$, t);
   END LOOP;
 END $$;
 
+-- Notification delivery and secrets are restricted to the API control-plane boundary and ops read-only audit;
+-- Tool Gateway and Relay never receive SELECT/UPDATE access to notification_bindings secrets or intents.
 GRANT SELECT, INSERT, UPDATE ON agent.notification_bindings, agent.notification_intents, agent.notification_attempts
-  TO aiagent_api, aiagent_tool_gateway, aiagent_relay;
-GRANT SELECT ON agent.notification_bindings, agent.notification_intents TO aiagent_sentinel;
+  TO aiagent_api;
+GRANT SELECT (
+  tenant_id, id, owner_user_id, workspace_id, channel, destination_scheme, destination_host, destination_port,
+  binding_version, consent_granted, consent_version, opted_out_at, revoked_at
+) ON agent.notification_bindings TO aiagent_sentinel;
+GRANT SELECT ON agent.notification_intents TO aiagent_sentinel;
 GRANT SELECT ON agent.notification_bindings, agent.notification_intents, agent.notification_attempts TO aiagent_ops;
 GRANT UPDATE (dispatched_at, relay_lease_epoch, relay_owner_ref, relay_lease_until, dispatch_attempts, next_attempt_at, last_error_code)
-  ON agent.outbox_messages TO aiagent_api, aiagent_tool_gateway;
+  ON agent.outbox_messages TO aiagent_api;
 
 ALTER TABLE agent.automation_watches
   ADD COLUMN IF NOT EXISTS local_hour smallint NOT NULL DEFAULT 9 CHECK (local_hour BETWEEN 0 AND 23),

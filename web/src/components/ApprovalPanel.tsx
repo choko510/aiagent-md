@@ -3,7 +3,7 @@ import type { ApprovalRow } from "../api/client";
 type Props = {
   approvals: ApprovalRow[];
   disabled: boolean;
-  onDecide: (approval: ApprovalRow, decision: "APPROVED" | "REJECTED") => Promise<void>;
+  onDecide: (approval: ApprovalRow, decision: "APPROVED" | "REJECTED") => Promise<boolean>;
 };
 
 export default function ApprovalPanel({ approvals, disabled, onDecide }: Props) {

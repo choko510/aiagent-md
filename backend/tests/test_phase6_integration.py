@@ -25,15 +25,19 @@ import uvicorn
 from aiagent_api.app import create_app
 from aiagent_browser import Authority
 from aiagent_browser.pg_fence import PostgresFencePort
-from aiagent_core import admin, commands, control, memory_tombstones, notifications
+from aiagent_context.models import Scope as ContextScope
+from aiagent_context.models import SourceInput
+from aiagent_core import admin, commands, control, events, memory_tombstones, memory_writer, notifications
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_domain import uuid7
+from aiagent_gateways.context_artifacts import PostgresArtifactStore
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.sentinel_port import LocalSentinel
 from aiagent_sentinel.authority import EgressConfig, Sentinel
 from aiagent_sentinel.egress import EgressProxy
 from fastapi.testclient import TestClient
+from psycopg.errors import InsufficientPrivilege
 
 pytestmark = pytest.mark.pg
 
@@ -181,7 +185,8 @@ def test_web_session_cookie_csrf_origin_and_owner_isolation(
 def test_campaign_and_watch_write_api_cas_and_trigger(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
     """Campaign CRUD + CAS + Steer and Watch registration + bounded trigger -> Notification Outbox."""
     ring = KeyRing.single(b"a" * 32, key_id="p6-auto")
-    app = create_app(dbs["api"], storage_key_ring=ring, egress_proxy="")
+    notify_ring = KeyRing.single(b"b" * 32, key_id="p6-notify-auto")
+    app = create_app(dbs["api"], storage_key_ring=ring, notification_key_ring=notify_ring, egress_proxy="")
     headers = {"Authorization": f"Bearer {tenant['token']}"}
 
     with TestClient(app) as client:
@@ -280,12 +285,17 @@ def test_campaign_and_watch_write_api_cas_and_trigger(dbs: dict[str, Database], 
         assert r_trig2.status_code == 200
         assert r_trig2.json()["claimed"] is False
 
+        # Trigger without explicit bindingId/allConsentedBindings fails closed 422 (UI-P1-3)
+        r_no_bind = client.post(f"/v1/watches/{wid}/trigger", headers=headers, json={"slotUtc": slot_ts})
+        assert r_no_bind.status_code == 422
+        assert r_no_bind.json()["detail"]["error"] == "BINDING_SELECTION_REQUIRED"
+
         # Deactivate watch -> further triggers fail 409 WATCH_INACTIVE
         assert client.delete(f"/v1/watches/{wid}", headers=headers).status_code == 200
         r_trig3 = client.post(
             f"/v1/watches/{wid}/trigger",
             headers=headers,
-            json={"slotUtc": "2026-11-19T00:30:00Z"},
+            json={"slotUtc": "2026-11-19T00:30:00Z", "bindingId": bid},
         )
         assert r_trig3.status_code == 409
 
@@ -366,9 +376,11 @@ def test_notification_bindings_encryption_consent_quiet_hours_and_sentinel_proxy
     monkeypatch.setenv("AIAGENT_EGRESS_PROXY", proxy_url)
 
     ring = KeyRing.single(b"n" * 32, key_id="p6-n1")
+    notify_ring = KeyRing.single(b"N" * 32, key_id="notify-1")
     app = create_app(
         dbs["api"],
         storage_key_ring=ring,
+        notification_key_ring=notify_ring,
         sentinel=LocalSentinel(sentinel),
         egress_proxy=proxy_url,
     )
@@ -686,7 +698,14 @@ def test_notification_ack_loss_and_crash_recovery_fail_closed_unknown(
     monkeypatch.setenv("AIAGENT_EGRESS_PROXY", proxy_url)
 
     ring = KeyRing.single(b"u" * 32, key_id="p6-unk")
-    app = create_app(dbs["api"], storage_key_ring=ring, sentinel=LocalSentinel(sentinel), egress_proxy=proxy_url)
+    notify_ring = KeyRing.single(b"U" * 32, key_id="p6-n-unk")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=ring,
+        notification_key_ring=notify_ring,
+        sentinel=LocalSentinel(sentinel),
+        egress_proxy=proxy_url,
+    )
     headers = {"Authorization": f"Bearer {tenant['token']}"}
 
     try:
@@ -743,7 +762,7 @@ def test_notification_ack_loss_and_crash_recovery_fail_closed_unknown(
             nid2 = n2.json()["notification"]["id"]
             monkeypatch.setenv("AIAGENT_NOTIFY_FAULT", "crash_after_begin")
             worker = notifications.NotificationDeliveryWorker(
-                dbs["api"], ring, sentinel=LocalSentinel(sentinel), egress_proxy=proxy_url
+                dbs["api"], notify_ring, sentinel=LocalSentinel(sentinel), egress_proxy=proxy_url
             )
             with pytest.raises(RuntimeError, match="simulated crash"):
                 _run(worker.run_once(tenant_id=tenant["tenantId"]))
@@ -851,6 +870,7 @@ def test_web_ui_full_playwright_e2e(
     )
 
     ring = KeyRing.single(b"w" * 32, key_id="p6-ui")
+    notify_ring = KeyRing.single(b"W" * 32, key_id="p6-notify-ui")
     tlog_path = tmp_path / "ui_tombstone.jsonl"
     memory_tombstones.TombstoneLog(tlog_path, integrity_key=b"t" * 32).initialize()
     monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_LOG", str(tlog_path))
@@ -859,6 +879,7 @@ def test_web_ui_full_playwright_e2e(
     app = create_app(
         dbs["api"],
         storage_key_ring=ring,
+        notification_key_ring=notify_ring,
         egress_proxy="",
         notify_allow_private=frozenset({"127.0.0.1"}),
         web_dist_dir=dist_dir,
@@ -889,10 +910,17 @@ def test_web_ui_full_playwright_e2e(
                 await page.reload(wait_until="networkidle")
                 await page.get_by_text("AUTHENTICATED").wait_for(timeout=10000)
 
-                # 3. Tasks tab: open seeded task -> verify UNKNOWN warning & approve pending approval
+                # 3. Tasks tab: open seeded task -> verify goal summary & UNKNOWN warning & confirm pending approval
+                await (
+                    page.get_by_test_id(f"task-item-{seed_ids['taskId']}")
+                    .get_by_text("UI approval and UNKNOWN check")
+                    .wait_for(timeout=10000)
+                )
                 await page.get_by_test_id(f"task-item-{seed_ids['taskId']}").click()
                 await page.get_by_test_id("unknown-effect-warning").wait_for(timeout=10000)
                 await page.get_by_role("button", name="承認 (APPROVE)").click()
+                await page.get_by_test_id("confirm-dialog").wait_for(timeout=10000)
+                await page.get_by_test_id("confirm-dialog-confirm").click()
                 await page.get_by_text("判定: APPROVED").wait_for(timeout=10000)
 
                 # Create a new task from UI form
@@ -937,16 +965,32 @@ def test_web_ui_full_playwright_e2e(
                 await page.get_by_label("通知ラベル").fill("E2E Hook")
                 await page.get_by_label("Webhook URL").fill(f"http://127.0.0.1:{wh_port}/ui-hook")
                 await page.get_by_role("button", name="Binding 登録").click()
-                await page.get_by_text("E2E Hook").first.wait_for(timeout=10000)
+                await page.locator("li", has_text="E2E Hook").wait_for(timeout=10000)
 
+                # Explicit binding required (no auto-pick fallback): send button disabled while empty
                 await page.get_by_label("通知タイトル").fill("E2E Alert")
                 await page.get_by_label("通知本文").fill("From Playwright UI")
-                await page.get_by_role("button", name="Outbox 送信テスト").click()
-                await page.get_by_text("PROVIDER_ACCEPTED").first.wait_for(timeout=10000)
+                assert await page.get_by_role("button", name="実際に送信する").last.is_disabled()
+
+                sel = page.get_by_label("送信先Binding", exact=True)
+                opt_val = await sel.locator("option", has_text="E2E Hook").get_attribute("value")
+                assert opt_val
+                await sel.select_option(opt_val)
+
+                # Dry-Run preview does NOT send HTTP or insert DB rows
+                await page.get_by_role("button", name="プレビュー (Dry-Run)").last.click()
+                await page.get_by_test_id("manual-dryrun-preview").wait_for(timeout=10000)
+                assert len(ui_wh_hits) == 0
+
+                # Live send opens confirmation dialog -> confirm sends once -> delivered -> READ
+                await page.get_by_role("button", name="実際に送信する").last.click()
+                await page.get_by_test_id("confirm-dialog").wait_for(timeout=10000)
+                await page.get_by_test_id("confirm-dialog-confirm").click()
+                await page.get_by_text("配信先サーバー受理済み（ユーザー未確認）").first.wait_for(timeout=10000)
                 assert len(ui_wh_hits) == 1 and ui_wh_hits[0]["title"] == "E2E Alert"
 
                 await page.get_by_role("button", name="既読にする (READ)").first.click()
-                await page.get_by_text("READ", exact=True).first.wait_for(timeout=10000)
+                await page.get_by_text("ユーザー確認済み (READ)").first.wait_for(timeout=10000)
 
                 # 7. Logout revokes cookie session cleanly
                 await page.get_by_role("button", name="ログアウト").click()
@@ -963,3 +1007,711 @@ def test_web_ui_full_playwright_e2e(
         uv_sock.close()
         wh_srv.shutdown()
         wh_srv.server_close()
+
+
+def test_notification_post_send_non2xx_statuses_become_delivery_unknown_no_retry(
+    dbs: dict[str, Database], tenant: dict[str, str]
+) -> None:
+    """BE-P1-1: Upstream 400/409/429/500/503 after POST transmission ALL transition to DELIVERY_UNKNOWN with 0 auto-retries."""
+    status_queue = [400, 409, 429, 503, 500]
+    hits: list[str] = []
+
+    class _StatusHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(n)
+            hits.append(self.path)
+            code = status_queue.pop(0) if status_queue else 200
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(f"upstream-{code}".encode())
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _StatusHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    notify_ring = KeyRing.single(b"k" * 32, key_id="notify-non2xx")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            rb = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Status Test Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                },
+            )
+            assert rb.status_code == 201, rb.text
+            bid = rb.json()["binding"]["id"]
+
+            intent_ids: list[str] = []
+            for idx, expected_code in enumerate((400, 409, 429, 503, 500)):
+                rn = client.post(
+                    "/v1/notifications",
+                    headers=headers,
+                    json={
+                        "bindingId": bid,
+                        "semanticEventKey": f"non2xx-{expected_code}-{idx}",
+                        "title": f"Status {expected_code}",
+                        "summaryText": "Ambiguous post-send status",
+                        "dispatch": True,
+                    },
+                )
+                assert rn.status_code == 201, rn.text
+                body = rn.json()
+                assert body["dispatch"].get("DELIVERY_UNKNOWN") == 1, body
+                intent_ids.append(body["notification"]["id"])
+
+            assert len(hits) == 5
+            # Subsequent manual dispatch cycle must NEVER re-send any of those 5 DELIVERY_UNKNOWN intents
+            r_disp = client.post("/v1/notifications/dispatch", headers=headers)
+            assert r_disp.status_code == 200
+            assert r_disp.json()["counts"]["claimed"] == 0
+            assert len(hits) == 5
+
+            rows = dbs["owner"].all(
+                "SELECT status, last_error_code, attempt_count FROM agent.notification_intents"
+                " WHERE tenant_id=%s AND id = ANY(%s) ORDER BY created_at",
+                (tenant["tenantId"], intent_ids),
+            )
+            assert [r["status"] for r in rows] == ["DELIVERY_UNKNOWN"] * 5
+            assert [r["attempt_count"] for r in rows] == [1] * 5
+            att_disps = dbs["owner"].all(
+                "SELECT disposition FROM agent.notification_attempts WHERE tenant_id=%s AND intent_id = ANY(%s)",
+                (tenant["tenantId"], intent_ids),
+            )
+            assert [a["disposition"] for a in att_disps] == ["UNKNOWN"] * 5
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_notification_crash_recovery_key_isolation_rotation_suppressed_race_and_owner_scope(
+    pg: Any, dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BE-P1-2, BE-P1-3, BE-P1-5, BE-P2-1, BE-P2-2: DB grants, separate key ring + rotation, crash_after_claim,
+    delayed ACK vs SUPPRESSED CAS, and same-tenant cross-owner dispatch isolation."""
+    wh_hits: list[dict[str, Any]] = []
+
+    class _Hook(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            wh_hits.append(json.loads(self.rfile.read(n).decode("utf-8")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"rot-ok"}')
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Hook)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    try:
+        # 1. BE-P1-3: Low-privilege roles cannot access encrypted notification secrets
+        for tbl in ("notification_bindings", "notification_intents", "notification_attempts"):
+            with pytest.raises(InsufficientPrivilege):
+                dbs["tool_gateway"].all(f"SELECT id FROM agent.{tbl} LIMIT 1")
+            with pytest.raises(InsufficientPrivilege):
+                dbs["relay"].all(f"SELECT id FROM agent.{tbl} LIMIT 1")
+        with pytest.raises(InsufficientPrivilege):
+            dbs["sentinel"].all("SELECT secret_ciphertext FROM agent.notification_bindings LIMIT 1")
+
+        # 2. BE-P1-3: Browser storage key MUST NOT encrypt/decrypt notifications
+        browser_key_hex = (b"B" * 32).hex()
+        monkeypatch.setenv(
+            "AIAGENT_BROWSER_STORAGE_KEYS", json.dumps({"active": "b1", "keys": {"b1": browser_key_hex}})
+        )
+        monkeypatch.delenv("AIAGENT_NOTIFICATION_SECRET_KEYS", raising=False)
+        app_no_notify_key = create_app(
+            dbs["api"],
+            storage_key_ring=KeyRing.single(b"B" * 32, key_id="b1"),
+            egress_proxy="",
+            notify_allow_private=frozenset({"127.0.0.1"}),
+        )
+        headers_a = {"Authorization": f"Bearer {tenant['token']}"}
+        with TestClient(app_no_notify_key) as cli_nokey:
+            r_nokey = cli_nokey.post(
+                "/v1/notifications/bindings",
+                headers=headers_a,
+                json={
+                    "channel": "webhook",
+                    "label": "Must Fail Without Dedicated Key",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                },
+            )
+            assert r_nokey.status_code == 503
+            assert r_nokey.json()["error"] == "NOTIFICATION_KEY_UNAVAILABLE"
+
+        # 3. BE-P2-2: Dedicated AIAGENT_NOTIFICATION_SECRET_KEYS rotation preserves decrypt of notify-1 under active notify-2
+        k1_hex = (b"1" * 32).hex()
+        k2_hex = (b"2" * 32).hex()
+        monkeypatch.setenv(
+            "AIAGENT_NOTIFICATION_SECRET_KEYS", json.dumps({"active": "notify-1", "keys": {"notify-1": k1_hex}})
+        )
+        app_env = create_app(
+            dbs["api"],
+            egress_proxy="",
+            notify_allow_private=frozenset({"127.0.0.1"}),
+        )
+        with TestClient(app_env) as cli_rot:
+            r_b1 = cli_rot.post(
+                "/v1/notifications/bindings",
+                headers=headers_a,
+                json={
+                    "channel": "webhook",
+                    "label": "Rotated Key Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                },
+            )
+            assert r_b1.status_code == 201, r_b1.text
+            b1_id = r_b1.json()["binding"]["id"]
+
+            # Rotate active key to notify-2 while retaining notify-1
+            monkeypatch.setenv(
+                "AIAGENT_NOTIFICATION_SECRET_KEYS",
+                json.dumps({"active": "notify-2", "keys": {"notify-1": k1_hex, "notify-2": k2_hex}}),
+            )
+            r_send_old = cli_rot.post(
+                "/v1/notifications",
+                headers=headers_a,
+                json={
+                    "bindingId": b1_id,
+                    "semanticEventKey": "rot-old-key",
+                    "title": "Rotation Works",
+                    "summaryText": "Decrypts notify-1 binding under active notify-2",
+                    "dispatch": True,
+                },
+            )
+            assert r_send_old.status_code == 201, r_send_old.text
+            assert r_send_old.json()["dispatch"]["PROVIDER_ACCEPTED"] == 1
+            assert len(wh_hits) == 1
+
+            # 4. BE-P1-5: Same-tenant user B CANNOT dispatch user A's queued notifications
+            user_b = admin.add_user(pg.owner, tenant["tenantId"])
+            headers_b = {"Authorization": f"Bearer {user_b['token']}"}
+            r_qa = cli_rot.post(
+                "/v1/notifications",
+                headers=headers_a,
+                json={
+                    "bindingId": b1_id,
+                    "semanticEventKey": "owner-scope-a",
+                    "title": "Only Owner A",
+                    "summaryText": "User B must not dispatch",
+                    "dispatch": False,
+                },
+            )
+            assert r_qa.status_code == 201
+            qa_id = r_qa.json()["notification"]["id"]
+
+            r_disp_b = cli_rot.post("/v1/notifications/dispatch", headers=headers_b)
+            assert r_disp_b.status_code == 200
+            assert r_disp_b.json()["counts"]["claimed"] == 0
+            st_a = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (qa_id,))
+            assert st_a is not None and st_a["status"] == "QUEUED"
+
+            # 5. BE-P1-2: crash_after_claim atomic TX inserts NOT_STARTED attempt and lease expiry recovers to DELIVERY_UNKNOWN
+            monkeypatch.setenv("AIAGENT_NOTIFY_FAULT", "crash_after_claim")
+            with pytest.raises(RuntimeError, match="simulated crash immediately after batch claim"):
+                cli_rot.post("/v1/notifications/dispatch", headers=headers_a)
+            monkeypatch.delenv("AIAGENT_NOTIFY_FAULT", raising=False)
+
+            after_crash_row = dbs["owner"].one(
+                "SELECT status, lease_until FROM agent.notification_intents WHERE id=%s",
+                (qa_id,),
+            )
+            assert after_crash_row is not None and after_crash_row["status"] == "SENDING"
+            att_row = dbs["owner"].one(
+                "SELECT disposition FROM agent.notification_attempts WHERE intent_id=%s AND attempt_no=1",
+                (qa_id,),
+            )
+            assert att_row is not None and att_row["disposition"] == "NOT_STARTED"
+
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.notification_intents SET lease_until = now() - interval '5 seconds' WHERE id=%s",
+                    (qa_id,),
+                )
+            r_rec = cli_rot.post("/v1/notifications/dispatch", headers=headers_a)
+            assert r_rec.status_code == 200
+            assert r_rec.json()["counts"]["recoveredUnknown"] >= 1
+            recovered_row = dbs["owner"].one(
+                "SELECT status FROM agent.notification_intents WHERE id=%s",
+                (qa_id,),
+            )
+            assert recovered_row is not None and recovered_row["status"] == "DELIVERY_UNKNOWN"
+
+            # 6. BE-P2-1: Concurrent SUPPRESSED during in-flight send is NEVER overwritten by late PROVIDER_ACCEPTED
+            r_race = cli_rot.post(
+                "/v1/notifications",
+                headers=headers_a,
+                json={
+                    "bindingId": b1_id,
+                    "semanticEventKey": "suppressed-race-1",
+                    "title": "Race Test",
+                    "summaryText": "Must remain SUPPRESSED",
+                    "dispatch": False,
+                },
+            )
+            assert r_race.status_code == 201
+            race_id = r_race.json()["notification"]["id"]
+
+            worker = notifications.NotificationDeliveryWorker(dbs["api"])
+            claims = worker._claim_batch(tenant_filter=tenant["tenantId"], owner_user_id=tenant["userId"])
+            target_claims = [cl for cl in claims if cl.intent_id == race_id]
+            assert len(target_claims) == 1
+            # Owner opts out while in-flight -> sets intent SUPPRESSED
+            assert cli_rot.post(f"/v1/notifications/bindings/{b1_id}/opt-out", headers=headers_a).status_code == 200
+            # Late ACK arrives from provider and calls _finish_attempt
+            worker._finish_attempt(
+                target_claims[0],
+                disposition="PROVIDER_ACCEPTED",
+                intent_status="PROVIDER_ACCEPTED",
+                receipt_ref="late-ack-999",
+            )
+            race_row = dbs["owner"].one(
+                "SELECT status, provider_receipt_ref FROM agent.notification_intents WHERE id=%s",
+                (race_id,),
+            )
+            assert race_row is not None and race_row["status"] == "SUPPRESSED"
+            assert race_row["provider_receipt_ref"] is None
+            race_att = dbs["owner"].one(
+                "SELECT disposition, provider_receipt_ref FROM agent.notification_attempts WHERE intent_id=%s AND attempt_no=1",
+                (race_id,),
+            )
+            assert race_att is not None and race_att["disposition"] == "PROVIDER_ACCEPTED"
+    finally:
+        monkeypatch.delenv("AIAGENT_NOTIFY_FAULT", raising=False)
+        monkeypatch.delenv("AIAGENT_NOTIFICATION_SECRET_KEYS", raising=False)
+        monkeypatch.delenv("AIAGENT_BROWSER_STORAGE_KEYS", raising=False)
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_watch_atomic_rollback_and_dryrun_and_validation_422(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BE-P1-4, BE-P2-4, UI-P1-2, UI-P1-3: Watch claim+enqueue rollback leaves 0 PENDING slots; DryRun=0 writes; invalid inputs->422."""
+    notify_ring = KeyRing.single(b"w" * 32, key_id="notify-watch-tx")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    with TestClient(app) as client:
+        rw = client.post(
+            "/v1/watches",
+            headers=headers,
+            json={"timezoneId": "UTC", "localHour": 10, "localMinute": 0, "maxOccurrences": 1},
+        )
+        assert rw.status_code == 201, rw.text
+        wid = rw.json()["watchId"]
+
+        # Invalid timestamps / boolean quiet hours -> HTTP 422 (BE-P2-4)
+        assert (
+            client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": "not-a-timestamp", "allConsentedBindings": True},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Bad Hour",
+                    "destination": {"url": "http://127.0.0.1:9999/h"},
+                    "quietStartHour": True,
+                    "quietEndHour": 7,
+                },
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Bad Str Hour",
+                    "destination": {"url": "http://127.0.0.1:9999/h"},
+                    "quietStartHour": "abc",
+                    "quietEndHour": 7,
+                },
+            ).status_code
+            == 422
+        )
+
+        # 0 active bindings with allConsentedBindings=True rolls back claim_bounded_tx -> maxOccurrences=1 preserved!
+        r0 = client.post(
+            f"/v1/watches/{wid}/trigger",
+            headers=headers,
+            json={"slotUtc": "2026-11-17T10:00:00Z", "allConsentedBindings": True},
+        )
+        assert r0.status_code == 422
+        slots_after_0 = dbs["owner"].all(
+            "SELECT status FROM agent.automation_watch_slots WHERE tenant_id=%s AND watch_id=%s",
+            (tenant["tenantId"], wid),
+        )
+        assert slots_after_0 == []
+
+        # Create active consented binding
+        rb = client.post(
+            "/v1/notifications/bindings",
+            headers=headers,
+            json={
+                "channel": "webhook",
+                "label": "Atomic Hook",
+                "destination": {"url": "http://127.0.0.1:19999/hook"},
+                "consentGranted": True,
+            },
+        )
+        assert rb.status_code == 201
+        bid = rb.json()["binding"]["id"]
+
+        # Dry-Run preview on Watch & Manual -> ZERO DB rows created!
+        r_dry_w = client.post(
+            f"/v1/watches/{wid}/trigger",
+            headers=headers,
+            json={"slotUtc": "2026-11-17T10:00:00Z", "bindingId": bid, "dryRun": True},
+        )
+        assert r_dry_w.status_code == 200, r_dry_w.text
+        assert r_dry_w.json()["dryRun"] is True and r_dry_w.json()["preview"]["sendableCount"] == 1
+        assert dbs["owner"].all("SELECT status FROM agent.automation_watch_slots WHERE watch_id=%s", (wid,)) == []
+
+        r_dry_m = client.post(
+            "/v1/notifications",
+            headers=headers,
+            json={"bindingId": bid, "title": "Dry", "summaryText": "Check", "dryRun": True, "observedAt": "bad-date"},
+        )
+        assert r_dry_m.status_code == 422
+        r_dry_m_ok = client.post(
+            "/v1/notifications",
+            headers=headers,
+            json={"bindingId": bid, "title": "Dry", "summaryText": "Check", "dryRun": True},
+        )
+        assert r_dry_m_ok.status_code == 201 and r_dry_m_ok.json()["dryRun"] is True
+        assert dbs["owner"].all("SELECT id FROM agent.notification_intents WHERE binding_id=%s", (bid,)) == []
+
+        # Crash inside watch trigger after claim -> entire TX rolls back (0 PENDING slots, budget still 1 available)
+        monkeypatch.setenv("AIAGENT_WATCH_FAULT", "fail_after_claim")
+        cli_raise = TestClient(app, raise_server_exceptions=False)
+        r_fault = cli_raise.post(
+            f"/v1/watches/{wid}/trigger",
+            headers=headers,
+            json={"slotUtc": "2026-11-17T10:00:00Z", "bindingId": bid},
+        )
+        assert r_fault.status_code == 500
+        monkeypatch.delenv("AIAGENT_WATCH_FAULT", raising=False)
+        assert dbs["owner"].all("SELECT status FROM agent.automation_watch_slots WHERE watch_id=%s", (wid,)) == []
+
+        # Next live trigger succeeds using the unconsumed maxOccurrences=1 budget!
+        r_live = client.post(
+            f"/v1/watches/{wid}/trigger",
+            headers=headers,
+            json={"slotUtc": "2026-11-17T10:00:00Z", "bindingId": bid},
+        )
+        assert r_live.status_code == 200, r_live.text
+        assert r_live.json()["claimed"] is True
+        slots_final = dbs["owner"].all("SELECT status FROM agent.automation_watch_slots WHERE watch_id=%s", (wid,))
+        assert [s["status"] for s in slots_final] == ["SENT"]
+
+
+def test_web_ui_regression_sse_races_confirm_mobile_and_a11y(
+    memory_dbs: dict[str, Database], memory_tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UI-7..UI-13: SSE live updates, Task/Browser switch race protection, form error preservation,
+    logout failure protection, ConfirmDialog cancel 0-network, 320px/375px/768px mobile width, ARIA tabs."""
+    dbs = memory_dbs
+    tenant = memory_tenant
+    from playwright.async_api import async_playwright
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dist_dir = repo_root / "web" / "dist"
+    assert (dist_dir / "index.html").is_file()
+
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    t_sse = commands.submit_task(dbs["api"], scope, "SSE Live Task A")
+    t_other = commands.submit_task(dbs["api"], scope, "Static Task B")
+    control.claim_run(dbs["runtime"], tenant["tenantId"], t_sse["runId"], "sse-worker")
+    claim_b = control.claim_run(dbs["runtime"], tenant["tenantId"], t_other["runId"], "static-worker")
+    apr_id = uuid7()
+    int_id = uuid7()
+    req_sha = secrets.token_hex(32)
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.tool_intents(tenant_id, id, task_id, run_id, tool_key, invocation_key,"
+            " request_sha256, safe_arguments_json, risk_class, goal_revision, status_code)"
+            " VALUES (%s,%s,%s,%s,'http_message','inv-reg-apr',%s,'{}'::jsonb,'external_irreversible',%s,'PENDING_APPROVAL')",
+            (tenant["tenantId"], int_id, t_other["taskId"], t_other["runId"], req_sha, claim_b.goal_revision),
+        )
+        c.execute(
+            "INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id,"
+            " tool_key, request_sha256, goal_revision, safe_summary, expires_at, decision_code, record_version)"
+            " VALUES (%s,%s,%s,%s,%s,%s,'http_message',%s,%s,'Confirm cancel regression',now() + interval '1 hour','PENDING',1)",
+            (
+                tenant["tenantId"],
+                apr_id,
+                int_id,
+                t_other["taskId"],
+                t_other["runId"],
+                tenant["userId"],
+                req_sha,
+                claim_b.goal_revision,
+            ),
+        )
+    tlog_path = tmp_path / "ui_reg_tomb.jsonl"
+    memory_tombstones.TombstoneLog(tlog_path, integrity_key=b"t" * 32).initialize()
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_LOG", str(tlog_path))
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY", (b"t" * 32).hex())
+    ctx_scope_b = ContextScope(claim_b.tenant_id, claim_b.owner_user_id, claim_b.task_id, claim_b.run_id)
+    art_store = PostgresArtifactStore(
+        dbs["model_gateway"], claim_b, b"k" * 32, expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=2)
+    )
+    src_art = art_store.put_raw(ctx_scope_b, SourceInput("source", "2026-11-16T00:00:00Z", b"src", locator_ref="s1"))
+    proj_art = art_store.put_raw(
+        ctx_scope_b, SourceInput("projection", "2026-11-16T00:00:00Z", b"proj", locator_ref="p1")
+    )
+    memory_writer.grant_memory_consent(dbs["api"], scope, recipient="anthropic", consent_basis="user_explicit")
+    memory_writer.create_memory_with_status(
+        dbs["api"],
+        scope,
+        task_id=t_other["taskId"],
+        source_ref=src_art.artifact_ref,
+        projection_ref=proj_art.artifact_ref,
+        recipient="anthropic",
+        observed_at=dt.datetime.now(dt.UTC),
+        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=30),
+        consent_basis="user_explicit",
+        idempotency_key="ui-reg-mem-1",
+    )
+
+    bs_a = uuid7()
+    bs_b = uuid7()
+    for bsid, url in ((bs_a, "https://session-a.example/page"), (bs_b, "https://session-b.example/page")):
+        claim_x = control.claim_run(
+            dbs["runtime"],
+            tenant["tenantId"],
+            commands.submit_task(dbs["api"], scope, f"Browser {url}")["runId"],
+            "br-w",
+        )
+        _run(
+            PostgresFencePort(dbs["tool_gateway"]).register(
+                bsid,
+                Authority(
+                    claim_x.tenant_id,
+                    claim_x.owner_user_id,
+                    claim_x.task_id,
+                    claim_x.run_id,
+                    str(claim_x.goal_revision),
+                    str(claim_x.lease_epoch),
+                    claim_x.worker_ref,
+                ),
+            )
+        )
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.browser_sessions SET current_url=%s, last_observation_text=%s WHERE id=%s",
+                (url, f"OBS_FOR_{url}", bsid),
+            )
+
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", "")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=KeyRing.single(b"s" * 32, key_id="reg-st"),
+        notification_key_ring=KeyRing.single(b"n" * 32, key_id="reg-nt"),
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+        web_dist_dir=dist_dir,
+    )
+    api_port, uv_srv, uv_th, uv_sock = _start_uvicorn_thread(app)
+    base_url = f"http://127.0.0.1:{api_port}"
+
+    async def _drive() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto(base_url, wait_until="networkidle")
+                await page.get_by_label("APIトークン").fill(tenant["token"])
+                await page.get_by_role("button", name="セッション開始").click()
+                await page.get_by_text("AUTHENTICATED").wait_for(timeout=10000)
+
+                # UI-7: SSE live state transition updates task detail without reload
+                await page.get_by_test_id(f"task-item-{t_sse['taskId']}").click()
+                await page.get_by_test_id("task-detail-panel").wait_for(timeout=10000)
+
+                def _complete_task_bg() -> None:
+                    time.sleep(0.35)
+                    with dbs["owner"].tx() as c:
+                        c.execute(
+                            "UPDATE agent.tasks SET status_code='SUCCEEDED', updated_at=now() WHERE id=%s",
+                            (t_sse["taskId"],),
+                        )
+                        events.append_event(
+                            c,
+                            tenant_id=tenant["tenantId"],
+                            aggregate_type="task",
+                            aggregate_id=t_sse["taskId"],
+                            kind="task.state_changed",
+                            payload={"fromState": "RUNNING", "toState": "SUCCEEDED", "reason": "sse-live"},
+                            actor={"kind": "worker", "id": "sse-worker"},
+                            owner_user_id=tenant["userId"],
+                            task_id=t_sse["taskId"],
+                            run_id=t_sse["runId"],
+                        )
+
+                bg = threading.Thread(target=_complete_task_bg, daemon=True)
+                bg.start()
+                await page.get_by_test_id("task-detail-panel").get_by_text("SUCCEEDED").first.wait_for(timeout=10000)
+                await (
+                    page.get_by_test_id(f"task-item-{t_sse['taskId']}")
+                    .get_by_text("[SUCCEEDED]")
+                    .wait_for(timeout=10000)
+                )
+                await page.get_by_test_id("task-sse-log").get_by_text("sse-live").wait_for(timeout=10000)
+
+                # UI-11: ConfirmDialog Cancel -> 0 API requests on Approval
+                mut_calls: list[str] = []
+
+                async def _track_approval(route: Any) -> None:
+                    mut_calls.append(route.request.url)
+                    await route.continue_()
+
+                await page.route("**/v1/approvals/*/decision", _track_approval)
+                await page.get_by_test_id(f"task-item-{t_other['taskId']}").click()
+                await page.get_by_role("button", name="承認 (APPROVE)").click()
+                await page.get_by_test_id("confirm-dialog").wait_for(timeout=10000)
+                # UI-13: Escape closes confirm dialog cleanly with 0 network calls
+                await page.keyboard.press("Escape")
+                assert await page.get_by_test_id("confirm-dialog").count() == 0
+                assert mut_calls == []
+                await page.unroute("**/v1/approvals/*/decision")
+
+                # UI-9: Form preservation on 422 Task submit error
+                await page.get_by_label("新しいTask目標").fill("Preserve Me On 422")
+
+                async def _fail_task_422(route: Any) -> None:
+                    if route.request.method == "POST":
+                        await route.fulfill(
+                            status=422, content_type="application/json", body='{"detail":{"error":"BAD_INPUT"}}'
+                        )
+                    else:
+                        await route.continue_()
+
+                await page.route("**/v1/tasks", _fail_task_422)
+                await page.get_by_role("button", name="Task 送信").click()
+                await page.get_by_test_id("console-error-banner").wait_for(timeout=10000)
+                assert await page.get_by_label("新しいTask目標").input_value() == "Preserve Me On 422"
+                assert await page.get_by_test_id("console-status-banner").count() == 0
+                await page.unroute("**/v1/tasks")
+
+                # UI-13: ARIA Tabs keyboard navigation (ArrowRight, End, Home)
+                tab_tasks = page.get_by_test_id("tab-tasks")
+                await tab_tasks.focus()
+                await page.keyboard.press("ArrowRight")
+                assert await page.get_by_test_id("tab-memory").get_attribute("aria-selected") == "true"
+                await page.keyboard.press("End")
+                assert await page.get_by_test_id("tab-automation").get_attribute("aria-selected") == "true"
+                await page.keyboard.press("Home")
+                assert await page.get_by_test_id("tab-tasks").get_attribute("aria-selected") == "true"
+
+                # UI-11: Memory delete ConfirmDialog cancel -> 0 DELETE requests
+                await page.get_by_test_id("tab-memory").click()
+                mem_deletes: list[str] = []
+
+                async def _track_mem_del(route: Any) -> None:
+                    if route.request.method == "DELETE":
+                        mem_deletes.append(route.request.url)
+                    await route.continue_()
+
+                await page.route("**/v1/tasks/*/memory/*", _track_mem_del)
+                await page.get_by_role("button", name="削除（復元時再適用を防止）").first.click()
+                await page.get_by_test_id("confirm-dialog-cancel").click()
+                assert mem_deletes == []
+                await page.unroute("**/v1/tasks/*/memory/*")
+
+                # UI-10: Browser Session A/B fast switch where Session A observation responds late
+                await page.get_by_test_id("tab-browser").click()
+
+                async def _delay_a(route: Any) -> None:
+                    await asyncio.sleep(0.35)
+                    await route.continue_()
+
+                await page.route(f"**/v1/browser/sessions/{bs_a}/observation", _delay_a)
+                await page.get_by_test_id(f"browser-session-{bs_a}").click()
+                await page.get_by_test_id(f"browser-session-{bs_b}").click()
+                await (
+                    page.get_by_test_id("browser-observation-box")
+                    .get_by_text("OBS_FOR_https://session-b.example/page")
+                    .wait_for(timeout=10000)
+                )
+                await asyncio.sleep(0.45)
+                obs_text = await page.get_by_test_id("browser-observation-box").inner_text()
+                assert "OBS_FOR_https://session-b.example/page" in obs_text
+                assert "OBS_FOR_https://session-a.example/page" not in obs_text
+                await page.unroute(f"**/v1/browser/sessions/{bs_a}/observation")
+
+                # UI-12: Mobile responsive width check (320px / 375px / 768px) -> 0 horizontal overflow
+                for vw in (320, 375, 768):
+                    await page.set_viewport_size({"width": vw, "height": 800})
+                    for tname in ("tab-tasks", "tab-memory", "tab-browser", "tab-automation"):
+                        await page.get_by_test_id(tname).click()
+                        fits = await page.evaluate(
+                            "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+                        )
+                        assert fits, f"Horizontal overflow detected at width={vw}px on {tname}"
+                await page.set_viewport_size({"width": 1280, "height": 900})
+
+                # UI-9 / BE-P2-3: DELETE /v1/auth/session 500 keeps session & shows error
+                async def _fail_logout_500(route: Any) -> None:
+                    if route.request.method == "DELETE":
+                        await route.fulfill(
+                            status=500, content_type="application/json", body='{"detail":{"error":"REV_ERR"}}'
+                        )
+                    else:
+                        await route.continue_()
+
+                await page.route("**/v1/auth/session", _fail_logout_500)
+                await page.get_by_role("button", name="ログアウト").click()
+                await page.get_by_test_id("console-error-banner").wait_for(timeout=10000)
+                assert await page.get_by_text("AUTHENTICATED").count() == 1
+                assert await page.get_by_test_id("console-status-banner").count() == 0
+                await page.unroute("**/v1/auth/session")
+
+                # Clean logout succeeds once backend recovers
+                await page.get_by_role("button", name="ログアウト").click()
+                await page.get_by_label("APIトークン").wait_for(timeout=10000)
+            finally:
+                await context.close()
+                await browser.close()
+
+    try:
+        _run(_drive())
+    finally:
+        uv_srv.should_exit = True
+        uv_th.join(timeout=5)
+        uv_sock.close()

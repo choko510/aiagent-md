@@ -56,37 +56,30 @@ class NotificationError(Exception):
         self.http_status = http_status
 
 
-def _parse_keyring_secret(raw_json: str) -> tuple[str, bytes]:
+def _parse_keyring_secret(raw_json: str) -> tuple[str, dict[str, bytes]]:
     try:
         doc = json.loads(raw_json)
         active = str(doc["active"])
-        key_bytes = bytes.fromhex(str(doc["keys"][active]))
+        raw_keys = doc["keys"]
+        if not isinstance(raw_keys, dict) or active not in raw_keys:
+            raise ValueError("missing active key")
+        keys_map: dict[str, bytes] = {}
+        for kid, khex in raw_keys.items():
+            kb = bytes.fromhex(str(khex))
+            if not str(kid) or len(kb) != 32:
+                raise ValueError("invalid key entry")
+            keys_map[str(kid)] = kb
     except (ValueError, KeyError, TypeError) as exc:
         raise config.ConfigError("invalid notification secret key ring") from exc
-    if not active or len(key_bytes) != 32:
+    if not active or active not in keys_map:
         raise config.ConfigError("invalid notification secret key ring")
-    return active, key_bytes
+    return active, keys_map
 
 
-def _load_keyring_from_env() -> tuple[str, bytes] | None:
-    for env_name in (
-        "AIAGENT_NOTIFICATION_SECRET_KEYS",
-        "AIAGENT_BROWSER_STORAGE_KEYS",
-        "AIAGENT_CONTEXT_KEY_RING_JSON",
-        "AIAGENT_CONTEXT_ARTIFACT_KEYS",
-    ):
-        raw = config.secret(env_name, required=False)
-        if raw is not None:
-            return _parse_keyring_secret(raw.reveal())
-    if config.profile() == "production":
-        return None
-    for env_name in ("AIAGENT_CONTEXT_KEY", "AIAGENT_CONTEXT_ARTIFACT_KEY"):
-        single = config.secret(env_name, required=False)
-        if single is not None:
-            kb = bytes.fromhex(single.reveal())
-            if len(kb) != 32:
-                raise config.ConfigError("invalid notification single key")
-            return "v1", kb
+def _load_keyring_from_env() -> tuple[str, dict[str, bytes]] | None:
+    raw = config.secret("AIAGENT_NOTIFICATION_SECRET_KEYS", required=False)
+    if raw is not None:
+        return _parse_keyring_secret(raw.reveal())
     return None
 
 
@@ -112,9 +105,9 @@ def encrypt_binding_secret(
     loaded = _load_keyring_from_env()
     if loaded is None:
         raise NotificationError("NOTIFICATION_KEY_UNAVAILABLE", http_status=503)
-    key_id, key_bytes = loaded
+    key_id, keys_map = loaded
     nonce = os.urandom(12)
-    cipher_bytes = AESGCM(key_bytes).encrypt(nonce, plaintext, aad)
+    cipher_bytes = AESGCM(keys_map[key_id]).encrypt(nonce, plaintext, aad)
     return nonce, cipher_bytes, key_id, hashlib.sha256(plaintext).hexdigest()
 
 
@@ -131,12 +124,19 @@ def decrypt_binding_secret(
 ) -> dict[str, str]:
     aad = _binding_aad(tenant_id, user_id, binding_id)
     if keyring is not None and hasattr(keyring, "cipher"):
-        plain = keyring.cipher(key_id).decrypt(nonce, ciphertext, aad)
+        try:
+            cipher = keyring.cipher(key_id)
+        except KeyError:
+            raise NotificationError("NOTIFICATION_KEY_UNAVAILABLE", http_status=503) from None
+        plain = cipher.decrypt(nonce, ciphertext, aad)
     else:
         loaded = _load_keyring_from_env()
         if loaded is None:
             raise NotificationError("NOTIFICATION_KEY_UNAVAILABLE", http_status=503)
-        _, key_bytes = loaded
+        _, keys_map = loaded
+        key_bytes = keys_map.get(key_id)
+        if key_bytes is None:
+            raise NotificationError("NOTIFICATION_KEY_UNAVAILABLE", http_status=503)
         plain = AESGCM(key_bytes).decrypt(nonce, ciphertext, aad)
     if hashlib.sha256(plain).hexdigest() != expected_sha256:
         raise NotificationError("BINDING_SECRET_TAMPERED", http_status=500)
@@ -628,6 +628,87 @@ def mark_notification_read(db: Database, *, tenant_id: str, user_id: str, notifi
         return _format_intent_row(upd)
 
 
+def preview_notification_dry_run(
+    db: Database,
+    *,
+    tenant_id: str,
+    user_id: str,
+    workspace_id: str,
+    binding_ids: list[str] | None = None,
+    all_consented_bindings: bool = False,
+    priority: str = "standard",
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Read-only preview of notification delivery targets, consent, and quiet-hours without any DB mutation or send."""
+    if priority not in ("critical", "standard", "low"):
+        raise NotificationError("INVALID_PRIORITY")
+    effective_now = now_utc or datetime.now(UTC)
+    with db.tx(tenant=tenant_id) as c:
+        if binding_ids:
+            rows = c.execute(
+                "SELECT * FROM agent.notification_bindings"
+                " WHERE tenant_id=%s AND owner_user_id=%s AND workspace_id=%s AND id = ANY(%s)"
+                " ORDER BY created_at DESC",
+                (tenant_id, user_id, workspace_id, binding_ids),
+            ).fetchall()
+            found = {str(r["id"]) for r in rows}
+            for bid in binding_ids:
+                if bid not in found:
+                    raise NotificationError("BINDING_NOT_FOUND", http_status=404)
+        elif all_consented_bindings:
+            rows = c.execute(
+                "SELECT * FROM agent.notification_bindings"
+                " WHERE tenant_id=%s AND owner_user_id=%s AND workspace_id=%s"
+                " AND consent_granted=true AND opted_out_at IS NULL AND revoked_at IS NULL"
+                " ORDER BY created_at DESC",
+                (tenant_id, user_id, workspace_id),
+            ).fetchall()
+        else:
+            raise NotificationError("BINDING_SELECTION_REQUIRED", http_status=422)
+
+    recipients: list[dict[str, Any]] = []
+    sendable_count = 0
+    for r in rows:
+        blocked_reason: str | None = None
+        if r["revoked_at"] is not None:
+            blocked_reason = "BINDING_REVOKED"
+        elif r["opted_out_at"] is not None:
+            blocked_reason = "BINDING_OPTED_OUT"
+        elif not bool(r["consent_granted"]):
+            blocked_reason = "CONSENT_NOT_GRANTED"
+        quiet_until = (
+            None
+            if priority == "critical"
+            else compute_quiet_until(
+                effective_now,
+                timezone_id=str(r["timezone_id"]),
+                quiet_start_hour=r["quiet_start_hour"],
+                quiet_end_hour=r["quiet_end_hour"],
+            )
+        )
+        eligible = blocked_reason is None
+        if eligible:
+            sendable_count += 1
+        recipients.append(
+            {
+                "bindingId": str(r["id"]),
+                "label": str(r["label"]),
+                "channel": str(r["channel"]),
+                "redactedTarget": str(r["redacted_target"]),
+                "eligible": eligible,
+                "blockedReason": blocked_reason,
+                "wouldDeferUntil": quiet_until.isoformat() if quiet_until is not None else None,
+            }
+        )
+    return {
+        "dryRun": True,
+        "evaluatedAt": effective_now.isoformat(),
+        "recipientCount": len(recipients),
+        "sendableCount": sendable_count,
+        "recipients": recipients,
+    }
+
+
 @dataclass(frozen=True)
 class NotificationClaim:
     tenant_id: str
@@ -652,6 +733,7 @@ class NotificationClaim:
     summary_text: str
     attempt_no: int
     lease_epoch: int
+    send_token: str
 
 
 class NotificationDeliveryWorker:
@@ -680,19 +762,35 @@ class NotificationDeliveryWorker:
         self._resolver = resolver
         self._verify_ssl = verify_ssl
 
-    def recover_abandoned(self, *, tenant_id: str | None = None) -> int:
-        """Any SENDING attempt whose lease expired after transmission started becomes DELIVERY_UNKNOWN (never auto-retried)."""
+    def recover_abandoned(
+        self,
+        *,
+        tenant_id: str | None = None,
+        owner_user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> int:
+        """Any expired SENDING row (with or without a NOT_STARTED attempt row) transitions to DELIVERY_UNKNOWN."""
+        if (owner_user_id is not None or workspace_id is not None) and not tenant_id:
+            raise NotificationError("TENANT_REQUIRED_FOR_OWNER_SCOPE", http_status=400)
+        clauses = ["i.status='SENDING'", "i.lease_until IS NOT NULL", "i.lease_until <= now()"]
+        params: list[Any] = []
+        if tenant_id is not None:
+            clauses.append("i.tenant_id=%s")
+            params.append(tenant_id)
+        if owner_user_id is not None:
+            clauses.append("i.owner_user_id=%s")
+            params.append(owner_user_id)
+        if workspace_id is not None:
+            clauses.append("i.workspace_id=%s")
+            params.append(workspace_id)
+        where_sql = " AND ".join(clauses)
         with self._db.tx(tenant=tenant_id) as c:
             rows = c.execute(
                 "UPDATE agent.notification_intents i"
                 " SET status='DELIVERY_UNKNOWN', last_error_code='WORKER_LEASE_EXPIRED', lease_until=NULL, updated_at=now()"
-                " WHERE i.status='SENDING' AND i.lease_until IS NOT NULL AND i.lease_until <= now()"
-                + (" AND i.tenant_id=%s" if tenant_id else "")
-                + " AND EXISTS (SELECT 1 FROM agent.notification_attempts a"
-                "   WHERE a.tenant_id=i.tenant_id AND a.intent_id=i.id AND a.attempt_no=i.attempt_count"
-                "     AND a.disposition='NOT_STARTED')"
+                f" WHERE {where_sql}"
                 " RETURNING i.tenant_id, i.id",
-                ((tenant_id,) if tenant_id else ()),
+                tuple(params),
             ).fetchall()
             for r in rows:
                 c.execute(
@@ -709,7 +807,16 @@ class NotificationDeliveryWorker:
                 )
             return len(rows)
 
-    def _claim_batch(self, *, batch: int = 20, tenant_filter: str | None = None) -> list[NotificationClaim]:
+    def _claim_batch(
+        self,
+        *,
+        batch: int = 20,
+        tenant_filter: str | None = None,
+        owner_user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> list[NotificationClaim]:
+        if (owner_user_id is not None or workspace_id is not None) and not tenant_filter:
+            raise NotificationError("TENANT_REQUIRED_FOR_OWNER_SCOPE", http_status=400)
         claims: list[NotificationClaim] = []
         with self._db.tx(tenant=tenant_filter) as c:
             inc_row = c.execute("SELECT restore_incarnation FROM agent.schema_control").fetchone()
@@ -719,13 +826,28 @@ class NotificationDeliveryWorker:
             assert now_row is not None
             db_now: datetime = now_row["n"]
 
+            clauses = [
+                "i.status IN ('QUEUED','DEFERRED_QUIET_HOURS')",
+                "i.not_before_at <= now()",
+                "i.next_attempt_at <= now()",
+            ]
+            params: list[Any] = []
+            if tenant_filter is not None:
+                clauses.append("i.tenant_id = %s")
+                params.append(tenant_filter)
+            if owner_user_id is not None:
+                clauses.append("i.owner_user_id = %s")
+                params.append(owner_user_id)
+            if workspace_id is not None:
+                clauses.append("i.workspace_id = %s")
+                params.append(workspace_id)
+            params.append(batch)
+
             rows = c.execute(
                 "SELECT i.* FROM agent.notification_intents i"
-                " WHERE i.status IN ('QUEUED','DEFERRED_QUIET_HOURS')"
-                " AND i.not_before_at <= now() AND i.next_attempt_at <= now()"
-                + (" AND i.tenant_id = %s" if tenant_filter else "")
-                + " ORDER BY i.next_attempt_at, i.id LIMIT %s FOR UPDATE OF i SKIP LOCKED",
-                ((tenant_filter, batch) if tenant_filter else (batch,)),
+                f" WHERE {' AND '.join(clauses)}"
+                " ORDER BY i.next_attempt_at, i.id LIMIT %s FOR UPDATE OF i SKIP LOCKED",
+                tuple(params),
             ).fetchall()
             for r in rows:
                 tid = str(r["tenant_id"])
@@ -785,12 +907,19 @@ class NotificationDeliveryWorker:
                         continue
                 new_attempt = int(r["attempt_count"]) + 1
                 new_lease = int(r["lease_epoch"]) + 1
+                send_token = uuid7()
                 c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status='SENDING', attempt_count=%s, lease_epoch=%s, lease_owner_ref=%s,"
                     " lease_until=now() + make_interval(secs => %s), updated_at=now()"
                     " WHERE tenant_id=%s AND id=%s",
                     (new_attempt, new_lease, self._owner, LEASE_SECONDS, tid, iid),
+                )
+                c.execute(
+                    "INSERT INTO agent.notification_attempts("
+                    " tenant_id, id, intent_id, binding_id, attempt_no, send_token, claimed_lease_epoch, disposition)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,'NOT_STARTED')",
+                    (tid, uuid7(), iid, str(r["binding_id"]), new_attempt, send_token, new_lease),
                 )
                 claims.append(
                     NotificationClaim(
@@ -816,26 +945,10 @@ class NotificationDeliveryWorker:
                         summary_text=str(r["summary_text"]),
                         attempt_no=new_attempt,
                         lease_epoch=new_lease,
+                        send_token=send_token,
                     )
                 )
         return claims
-
-    def _begin_attempt(self, claim: NotificationClaim, send_token: str) -> None:
-        with self._db.tx(tenant=claim.tenant_id) as c:
-            c.execute(
-                "INSERT INTO agent.notification_attempts("
-                " tenant_id, id, intent_id, binding_id, attempt_no, send_token, claimed_lease_epoch, disposition)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,'NOT_STARTED')",
-                (
-                    claim.tenant_id,
-                    uuid7(),
-                    claim.intent_id,
-                    claim.binding_id,
-                    claim.attempt_no,
-                    send_token,
-                    claim.lease_epoch,
-                ),
-            )
 
     def _finish_attempt(
         self,
@@ -855,40 +968,44 @@ class NotificationDeliveryWorker:
                 (disposition, receipt_ref, error_code, claim.tenant_id, claim.intent_id, claim.attempt_no),
             )
             if intent_status == "PROVIDER_ACCEPTED":
-                c.execute(
+                updated = c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status='PROVIDER_ACCEPTED', provider_receipt_ref=%s, delivered_at=now(),"
                     " last_error_code=NULL, lease_until=NULL, updated_at=now()"
-                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
+                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'"
+                    " RETURNING id",
                     (receipt_ref, claim.tenant_id, claim.intent_id, claim.lease_epoch),
-                )
-                c.execute(
-                    "UPDATE agent.outbox_messages"
-                    " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=NULL"
-                    " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
-                    (claim.tenant_id, f"notify:{claim.intent_id}"),
-                )
+                ).fetchone()
+                if updated is not None:
+                    c.execute(
+                        "UPDATE agent.outbox_messages"
+                        " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=NULL"
+                        " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
+                        (claim.tenant_id, f"notify:{claim.intent_id}"),
+                    )
             elif intent_status == "QUEUED" and retry_delay_s is not None:
                 c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status='QUEUED', last_error_code=%s, lease_until=NULL,"
                     " next_attempt_at=now() + make_interval(secs => %s), updated_at=now()"
-                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
+                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
                     (error_code, retry_delay_s, claim.tenant_id, claim.intent_id, claim.lease_epoch),
                 )
             else:
-                c.execute(
+                updated = c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status=%s, last_error_code=%s, lease_until=NULL, updated_at=now()"
-                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s",
+                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'"
+                    " RETURNING id",
                     (intent_status, error_code, claim.tenant_id, claim.intent_id, claim.lease_epoch),
-                )
-                c.execute(
-                    "UPDATE agent.outbox_messages"
-                    " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=%s"
-                    " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
-                    (error_code or intent_status, claim.tenant_id, f"notify:{claim.intent_id}"),
-                )
+                ).fetchone()
+                if updated is not None:
+                    c.execute(
+                        "UPDATE agent.outbox_messages"
+                        " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=%s"
+                        " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
+                        (error_code or intent_status, claim.tenant_id, f"notify:{claim.intent_id}"),
+                    )
 
     def _build_request(
         self, claim: NotificationClaim, send_token: str
@@ -1077,11 +1194,10 @@ class NotificationDeliveryWorker:
                 await w.wait_closed()
 
     async def deliver_claim(self, claim: NotificationClaim) -> str:
-        send_token = uuid7()
+        send_token = claim.send_token
         try:
             target_url, scheme, host, port, headers, body = self._build_request(claim, send_token)
         except NotificationError as exc:
-            self._begin_attempt(claim, send_token)
             self._finish_attempt(claim, disposition="PERMANENT_FAILURE", intent_status="FAILED", error_code=exc.code)
             return "FAILED"
 
@@ -1106,22 +1222,18 @@ class NotificationDeliveryWorker:
                 )
             except (RpcError, NotificationError) as exc:
                 err_code = exc.code if hasattr(exc, "code") else type(exc).__name__
-                self._begin_attempt(claim, send_token)
+                retryable = err_code == "SENTINEL_UNAVAILABLE" and claim.attempt_no < MAX_ATTEMPTS
                 self._finish_attempt(
                     claim,
-                    disposition="TRANSPORT_REJECTED" if err_code == "SENTINEL_UNAVAILABLE" else "PERMANENT_FAILURE",
-                    intent_status="QUEUED"
-                    if err_code == "SENTINEL_UNAVAILABLE" and claim.attempt_no < MAX_ATTEMPTS
-                    else "FAILED",
+                    disposition="TRANSPORT_REJECTED" if retryable else "PERMANENT_FAILURE",
+                    intent_status="QUEUED" if retryable else "FAILED",
                     error_code=str(err_code),
-                    retry_delay_s=min(60, 2**claim.attempt_no) if err_code == "SENTINEL_UNAVAILABLE" else None,
+                    retry_delay_s=min(60, 2**claim.attempt_no) if retryable else None,
                 )
-                return "QUEUED" if err_code == "SENTINEL_UNAVAILABLE" and claim.attempt_no < MAX_ATTEMPTS else "FAILED"
+                return "QUEUED" if retryable else "FAILED"
         else:
             permit = ""
 
-        # Record NOT_STARTED before bytes hit the network so crash/kill mid-flight transitions to DELIVERY_UNKNOWN.
-        self._begin_attempt(claim, send_token)
         if os.environ.get("AIAGENT_NOTIFY_FAULT") == "crash_after_begin":
             raise RuntimeError("simulated crash after transmission began")
 
@@ -1202,36 +1314,39 @@ class NotificationDeliveryWorker:
             )
             return "PROVIDER_ACCEPTED"
 
-        if status_code in (429, 503) and claim.attempt_no < MAX_ATTEMPTS:
-            self._finish_attempt(
-                claim,
-                disposition="TRANSPORT_REJECTED",
-                intent_status="QUEUED",
-                error_code=f"HTTP_{status_code}",
-                retry_delay_s=min(120, 2**claim.attempt_no),
-            )
-            return "QUEUED"
-
-        if status_code >= 500:
-            self._finish_attempt(
-                claim,
-                disposition="UNKNOWN",
-                intent_status="DELIVERY_UNKNOWN",
-                error_code=f"HTTP_{status_code}",
-            )
-            return "DELIVERY_UNKNOWN"
-
+        # Any post-send non-2xx upstream HTTP response (400/409/429/500/503 etc.) occurred AFTER request
+        # transmission; remote side effect is ambiguous, so transition to DELIVERY_UNKNOWN with ZERO auto-retry (BE-P1-1).
         self._finish_attempt(
             claim,
-            disposition="PERMANENT_FAILURE",
-            intent_status="FAILED",
+            disposition="UNKNOWN",
+            intent_status="DELIVERY_UNKNOWN",
             error_code=f"HTTP_{status_code}",
         )
-        return "FAILED"
+        return "DELIVERY_UNKNOWN"
 
-    async def run_once(self, *, tenant_id: str | None = None, batch: int = 20) -> dict[str, int]:
-        recovered = await asyncio.to_thread(self.recover_abandoned, tenant_id=tenant_id)
-        claims = await asyncio.to_thread(self._claim_batch, batch=batch, tenant_filter=tenant_id)
+    async def run_once(
+        self,
+        *,
+        tenant_id: str | None = None,
+        owner_user_id: str | None = None,
+        workspace_id: str | None = None,
+        batch: int = 20,
+    ) -> dict[str, int]:
+        recovered = await asyncio.to_thread(
+            self.recover_abandoned,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
+        )
+        claims = await asyncio.to_thread(
+            self._claim_batch,
+            batch=batch,
+            tenant_filter=tenant_id,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
+        )
+        if claims and os.environ.get("AIAGENT_NOTIFY_FAULT") == "crash_after_claim":
+            raise RuntimeError("simulated crash immediately after batch claim")
         counts: dict[str, int] = {"recoveredUnknown": recovered, "claimed": len(claims)}
         for claim in claims:
             outcome = await self.deliver_claim(claim)

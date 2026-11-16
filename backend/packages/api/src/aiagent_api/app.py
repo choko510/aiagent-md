@@ -422,6 +422,7 @@ def create_app(
     db: Database | None = None,
     *,
     storage_key_ring: Any = None,
+    notification_key_ring: Any = None,
     sentinel: Any = None,
     egress_proxy: str | None = None,
     allowed_web_hosts: frozenset[str] | None = None,
@@ -1011,8 +1012,11 @@ def create_app(
             with get_db().tx(tenant=s.tenant_id) as c:
                 rows = c.execute(
                     "SELECT t.id, t.status_code, t.profile_code, t.goal_revision, t.active_run_id,"
-                    " t.created_at, t.updated_at, r.status_code AS run_state"
-                    " FROM agent.tasks t LEFT JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.id=t.active_run_id"
+                    " t.created_at, t.updated_at, r.status_code AS run_state, gr.goal_text"
+                    " FROM agent.tasks t"
+                    " LEFT JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.id=t.active_run_id"
+                    " LEFT JOIN agent.task_goal_revisions gr"
+                    "   ON gr.tenant_id=t.tenant_id AND gr.task_id=t.id AND gr.revision=t.goal_revision"
                     " WHERE t.tenant_id=%s AND t.owner_user_id=%s ORDER BY t.created_at DESC LIMIT %s",
                     (s.tenant_id, s.user_id, bounded),
                 ).fetchall()
@@ -1022,6 +1026,7 @@ def create_app(
                         "state": str(r["status_code"]),
                         "profile": str(r["profile_code"]),
                         "goalRevision": str(r["goal_revision"]),
+                        "goalSummary": " ".join(redact_secrets(str(r["goal_text"] or "")).split())[:160],
                         "activeRunId": str(r["active_run_id"]) if r["active_run_id"] else None,
                         "runState": str(r["run_state"]) if r["run_state"] else None,
                         "createdAt": r["created_at"].isoformat(),
@@ -1896,57 +1901,128 @@ def create_app(
         if not isinstance(body, dict):
             raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
         slot_iso = body.get("slotUtc")
-        slot_dt = (
-            datetime.fromisoformat(str(slot_iso).replace("Z", "+00:00"))
-            if isinstance(slot_iso, str)
-            else datetime.now(UTC)
-        )
+        if slot_iso is not None:
+            if not isinstance(slot_iso, str) or not slot_iso.strip():
+                raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"})
+            try:
+                slot_dt = datetime.fromisoformat(slot_iso.strip().replace("Z", "+00:00"))
+                if slot_dt.tzinfo is None:
+                    slot_dt = slot_dt.replace(tzinfo=UTC)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"}) from None
+        else:
+            slot_dt = datetime.now(UTC)
+
+        raw_ev = body.get("evidenceUrls")
+        if raw_ev is not None and not isinstance(raw_ev, list):
+            raise HTTPException(422, detail={"error": "INVALID_EVIDENCE_URLS"})
+        evidence_urls = [str(u) for u in (raw_ev or []) if isinstance(u, str)]
         title = str(body.get("title") or f"Watch {watch_id} triggered").strip()
         summary = str(body.get("summaryText") or f"Watch observation slot {slot_dt.isoformat()}").strip()
-        evidence_urls = [str(u) for u in (body.get("evidenceUrls") or []) if isinstance(u, str)]
         priority = str(body.get("priority") or "standard")
-        explicit_binding = str(body["bindingId"]).strip() if isinstance(body.get("bindingId"), str) else None
+        dry_run = bool(body.get("dryRun", False))
+
+        raw_bids = body.get("bindingIds")
+        explicit_bindings: list[str] = []
+        if body.get("bindingId") is not None:
+            if not isinstance(body.get("bindingId"), str) or not is_uuid7(str(body["bindingId"]).strip()):
+                raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+            explicit_bindings.append(str(body["bindingId"]).strip())
+        if raw_bids is not None:
+            if not isinstance(raw_bids, list):
+                raise HTTPException(422, detail={"error": "INVALID_BINDING_IDS"})
+            for item in raw_bids:
+                if not isinstance(item, str) or not is_uuid7(item.strip()):
+                    raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+                bid_s = item.strip()
+                if bid_s not in explicit_bindings:
+                    explicit_bindings.append(bid_s)
+        all_consented = bool(body.get("allConsentedBindings", False))
+        if not explicit_bindings and not all_consented:
+            raise HTTPException(422, detail={"error": "BINDING_SELECTION_REQUIRED"})
+
+        if dry_run:
+
+            def dry_op() -> dict[str, Any]:
+                with get_db().tx(tenant=s.tenant_id) as c:
+                    wrow = c.execute(
+                        "SELECT active FROM agent.automation_watches"
+                        " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s",
+                        (s.tenant_id, watch_id, s.user_id),
+                    ).fetchone()
+                if wrow is None:
+                    raise HTTPException(404)
+                if not wrow["active"]:
+                    raise HTTPException(409, detail={"error": "WATCH_INACTIVE"})
+                preview = notifications.preview_notification_dry_run(
+                    get_db(),
+                    tenant_id=s.tenant_id,
+                    user_id=s.user_id,
+                    workspace_id=s.workspace_id,
+                    binding_ids=explicit_bindings or None,
+                    all_consented_bindings=all_consented,
+                    priority=priority,
+                    now_utc=slot_dt,
+                )
+                return {
+                    "schemaVersion": "1.0",
+                    "watchId": watch_id,
+                    "dryRun": True,
+                    "claimed": False,
+                    "preview": preview,
+                    "queuedNotifications": [],
+                }
+
+            return await asyncio.to_thread(dry_op)
 
         def op() -> dict[str, Any]:
+            wstore = PostgresWatchStore(get_db(), owner_user_id=s.user_id, workspace_id=s.workspace_id)
             with get_db().tx(tenant=s.tenant_id) as c:
                 wrow = c.execute(
                     "SELECT watch_id, timezone_id, local_hour, local_minute, start_utc, max_occurrences, revision, active"
                     " FROM agent.automation_watches"
-                    " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s",
+                    " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s FOR UPDATE",
                     (s.tenant_id, watch_id, s.user_id),
                 ).fetchone()
-            if wrow is None:
-                raise HTTPException(404)
-            if not wrow["active"]:
-                raise HTTPException(409, detail={"error": "WATCH_INACTIVE"})
-            watch = DailyWatch(
-                watch_id=str(wrow["watch_id"]),
-                tenant_id=s.tenant_id,
-                revision=int(wrow["revision"]),
-                timezone_id=str(wrow["timezone_id"]),
-                local_hour=int(wrow.get("local_hour", 9)),
-                local_minute=int(wrow.get("local_minute", 0)),
-                start_utc=wrow["start_utc"].isoformat().replace("+00:00", "Z"),
-                max_occurrences=int(wrow["max_occurrences"]),
-            )
-            wstore = PostgresWatchStore(get_db(), owner_user_id=s.user_id, workspace_id=s.workspace_id)
-            claimed = wstore.claim_bounded(watch, slot_dt)
-            if not claimed:
-                return {"schemaVersion": "1.0", "watchId": watch_id, "claimed": False, "queuedNotifications": []}
-            queued: list[dict[str, Any]] = []
-            dedupe = f"watch:{s.tenant_id}:{watch_id}:r{watch.revision}:{slot_dt.isoformat()}"
-            with get_db().tx(tenant=s.tenant_id) as c:
-                if explicit_binding:
-                    binding_ids = [explicit_binding]
-                else:
+                if wrow is None:
+                    raise HTTPException(404)
+                if not wrow["active"]:
+                    raise HTTPException(409, detail={"error": "WATCH_INACTIVE"})
+                watch = DailyWatch(
+                    watch_id=str(wrow["watch_id"]),
+                    tenant_id=s.tenant_id,
+                    revision=int(wrow["revision"]),
+                    timezone_id=str(wrow.get("timezone_id") or "UTC"),
+                    local_hour=int(wrow.get("local_hour", 9)),
+                    local_minute=int(wrow.get("local_minute", 0)),
+                    start_utc=wrow["start_utc"].isoformat().replace("+00:00", "Z"),
+                    max_occurrences=int(wrow["max_occurrences"]),
+                )
+                claimed = wstore.claim_bounded_tx(c, watch, slot_dt)
+                if not claimed:
+                    return {
+                        "schemaVersion": "1.0",
+                        "watchId": watch_id,
+                        "dryRun": False,
+                        "claimed": False,
+                        "queuedNotifications": [],
+                    }
+                if os.environ.get("AIAGENT_WATCH_FAULT") == "fail_after_claim":
+                    raise RuntimeError("simulated crash after watch claim inside tx")
+                target_bindings = list(explicit_bindings)
+                if not target_bindings and all_consented:
                     brows = c.execute(
                         "SELECT id FROM agent.notification_bindings"
                         " WHERE tenant_id=%s AND owner_user_id=%s AND workspace_id=%s"
                         " AND consent_granted=true AND opted_out_at IS NULL AND revoked_at IS NULL",
                         (s.tenant_id, s.user_id, s.workspace_id),
                     ).fetchall()
-                    binding_ids = [str(b["id"]) for b in brows]
-                for bid in binding_ids:
+                    target_bindings = [str(b["id"]) for b in brows]
+                if not target_bindings:
+                    raise notifications.NotificationError("NO_ACTIVE_BINDINGS", http_status=422)
+                queued: list[dict[str, Any]] = []
+                dedupe = f"watch:{s.tenant_id}:{watch_id}:r{watch.revision}:{slot_dt.isoformat()}"
+                for bid in target_bindings:
                     intent = notifications.enqueue_notification_tx(
                         c,
                         tenant_id=s.tenant_id,
@@ -1968,18 +2044,28 @@ def create_app(
                     " WHERE tenant_id=%s AND dedupe_key=%s AND status='PENDING'",
                     (s.tenant_id, dedupe),
                 )
-            return {"schemaVersion": "1.0", "watchId": watch_id, "claimed": True, "queuedNotifications": queued}
+                return {
+                    "schemaVersion": "1.0",
+                    "watchId": watch_id,
+                    "dryRun": False,
+                    "claimed": True,
+                    "queuedNotifications": queued,
+                }
 
         res = await asyncio.to_thread(op)
         if res["claimed"] and body.get("dispatch"):
-            res["dispatch"] = await _notify_worker().run_once(tenant_id=s.tenant_id)
+            res["dispatch"] = await _notify_worker().run_once(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                workspace_id=s.workspace_id,
+            )
         return res
 
     # ------------------------------------------------------------------ Notification Bindings & Outbox APIs
     def _notify_worker() -> notifications.NotificationDeliveryWorker:
         return notifications.NotificationDeliveryWorker(
             get_db(),
-            storage_key_ring,
+            notification_key_ring,
             sentinel=sentinel,
             egress_proxy=egress_proxy,
             direct_send_fn=notify_direct_send_fn,
@@ -2007,12 +2093,19 @@ def create_app(
         if not isinstance(body, dict) or not isinstance(body.get("destination"), dict):
             raise HTTPException(422, detail={"error": "INVALID_BINDING_REQUEST"})
         dest_raw = {str(k): str(v) for k, v in body["destination"].items()}
-        quiet_start = int(body["quietStartHour"]) if body.get("quietStartHour") is not None else None
-        quiet_end = int(body["quietEndHour"]) if body.get("quietEndHour") is not None else None
+        try:
+            raw_qs = body.get("quietStartHour")
+            raw_qe = body.get("quietEndHour")
+            if isinstance(raw_qs, bool) or isinstance(raw_qe, bool):
+                raise ValueError("bool is not valid hour")
+            quiet_start = int(raw_qs) if raw_qs is not None else None
+            quiet_end = int(raw_qe) if raw_qe is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail={"error": "INVALID_QUIET_HOURS"}) from None
         created = await asyncio.to_thread(
             notifications.create_binding,
             get_db(),
-            storage_key_ring,
+            notification_key_ring,
             tenant_id=s.tenant_id,
             user_id=s.user_id,
             workspace_id=s.workspace_id,
@@ -2099,6 +2192,46 @@ def create_app(
             raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
         if not isinstance(body, dict) or not is_uuid7(str(body.get("bindingId") or "")):
             raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+        raw_ev = body.get("evidenceUrls")
+        if raw_ev is not None and not isinstance(raw_ev, list):
+            raise HTTPException(422, detail={"error": "INVALID_EVIDENCE_URLS"})
+        obs_raw = body.get("observedAt")
+        observed_dt: datetime | None = None
+        if obs_raw is not None:
+            if not isinstance(obs_raw, str) or not obs_raw.strip():
+                raise HTTPException(422, detail={"error": "INVALID_OBSERVED_AT"})
+            try:
+                observed_dt = datetime.fromisoformat(obs_raw.strip().replace("Z", "+00:00"))
+                if observed_dt.tzinfo is None:
+                    observed_dt = observed_dt.replace(tzinfo=UTC)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_OBSERVED_AT"}) from None
+        dry_run = bool(body.get("dryRun", False))
+        binding_id = str(body["bindingId"]).strip()
+        priority = str(body.get("priority") or "standard")
+
+        if dry_run:
+            title_val = str(body.get("title") or "").strip()
+            summary_val = str(body.get("summaryText") or "").strip()
+            if not title_val or not summary_val:
+                raise HTTPException(422, detail={"error": "INVALID_NOTIFICATION_CONTENT"})
+            preview = await asyncio.to_thread(
+                notifications.preview_notification_dry_run,
+                get_db(),
+                tenant_id=s.tenant_id,
+                user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                binding_ids=[binding_id],
+                priority=priority,
+                now_utc=observed_dt,
+            )
+            return {
+                "schemaVersion": "1.0",
+                "dryRun": True,
+                "preview": preview,
+                "notification": None,
+                "dispatch": None,
+            }
 
         def tx_op() -> dict[str, Any]:
             with get_db().tx(tenant=s.tenant_id) as c:
@@ -2107,24 +2240,38 @@ def create_app(
                     tenant_id=s.tenant_id,
                     user_id=s.user_id,
                     workspace_id=s.workspace_id,
-                    binding_id=str(body["bindingId"]),
+                    binding_id=binding_id,
                     semantic_event_key=str(body.get("semanticEventKey") or f"manual:{uuid7()}"),
                     source_kind=str(body.get("sourceKind") or "system"),
                     source_ref=str(body.get("sourceRef") or "manual"),
                     title=str(body.get("title") or ""),
                     summary_text=str(body.get("summaryText") or ""),
-                    evidence_urls=[str(u) for u in (body.get("evidenceUrls") or []) if isinstance(u, str)],
-                    priority=str(body.get("priority") or "standard"),
+                    evidence_urls=[str(u) for u in (raw_ev or []) if isinstance(u, str)],
+                    observed_at=observed_dt,
+                    priority=priority,
                     delivery_purpose=str(body.get("deliveryPurpose") or "alert"),
                 )
 
         created = await asyncio.to_thread(tx_op)
-        dispatch_res = await _notify_worker().run_once(tenant_id=s.tenant_id) if body.get("dispatch") else None
-        return {"schemaVersion": "1.0", "notification": created, "dispatch": dispatch_res}
+        dispatch_res = (
+            await _notify_worker().run_once(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                workspace_id=s.workspace_id,
+            )
+            if body.get("dispatch")
+            else None
+        )
+        return {"schemaVersion": "1.0", "dryRun": False, "notification": created, "dispatch": dispatch_res}
 
     @app.post("/v1/notifications/dispatch")
     async def dispatch_user_notifications(s: S, limit: int = 20) -> dict[str, Any]:
-        counts = await _notify_worker().run_once(tenant_id=s.tenant_id, batch=max(1, min(limit, 50)))
+        counts = await _notify_worker().run_once(
+            tenant_id=s.tenant_id,
+            owner_user_id=s.user_id,
+            workspace_id=s.workspace_id,
+            batch=max(1, min(limit, 50)),
+        )
         return {"schemaVersion": "1.0", "counts": counts}
 
     @app.post("/v1/notifications/{notification_id}/read")

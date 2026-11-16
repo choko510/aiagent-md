@@ -9,17 +9,17 @@ type Props = {
   revisionsByMemory: Record<string, MemoryRevisionItem[]>;
   consents: ConsentItem[];
   contextPolicy: ContextPolicyItem | null;
-  onRevokeMemory: (memoryId: string) => Promise<void>;
-  onLoadRevisions: (memoryId: string) => Promise<void>;
-  onGrantConsent: (recipient: string) => Promise<void>;
-  onRevokeConsent: (recipient: string) => Promise<void>;
+  onRevokeMemory: (memoryId: string) => Promise<boolean>;
+  onLoadRevisions: (memoryId: string) => Promise<boolean>;
+  onGrantConsent: (recipient: string) => Promise<boolean>;
+  onRevokeConsent: (recipient: string) => Promise<boolean>;
   onSaveContextPolicy: (payload: {
     recipient: string;
     model: string;
     enabled: boolean;
     semanticVerifierMode: "HEURISTIC" | "LLM_GATED";
     expectedRecordVersion: string | null;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
 };
 
 export default function MemoryAndPolicyPanel({
@@ -72,16 +72,16 @@ export default function MemoryAndPolicyPanel({
   return (
     <div className="console-grid" data-testid="memory-policy-panel">
       <div className="panel">
-        <h2>外部モデル Memory Consent 管理</h2>
+        <h2>外部モデル 記憶・利用同意管理</h2>
         <p className="muted">
-          平文 Memory は API に保持されず、同意を撤回すると直ちに Tombstone 連鎖でモデル送信が遮断されます。
+          平文の記憶は API に保持されません。同意を撤回すると、削除履歴（復元時の再適用防止）によりモデル事業者への送信が直ちに遮断されます。
         </p>
         <form onSubmit={(e) => void submitConsent(e)} className="inline-form">
           <input
             type="text"
             value={recipientInput}
             onChange={(e) => setRecipientInput(e.target.value)}
-            placeholder="送信先 recipient (例: anthropic, openai)"
+            placeholder="送信先モデル事業者 (例: anthropic, openai)"
             aria-label="Memory同意送信先"
           />
           <button type="submit" disabled={!authenticated || busy || !recipientInput.trim()}>
@@ -132,14 +132,14 @@ export default function MemoryAndPolicyPanel({
               type="text"
               value={policyRecipient}
               onChange={(e) => setPolicyRecipient(e.target.value)}
-              placeholder="recipient"
+              placeholder="送信先モデル事業者"
               aria-label="Policy送信先"
             />
             <input
               type="text"
               value={policyModel}
               onChange={(e) => setPolicyModel(e.target.value)}
-              placeholder="model"
+              placeholder="利用モデル名"
               aria-label="Policyモデル"
             />
             <select
@@ -147,8 +147,8 @@ export default function MemoryAndPolicyPanel({
               onChange={(e) => setVerifierMode(e.target.value as "HEURISTIC" | "LLM_GATED")}
               aria-label="Semantic Verifierモード"
             >
-              <option value="HEURISTIC">HEURISTIC</option>
-              <option value="LLM_GATED">LLM_GATED</option>
+              <option value="HEURISTIC">自動判定 (HEURISTIC)</option>
+              <option value="LLM_GATED">LLM 二重検証 (LLM_GATED)</option>
             </select>
             <label className="checkbox-row">
               <input
@@ -195,8 +195,9 @@ export default function MemoryAndPolicyPanel({
                       className="danger-btn"
                       disabled={!authenticated || busy}
                       onClick={() => void onRevokeMemory(m.id)}
+                      data-testid={`revoke-memory-${m.id}`}
                     >
-                      削除 / Tombstone
+                      削除（復元時再適用を防止）
                     </button>
                   )}
                 </div>
