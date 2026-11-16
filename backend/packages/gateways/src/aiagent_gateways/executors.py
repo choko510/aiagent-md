@@ -204,10 +204,15 @@ class SandboxCellExecutor:
         return None
 
 
-def from_env() -> dict[str, Executor]:
+def from_env(db: Any = None) -> dict[str, Executor]:
     from aiagent_core.config import secret
 
+    from .browser_executor import browser_from_env
+
     out: dict[str, Executor] = {"mock_search": MockSearchExecutor()}
+    bf = browser_from_env(db)
+    if bf is not None:
+        out["browser_fixture"] = bf
     url = os.environ.get("AIAGENT_MESSAGE_RECEIVER_URL")
     if url:
         out["http_message"] = HttpMessageExecutor(

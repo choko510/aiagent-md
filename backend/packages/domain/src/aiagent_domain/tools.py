@@ -33,6 +33,14 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
+def _browser_target_props() -> dict[str, Any]:
+    return {
+        "kind": {"type": "string", "enum": ["role", "label", "test_id", "css"]},
+        "selector": {"type": "string", "minLength": 1, "maxLength": 512},
+        "roleName": {"type": "string", "minLength": 1, "maxLength": 256},
+    }
+
+
 TOOLS: dict[str, ToolSpec] = {
     "search": ToolSpec(
         "search",
@@ -81,6 +89,56 @@ TOOLS: dict[str, ToolSpec] = {
         False,
         "sandbox_cell",
     ),
+    "browser_navigate": ToolSpec(
+        "browser_navigate",
+        "Navigate an offline sandboxed fixture browser session and return redacted visible text.",
+        _obj(
+            {
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "sessionId": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            ["url"],
+        ),
+        "read",
+        False,
+        "browser_fixture",
+    ),
+    "browser_click": ToolSpec(
+        "browser_click",
+        "Click a single visible control inside an active fixture browser session.",
+        _obj(
+            {
+                "sessionId": {"type": "string", "minLength": 1, "maxLength": 64},
+                **_browser_target_props(),
+            },
+            ["sessionId", "kind", "selector"],
+        ),
+        "write_reversible",
+        False,
+        "browser_fixture",
+    ),
+    "browser_submit": ToolSpec(
+        "browser_submit",
+        "Fill inputs and click a form submit control in an active browser session. Irreversible; requires owner approval.",
+        _obj(
+            {
+                "sessionId": {"type": "string", "minLength": 1, "maxLength": 64},
+                **_browser_target_props(),
+                "inputs": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": _obj(
+                        {**_browser_target_props(), "value": {"type": "string", "maxLength": 4096}},
+                        ["kind", "selector", "value"],
+                    ),
+                },
+            },
+            ["sessionId", "kind", "selector"],
+        ),
+        "external_irreversible",
+        True,
+        "browser_fixture",
+    ),
 }
 
 # Profile -> tools the model may see. Framework built-ins are NOT here and are removed by the runtime.
@@ -88,6 +146,7 @@ PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
     "default": ("search", "send_message"),
     "anthropic": ("search", "send_message"),
     "sandbox": ("search", "sandbox_exec"),
+    "browser": ("search", "browser_navigate", "browser_click", "browser_submit"),
 }
 # Framework-internal read-only operations: provider schema is fixed here instead of trusting a runtime-supplied
 # schema. These are NOT external Tool Gateway executors. All results enter HEAD only via grounded admission.

@@ -253,7 +253,7 @@ def main_tool() -> None:
         },
     )
     db = Database(dsn, max_size=8, name="tool_gateway")
-    gw = ToolGateway(db, executors_from_env(), sentinel=sentinel)
+    gw = ToolGateway(db, executors_from_env(db=db), sentinel=sentinel)
     srv = build_tool_server(keys, config.env("AIAGENT_TOOL_GATEWAY_ENDPOINT"), gw)
     asyncio.run(_serve("tool_gateway", srv, db, config.env_int("AIAGENT_HEALTH_PORT", 0) or None))
 

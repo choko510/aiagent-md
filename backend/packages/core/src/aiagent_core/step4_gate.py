@@ -27,8 +27,9 @@ FEATURES = (
     "automation",
     "device",
 )
-# Features with a real, owner-consent-gated path integrated into the normal Runtime Worker.
+# Features integrated into the STEP 3 Runtime/Gateway pipeline with explicit owner gating.
 _OWNER_GATED_EGRESS = frozenset({"context", "memory"})
+_SANDBOXED_INTEGRATED = frozenset({"context", "memory", "browser"})
 _RESERVED_PREFIXES = (*(f + "." for f in FEATURES), "step4.")
 _RESERVED_EXACT = frozenset(FEATURES) | {"step4"}
 
@@ -67,7 +68,7 @@ def capability_snapshot() -> list[dict[str, str | bool]]:
     return [
         {
             "component": name,
-            "integrationState": "INTEGRATED_CONDITIONAL" if name in _OWNER_GATED_EGRESS else "INTEGRATION_PENDING",
+            "integrationState": "INTEGRATED_CONDITIONAL" if name in _SANDBOXED_INTEGRATED else "INTEGRATION_PENDING",
             "memoryEgressPath": "OWNER_ENABLED_CONTEXT" if name in _OWNER_GATED_EGRESS else "NONE",
             "externalActionsEnabled": False,
             "ownerConsentRequired": True,

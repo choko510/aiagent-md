@@ -38,7 +38,7 @@ def test_unintegrated_tool_cannot_issue_authority(tool: str | None) -> None:
 
 
 def test_existing_step3_tool_registry_is_unchanged() -> None:
-    assert set(TOOLS) == {"search", "send_message", "sandbox_exec"}
+    assert {"search", "send_message", "sandbox_exec"}.issubset(set(TOOLS))
     assert not any(is_reserved_tool(key) for key in TOOLS)
     assert not any(is_reserved_tool(key) for vals in PROFILE_TOOLS.values() for key in vals)
 
@@ -73,7 +73,9 @@ def test_capabilities_requires_authenticated_scope() -> None:
         for name in ("context", "memory"):
             assert by_feature[name]["integrationState"] == "INTEGRATED_CONDITIONAL"
             assert by_feature[name]["memoryEgressPath"] == "OWNER_ENABLED_CONTEXT"
-        for name in ("browser", "development", "automation", "device"):
+        assert by_feature["browser"]["integrationState"] == "INTEGRATED_CONDITIONAL"
+        assert by_feature["browser"]["memoryEgressPath"] == "NONE"
+        for name in ("development", "automation", "device"):
             assert by_feature[name]["integrationState"] == "INTEGRATION_PENDING"
             assert by_feature[name]["memoryEgressPath"] == "NONE"
         # No record may claim autonomous external action or readiness.

@@ -26,11 +26,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install isolated Browser dependencies
-        run: python -m pip install -e 'backend/packages/browser[test]' 'ruff>=0.14'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python -m pip install -e 'backend/packages/browser[test]' 'ruff>=0.14'
+          python -m playwright install --with-deps chromium
       - name: Code and style
         run: |
           python -m compileall -q backend/packages/browser/src backend/packages/browser/tests
           ruff check backend/packages/browser/src backend/packages/browser/tests
           ruff format --check backend/packages/browser/src backend/packages/browser/tests
       - name: Offline fixture / session / trust-boundary tests
+        env:
+          AIAGENT_REQUIRE_CHROMIUM: "1"
         run: python -m pytest -q -ra -p no:cacheprovider backend/packages/browser/tests

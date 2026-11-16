@@ -7,7 +7,15 @@ import re
 from dataclasses import replace
 
 import pytest
-from aiagent_browser import Authority, BrowserError, BrowserSessionService, FixtureResponse, State
+from aiagent_browser import (
+    Authority,
+    BrowserError,
+    BrowserSessionService,
+    BrowserTarget,
+    FixtureResponse,
+    FormInput,
+    State,
+)
 
 
 class MockAuth:
@@ -108,6 +116,37 @@ class MockWorker:
         # Simplified browser visible text: input attributes must not become visible text.
         html = self.pages[session_id]
         return " ".join(re.findall(r">([^<>]+)<", html))
+
+    async def click(self, session_id, target, *, timeout_ms=5000):
+        if self.crashed:
+            raise BrowserError("BROWSER_CRASHED")
+        if getattr(self, "click_timeout", False):
+            raise BrowserError("ACTION_TIMEOUT")
+        html = self.pages[session_id]
+        if f'data-testid="{target.selector}"' not in html and f">{target.role_name or target.selector}<" not in html:
+            raise BrowserError("TARGET_NOT_FOUND")
+        if "data-next='" in html:
+            nxt = re.search(r"data-next='([^']*)'", html)
+            if nxt:
+                self.pages[session_id] = nxt.group(1)
+        return (
+            "NEEDS_LOGIN"
+            if "type='password'" in self.pages[session_id]
+            or 'type="password"' in self.pages[session_id]
+            or "data-auth-wall='true'" in self.pages[session_id]
+            else "OK"
+        )
+
+    async def submit(self, session_id, target, inputs=(), *, timeout_ms=5000):
+        if self.crashed:
+            raise BrowserError("BROWSER_CRASHED")
+        if getattr(self, "submit_timeout", False):
+            raise BrowserError("ACTION_TIMEOUT")
+        html = self.pages[session_id]
+        if f'data-testid="{target.selector}"' not in html and f">{target.role_name or target.selector}<" not in html:
+            raise BrowserError("TARGET_NOT_FOUND")
+        self.pages[session_id] = f"<p>submitted:{len(inputs)}</p>"
+        return "NEEDS_LOGIN" if "data-auth-wall='true'" in html else "OK"
 
     async def close(self, session_id):
         self.pages.pop(session_id, None)
@@ -269,9 +308,14 @@ async def test_gateway_denial_and_side_effects(ctx):
     with pytest.raises(BrowserError, match="GATEWAY_DENIED"):
         await service.navigate_fixture(sid, p, "fixture://alpha.test/")
     assert worker.pages[sid] == ""
-    for method in (service.click, service.submit, service.authenticated_navigate):
-        with pytest.raises(BrowserError, match="NOT_INTEGRATED"):
-            await method(sid, p, "fixture://alpha.test/")
+    target = BrowserTarget("test_id", "buy")
+    with pytest.raises(BrowserError, match="APPROVAL_REQUIRED"):
+        await service.submit(sid, p, target)
+    with pytest.raises(BrowserError, match="AUTH_BROKER_REQUIRED"):
+        await service.authenticated_navigate(sid, p, "fixture://alpha.test/")
+    gate.reject = False
+    with pytest.raises(BrowserError, match="TARGET_NOT_FOUND"):
+        await service.click(sid, p, target)
 
 
 @pytest.mark.asyncio
@@ -422,3 +466,89 @@ async def test_relative_redirect_and_loop_detection_and_url_control_chars(ctx):
     for bad_url in ("fixture://alpha.test/\x7f", "fixture://alpha.test/a b"):
         with pytest.raises(BrowserError, match="INVALID_FIXTURE_URL"):
             await service.navigate_fixture(sid, p, bad_url)
+
+
+@pytest.mark.asyncio
+async def test_click_submit_auth_transition_and_timeout_unknown():
+    class Approval:
+        def __init__(self, allow: bool = True):
+            self.allow = allow
+            self.calls: list[str] = []
+
+        async def approve(self, authority, session_id, target):
+            self.calls.append(f"{session_id}:{target.selector}")
+            if not self.allow:
+                raise BrowserError("APPROVAL_DENIED")
+
+    class AuthBroker:
+        def __init__(self, allow: bool = True):
+            self.allow = allow
+            self.urls: list[str] = []
+
+        async def permit_transition(self, authority, session_id, url):
+            self.urls.append(url)
+            if not self.allow:
+                raise BrowserError("AUTH_DENIED")
+
+    auth, fence, gate, fixtures, redactor, worker = (
+        MockAuth(),
+        MockFence(),
+        MockGate(),
+        MockFixtures(),
+        MockRedactor(),
+        MockWorker(),
+    )
+    approval = Approval()
+    auth_broker = AuthBroker()
+    ids = iter(["019a55c4-00f0-7000-8000-000000000011"])
+    service = BrowserSessionService(
+        worker=worker,
+        authority=auth,
+        fence=fence,
+        fixture_gate=gate,
+        fixture=fixtures,
+        redactor=redactor,
+        new_id=lambda: next(ids),
+        allowed_fixture_hosts=frozenset({"alpha.test"}),
+        approval=approval,
+        auth_transition=auth_broker,
+    )
+    p = Authority("t1", "o1", "task1", "run1", "1", "1")
+    sid = (await service.create(p)).session_id
+    fixtures.data["fixture://alpha.test/shop"] = FixtureResponse(
+        200,
+        '<button data-testid="go">Go</button>'
+        '<div data-next=\'<button data-testid="pay">Pay</button><p>Login</p><input type="password" value="S">\'></div>',
+    )
+    await service.navigate_fixture(sid, p, "fixture://alpha.test/shop")
+    out = await service.click(sid, p, BrowserTarget("test_id", "go"))
+    assert out.status == "NEEDS_LOGIN"
+    assert (await service.view(sid, p)).state is State.NEEDS_LOGIN
+    with pytest.raises(BrowserError, match="SESSION_NOT_ACTIVE"):
+        await service.click(sid, p, BrowserTarget("test_id", "pay"))
+
+    fixtures.data["fixture://alpha.test/account"] = FixtureResponse(
+        200, '<button data-testid="pay">Pay</button><p>Welcome TOKEN:tok123</p>'
+    )
+    obs = await service.authenticated_navigate(sid, p, "fixture://alpha.test/account")
+    assert obs.text == "Pay Welcome [REDACTED]"
+    assert (await service.view(sid, p)).state is State.ACTIVE
+    assert auth_broker.urls == ["fixture://alpha.test/account"]
+
+    sub = await service.submit(
+        sid,
+        p,
+        BrowserTarget("test_id", "pay"),
+        inputs=(FormInput(BrowserTarget("label", "Note"), "hello"),),
+    )
+    assert sub.status == "EXECUTED" and sub.after_observation.text == "submitted:1"
+    assert approval.calls == [f"{sid}:pay"]
+
+    worker.submit_timeout = True
+    fixtures.data["fixture://alpha.test/checkout"] = FixtureResponse(200, '<button data-testid="pay">Pay</button>')
+    await service.navigate_fixture(sid, p, "fixture://alpha.test/checkout")
+    with pytest.raises(BrowserError, match="ACTION_OUTCOME_UNKNOWN"):
+        await service.submit(sid, p, BrowserTarget("test_id", "pay"))
+    assert (await service.view(sid, p)).state is State.PAUSED
+    with pytest.raises(BrowserError, match="SESSION_NOT_ACTIVE"):
+        await service.submit(sid, p, BrowserTarget("test_id", "pay"))

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 
 [manifest]
@@ -171,6 +171,7 @@ name = "aiagent-gateways"
 version = "0.3.0"
 source = { editable = "packages/gateways" }
 dependencies = [
+    { name = "aiagent-browser" },
     { name = "aiagent-context" },
     { name = "aiagent-core" },
     { name = "aiagent-memory" },
@@ -182,6 +183,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiagent-browser", editable = "packages/browser" },
     { name = "aiagent-context", editable = "packages/context" },
     { name = "aiagent-core", editable = "packages/core" },
     { name = "aiagent-memory", editable = "packages/memory" },
