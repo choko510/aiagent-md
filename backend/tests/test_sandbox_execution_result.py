@@ -131,3 +131,76 @@ def test_multibyte_and_large_results_do_not_gain_false_completeness() -> None:
         _complete_sandbox_result(result)
     result.update(truncated=False, outcome="EXITED_ZERO")
     assert _complete_sandbox_result(result)["stdout"] == text
+
+
+@pytest.mark.parametrize("different_attempt", [False, True])
+def test_gateway_binds_signed_tool_attempt_to_fake_cell_response(
+    monkeypatch: pytest.MonkeyPatch, different_attempt: bool
+) -> None:
+    from aiagent_sandbox.grant import verify
+
+    signing_key = b"g" * 32
+    attempt = "authority-issued-attempt"
+
+    class FakeCellClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def call(self, method: str, body: dict[str, object]) -> dict[str, object]:
+            assert method == "exec.run"
+            signed = body["grant"]
+            grant = verify(signing_key, signed, ["tool"], ".")
+            assert grant.attempt_id == attempt
+            assert (grant.tenant_id, grant.run_id, grant.lease_epoch) == ("t", "r", 1)
+            return {
+                "status": "EXITED",
+                "attemptId": "other" if different_attempt else attempt,
+                "exitCode": 0,
+                "timedOut": False,
+                "truncated": False,
+                "stdout": "",
+                "stderr": "",
+            }
+
+    monkeypatch.setattr(aiagent_core.rpc, "RpcClient", FakeCellClient)
+    executor = SandboxCellExecutor("unix:/unused", b"r" * 32, signing_key)
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": attempt,
+    }
+    if different_attempt:
+        with pytest.raises(ExecutorUnknown):
+            asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
+    else:
+        result = asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
+        assert result["outcome"] == "EXITED_ZERO"
+        assert result["toolAttemptId"] == attempt
+
+
+@pytest.mark.parametrize(("field", "value"), [("attempt_id", "other"), ("tenant_id", "other"), ("lease_epoch", 2)])
+def test_attempt_grant_tampering_is_rejected(field: str, value: object) -> None:
+    from aiagent_sandbox.grant import Grant, GrantError, sign, verify
+
+    key = b"g" * 32
+    grant = Grant(
+        "g",
+        "tenant",
+        "task",
+        "run",
+        "intent",
+        1,
+        ("tool",),
+        ".",
+        1000,
+        1024,
+        9999999999,
+        attempt_id="authority-attempt",
+    )
+    token = sign(key, grant)
+    token["grant"][field] = value
+    with pytest.raises(GrantError, match="BAD_SIGNATURE"):
+        verify(key, token, ["tool"], ".")

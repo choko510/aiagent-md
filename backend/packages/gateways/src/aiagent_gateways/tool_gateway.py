@@ -509,6 +509,7 @@ class ToolGateway:
                 "task_id": claim.task_id,
                 "run_id": claim.run_id,
                 "intent_id": intent["id"],
+                "attempt_id": str(attempt_id),
                 "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,

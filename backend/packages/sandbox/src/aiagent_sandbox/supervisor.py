@@ -238,6 +238,7 @@ class Supervisor:
             return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
         return {
             "status": "EXITED",
+            "attemptId": g.attempt_id,
             "exitCode": rc,
             "timedOut": timed_out,
             "wallMs": int((time.monotonic() - started) * 1000),

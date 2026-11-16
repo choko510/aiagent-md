@@ -115,3 +115,30 @@ accounting and concurrent workloads must be measured for a dedicated Cell UID
 before choosing a limit; 256 from a temporary diagnostic is not a production
 recommendation. Separate-guest-kernel Cell and egress isolation remain
 NOT VERIFIED.
+
+## B2b-1: Tool Attempt binding is not Execution attestation
+
+The existing Tool Gateway owns `agent.tool_attempts.id`, minted at dispatch and
+stored with its Tool Intent and Run lease. It is an attempt identifier, not a
+canonical Execution ID; no existing owner in this repository currently issues
+a distinct execution identity bound to a verified Workspace snapshot, tree,
+recipe, toolchain and Plan Test ID. The Gateway now includes its own attempt ID
+in the signed Sandbox grant. The Supervisor echoes the ID from the verified
+grant and the Gateway rejects an unmatched response as UNKNOWN. A fake Cell
+contract test verifies this binding and signed-grant tampering. Legacy grants
+remain accepted, and this binding alone must not be used to authorize B2 or to
+construct an authenticated execution receipt.
+
+The ToolGatewaySandboxAdapter stays blocked. The following remain missing:
+Authority-issued execution identity with tenant/owner/run/lease/goal and Intent;
+trusted Workspace binding to Commit/Tree/Revision; a Plan-owned Test ID bound
+to the approved recipe; toolchain attestation; and a trusted receipt that binds
+actual result and Artifact bytes. A future owner must define atomic checks and
+revocation semantics before this path can be enabled. A fake Cell is not a real
+Supervisor E2E or proof of isolation; no Source/Artifact transfer is added.
+
+Compatibility: a new Supervisor accepts a legacy grant without an attempt ID,
+but an older Supervisor will reject the additional signed field rather than
+execute it. Roll out the Supervisor before the Gateway change; mixed-version
+operation has not been verified. Generic legacy grant acceptance does not
+satisfy the B2b-1 execution-identity requirement.

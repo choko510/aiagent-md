@@ -179,6 +179,7 @@ class SandboxCellExecutor:
             self.wall_ms,
             self.memory_bytes,
             int(time.time()) + 120,
+            attempt_id=ctx.get("attempt_id"),
         )
         client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
         try:
@@ -195,6 +196,7 @@ class SandboxCellExecutor:
             raise ExecutorFailed(str(res.get("reason")))
         if (
             res.get("status") != "EXITED"
+            or (g.attempt_id is not None and res.get("attemptId") != g.attempt_id)
             or type(res.get("exitCode")) is not int
             or type(res.get("timedOut")) is not bool
             or type(res.get("truncated")) is not bool
@@ -215,6 +217,7 @@ class SandboxCellExecutor:
             outcome = "EXITED_ZERO"
         # DONE/CONFIRMED means the Tool intent settled, not that this command succeeded.
         return {
+            "toolAttemptId": g.attempt_id,
             "exitCode": res["exitCode"],
             "timedOut": res["timedOut"],
             "truncated": truncated,

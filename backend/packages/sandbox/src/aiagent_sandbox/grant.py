@@ -31,6 +31,7 @@ class Grant:
     wall_ms: int
     memory_bytes: int
     expires: int
+    attempt_id: str | None = None
 
     def payload(self) -> dict[str, Any]:
         d = asdict(self)
@@ -59,6 +60,8 @@ def verify(key: bytes, token: Any, argv: list[str], cwd: str, *, now: float | No
         g = Grant(**{**p, "argv": tuple(p["argv"])})
     except TypeError as e:
         raise GrantError("MALFORMED") from e
+    if g.attempt_id is not None and (not isinstance(g.attempt_id, str) or not 1 <= len(g.attempt_id) <= 128):
+        raise GrantError("MALFORMED")
     if list(g.argv) != argv or g.cwd != cwd:
         raise GrantError("BINDING")  # the request differs from what was admitted
     if g.expires < (now if now is not None else time.time()):
