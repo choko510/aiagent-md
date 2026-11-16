@@ -16,8 +16,20 @@ class TokenEstimatorPort(Protocol):
     def count_tokens(self, text: str, *, model_id: str, tokenizer_id: str) -> int: ...
 
 
+def tokenizer_for_model(model_id: str) -> str:
+    """Resolve explicit tokenizer profile matching a model family (fail conservative on non-OpenAI families)."""
+    m = model_id.strip().lower()
+    if m.startswith("claude"):
+        return "anthropic_claude_est"
+    if m.startswith(("gpt-4o", "o1", "o3", "o4")):
+        return "o200k_base"
+    if m.startswith("fake"):
+        return "fake_bpe_est"
+    return "cl100k_base"
+
+
 class ModelBoundTokenEstimator:
-    """Uses `tiktoken` when installed and matching the tokenizer/model; otherwise a conservative subword counter."""
+    """Uses `tiktoken` when exact for the tokenizer profile; otherwise a conservative subword counter."""
 
     def __init__(self, *, strict_tiktoken: bool = False) -> None:
         self._strict_tiktoken = strict_tiktoken
@@ -38,7 +50,8 @@ class ModelBoundTokenEstimator:
     def count_tokens(self, text: str, *, model_id: str, tokenizer_id: str) -> int:
         if not text:
             return 0
-        if self._tiktoken is not None:
+        is_anthropic = tokenizer_id == "anthropic_claude_est" or model_id.strip().lower().startswith("claude")
+        if self._tiktoken is not None and not is_anthropic:
             tk = self._tiktoken
             enc = None
             for name in (tokenizer_id, "cl100k_base", "o200k_base"):
@@ -54,7 +67,7 @@ class ModelBoundTokenEstimator:
                     enc = None
             if enc is not None:
                 return len(enc.encode(text, disallowed_special=())) + 1
-        elif self._strict_tiktoken:
+        elif self._strict_tiktoken and not is_anthropic:
             raise RuntimeError("tiktoken unavailable for strict tokenization")
         # Conservative BPE-like approximation: CJK characters map >=1 token each,
         # ASCII runs map ceil(len / 3), punctuation 1 token each, plus floor of ceil(utf8_bytes / 4).
@@ -67,4 +80,6 @@ class ModelBoundTokenEstimator:
             else:
                 pieces += math.ceil(len(tok) / 3)
         byte_floor = math.ceil(len(text.encode("utf-8")) / 4)
-        return max(pieces, byte_floor, 1)
+        base = max(pieces, byte_floor, 1)
+        # Anthropic Claude uses a distinct tokenizer; apply a +15% safety margin rather than assuming OpenAI cl100k exactness.
+        return math.ceil(base * 1.15) if is_anthropic else base

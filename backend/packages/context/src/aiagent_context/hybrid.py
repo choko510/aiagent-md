@@ -8,15 +8,22 @@ from dataclasses import replace
 from hashlib import sha256
 from typing import Literal
 
+from .compaction import ContextService, _revoke_written_summaries
 from .models import (
     ContextPlan,
     ContextRequest,
     OptimizationReceipt,
+    RawArtifact,
     SafeStop,
     SourceInput,
+    SourceProjectionTrace,
+    SummaryClaim,
+    SummaryProposal,
     ToolEvent,
     forbid_secrets,
+    stable_digest,
 )
+from .ports import ArtifactStorePort
 from .tokenizer import ModelBoundTokenEstimator, TokenEstimatorPort
 
 SourceClass = Literal["cli_stdout", "json_data", "search_hits", "prose", "unknown"]
@@ -140,8 +147,73 @@ class HybridOptimizer:
         return json.dumps(trim(data), ensure_ascii=False, separators=(",", ":"))
 
 
+def _verbatim_raw_span(raw_bytes: bytes, max_chars: int) -> tuple[int, int, str]:
+    """Select an exact verbatim UTF-8 byte span inside unmodified raw bytes, keeping guard/error lines intact."""
+    decoded = raw_bytes.decode("utf-8", "strict")
+    if len(decoded) <= max_chars:
+        return 0, len(raw_bytes), decoded
+    # If a guard/negation/error line exists later in the raw text and fits within max_chars, ground directly to it.
+    for match in _NEGATION_GUARD_RE.finditer(decoded):
+        line_start = decoded.rfind("\n", 0, match.start()) + 1
+        line_end = decoded.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(decoded)
+        span = decoded[line_start:line_end]
+        if 0 < len(span) <= max_chars:
+            start_b = len(decoded[:line_start].encode("utf-8"))
+            end_b = start_b + len(span.encode("utf-8"))
+            return start_b, end_b, span
+    text = decoded[:max_chars]
+    if (
+        text
+        and decoded[max_chars].isascii()
+        and decoded[max_chars].isalnum()
+        and text[-1].isascii()
+        and text[-1].isalnum()
+    ):
+        cut = len(text)
+        while cut > 0 and text[cut - 1].isascii() and text[cut - 1].isalnum():
+            cut -= 1
+        trimmed = text[:cut].rstrip()
+        if trimmed:
+            text = trimmed
+    return 0, len(text.encode("utf-8")), text
+
+
+class _HybridSummarizer:
+    def __init__(self, spans_by_ref: dict[str, tuple[int, int, str]]) -> None:
+        self._spans = spans_by_ref
+
+    def __call__(
+        self,
+        request: ContextRequest,
+        refs: tuple[RawArtifact, ...],
+        store: ArtifactStorePort,
+        max_chars: int,
+    ) -> SummaryProposal:
+        del store, max_chars
+        claims = tuple(
+            SummaryClaim(
+                text=self._spans[ref.artifact_ref][2],
+                quote=self._spans[ref.artifact_ref][2],
+                artifact_ref=ref.artifact_ref,
+                source_hash=ref.sha256,
+                observed_at=ref.observed_at,
+                start_byte=self._spans[ref.artifact_ref][0],
+                end_byte=self._spans[ref.artifact_ref][1],
+            )
+            for ref in refs
+        )
+        return SummaryProposal(
+            request.goal_revision,
+            request.anchor_digest,
+            tuple(ref.artifact_ref for ref in refs),
+            claims,
+        )
+
+
 class HybridCompactionPipeline:
-    """Runs optional selective pre-projection optimization, grounded ContextService compaction, and NLI audit."""
+    """Persists unmodified raw artifacts FIRST, creates derived projections separately, and records full traces."""
 
     def __init__(self, context_service: object, optimizer: HybridOptimizer | None = None) -> None:
         self._service = context_service
@@ -155,44 +227,100 @@ class HybridCompactionPipeline:
         events: tuple[ToolEvent, ...] = (),
         max_excerpt_chars: int = 240,
     ) -> ContextPlan:
-        from .compaction import ContextService
-
         if not isinstance(self._service, ContextService):
             raise SafeStop("INVALID_SERVICE")
-        optimized_sources: list[SourceInput] = []
-        last_receipt: OptimizationReceipt | None = None
+        if max_excerpt_chars < 1 or max_excerpt_chars > 4096 or len(sources) > 64:
+            raise SafeStop("INVALID_COMPACTION_LIMIT")
+        raw_sources = tuple(src for src, _ in sources)
+        if len({src.source_ref for src in raw_sources}) != len(raw_sources):
+            raise SafeStop("DUPLICATE_SOURCE")
+
+        self._service._validate_current(request)
+        # 1. Persist every unmodified raw source FIRST before any projection or optimization.
+        raw_refs = tuple(self._service.artifacts.put_raw(request.scope, src) for src in raw_sources)
+        raw_by_ref = {ref.artifact_ref: self._service.artifacts.get_raw(request.scope, ref) for ref in raw_refs}
+
+        spans_by_ref: dict[str, tuple[int, int, str]] = {}
+        traces: list[SourceProjectionTrace] = []
+        written_projections: list[str] = []
         total_before = 0
         total_after = 0
         any_optimized = False
-        for src, cls in sources:
-            opt_src, receipt = self._optimizer.optimize_source(
-                src,
-                source_class=cls,
-                model_id=request.budget.model_id,
-                tokenizer_id=request.budget.tokenizer_id,
+
+        try:
+            for (src, cls), raw_ref in zip(sources, raw_refs, strict=True):
+                raw_bytes = raw_by_ref[raw_ref.artifact_ref]
+                if len(raw_bytes) != len(src.body):
+                    raise SafeStop("SOURCE_MISMATCH")
+                opt_src, receipt = self._optimizer.optimize_source(
+                    src,
+                    source_class=cls,
+                    model_id=request.budget.model_id,
+                    tokenizer_id=request.budget.tokenizer_id,
+                )
+                proj_ref: str | None = None
+                if receipt.outcome == "OPTIMIZED":
+                    proj_ref, proj_sha = self._service.artifacts.put_summary(request.scope, opt_src.body)
+                    written_projections.append(proj_ref)
+                    if proj_sha != receipt.output_sha256:
+                        raise SafeStop("PROJECTION_DIGEST_MISMATCH")
+                    any_optimized = True
+                start_b, end_b, span_text = _verbatim_raw_span(raw_bytes, max_excerpt_chars)
+                spans_by_ref[raw_ref.artifact_ref] = (start_b, end_b, span_text)
+                total_before += receipt.before_tokens
+                total_after += receipt.after_tokens
+                traces.append(
+                    SourceProjectionTrace(
+                        source_ref=src.source_ref,
+                        raw_artifact_ref=raw_ref.artifact_ref,
+                        raw_sha256=raw_ref.sha256,
+                        raw_byte_length=raw_ref.byte_length,
+                        projection_artifact_ref=proj_ref,
+                        projection_sha256=receipt.output_sha256,
+                        preserved_start_byte=start_b,
+                        preserved_end_byte=end_b,
+                        outcome=receipt.outcome,
+                        before_tokens=receipt.before_tokens,
+                        after_tokens=receipt.after_tokens,
+                        reason_code=receipt.reason_code,
+                    )
+                )
+
+            plan = self._service.compact(
+                request,
+                raw_sources,
+                events=events,
+                summarizer=_HybridSummarizer(spans_by_ref),
+                max_excerpt_chars=max_excerpt_chars,
+                _existing_refs=raw_refs,
             )
-            optimized_sources.append(opt_src)
-            total_before += receipt.before_tokens
-            total_after += receipt.after_tokens
-            if receipt.outcome == "OPTIMIZED":
-                any_optimized = True
-            last_receipt = receipt
-        plan = self._service.compact(
-            request,
-            tuple(optimized_sources),
-            events=events,
-            max_excerpt_chars=max_excerpt_chars,
-        )
-        if last_receipt is None:
+        except SafeStop as exc:
+            if exc.code != "SIMULATED_KILL_BEFORE_CAS":
+                _revoke_written_summaries(self._service.artifacts, request.scope, written_projections)
+            raise
+        except Exception:
+            _revoke_written_summaries(self._service.artifacts, request.scope, written_projections)
+            raise
+
+        if not traces:
             return plan
+        agg_input_sha = (
+            traces[0].raw_sha256 if len(traces) == 1 else stable_digest([(t.source_ref, t.raw_sha256) for t in traces])
+        )
+        agg_output_sha = (
+            traces[0].projection_sha256
+            if len(traces) == 1
+            else stable_digest([(t.source_ref, t.projection_sha256) for t in traces])
+        )
         agg_receipt = OptimizationReceipt(
             codec_id=self._optimizer.CODEC_ID,
             codec_version=self._optimizer.CODEC_VERSION,
-            outcome="OPTIMIZED" if any_optimized else last_receipt.outcome,
+            outcome="OPTIMIZED" if any_optimized else traces[-1].outcome,
             before_tokens=total_before,
             after_tokens=total_after,
-            input_sha256=last_receipt.input_sha256,
-            output_sha256=last_receipt.output_sha256,
-            reason_code="SELECTIVE_COMPACTION" if any_optimized else last_receipt.reason_code,
+            input_sha256=agg_input_sha,
+            output_sha256=agg_output_sha,
+            reason_code="SELECTIVE_COMPACTION" if any_optimized else traces[-1].reason_code,
+            traces=tuple(traces),
         )
         return replace(plan, optimization_receipt=agg_receipt)

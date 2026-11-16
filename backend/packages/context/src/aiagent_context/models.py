@@ -278,6 +278,22 @@ class SourceBackedFact:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceProjectionTrace:
+    source_ref: str
+    raw_artifact_ref: str
+    raw_sha256: str
+    raw_byte_length: int
+    projection_artifact_ref: str | None
+    projection_sha256: str
+    preserved_start_byte: int
+    preserved_end_byte: int
+    outcome: OptimizationOutcome
+    before_tokens: int
+    after_tokens: int
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
 class OptimizationReceipt:
     codec_id: str
     codec_version: str
@@ -287,6 +303,7 @@ class OptimizationReceipt:
     input_sha256: str
     output_sha256: str
     reason_code: str
+    traces: tuple[SourceProjectionTrace, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

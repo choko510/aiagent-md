@@ -70,6 +70,8 @@ def capability_snapshot() -> list[dict[str, str | bool]]:
             "component": name,
             "integrationState": "INTEGRATED_CONDITIONAL" if name in _SANDBOXED_INTEGRATED else "INTEGRATION_PENDING",
             "memoryEgressPath": "OWNER_ENABLED_CONTEXT" if name in _OWNER_GATED_EGRESS else "NONE",
+            "hybridPipelineWired": name == "context",
+            "semanticVerifierMode": "HEURISTIC_NLI_DEFAULT_LLM_GATED" if name == "context" else "NONE",
             "externalActionsEnabled": False,
             "ownerConsentRequired": True,
             "hostVerified": False,

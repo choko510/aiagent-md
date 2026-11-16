@@ -134,10 +134,86 @@ def test_hybrid_compaction_reduces_repetitive_cli_and_json_and_passthroughs_shor
     assert plan.optimization_receipt is not None
     assert plan.optimization_receipt.outcome == "OPTIMIZED"
     assert plan.optimization_receipt.after_tokens < plan.optimization_receipt.before_tokens
+    assert len(plan.optimization_receipt.traces) == 3
     assert len(plan.verified_facts) == 3
     assert all(f.verdict == "SUPPORTED" for f in plan.verified_facts)
+
+    # P1-5: Raw artifact store MUST hold exact unmodified raw bytes for every source (never elided bytes!)
+    raw_cli = cli_lines.encode("utf-8")
+    raw_json = json.dumps(json_items).encode("utf-8")
+    expected_bodies = {"cli:1": raw_cli, "json:1": raw_json, "prose:1": short_prose}
+    for ref in plan.raw_artifacts:
+        stored = store.get_raw(req.scope, ref)
+        assert stored == expected_bodies[ref.source_ref]
+    # And the trace records derived projections separately from the unmodified raw SHA-256.
+    by_src = {t.source_ref: t for t in plan.optimization_receipt.traces}
+    assert by_src["cli:1"].raw_sha256 != by_src["cli:1"].projection_sha256
+    assert by_src["cli:1"].projection_artifact_ref is not None
+    assert by_src["prose:1"].projection_artifact_ref is None
+    assert any("ERROR: timeout on step 4" in c.quote for c in plan.selected_claims)
+
+    # Multi-source aggregate SHA-256 changes when a non-last source changes (cannot reuse only last_receipt).
+    cli_lines_alt = "\n".join(["ok heartbeat line"] * 26 + ["ERROR: timeout on step 4"])
+    head2 = MockHeadPort(
+        req.scope, head="head:0", goal_revision="1", lease_epoch="1", policy_version="policy:1", memory_epoch="1"
+    )
+    pipe2 = HybridCompactionPipeline(
+        ContextService(MockArtifactStore(), head2), HybridOptimizer(ModelBoundTokenEstimator())
+    )
+    plan2 = pipe2.compact(
+        req,
+        (
+            (
+                SourceInput("cli:1", "2026-11-16T00:00:00Z", cli_lines_alt.encode("utf-8"), locator_ref="log:cli"),
+                "cli_stdout",
+            ),
+            (SourceInput("prose:1", "2026-11-16T00:00:00Z", short_prose, locator_ref="log:prose"), "prose"),
+        ),
+    )
+    assert plan2.optimization_receipt is not None
+    assert plan2.optimization_receipt.input_sha256 != plan.optimization_receipt.input_sha256
 
     # Passthrough when no savings
     tiny = SourceInput("tiny:1", "2026-11-16T00:00:00Z", b"short ok", locator_ref="log:tiny")
     out_src, rec = HybridOptimizer().optimize_source(tiny, source_class="cli_stdout")
     assert out_src == tiny and rec.outcome == "PASSTHROUGH"
+
+
+def test_anthropic_tokenizer_uses_conservative_non_openai_margin_and_revokes_projections_on_cas_failure() -> None:
+    from aiagent_context.tokenizer import tokenizer_for_model
+
+    tok = ModelBoundTokenEstimator()
+    assert tokenizer_for_model("claude-sonnet-5-5") == "anthropic_claude_est"
+    assert tok.count_tokens(
+        "hello world status", model_id="claude-sonnet-5-5", tokenizer_id="anthropic_claude_est"
+    ) >= tok.count_tokens("hello world status", model_id="gpt-4o", tokenizer_id="cl100k_base")
+
+    req = _req()
+    store = MockArtifactStore()
+
+    class _FailHead(MockHeadPort):
+        def publish(self, *args, **kwargs):  # type: ignore[override]
+            raise SafeStop("HEAD_CONFLICT")
+
+    svc = ContextService(
+        store,
+        _FailHead(
+            req.scope, head="head:0", goal_revision="1", lease_epoch="1", policy_version="policy:1", memory_epoch="1"
+        ),
+    )
+    pipe = HybridCompactionPipeline(svc)
+    cli_lines = "\n".join(["ok heartbeat line"] * 25 + ["ERROR: timeout on step 4"])
+    with pytest.raises(SafeStop, match="HEAD_CONFLICT"):
+        pipe.compact(
+            req,
+            (
+                (
+                    SourceInput("cli:1", "2026-11-16T00:00:00Z", cli_lines.encode("utf-8"), locator_ref="log:cli"),
+                    "cli_stdout",
+                ),
+            ),
+        )
+    # Derived summary/projection artifacts must be revoked on CAS failure while original raw stays intact.
+    assert len(store._summary) == 0
+    assert len(store._raw) == 1
+    assert next(iter(store._raw.values()))[2] == cli_lines.encode("utf-8")
