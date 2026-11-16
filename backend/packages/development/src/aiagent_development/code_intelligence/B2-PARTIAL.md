@@ -12,9 +12,8 @@ existing supervisor accepts `exec.run` authenticated through the tool gateway,
 but provides no execution-bound artifact download, source projection upload,
 execution-time lease revocation or source/output separation contract. The
 Context artifact store is scoped to its own authenticated Context flow and is
-not an execution artifact transfer. The supervisor's `communicate()` currently
-buffers child stdout/stderr before truncation, so its response limit alone does
-not bound memory use. Reusing that channel for SCIP or declaring a mock to be
+not an execution artifact transfer. The supervisor now bounds retained stdout and stderr while reading and terminates the
+process group on overflow. This does not establish a secure artifact transfer. Reusing that channel for SCIP or declaring a mock to be
 an authenticated broker would be unsafe.
 
 Remaining owner work includes authenticated per-execution source and artifact
@@ -25,3 +24,7 @@ real supervisor and authority, including egress and revocation; only then can
 the actual index be passed to `load_index()` with trusted evidence. A verified
 manifest alone cannot establish any of these properties. No host execution,
 package install, network upload or production integration is performed here.
+
+Projection selects Python source and pyproject.toml, excludes sensitive filenames,
+and rejects private-key markers. Content is not proven secret-free: coverage is
+always PARTIAL. Neither the manifest nor selection authorizes transfer.

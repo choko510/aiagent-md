@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from aiagent_development.code_intelligence.git_reader import GitSnapshot
-from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Identity, Limits, ReadError
+from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Coverage, Identity, Limits, ReadError
 from aiagent_development.code_intelligence.projection import prepare_projection
 
 
@@ -110,4 +110,28 @@ def test_submodule_entry_rejected(tmp_path: Path) -> None:
     sha = subprocess.check_output([str(repo[2]), "-C", str(repo[0]), "rev-parse", "HEAD"]).decode().strip()
     reader = open_reader((repo[0], sha, repo[2]))
     with pytest.raises(ReadError, match="unsupported"):
+        prepare_projection(reader, reader.snapshot.identity, reader.tree)
+
+
+def test_source_policy_excludes_sensitive_and_non_source_files(tmp_path: Path) -> None:
+    repo = make_repo(
+        tmp_path, {"a.py": b"pass\n", ".env": b"SECRET=hidden", "id_rsa": b"secret", "notes.txt": b"ignored"}
+    )
+    reader = open_reader(repo)
+    result = prepare_projection(reader, reader.snapshot.identity, reader.tree)
+    assert [f.path for f in result.files] == ["a.py"]
+    assert result.coverage == Coverage.PARTIAL
+    assert len(result.issues) == 4
+    assert all("hidden" not in issue for issue in result.issues)
+
+
+def test_private_key_marker_in_source_is_rejected(tmp_path: Path) -> None:
+    reader = open_reader(make_repo(tmp_path, {"a.py": b"-----BEGIN PRIVATE KEY-----\ntest"}))
+    with pytest.raises(ReadError, match="private key"):
+        prepare_projection(reader, reader.snapshot.identity, reader.tree)
+
+
+def test_credential_assignment_in_source_is_rejected(tmp_path: Path) -> None:
+    reader = open_reader(make_repo(tmp_path, {"a.py": b"api_key = 'example-credential'\n"}))
+    with pytest.raises(ReadError, match="possible credential"):
         prepare_projection(reader, reader.snapshot.identity, reader.tree)
