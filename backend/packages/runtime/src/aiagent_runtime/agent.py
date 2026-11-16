@@ -325,7 +325,63 @@ async def sandbox_exec(
     return await gateway_tool(run_ctx(config), tool_call_id, "sandbox_exec", {"argv": argv, "cwdRelative": cwdRelative})
 
 
-STUBS = {"search": search, "send_message": send_message, "sandbox_exec": sandbox_exec}
+@tool
+async def browser_navigate(
+    url: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    config: RunnableConfig,
+    sessionId: str | None = None,
+) -> str:
+    """Navigate an offline sandboxed fixture browser session and return redacted visible text."""
+    args: dict[str, Any] = {"url": url}
+    if sessionId is not None:
+        args["sessionId"] = sessionId
+    return await gateway_tool(run_ctx(config), tool_call_id, "browser_navigate", args)
+
+
+@tool
+async def browser_click(
+    sessionId: str,
+    kind: str,
+    selector: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    config: RunnableConfig,
+    roleName: str | None = None,
+) -> str:
+    """Click a single visible control inside an active fixture browser session."""
+    args: dict[str, Any] = {"sessionId": sessionId, "kind": kind, "selector": selector}
+    if roleName is not None:
+        args["roleName"] = roleName
+    return await gateway_tool(run_ctx(config), tool_call_id, "browser_click", args)
+
+
+@tool
+async def browser_submit(
+    sessionId: str,
+    kind: str,
+    selector: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    config: RunnableConfig,
+    roleName: str | None = None,
+    inputs: list[dict[str, Any]] | None = None,
+) -> str:
+    """Fill inputs and click a form submit control in an active browser session. Irreversible; requires owner approval."""
+    args: dict[str, Any] = {"sessionId": sessionId, "kind": kind, "selector": selector}
+    if roleName is not None:
+        args["roleName"] = roleName
+    if inputs is not None:
+        args["inputs"] = inputs
+    return await gateway_tool(run_ctx(config), tool_call_id, "browser_submit", args)
+
+
+STUBS = {
+    "search": search,
+    "send_message": send_message,
+    "sandbox_exec": sandbox_exec,
+    "browser_navigate": browser_navigate,
+    "browser_click": browser_click,
+    "browser_submit": browser_submit,
+}
 
 
 def make_tools(profile: str) -> list[Any]:

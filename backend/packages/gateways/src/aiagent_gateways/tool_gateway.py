@@ -488,12 +488,15 @@ class ToolGateway:
                     {"error": f"sentinel:{e.code}"},
                     effect="FAILED",
                 )
-        if hasattr(executor, "context"):  # executors that need the admitted identity (sandbox grants)
+        if hasattr(executor, "context"):  # executors that need the admitted identity (sandbox grants, browser fence)
             executor.context[effect_key] = {
+                "tool": tool,
                 "tenant_id": claim.tenant_id,
+                "owner_user_id": claim.owner_user_id,
                 "task_id": claim.task_id,
                 "run_id": claim.run_id,
                 "intent_id": intent["id"],
+                "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
             }
         fault("gateway_before_send")

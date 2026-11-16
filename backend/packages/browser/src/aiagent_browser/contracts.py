@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
 
@@ -76,6 +76,71 @@ class FixtureResponse:
     redirect_to: str | None = None
 
 
+LocatorKind = Literal["role", "label", "test_id", "css"]
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserTarget:
+    """Strictly typed DOM/AX locator; never a raw JS expression or CDP handle."""
+
+    kind: LocatorKind
+    selector: str
+    role_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("role", "label", "test_id", "css"):
+            raise BrowserError("INVALID_TARGET")
+        if (
+            not isinstance(self.selector, str)
+            or not self.selector.strip()
+            or len(self.selector) > 512
+            or any(c in self.selector for c in ("\r", "\n", "\0"))
+        ):
+            raise BrowserError("INVALID_TARGET")
+        if self.role_name is not None and (
+            not isinstance(self.role_name, str)
+            or len(self.role_name) > 256
+            or any(c in self.role_name for c in ("\r", "\n", "\0"))
+        ):
+            raise BrowserError("INVALID_TARGET")
+
+
+@dataclass(frozen=True, slots=True)
+class FormInput:
+    """Input field value bound to an explicit target; repr hides raw field values."""
+
+    target: BrowserTarget
+    value: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, BrowserTarget):
+            raise BrowserError("INVALID_TARGET")
+        if not isinstance(self.value, str) or len(self.value) > 4096:
+            raise BrowserError("INVALID_TARGET")
+
+
+@dataclass(frozen=True, slots=True)
+class ActionOutcome:
+    session_id: str
+    generation: int
+    action: Literal["click", "submit"]
+    status: Literal["EXECUTED", "NEEDS_LOGIN"]
+    before_observation: Observation
+    after_observation: Observation
+
+
+class ApprovalPort(Protocol):
+    """Explicit owner approval gate for side-effectful browser actions (submit/post/purchase)."""
+
+    async def approve(self, authority: Authority, session_id: str, target: BrowserTarget) -> None: ...
+
+
+class AuthTransitionPort(Protocol):
+    """Verified credential/login transition broker (never exposes secrets to observations)."""
+
+    async def permit_transition(self, authority: Authority, session_id: str, url: str) -> None: ...
+
+
 class AuthorityPort(Protocol):
     async def authorize(self, authority: Authority, operation: str, session_id: str | None) -> None: ...
 
@@ -116,6 +181,17 @@ class WorkerPort(Protocol):
     async def render(self, session_id: str, html: str) -> None: ...
 
     async def observe(self, session_id: str) -> str: ...
+
+    async def click(self, session_id: str, target: BrowserTarget, *, timeout_ms: int = 5000) -> str: ...
+
+    async def submit(
+        self,
+        session_id: str,
+        target: BrowserTarget,
+        inputs: tuple[FormInput, ...] = (),
+        *,
+        timeout_ms: int = 5000,
+    ) -> str: ...
 
     async def close(self, session_id: str) -> None: ...
 
