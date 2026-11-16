@@ -52,6 +52,14 @@ pub struct ControlRecord {
     pub audit: Vec<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SealedControlPayload {
+    v: u8,
+    stopped: bool,
+    revoked: bool,
+    audit: Vec<String>,
+}
+
 pub struct LocalJournal {
     conn: Connection,
     scope_hash: String,
@@ -160,12 +168,18 @@ impl LocalJournal {
                     "local_control",
                     &sealed_audit,
                 )?;
-                let audit: Vec<String> =
+                let envelope: SealedControlPayload =
                     serde_json::from_slice(&raw_json).map_err(|e| e.to_string())?;
+                if envelope.v != 2
+                    || envelope.stopped != (stopped != 0)
+                    || envelope.revoked != (revoked != 0)
+                {
+                    return Err("tampered local_control flags or unsupported version".into());
+                }
                 Ok(ControlRecord {
-                    stopped: stopped != 0,
-                    revoked: revoked != 0,
-                    audit,
+                    stopped: envelope.stopped,
+                    revoked: envelope.revoked,
+                    audit: envelope.audit,
                 })
             }
             None => Ok(ControlRecord {
@@ -177,7 +191,13 @@ impl LocalJournal {
     }
 
     pub fn save_control(&mut self, record: &ControlRecord) -> Result<(), String> {
-        let audit_json = serde_json::to_string(&record.audit).map_err(|e| e.to_string())?;
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: record.stopped,
+            revoked: record.revoked,
+            audit: record.audit.clone(),
+        };
+        let audit_json = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
         let sealed_audit = seal_payload(
             &self.master_key,
             &self.scope_hash,
@@ -333,5 +353,45 @@ impl LocalJournal {
             return Err("not an active STARTED effect".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tampering_plaintext_stopped_or_revoked_column_fails_closed() {
+        let base =
+            std::env::temp_dir().join(format!("aiagent_journal_tamper_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("journal.db");
+        let scope = Scope {
+            os_user: "u-tamper".into(),
+            tenant_id: "t-tamper".into(),
+            owner_user_id: "o-tamper".into(),
+            device_identity_id: "di-tamper".into(),
+            device_id: "d-tamper".into(),
+        };
+        {
+            let mut j = LocalJournal::open(&db_path, &scope).unwrap();
+            j.save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec!["STOP".into()],
+            })
+            .unwrap();
+        }
+        // Directly flip plaintext INTEGER column in SQLite without re-sealing HMAC envelope
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("UPDATE local_control SET stopped=0, revoked=0", [])
+                .unwrap();
+        }
+        let reopened = LocalJournal::open(&db_path, &scope).unwrap();
+        let err = reopened.load_control(vec![]).unwrap_err();
+        assert!(err.contains("tampered"), "unexpected err: {err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

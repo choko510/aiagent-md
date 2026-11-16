@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { TaskState, TaskV1 } from "./api/generated/domain";
 
 type TaskSummary = {
@@ -94,6 +94,32 @@ export default function ConsoleView() {
   const [capabilities, setCapabilities] = useState<CapabilityItem[]>([]);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const authEpochRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const clearOwnerState = useCallback(() => {
+    setTasks([]);
+    setSelectedTaskId(null);
+    setTaskDetail(null);
+    setEventsText("");
+    setSessions([]);
+    setCampaigns([]);
+    setWatches([]);
+    setCapabilities([]);
+    setStatusMsg(null);
+  }, []);
+
+  const handleTokenChange = useCallback(
+    (nextToken: string) => {
+      authEpochRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setToken(nextToken);
+      setErrorMsg(null);
+      clearOwnerState();
+    },
+    [clearOwnerState],
+  );
 
   const authHeaders = useCallback((): Record<string, string> => {
     const t = token.trim();
@@ -101,49 +127,92 @@ export default function ConsoleView() {
   }, [token]);
 
   const loadOverview = useCallback(async () => {
-    if (!token.trim()) return;
+    if (!token.trim()) {
+      clearOwnerState();
+      return;
+    }
+    const epoch = authEpochRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setErrorMsg(null);
     try {
       const headers = authHeaders();
       const [tRes, bRes, cRes, wRes, capRes] = await Promise.all([
-        fetch("/v1/tasks", { headers }),
-        fetch("/v1/browser/sessions", { headers }),
-        fetch("/v1/campaigns", { headers }),
-        fetch("/v1/watches", { headers }),
-        fetch("/v1/step4/capabilities", { headers }),
+        fetch("/v1/tasks", { headers, signal: controller.signal }),
+        fetch("/v1/browser/sessions", { headers, signal: controller.signal }),
+        fetch("/v1/campaigns", { headers, signal: controller.signal }),
+        fetch("/v1/watches", { headers, signal: controller.signal }),
+        fetch("/v1/step4/capabilities", { headers, signal: controller.signal }),
       ]);
+      if (epoch !== authEpochRef.current) return;
       if (!tRes.ok) {
+        clearOwnerState();
         setErrorMsg(`認証エラーまたはAPI未接続 (HTTP ${tRes.status})`);
         return;
       }
-      setTasks((await tRes.json()).items ?? []);
-      if (bRes.ok) setSessions((await bRes.json()).items ?? []);
-      if (cRes.ok) setCampaigns((await cRes.json()).items ?? []);
-      if (wRes.ok) setWatches((await wRes.json()).items ?? []);
-      if (capRes.ok) setCapabilities((await capRes.json()).capabilities ?? []);
-    } catch {
+      const [tJson, bJson, cJson, wJson, capJson] = await Promise.all([
+        tRes.json(),
+        bRes.ok ? bRes.json() : Promise.resolve({ items: [] }),
+        cRes.ok ? cRes.json() : Promise.resolve({ items: [] }),
+        wRes.ok ? wRes.json() : Promise.resolve({ items: [] }),
+        capRes.ok ? capRes.json() : Promise.resolve({ capabilities: [] }),
+      ]);
+      if (epoch !== authEpochRef.current) return;
+      setTasks(tJson.items ?? []);
+      setSessions(bJson.items ?? []);
+      setCampaigns(cJson.items ?? []);
+      setWatches(wJson.items ?? []);
+      setCapabilities(capJson.capabilities ?? []);
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError" || epoch !== authEpochRef.current) return;
+      clearOwnerState();
       setErrorMsg("Control Plane API (/v1) に接続できませんでした。");
     }
-  }, [token, authHeaders]);
+  }, [token, authHeaders, clearOwnerState]);
 
-  const loadTaskDetail = useCallback(async (id: string) => {
-    if (!token.trim()) return;
-    const headers = authHeaders();
-    const [dRes, eRes] = await Promise.all([
-      fetch(`/v1/tasks/${encodeURIComponent(id)}`, { headers }),
-      fetch(`/v1/tasks/${encodeURIComponent(id)}/events/stream`, { headers }),
-    ]);
-    if (dRes.ok) {
-      setTaskDetail((await dRes.json()) as FullTaskView);
-    }
-    if (eRes.ok) {
-      setEventsText(await eRes.text());
-    }
-  }, [token, authHeaders]);
+  const loadTaskDetail = useCallback(
+    async (id: string) => {
+      if (!token.trim()) return;
+      const epoch = authEpochRef.current;
+      const headers = authHeaders();
+      try {
+        const [dRes, eRes] = await Promise.all([
+          fetch(`/v1/tasks/${encodeURIComponent(id)}`, { headers }),
+          fetch(`/v1/tasks/${encodeURIComponent(id)}/events/stream?follow=true&max_polls=4`, { headers }),
+        ]);
+        if (epoch !== authEpochRef.current) return;
+        if (!dRes.ok) {
+          if (dRes.status === 401 || dRes.status === 403 || dRes.status === 404) {
+            setTaskDetail(null);
+            setEventsText("");
+          }
+          return;
+        }
+        const detail = (await dRes.json()) as FullTaskView;
+        const evText = eRes.ok ? await eRes.text() : "";
+        if (epoch !== authEpochRef.current) return;
+        setTaskDetail(detail);
+        if (eRes.ok) setEventsText(evText);
+      } catch {
+        // Transient read failure is ignored if owner switched.
+      }
+    },
+    [token, authHeaders],
+  );
 
   useEffect(() => {
     if (selectedTaskId) void loadTaskDetail(selectedTaskId);
   }, [selectedTaskId, loadTaskDetail]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !token.trim()) return;
+    if (taskDetail && ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(taskDetail.state)) return;
+    const timer = window.setInterval(() => {
+      void loadTaskDetail(selectedTaskId);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [selectedTaskId, token, taskDetail, loadTaskDetail]);
 
   async function submitNewTask(event: FormEvent) {
     event.preventDefault();
@@ -232,7 +301,7 @@ export default function ConsoleView() {
           <input
             type="password"
             value={token}
-            onChange={(e) => setToken(e.target.value)}
+            onChange={(e) => handleTokenChange(e.target.value)}
             placeholder="aiag_... を入力"
           />
         </label>

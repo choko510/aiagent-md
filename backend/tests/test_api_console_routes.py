@@ -34,3 +34,7 @@ def test_console_list_routes_enforce_owner_isolation(
     assert api.get("/v1/browser/sessions", headers=other_headers).json()["items"] == []
     assert api.get("/v1/campaigns", headers=other_headers).json()["items"] == []
     assert api.get("/v1/watches", headers=other_headers).json()["items"] == []
+
+    sse = api.get(f"/v1/tasks/{created['taskId']}/events/stream?follow=true&max_polls=2", headers=headers)
+    assert sse.status_code == 200
+    assert "task.accepted" in sse.text

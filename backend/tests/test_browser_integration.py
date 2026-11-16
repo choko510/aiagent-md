@@ -280,5 +280,42 @@ def test_browser_submit_timeout_records_unknown_ledger(
             (scope.tenant_id, apr["tool_intent_id"]),
         )
         assert ledger is not None and ledger["outcome_code"] == "UNKNOWN"
+
+        # Click timeout must also raise ACTION_OUTCOME_UNKNOWN and pause session (never silently succeed or retry)
+        class ClickTimeoutWorker(TimeoutWorker):
+            async def click(self, session_id: str, target: BrowserTarget, *, timeout_ms: int = 5000) -> str:
+                raise BrowserError("ACTION_TIMEOUT")
+
+        from aiagent_browser import BrowserSessionService
+
+        svc = BrowserSessionService(
+            worker=ClickTimeoutWorker(),
+            authority=executor._service._authority,
+            fence=executor._fence,
+            fixture_gate=executor._service._gate,
+            fixture=executor._service._fixture,
+            redactor=executor._service._redactor,
+            new_id=uuid7,
+            allowed_fixture_hosts=frozenset({"alpha.test"}),
+        )
+        claim_c = control.claim_run(
+            dbs["runtime"],
+            scope.tenant_id,
+            submit_task(dbs["api"], scope, "click timeout", profile="browser")["runId"],
+            "w-click-t",
+        )
+        auth_c = Authority(
+            claim_c.tenant_id,
+            claim_c.owner_user_id,
+            claim_c.task_id,
+            claim_c.run_id,
+            str(claim_c.goal_revision),
+            str(claim_c.lease_epoch),
+            worker_ref="w-click-t",
+        )
+        view_c = _run(svc.create(auth_c))
+        _run(svc.navigate_fixture(view_c.session_id, auth_c, "fixture://alpha.test/pay"))
+        with pytest.raises(BrowserError, match="ACTION_OUTCOME_UNKNOWN"):
+            _run(svc.click(view_c.session_id, auth_c, BrowserTarget("test_id", "pay")))
     finally:
         executor.close()
