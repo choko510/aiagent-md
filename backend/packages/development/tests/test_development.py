@@ -429,3 +429,12 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
     scm_rec.heads[(scope_rec.repository, scope_rec.branch, scope_rec.workspace_id)] = committed_sha
     ev = CommitEvidence(parent_sha, committed_sha, "e" * 64, "p-rec2", "recovered-receipt")
     assert flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev).phase == Phase.COMMITTED
+
+
+def test_build_rejects_receipt_for_different_commit(env):
+    _, scope, run, _, _, sandbox, _, flow = env
+    flow.create("cycle-sha", scope, run, "change-1")
+    flow.plan(scope, "cycle-sha", TaskPlan("plan-1", "change-1", ("unit",), run.goal_revision))
+    sandbox.source_sha = "b" * 40 if scope.base_sha != "b" * 40 else "c" * 40
+    with pytest.raises(InvalidEvidence, match="SHA"):
+        flow.execute(scope, "cycle-sha", _request(env))

@@ -51,3 +51,29 @@ within nested user namespaces. User/PID/network namespace creation and a simple
 fork succeeded in a separate diagnostic; the calling process reported seccomp
 mode 0 before the Supervisor's filter. This is not proof of Cell or network
 isolation. No production policy was relaxed or changed for this diagnostic.
+
+## Development execution evidence: blocked pending owner contracts
+
+The current `ExecutionRequest` carries a plan reference, not an actual Test ID;
+`exec.run` does not return a verified immutable workspace commit or an
+execution-bound artifact. The real ToolGatewaySandboxAdapter therefore refuses
+before creating an intent or running a command for build, static-check and test.
+It does not invent a test ID or claim that the base commit was executed. Mock
+ports remain test fixtures and are not execution evidence. The Workflow checks
+any supplied source SHA against its expected target, and requires the committed
+SHA for post-commit receipts; planned test receipts must name a required Test ID.
+
+To restore the real adapter, the owners must specify an authenticated receipt
+binding tenant, run, lease, intent, execution, workspace revision, actual
+verified source commit, and, for test executions, a trusted Plan Test ID and
+command/recipe binding. Workflow must compare those values to its own expected
+commit and plan under the existing authority. This is a proposal, not a new
+canonical grant. Merely accepting request/model values as proof is forbidden.
+
+The existing `artifact_sha256` has no documented output artifact contract. The
+adapter no longer hashes a 4,096-character display excerpt and calls it an
+artifact. A future owner contract must specify the exact artifact bytes,
+encoding and framing (including stdout/stderr boundaries), its completeness,
+digest, scope, and authenticated transfer. Display excerpts must be separately
+UTF-8 byte bounded and explicitly marked as excerpts; truncation of required
+output must reject evidence. No digest is emitted by the blocked adapter.

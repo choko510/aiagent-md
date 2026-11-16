@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +9,6 @@ from typing import Any
 
 from aiagent_core import control
 from aiagent_core.db import Database
-from aiagent_domain import sha256_hex
 
 from .contracts import (
     Cycle,
@@ -60,43 +56,10 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
         self._cwd_relative = cwd_relative
 
     def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
-        scope = request.project
-        args = {"argv": list(request.argv), "cwdRelative": self._cwd_relative}
-        call_id = f"dev_{request.intent_ref[:32]}"
-        with self._db_model.tx() as c:
-            control.append_head(
-                c,
-                self._claim,
-                "assistant",
-                {
-                    "kind": "assistant",
-                    "content": "",
-                    "tool_calls": [{"id": call_id, "name": "sandbox_exec", "args": args}],
-                },
-                writer="development_cell_adapter",
-                request_key=os.urandom(32).hex(),
-            )
-        out = asyncio.run(self._gateway.submit(self._claim, call_id, "sandbox_exec", args))
-        if out.get("status") not in ("DONE", "CONFIRMED"):
-            raise InvalidEvidence(f"sandbox_exec denied or unknown: {out.get('status')}")
-        res = _complete_sandbox_result(out.get("result"))
-        stdout = str(res.get("stdout", ""))[:4096]
-        stderr = str(res.get("stderr", ""))[:4096]
-        digest = hashlib.sha256((stdout + "\n" + stderr).encode("utf-8")).hexdigest()
-        return ExecutionEvidence(
-            intent_ref=request.intent_ref,
-            run=request.run,
-            kind=request.kind,
-            exit_code=int(res["exitCode"]),
-            executed=not bool(res.get("timedOut", False)),
-            artifact_sha256=digest,
-            toolchain_digest=request.toolchain_digest,
-            stdout=stdout,
-            stderr=stderr,
-            source_commit_sha=scope.base_sha,
-            test_id=request.plan_ref,
-            receipt_ref=f"tgw:{sha256_hex({'call': call_id, 'digest': digest})[:24]}",
-        )
+        # The current grant and response do not bind a verified workspace commit,
+        # and the request does not identify a trusted planned test. Never dispatch
+        # and later fabricate evidence from the plan reference or base SHA.
+        raise InvalidEvidence("sandbox execution requires verified workspace and test identity contracts")
 
 
 @dataclass(frozen=True, slots=True)

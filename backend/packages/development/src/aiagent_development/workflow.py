@@ -114,10 +114,11 @@ class DevelopmentWorkflow:
             or receipt.intent_ref != request.intent_ref
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
+            or (receipt.source_commit_sha is not None and receipt.source_commit_sha != target)
             or (
                 c.commit is not None
                 and c.phase in (Phase.COMMITTED, Phase.REVIEWING)
-                and receipt.source_commit_sha != c.commit.commit_sha
+                and receipt.source_commit_sha is None
             )
         ):
             raise InvalidEvidence("sandbox receipt mismatches immutable request/SHA/fence")

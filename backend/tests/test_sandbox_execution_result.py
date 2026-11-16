@@ -105,3 +105,29 @@ def test_gateway_clipping_marks_incomplete(monkeypatch: pytest.MonkeyPatch) -> N
     assert result["truncated"] and result["outcome"] == "OUTPUT_LIMIT"
     with pytest.raises(InvalidEvidence):
         _complete_sandbox_result(result)
+
+
+@pytest.mark.parametrize("kind", ["build", "static-check", "test"])
+def test_real_adapter_refuses_unattested_source_before_dispatch(kind: str) -> None:
+    from unittest.mock import Mock
+
+    from aiagent_development.contracts import ExecutionRequest, ProjectScope, RunFence
+    from aiagent_development.factory import ToolGatewaySandboxAdapter
+
+    db, gateway, claim = Mock(), Mock(), Mock()
+    adapter = ToolGatewaySandboxAdapter(db, gateway, claim)
+    scope = ProjectScope("t", "o", "p", "w", "org/repo", "branch", "a" * 40, "rev")
+    request = ExecutionRequest(scope, RunFence("t", "r", 1, 1, 1), "plan", kind, ("tool",), "a" * 64, "intent")
+    with pytest.raises(InvalidEvidence, match="verified workspace"):
+        adapter.execute(request)
+    db.tx.assert_not_called()
+    gateway.submit.assert_not_called()
+
+
+def test_multibyte_and_large_results_do_not_gain_false_completeness() -> None:
+    text = "日本語" * 2000
+    result = {"exitCode": 0, "timedOut": False, "truncated": True, "outcome": "OUTPUT_LIMIT", "stdout": text}
+    with pytest.raises(InvalidEvidence):
+        _complete_sandbox_result(result)
+    result.update(truncated=False, outcome="EXITED_ZERO")
+    assert _complete_sandbox_result(result)["stdout"] == text
