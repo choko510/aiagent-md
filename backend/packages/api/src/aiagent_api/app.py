@@ -395,13 +395,21 @@ def create_app(db: Database | None = None) -> FastAPI:
         return {"schemaVersion": "1.0", "taskId": task_id, "recordVersion": str(version)}
 
     @app.get("/v1/tasks/{task_id}/events/stream")
-    async def stream_task_events(task_id: str, s: S, after_offset: int = 0, limit: int = 100) -> StreamingResponse:
+    async def stream_task_events(
+        task_id: str,
+        s: S,
+        after_offset: int = 0,
+        limit: int = 100,
+        follow: bool = False,
+        max_polls: int = 20,
+    ) -> StreamingResponse:
         bounded = max(1, min(limit, 500))
+        poll_cap = max(1, min(max_polls, 60))
 
-        def load_events() -> list[dict[str, Any]]:
+        def load_events(cursor: int) -> tuple[str, list[dict[str, Any]]]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 owned = c.execute(
-                    "SELECT 1 FROM agent.tasks WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                    "SELECT status_code FROM agent.tasks WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
                     (s.tenant_id, task_id, s.user_id),
                 ).fetchone()
                 if owned is None:
@@ -411,9 +419,9 @@ def create_app(db: Database | None = None) -> FastAPI:
                     " FROM agent.domain_events"
                     " WHERE tenant_id=%s AND task_id=%s AND delivery_offset > %s"
                     " ORDER BY delivery_offset ASC LIMIT %s",
-                    (s.tenant_id, task_id, after_offset, bounded),
+                    (s.tenant_id, task_id, cursor, bounded),
                 ).fetchall()
-                return [
+                return str(owned["status_code"]), [
                     {
                         "id": str(r["id"]),
                         "kind": str(r["event_kind"]),
@@ -424,11 +432,22 @@ def create_app(db: Database | None = None) -> FastAPI:
                     for r in rows
                 ]
 
-        events = await asyncio.to_thread(load_events)
+        initial_state, initial_events = await asyncio.to_thread(load_events, after_offset)
 
         async def sse() -> AsyncIterator[str]:
-            for ev in events:
-                yield f"id: {ev['offset']}\nevent: {ev['kind']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            cursor = after_offset
+            state_code = initial_state
+            batch = initial_events
+            polls = 0
+            while True:
+                for ev in batch:
+                    cursor = max(cursor, int(ev["offset"]))
+                    yield f"id: {ev['offset']}\nevent: {ev['kind']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                polls += 1
+                if not follow or polls >= poll_cap or state_code in ("SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"):
+                    break
+                await asyncio.sleep(0.25)
+                state_code, batch = await asyncio.to_thread(load_events, cursor)
 
         return StreamingResponse(sse(), media_type="text/event-stream")
 

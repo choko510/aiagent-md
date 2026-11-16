@@ -317,6 +317,9 @@ class BrowserSessionService:
             except BrowserError as exc:
                 if exc.code == "BROWSER_CRASHED":
                     entry.state = State.RECOVERING
+                elif exc.code == "ACTION_TIMEOUT":
+                    entry.state = State.PAUSED
+                    raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
                 raise
             await self._fence.check(session_id, authority)
             after = await self._observe_locked(session_id, authority, entry)
