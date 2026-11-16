@@ -13,7 +13,7 @@ from test_code_intelligence_git import repo as _repo  # noqa: F401
 from aiagent_development.code_intelligence.git_reader import GitSnapshot, open_snapshot
 from aiagent_development.code_intelligence.impact import impact
 from aiagent_development.code_intelligence.inventory import inventory
-from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Coverage, Limits, ReadError
+from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Coverage, Entry, Limits, ReadError
 from aiagent_development.code_intelligence.search import search
 
 
@@ -189,3 +189,31 @@ def test_nested_tree_and_digest(repo: tuple[Path, str, Path]) -> None:
     inv = inventory(snap)
     assert "pkg" in inv.directories
     assert search(snap, inv, "ping").hits[0].path == "pkg/module.py"
+
+
+def test_same_symbol_in_multiple_files_and_literal_query(repo: tuple[Path, str, Path]) -> None:
+    root, _, git = repo
+    (root / "first.py").write_text("def same():\n    return '[x]'\n")
+    (root / "second.py").write_text("def same():\n    return '[x]'\n")
+    sha = commit(root, git)
+    snap = reader((root, sha, git))
+    inv = inventory(snap)
+    result = search(snap, inv, "def same")
+    assert [hit.path for hit in result.hits] == ["first.py", "second.py"]
+    assert all(hit.line == 1 and hit.identity.commit == sha for hit in result.hits)
+    assert len(search(snap, inv, "[x]").hits) == 2
+    assert not search(snap, inv, ".*").hits
+
+
+def test_config_include_and_forged_entry_rejected(repo: tuple[Path, str, Path], tmp_path: Path) -> None:
+    root, _, git = repo
+    snap = reader(repo)
+    snap.entries()
+    forged = Entry("other", "100644", "f" * 40, 10, "BLOB")
+    with pytest.raises(ReadError):
+        snap.read(forged)
+    config_path = tmp_path / "foreign-config"
+    config_path.write_text('[remote "origin"]\n    promisor = true\n')
+    subprocess.run([str(git), "-C", str(root), "config", "include.path", str(config_path)], check=True)
+    with pytest.raises(ReadError, match="include"):
+        reader(repo)
