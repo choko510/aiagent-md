@@ -40,6 +40,7 @@ class Authority:
     run_id: str
     goal_revision: str
     lease_epoch: str
+    worker_ref: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("tenant_id", "owner_user_id", "task_id", "run_id"):
@@ -50,6 +51,10 @@ class Authority:
             value = getattr(self, name)
             if not isinstance(value, str) or not _DECIMAL.fullmatch(value) or int(value) >= 2**63:
                 raise ValueError(f"invalid {name}")
+        if self.worker_ref is not None and (
+            not isinstance(self.worker_ref, str) or not self.worker_ref.strip() or len(self.worker_ref) > 128
+        ):
+            raise ValueError("invalid worker_ref")
 
 
 @dataclass(frozen=True, slots=True)

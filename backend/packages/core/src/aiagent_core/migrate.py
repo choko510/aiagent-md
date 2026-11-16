@@ -24,7 +24,7 @@ from .config import secret
 from .db import Row, connect
 
 # Schema version this code base requires and the newest it understands.
-APP_SCHEMA_VERSION = 8
+APP_SCHEMA_VERSION = 9
 APP_MIN_READER = 5
 APP_MIN_WRITER = 5
 LOCK_KEY = 0x61696167656E74  # 'aiagent'

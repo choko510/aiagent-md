@@ -140,24 +140,73 @@ def test_pg_fence_blocks_stale_epoch_and_cross_tenant(
         claim.run_id,
         str(claim.goal_revision),
         str(claim.lease_epoch),
+        worker_ref="w1",
     )
     _run(fence.register(sid, auth1))
     _run(fence.check(sid, auth1))
+
+    # Wrong worker_ref denied even with matching epoch
+    with pytest.raises(BrowserError, match="STALE_LEASE"):
+        _run(fence.check(sid, replace(auth1, worker_ref="w-rogue")))
 
     # Cross-tenant check denied
     other = admin.provision_tenant(pg.owner)
     with pytest.raises(BrowserError, match="STALE_LEASE"):
         _run(fence.check(sid, replace(auth1, tenant_id=other["tenantId"])))
 
-    # Advance epoch -> old epoch rejected
-    auth2 = replace(auth1, lease_epoch=str(claim.lease_epoch + 1))
+    # Forged advance to an epoch not committed on agent.runs fails closed
+    forged_auth2 = replace(auth1, lease_epoch=str(claim.lease_epoch + 1), worker_ref="w2")
+    with pytest.raises(BrowserError, match="STALE_LEASE"):
+        _run(fence.advance(sid, auth1, forged_auth2, "AGENT"))
+
+    # Expired lease BEFORE re-claim fails closed even if session row still matches auth1
+    assert control.release(dbs["runtime"], claim)
+    with pytest.raises(BrowserError, match="STALE_LEASE"):
+        _run(fence.check(sid, auth1))
+
+    # Worker w2 genuinely re-claims the run -> old session check (auth1) STILL rejected before advance
+    claim2 = control.claim_run(dbs["runtime"], scope.tenant_id, created["runId"], "w2")
+    with pytest.raises(BrowserError, match="STALE_LEASE"):
+        _run(fence.check(sid, auth1))
+
+    auth2 = Authority(
+        claim2.tenant_id,
+        claim2.owner_user_id,
+        claim2.task_id,
+        claim2.run_id,
+        str(claim2.goal_revision),
+        str(claim2.lease_epoch),
+        worker_ref="w2",
+    )
     _run(fence.advance(sid, auth1, auth2, "AGENT"))
     with pytest.raises(BrowserError, match="STALE_LEASE"):
         _run(fence.check(sid, auth1))
     _run(fence.check(sid, auth2))
-    _run(fence.revoke(sid, auth2))
+
+    # Restore incarnation bump invalidates active session even on live lease
+    admin.restore_bump(pg.owner)
     with pytest.raises(BrowserError, match="STALE_LEASE"):
         _run(fence.check(sid, auth2))
+
+    # Reset cancel/restore test on fresh task for revoke path
+    created2 = submit_task(dbs["api"], scope, "fence revoke test", profile="browser")
+    with dbs["owner"].conn() as c:
+        c.execute("UPDATE agent.schema_control SET dispatch_paused = false")
+    claim3 = control.claim_run(dbs["runtime"], scope.tenant_id, created2["runId"], "w3")
+    sid2 = uuid7()
+    auth3 = Authority(
+        claim3.tenant_id,
+        claim3.owner_user_id,
+        claim3.task_id,
+        claim3.run_id,
+        str(claim3.goal_revision),
+        str(claim3.lease_epoch),
+        worker_ref="w3",
+    )
+    _run(fence.register(sid2, auth3))
+    _run(fence.revoke(sid2, auth3))
+    with pytest.raises(BrowserError, match="STALE_LEASE"):
+        _run(fence.check(sid2, auth3))
 
 
 def test_browser_submit_timeout_records_unknown_ledger(

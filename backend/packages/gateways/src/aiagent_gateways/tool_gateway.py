@@ -498,6 +498,7 @@ class ToolGateway:
                 "intent_id": intent["id"],
                 "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
+                "worker_ref": claim.worker_ref,
             }
         fault("gateway_before_send")
         try:

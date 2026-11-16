@@ -46,10 +46,11 @@ class PostgresFencePort:
             _parse_uuid(authority.run_id),
             int(authority.goal_revision),
             int(authority.lease_epoch),
+            authority.worker_ref,
         )
         await asyncio.to_thread(
             self._run_tx,
-            "SELECT agent.browser_session_register(%s,%s,%s,%s,%s,%s,%s)",
+            "SELECT agent.browser_session_register(%s,%s,%s,%s,%s,%s,%s,%s)",
             params,
         )
 
@@ -65,10 +66,11 @@ class PostgresFencePort:
             int(authority.goal_revision),
             int(authority.lease_epoch),
             mode,
+            authority.worker_ref,
         )
         await asyncio.to_thread(
             self._run_tx,
-            "SELECT agent.browser_session_check(%s,%s,%s,%s,%s,%s,%s,%s)",
+            "SELECT agent.browser_session_check(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             params,
         )
 
@@ -87,10 +89,11 @@ class PostgresFencePort:
             int(new.goal_revision),
             int(new.lease_epoch),
             mode,
+            new.worker_ref,
         )
         await asyncio.to_thread(
             self._run_tx,
-            "SELECT agent.browser_session_advance(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "SELECT agent.browser_session_advance(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             params,
         )
 
@@ -103,9 +106,10 @@ class PostgresFencePort:
             _parse_uuid(authority.run_id),
             int(authority.goal_revision),
             int(authority.lease_epoch),
+            authority.worker_ref,
         )
         await asyncio.to_thread(
             self._run_tx,
-            "SELECT agent.browser_session_revoke(%s,%s,%s,%s,%s,%s,%s)",
+            "SELECT agent.browser_session_revoke(%s,%s,%s,%s,%s,%s,%s,%s)",
             params,
         )
