@@ -71,3 +71,37 @@ def test_exact_limit_is_not_truncated() -> None:
         assert len(out) == MAX_OUTPUT and not err and not timed_out and not truncated
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("fd", [1, 2])
+def test_one_stream_just_over_limit(fd: int) -> None:
+    async def run() -> None:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            f"import os; os.write({fd},b'x'*{MAX_OUTPUT + 1})",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        out, err, timed_out, truncated = await asyncio.wait_for(_bounded_output(proc, 5), 10)
+        assert truncated and not timed_out
+        assert len(out if fd == 1 else err) == MAX_OUTPUT
+
+    asyncio.run(run())
+
+
+def test_nonzero_exit_is_retained() -> None:
+    async def run() -> None:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "raise SystemExit(7)",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        _, _, timed_out, truncated = await asyncio.wait_for(_bounded_output(proc, 5), 10)
+        assert proc.returncode == 7 and not timed_out and not truncated
+
+    asyncio.run(run())

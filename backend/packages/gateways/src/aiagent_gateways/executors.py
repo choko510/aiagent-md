@@ -193,11 +193,35 @@ class SandboxCellExecutor:
             raise ExecutorUnknown(type(e).__name__) from e
         if res.get("status") == "REFUSED":
             raise ExecutorFailed(str(res.get("reason")))
+        if (
+            res.get("status") != "EXITED"
+            or type(res.get("exitCode")) is not int
+            or type(res.get("timedOut")) is not bool
+            or type(res.get("truncated")) is not bool
+            or not isinstance(res.get("stdout"), str)
+            or not isinstance(res.get("stderr"), str)
+        ):
+            # The command may have run, but its result cannot be trusted.
+            raise ExecutorUnknown("invalid sandbox result")
+        stdout, stderr = res["stdout"], res["stderr"]
+        truncated = res["truncated"] or len(stdout) > 8000 or len(stderr) > 4000
+        if res["timedOut"]:
+            outcome = "TIMED_OUT"
+        elif truncated:
+            outcome = "OUTPUT_LIMIT"
+        elif res["exitCode"] != 0:
+            outcome = "NONZERO_EXIT"
+        else:
+            outcome = "EXITED_ZERO"
+        # DONE/CONFIRMED means the Tool intent settled, not that this command succeeded.
         return {
             "exitCode": res["exitCode"],
             "timedOut": res["timedOut"],
-            "stdout": res["stdout"][:8000],
-            "stderr": res["stderr"][:4000],
+            "truncated": truncated,
+            "outcome": outcome,
+            "resourceLimit": "UNKNOWN",
+            "stdout": stdout[:8000],
+            "stderr": stderr[:4000],
         }
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:

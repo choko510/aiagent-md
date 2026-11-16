@@ -28,3 +28,26 @@ package install, network upload or production integration is performed here.
 Projection selects Python source and pyproject.toml, excludes sensitive filenames,
 and rejects private-key markers. Content is not proven secret-free: coverage is
 always PARTIAL. Neither the manifest nor selection authorizes transfer.
+
+## Sandbox result contract and WSL diagnostics
+
+Gateway `DONE`/`CONFIRMED` records settlement of the Tool intent and effect,
+not exit-zero or complete command output. `SandboxCellExecutor` now returns
+`outcome`, `exitCode`, `timedOut` and `truncated`; malformed responses are
+UNKNOWN. Output clipping by either the Supervisor or Gateway marks truncation.
+Development evidence rejects timeouts, truncated or inconsistent results; a
+nonzero completed exit remains a failed command, not successful evidence.
+CPU/OOM limits cannot currently be distinguished reliably from a signal or
+nonzero exit, so callers must not infer a specific resource cause.
+
+WSL diagnostic (not production Cell verification): the venv Python resolves
+under the user's home directory, outside the Supervisor Landlock system and
+workspace allowlists, so it cannot be executed after confinement. Using
+`/usr/bin/python3` instead led to bootstrap exit 125. `strace` showed fork/clone
+returning EAGAIN; the test supervisor sets RLIMIT_NPROC=32. In a temporary test
+copy, raising this limit to 256 allowed the same command to start. Linux counts
+NPROC by real UID; visible process counts alone do not establish the accounting
+within nested user namespaces. User/PID/network namespace creation and a simple
+fork succeeded in a separate diagnostic; the calling process reported seccomp
+mode 0 before the Supervisor's filter. This is not proof of Cell or network
+isolation. No production policy was relaxed or changed for this diagnostic.

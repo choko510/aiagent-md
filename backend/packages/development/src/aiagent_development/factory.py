@@ -29,6 +29,20 @@ from .ports import SandboxExecutionPort
 from .workflow import DevelopmentWorkflow
 
 
+def _complete_sandbox_result(result: Any) -> dict[str, Any]:
+    """Require a complete command result; intent settlement alone is not success."""
+    if (
+        not isinstance(result, dict)
+        or type(result.get("exitCode")) is not int
+        or result.get("timedOut") is not False
+        or result.get("truncated") is not False
+        or result.get("outcome") not in {"EXITED_ZERO", "NONZERO_EXIT"}
+        or (result["exitCode"] == 0) != (result["outcome"] == "EXITED_ZERO")
+    ):
+        raise InvalidEvidence("sandbox result incomplete or invalid")
+    return result
+
+
 class ToolGatewaySandboxAdapter(SandboxExecutionPort):
     """Bridges DevelopmentWorkflow SandboxExecutionPort -> ToolGateway (`sandbox_exec` inside isolated Cell)."""
 
@@ -65,7 +79,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
         out = asyncio.run(self._gateway.submit(self._claim, call_id, "sandbox_exec", args))
         if out.get("status") not in ("DONE", "CONFIRMED"):
             raise InvalidEvidence(f"sandbox_exec denied or unknown: {out.get('status')}")
-        res = dict(out["result"])
+        res = _complete_sandbox_result(out.get("result"))
         stdout = str(res.get("stdout", ""))[:4096]
         stderr = str(res.get("stderr", ""))[:4096]
         digest = hashlib.sha256((stdout + "\n" + stderr).encode("utf-8")).hexdigest()
