@@ -21,7 +21,7 @@ from .git_reader import GitSnapshot
 from .inventory import LOCKS, RepositoryInventory
 from .models import Entry, Identity, ReadError
 from .paths import display_path, validate_git_path
-from .scip_ranges import ByteRange, convert_range
+from .scip_ranges import ByteRange, PositionBudgetExceeded, PositionIndex
 from .search import CodeSearchResult, search
 
 
@@ -71,7 +71,7 @@ class SymbolLocation:
 class Implementation:
     implementing: str
     implemented: str
-    document: str
+    document: str | None
     confidence: str = "PRECISE_INDEX_REPORTED"
 
 
@@ -79,7 +79,7 @@ class Implementation:
 class ReferenceRelationship:
     source: str
     target: str
-    document: str
+    document: str | None
 
 
 @dataclass(frozen=True)
@@ -90,23 +90,49 @@ class SymbolGraph:
     status: IndexStatus
     issues: tuple[str, ...]
     reference_relationships: tuple[ReferenceRelationship, ...]
+    definition_relationships: tuple[ReferenceRelationship, ...]
     provenance_trust: str = "UNVERIFIED_INDEXER_ORIGIN"
     coverage: str = "UNKNOWN"
 
-    def related_files(self, symbol: str, *, local_path: str | None = None) -> tuple[str, ...]:
-        """Files with indexed definition/reference occurrences for this symbol."""
-        return tuple(
-            sorted(
-                {
-                    x.path
-                    for x in self.definitions(symbol, local_path=local_path)
-                    + self.references(symbol, local_path=local_path)
-                }
+    @staticmethod
+    def _symbol_key(name: str, path: str | None) -> tuple[str, str | None]:
+        return name, path if name.startswith("local ") else None
+
+    def _definition_keys(self, initial: set[tuple[str, str | None]]) -> set[tuple[str, str | None]]:
+        links: dict[tuple[str, str | None], set[tuple[str, str | None]]] = {}
+        for rel in self.definition_relationships:
+            links.setdefault(self._symbol_key(rel.source, rel.document), set()).add(
+                self._symbol_key(rel.target, rel.document)
             )
+        seen = set(initial)
+        pending = list(seen)
+        while pending:
+            for target in links.get(pending.pop(), set()):
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
+        return seen
+
+    def related_files(self, symbol: str, *, local_path: str | None = None) -> tuple[str, ...]:
+        """Files with indexed definition/reference/implementation occurrences."""
+        locations = list(
+            self.definitions(symbol, local_path=local_path) + self.references(symbol, local_path=local_path)
         )
+        roots = {
+            self._symbol_key(rel.implementing, rel.document)
+            for rel in self.find_implementations(symbol, local_path=local_path)
+        }
+        targets = self._definition_keys(roots)
+        locations.extend(
+            item for item in self.locations if item.definition and self._symbol_key(item.symbol, item.path) in targets
+        )
+        return tuple(sorted({item.path for item in locations}))
 
     def definitions(self, symbol: str, *, local_path: str | None = None) -> tuple[SymbolLocation, ...]:
-        return self._locations(symbol, local_path, definition=True)
+        if symbol.startswith("local ") and local_path is None:
+            raise ValueError("local symbol requires a document path")
+        targets = self._definition_keys({self._symbol_key(symbol, local_path)})
+        return tuple(x for x in self.locations if x.definition and self._symbol_key(x.symbol, x.path) in targets)
 
     def references(self, symbol: str, *, local_path: str | None = None) -> tuple[SymbolLocation, ...]:
         if symbol.startswith("local ") and local_path is None:
@@ -116,7 +142,7 @@ class SymbolGraph:
             return (name, path if name.startswith("local ") else None)
 
         adjacency: dict[tuple[str, str | None], set[tuple[str, str | None]]] = {}
-        for rel in self.reference_relationships:
+        for rel in self.reference_relationships + self.definition_relationships:
             left, right = key(rel.source, rel.document), key(rel.target, rel.document)
             adjacency.setdefault(left, set()).add(right)
             adjacency.setdefault(right, set()).add(left)
@@ -128,17 +154,6 @@ class SymbolGraph:
                     seen.add(other)
                     pending.append(other)
         return tuple(x for x in self.locations if not x.definition and key(x.symbol, x.path) in seen)
-
-    def _locations(self, symbol: str, local_path: str | None, *, definition: bool) -> tuple[SymbolLocation, ...]:
-        if symbol.startswith("local ") and local_path is None:
-            raise ValueError("local symbol requires a document path")
-        return tuple(
-            x
-            for x in self.locations
-            if x.symbol == symbol
-            and x.definition == definition
-            and (not symbol.startswith("local ") or x.path == local_path)
-        )
 
     def find_implementations(self, symbol: str, *, local_path: str | None = None) -> tuple[Implementation, ...]:
         if symbol.startswith("local ") and local_path is None:
@@ -237,10 +252,6 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
             None,
             (str(exc),),
         )
-    if not index["wire_canonical"]:
-        return LoadResult(
-            IndexStatus.UNAVAILABLE, None, ("noncanonical wire encoding cannot establish metadata ordering",)
-        )
     if (
         index["version"] != manifest.protocol_version
         or index["tool"] != manifest.indexer
@@ -278,9 +289,8 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
     locations: list[SymbolLocation] = []
     relations: list[Implementation] = []
     reference_relations: list[ReferenceRelationship] = []
+    definition_relations: list[ReferenceRelationship] = []
     issues = list(tree_issues)
-    if index["external_relationships"]:
-        issues.append("external symbol relationships not interpreted")
     if lock_entries and manifest.dependency_lock_digest is None:
         issues.append("dependency lock provenance unavailable")
     seen: set[str] = set()
@@ -311,13 +321,13 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
             digest = hashlib.sha256(raw).hexdigest()
             if raw.startswith(b"\xef\xbb\xbf"):
                 return LoadResult(IndexStatus.INVALID, None, ("ambiguous UTF-8 BOM",))
-            raw.decode("utf-8", errors="strict")
             if b"\x00" in raw or raw.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
                 return LoadResult(IndexStatus.UNAVAILABLE, None, ("binary or LFS source unavailable",))
             if digest != source.digest:
                 return LoadResult(IndexStatus.STALE, None, ("source digest mismatch",))
             if doc["text_digest"] is not None and doc["text_digest"] != digest:
                 return LoadResult(IndexStatus.STALE, None, ("indexed document text differs from source",))
+            positions_index = PositionIndex(raw, deadline=reader.deadline)
             position_encoding = doc["encoding"]
             if position_encoding == 0 and raw.isascii():
                 # All three unit encodings coincide for ASCII; coverage remains partial.
@@ -339,7 +349,7 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
                 if roles & ~127:
                     unknown_roles = True
                 positions = tuple(coords)
-                span = convert_range(raw, position_encoding, positions)
+                span = positions_index.convert(position_encoding, positions)
                 locations.append(
                     SymbolLocation(symbol, path, span, entry.oid, digest, bool(roles & 1), positions, position_encoding)
                 )
@@ -353,18 +363,94 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
                 if not _safe_symbol(left + right):
                     raise ValueError("invalid relationship")
                 reference_relations.append(ReferenceRelationship(left, right, path))
-            if doc["definition_relationships"]:
-                issues.append(f"{display_path(path)}: definition relationships not interpreted")
+            for left, right in doc["definition_relationships"]:
+                if not _safe_symbol(left + right):
+                    raise ValueError("invalid relationship")
+                definition_relations.append(ReferenceRelationship(left, right, path))
+        external_relationships = index["external_relationships"]
+        if not isinstance(external_relationships, list):
+            raise ValueError("invalid external relationship list")
+        for left, right, is_definition, is_reference, is_implementation in external_relationships:
+            if not _safe_symbol(left + right):
+                raise ValueError("invalid external relationship")
+            # An external SymbolInformation has no document, hence it cannot
+            # safely bind a document-scoped local symbol.
+            if left.startswith("local ") or right.startswith("local "):
+                issues.append("external relationship has unresolved local scope")
+                continue
+            if is_definition:
+                definition_relations.append(ReferenceRelationship(left, right, None))
+            if is_reference:
+                reference_relations.append(ReferenceRelationship(left, right, None))
+            if is_implementation:
+                relations.append(Implementation(left, right, None))
+    except PositionBudgetExceeded as exc:
+        return LoadResult(IndexStatus.UNAVAILABLE, None, (str(exc),))
     except ReadError:
         return LoadResult(IndexStatus.UNAVAILABLE, None, ("source or time budget unavailable",))
     except (ValueError, UnicodeError, KeyError, TypeError):
         return LoadResult(IndexStatus.INVALID, None, ("invalid document or range",))
     if set(expected) != seen:
         issues.append("source provenance and indexed document set differ")
+    # Never resolve relationship endpoints against another repository. Record
+    # incompleteness if the current index has no occurrence for an endpoint.
+    local_symbols = {(item.symbol, item.path if item.symbol.startswith("local ") else None) for item in locations}
+    edges = [(r.source, r.target, r.document) for r in reference_relations + definition_relations]
+    edges.extend((r.implementing, r.implemented, r.document) for r in relations)
+    for left, right, document in edges:
+        left_key = (left, document if left.startswith("local ") else None)
+        right_key = (right, document if right.startswith("local ") else None)
+        if left_key not in local_symbols or right_key not in local_symbols:
+            issues.append("relationship has unresolved in-snapshot endpoint")
+            break
+    definition_symbols = {
+        (item.symbol, item.path if item.symbol.startswith("local ") else None) for item in locations if item.definition
+    }
+    # Resolve definition aliases backwards in linear time, including chains and
+    # cycles, without looking outside this snapshot's verified occurrences.
+    reverse_definitions: dict[tuple[str, str | None], set[tuple[str, str | None]]] = {}
+    for relation in definition_relations:
+        source_key = (relation.source, relation.document if relation.source.startswith("local ") else None)
+        target_key = (relation.target, relation.document if relation.target.startswith("local ") else None)
+        reverse_definitions.setdefault(target_key, set()).add(source_key)
+    resolved_symbols = set(definition_symbols)
+    pending = list(resolved_symbols)
+    while pending:
+        if time.monotonic() >= reader.deadline:
+            return LoadResult(IndexStatus.UNAVAILABLE, None, ("relationship time budget exceeded",))
+        for source_key in reverse_definitions.get(pending.pop(), set()):
+            if source_key not in resolved_symbols:
+                resolved_symbols.add(source_key)
+                pending.append(source_key)
+    if any(
+        (r.target, r.document if r.target.startswith("local ") else None) not in resolved_symbols
+        for r in definition_relations
+    ):
+        issues.append("definition relationship has no in-snapshot target definition")
+    if any(
+        (r.implementing, r.document if r.implementing.startswith("local ") else None) not in resolved_symbols
+        or (r.implemented, r.document if r.implemented.startswith("local ") else None) not in resolved_symbols
+        for r in relations
+    ):
+        issues.append("implementation relationship has an unresolved in-snapshot definition")
+    if any(
+        (r.source, r.document if r.source.startswith("local ") else None) not in resolved_symbols
+        or (r.target, r.document if r.target.startswith("local ") else None) not in resolved_symbols
+        for r in reference_relations
+    ):
+        issues.append("reference relationship has an unresolved in-snapshot definition")
     status = IndexStatus.PARTIAL if issues else IndexStatus.VALIDATED
     return LoadResult(
         status,
-        SymbolGraph(manifest, tuple(locations), tuple(relations), status, tuple(issues), tuple(reference_relations)),
+        SymbolGraph(
+            manifest,
+            tuple(locations),
+            tuple(relations),
+            status,
+            tuple(issues),
+            tuple(reference_relations),
+            tuple(definition_relations),
+        ),
         tuple(issues),
     )
 

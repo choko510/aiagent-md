@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Development project, Git CAS and review gate ports (STEP 4 / AI-03)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "protobuf>=6.33.5,<7",
+    "protobuf==6.33.6",
 ]
 
 [build-system]

@@ -155,7 +155,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "protobuf", specifier = ">=6.33.5,<7" }]
+requires-dist = [{ name = "protobuf", specifier = "==6.33.6" }]
 
 [[package]]
 name = "aiagent-domain"
