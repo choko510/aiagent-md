@@ -161,7 +161,7 @@ class Supervisor:
                 os.chown(p, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
         return ws, cwd
 
-    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path) -> Any:
+    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
         import resource
 
         lim = self.limits
@@ -180,7 +180,7 @@ class Supervisor:
             # Filesystem confinement is MANDATORY even in development / when netns is disabled.
             # Parent/cwd validation alone cannot prevent access to another tenant's files.
             try:
-                restrict_to_workspace(workspace)
+                restrict_to_workspace(workspace, source_fd=source_fd)
             except (OSError, ValueError) as e:
                 os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
@@ -206,6 +206,19 @@ class Supervisor:
         return fn
 
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
+        return await self._execute(token, argv, cwd_rel, source_fd=None)
+
+    async def _execute(self, token: Any, argv: list[str], cwd_rel: str, *, source_fd: int | None) -> dict[str, Any]:
+        # source_fd is reserved for a future trusted projection broker. It is
+        # deliberately not accepted from RPC and is not an authorization token.
+        if source_fd is not None:
+            if os.geteuid() != 0 or self.cell_uid in (None, 0):
+                raise GrantError("SOURCE_UID_ISOLATION_UNAVAILABLE")
+            try:
+                if os.fstat(source_fd).st_uid != os.geteuid():
+                    raise GrantError("SOURCE_OWNER_MISMATCH")
+            except OSError as exc:
+                raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
         g = verify(self.grant_key, token, argv, cwd_rel)
         self._consume(g.grant_id)
         ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
@@ -223,8 +236,9 @@ class Supervisor:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws),
+            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws, source_fd),
             close_fds=True,
+            pass_fds=() if source_fd is None else (source_fd,),
         )
         out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
         rc = proc.returncode

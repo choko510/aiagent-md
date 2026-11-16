@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from aiagent_development.code_intelligence.git_reader import GitSnapshot
 from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Coverage, Identity, Limits, ReadError
 from aiagent_development.code_intelligence.projection import prepare_projection
+from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 
 
 def make_repo(tmp_path: Path, files: dict[str, bytes]) -> tuple[Path, str, Path]:
@@ -25,6 +27,7 @@ def make_repo(tmp_path: Path, files: dict[str, bytes]) -> tuple[Path, str, Path]
     run("config", "user.name", "Test")
     run("config", "user.email", "test@example.invalid")
     for path, content in files.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_bytes(content)
     run("add", ".")
     run("commit", "-m", "test")
@@ -135,3 +138,45 @@ def test_credential_assignment_in_source_is_rejected(tmp_path: Path) -> None:
     reader = open_reader(make_repo(tmp_path, {"a.py": b"api_key = 'example-credential'\n"}))
     with pytest.raises(ReadError, match="possible credential"):
         prepare_projection(reader, reader.snapshot.identity, reader.tree)
+
+
+def test_projection_stream_is_bounded_and_digest_matches_wire(tmp_path: Path) -> None:
+    original = b"# " + b"x" * 150_000 + b"\n"
+    repo = make_repo(tmp_path, {"a.py": original, "z.py": b"import a\n", ".env": b"not-for-cell"})
+    (repo[0] / "a.py").write_bytes(b"uncommitted")
+    reader = open_reader(repo)
+    manifest = prepare_projection(reader, reader.snapshot.identity, reader.tree)
+    encoder = ProjectionEncoder(reader, manifest)
+    chunks = list(encoder.chunks())
+    wire = b"".join(chunks)
+    assert max(map(len, chunks)) <= 65536
+    assert original in wire and b"not-for-cell" not in wire and b"uncommitted" not in wire
+    assert encoder.receipt is not None
+    assert encoder.receipt.sha256 == hashlib.sha256(wire).hexdigest()
+    assert encoder.receipt.byte_length == len(wire) and encoder.receipt.file_count == 2
+    with pytest.raises(ReadError, match="already used"):
+        list(encoder.chunks())
+
+
+def test_projection_stream_rejects_modified_manifest_and_byte_limit(tmp_path: Path) -> None:
+    reader = open_reader(make_repo(tmp_path, {"a.py": b"print(1)\n"}))
+    manifest = prepare_projection(reader, reader.snapshot.identity, reader.tree)
+    changed = replace(manifest, files=(replace(manifest.files[0], sha256="0" * 64),))
+    encoder = ProjectionEncoder(reader, changed)
+    with pytest.raises(ReadError, match="manifest mismatch"):
+        list(encoder.chunks())
+    assert encoder.receipt is None
+    limited = ProjectionEncoder(reader, manifest, max_wire_bytes=1)
+    with pytest.raises(ReadError, match="wire limit"):
+        list(limited.chunks())
+    assert limited.receipt is None
+
+
+def test_projection_stream_interruption_never_produces_receipt(tmp_path: Path) -> None:
+    reader = open_reader(make_repo(tmp_path, {"a.py": b"x" * 100_000}))
+    manifest = prepare_projection(reader, reader.snapshot.identity, reader.tree)
+    encoder = ProjectionEncoder(reader, manifest)
+    stream = encoder.chunks()
+    assert next(stream)
+    stream.close()
+    assert encoder.receipt is None

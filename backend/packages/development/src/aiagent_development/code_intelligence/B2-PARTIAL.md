@@ -207,3 +207,32 @@ resume. Rollback requires the same quiescence and compatible versions. In-flight
 requests, lost responses, host failure and replay-store continuity require
 operator handling; this procedure is not a verified production runbook or a
 proof of VM isolation. Development's real adapter remains blocked.
+
+## B2 source / artifact primitives (not an authenticated broker)
+
+The projection encoder rechecks the immutable Git snapshot and emits bounded,
+deterministic framed chunks with a SHA-256 over the exact complete wire bytes.
+POSIX staging validates the expected scope/metadata, each SHA-256 and Git blob
+ID, rejects unsafe paths, uses descriptor-relative no-follow creation, and
+cleans temporary data on normal errors and context exit. It yields an open
+source directory descriptor only after the complete framed digest matches.
+The trusted parent must be private to the broker UID and inaccessible to the
+Cell UID; the input stream and expected receipt are not authentication.
+Blocking transports must enforce their own wall-time deadline. Crash recovery
+and orphan cleanup are not implemented.
+
+The Supervisor has a private, non-RPC source-descriptor execution hook. It
+requires a root-owned source descriptor and a distinct non-root Cell UID. Its
+Landlock rule requires ABI >= 3 and a disjoint source/output directory: source
+is readable but not writable, and output remains writable. The descriptor must
+come from trusted staging with no pre-existing writable aliases or hardlinks.
+This hook is not wired to an Authority, Gateway or Source Broker; a signed
+ordinary command grant alone does not authenticate its source snapshot.
+
+An internal capture primitive reads only `index.scip`, rejects symlinks,
+hardlinks, oversized files and detected replacement, and copies into an
+unlinked read-only descriptor with a SHA-256 of the exact captured bytes. It
+requires a private trusted parent and assumes all untrusted output writers have
+already stopped. It does not authenticate execution, transfer an Artifact,
+check cancellation/lease, or publish. An official scip-python fixture has been
+captured and revalidated by the B1 decoder; this is not a fresh indexer run.

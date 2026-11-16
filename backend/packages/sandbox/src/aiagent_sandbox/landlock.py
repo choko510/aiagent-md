@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import stat
 from pathlib import Path
 
 # The Landlock syscall numbers are shared by supported Linux architectures (x86_64/aarch64).
@@ -143,16 +144,53 @@ def block_cross_task_process_access() -> None:
         raise OSError(err, os.strerror(err))
 
 
-def restrict_to_workspace(workspace: Path) -> None:
+def _contains_directory(ancestor: os.stat_result, descendant_fd: int) -> bool:
+    """Compare directory ancestry by descriptors, without following symlinks."""
+    current = os.dup(descendant_fd)
+    try:
+        for _ in range(256):
+            info = os.fstat(current)
+            if (info.st_dev, info.st_ino) == (ancestor.st_dev, ancestor.st_ino):
+                return True
+            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            parent_info = os.fstat(parent)
+            if (parent_info.st_dev, parent_info.st_ino) == (info.st_dev, info.st_ino):
+                os.close(parent)
+                return False
+            os.close(current)
+            current = parent
+        raise ValueError("directory depth exceeds isolation limit")
+    finally:
+        os.close(current)
+
+
+def _validate_separate_source(workspace: Path, source_fd: int) -> None:
+    source = os.fstat(source_fd)
+    if not stat.S_ISDIR(source.st_mode):
+        raise ValueError("source descriptor must identify a directory")
+    workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        output = os.fstat(workspace_fd)
+        if _contains_directory(output, source_fd) or _contains_directory(source, workspace_fd):
+            raise ValueError("source and workspace must not overlap")
+    finally:
+        os.close(workspace_fd)
+
+
+def restrict_to_workspace(workspace: Path, *, source_fd: int | None = None) -> None:
     """Invoke in the already-forked child before exec; raises if confinement cannot be applied.
 
     No /proc, parent workspace directory, /root, /run/secrets, or broad /etc access.
     The dynamic loader and Python standard library can read their system runtime paths.
     """
+    if source_fd is not None:
+        _validate_separate_source(workspace, source_fd)
     if os.uname().machine not in ("x86_64", "aarch64"):
         raise OSError("unsupported Landlock syscall architecture")
     libc = ctypes.CDLL(None, use_errno=True)
     abi = _syscall(libc, _SYS_CREATE, ctypes.c_void_p(), ctypes.c_size_t(0), ctypes.c_uint32(_CREATE_VERSION))
+    if source_fd is not None and abi < 3:
+        raise OSError("Landlock ABI 3 required for read-only source")
     handled = _EXECUTE | _READ | _WRITE
     if abi >= 2:
         handled |= _REFER
@@ -181,6 +219,20 @@ def restrict_to_workspace(workspace: Path) -> None:
                 )
             finally:
                 os.close(pfd)
+
+        if source_fd is not None:
+            # A directory descriptor opened by the trusted broker, never by a model.
+            # The source is disjoint from workspace, so the writable rule below
+            # cannot grant write access to the source via Landlock's union semantics.
+            attr = _PathBeneathAttr(_READ, source_fd)
+            _syscall(
+                libc,
+                _SYS_ADD,
+                ctypes.c_int(fd),
+                ctypes.c_int(_RULE_PATH_BENEATH),
+                ctypes.byref(attr),
+                ctypes.c_uint32(0),
+            )
 
         # Executables, standard libraries and runtime files only. Never allow the
         # supervisor's parent cell directory or a sibling workspace.

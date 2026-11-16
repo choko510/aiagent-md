@@ -268,3 +268,117 @@ def test_task_pid_namespace_blocks_cross_task_signals_and_preserves_child_manage
     result = run(s.execute(task_grant("task-c", args), args, "."))
     assert result["status"] == "EXITED" and result["exitCode"] == 0, result
     assert "OWN_CHILD_STOPPED" in result["stdout"], result
+
+
+def test_trusted_source_descriptor_is_read_only_in_real_supervisor(tmp_path: Path) -> None:
+    """Internal source-FD hook only: no authenticated Source Broker is claimed."""
+    import tempfile
+
+    s = sup(tmp_path, netns=False)
+    with tempfile.TemporaryDirectory(prefix="codex-cell-source-") as source_path:
+        source = Path(source_path)
+        source.chmod(0o755)
+        (source / "source.py").write_text("value=42\n", encoding="utf-8")
+        (source / "source.py").chmod(0o666)
+        source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            code = (
+                "from pathlib import Path\n"
+                f"p=Path({str(source / 'source.py')!r})\n"
+                "assert p.read_text() == 'value=42\\n'\n"
+                f"assert Path('/proc/self/fd/{source_fd}/source.py').read_text() == 'value=42\\n'\n"
+                "try:\n p.write_text('changed')\n"
+                "except PermissionError: print('SOURCE_READ_ONLY')\n"
+                "else: print('WRITABLE')\n"
+                "Path('output').write_text('ok')\n"
+            )
+            argv = [sys.executable, "-c", code]
+            result = run(s._execute(grant(argv), argv, ".", source_fd=source_fd))
+        finally:
+            os.close(source_fd)
+        assert result["status"] == "EXITED" and result["exitCode"] == 0, result
+        assert "SOURCE_READ_ONLY" in result["stdout"] and "WRITABLE" not in result["stdout"]
+        assert (source / "source.py").read_text(encoding="utf-8") == "value=42\n"
+        assert (s.workspace("t1", "task1", ".")[0] / "output").read_text() == "ok"
+
+
+def test_staged_source_descriptor_through_real_supervisor(tmp_path: Path) -> None:
+    """Synthetic in-process test: not a network Source Broker or authenticated Execution."""
+    import hashlib
+    import io
+    import struct
+    import tempfile
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "development" / "src"))
+    from aiagent_development.code_intelligence.models import Coverage, Identity
+    from aiagent_development.code_intelligence.projection import ProjectionFile, ProjectionManifest
+    from aiagent_development.code_intelligence.projection_stage import stage_projection
+    from aiagent_development.code_intelligence.projection_stream import (
+        _MAGIC,
+        ProjectionStreamReceipt,
+        _field,
+        _header,
+    )
+
+    content = b"value=42\n"
+    blob = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content, usedforsecurity=False).hexdigest()
+    item = ProjectionFile("input.py", blob, hashlib.sha256(content).hexdigest(), len(content))
+    identity = Identity("fixture-tenant", "fixture-owner", "fixture-repo", "fixture-rev", "a" * 40)
+    manifest = ProjectionManifest(identity, "b" * 40, (item,), len(content), Coverage.PARTIAL, ("fixture",))
+    prefix = _MAGIC + b"".join(
+        _field(value, 1024) for value in (identity.tenant_id, identity.owner_id, identity.binding_id, identity.revision)
+    )
+    prefix += _field(identity.commit, 64) + _field(manifest.tree, 64) + struct.pack(">I", 1)
+    wire = prefix + _header(item) + content
+    receipt = ProjectionStreamReceipt(hashlib.sha256(wire).hexdigest(), len(wire), 1)
+    s = sup(tmp_path, netns=False)
+    with tempfile.TemporaryDirectory(prefix="codex-stage-parent-") as parent:
+        with stage_projection(
+            Path(parent), io.BytesIO(wire), manifest, receipt, deadline=time.monotonic() + 10
+        ) as root_fd:
+            path = f"/proc/self/fd/{root_fd}/input.py"
+            code = (
+                "from pathlib import Path\n"
+                f"p=Path({path!r})\n"
+                "assert p.read_text() == 'value=42\\n'\n"
+                "try:\n p.write_text('changed')\n"
+                "except PermissionError: print('SOURCE_READ_ONLY')\n"
+                "else: print('WRITABLE')\n"
+                "Path('output').write_text('ok')\n"
+            )
+            argv = [sys.executable, "-c", code]
+            result = run(s._execute(grant(argv), argv, ".", source_fd=root_fd))
+            assert result["status"] == "EXITED" and result["exitCode"] == 0, result
+            assert "SOURCE_READ_ONLY" in result["stdout"] and "WRITABLE" not in result["stdout"]
+            fd = os.open("input.py", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            try:
+                assert os.read(fd, 100) == content
+            finally:
+                os.close(fd)
+        assert not list(Path(parent).iterdir())
+
+
+def test_source_descriptor_requires_privileged_supervisor_and_distinct_uid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = sup(tmp_path, netns=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    argv = ["/bin/true"]
+    with pytest.raises(GrantError, match="SOURCE_UID_ISOLATION_UNAVAILABLE"):
+        run(s._execute(grant(argv), argv, ".", source_fd=-1))
+
+
+def test_source_descriptor_requires_supervisor_owned_directory(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("requires root to test distinct source owner")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "foreign-source"
+    source.mkdir()
+    os.chown(source, 20001, 20001)
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        argv = ["/bin/true"]
+        with pytest.raises(GrantError, match="SOURCE_OWNER_MISMATCH"):
+            run(s._execute(grant(argv), argv, ".", source_fd=fd))
+    finally:
+        os.close(fd)
