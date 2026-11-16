@@ -241,6 +241,8 @@ def test_task_pid_namespace_blocks_cross_task_signals_and_preserves_child_manage
                 5000,
                 256 * 1024 * 1024,
                 int(time.time()) + 60,
+                attempt_id=uuid.uuid4().hex,
+                attempt_binding_version=1,
             ),
         )
 

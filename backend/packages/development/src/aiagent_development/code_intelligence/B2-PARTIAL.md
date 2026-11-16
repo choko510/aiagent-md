@@ -186,3 +186,24 @@ The Development adapter remains blocked; no new Development-owned canonical DB,
 self-attested signed fields, Artifact Broker or publication transaction is
 introduced. An Owner-approved snapshot and recipe authority plus canonical
 Execution/Attempt binding and authenticated Artifact transfer remain required.
+
+## Versioned grant rollout (wire-level compatibility only)
+
+A regression matrix compares the current verifier to the pre-attempt grant
+implementation from main `ac8185c4b9ceb7a1c7b52e296e50331e4d783065`:
+old Gateway grant / old Supervisor verifier accepts; old / new rejects with
+`LEGACY_DISABLED`; new v1 / old rejects as malformed; new v1 / new accepts.
+The matrix exercises signed grant formats, not deployed binaries or race-free
+rolling upgrades. The v1 Gateway requires an Attempt ID. The low-level legacy
+verifier opt-in is not enabled by the Supervisor and is not a production
+migration mechanism.
+
+A safe mixed-version online rollout is not established. For a planned cutover,
+stop new sandbox admission, wait for in-flight executions to finish, and resolve
+UNKNOWN outcomes through the existing authority; do not retry blindly. Keep the
+Supervisor's consumed-grant store and keys intact, upgrade Supervisor and
+Gateway while admission is stopped, verify the versions and v1 behavior, then
+resume. Rollback requires the same quiescence and compatible versions. In-flight
+requests, lost responses, host failure and replay-store continuity require
+operator handling; this procedure is not a verified production runbook or a
+proof of VM isolation. Development's real adapter remains blocked.
