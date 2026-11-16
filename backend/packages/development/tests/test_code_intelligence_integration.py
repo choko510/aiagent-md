@@ -219,7 +219,9 @@ def test_config_include_and_forged_entry_rejected(repo: tuple[Path, str, Path], 
         reader(repo)
 
 
-def test_three_stages_share_verified_blobs_above_20_mib(repo: tuple[Path, str, Path]) -> None:
+def test_three_stages_share_verified_blobs_above_20_mib(
+    repo: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, _, git = repo
     # Each object is distinct and below the default per-file cap; the repository
     # exceeds 20 MiB but remains below the 32 MiB shared unique-byte budget.
@@ -232,6 +234,13 @@ def test_three_stages_share_verified_blobs_above_20_mib(repo: tuple[Path, str, P
     assert inv.coverage == Coverage.COMPLETE
     consumed = snap.bytes_read
     assert consumed > 20 * 1024 * 1024
+    original_git = snap._git
+
+    def no_blob_reread(*args: str) -> bytes:
+        assert args[:2] != ("cat-file", "blob"), "verified blob was read a second time"
+        return original_git(*args)
+
+    monkeypatch.setattr(snap, "_git", no_blob_reread)
     result = search(snap, inv, "# 00")
     assert result.coverage == Coverage.TEXT_ONLY and len(result.hits) == 1
     impact_result = impact(snap, inv, ("module_00.py",))
