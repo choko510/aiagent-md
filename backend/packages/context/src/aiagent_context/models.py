@@ -9,6 +9,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
+from typing import Literal
 
 
 class SafeStop(RuntimeError):
@@ -261,6 +262,33 @@ class ContextPublication:
     payload_digest: str
 
 
+Polarity = Literal["AFFIRMED", "NEGATED", "UNSPECIFIED"]
+EntailmentVerdict = Literal["SUPPORTED", "REFUTED", "UNVERIFIED"]
+OptimizationOutcome = Literal["PASSTHROUGH", "OPTIMIZED", "SKIPPED_UNSAFE"]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBackedFact:
+    artifact_ref: str
+    fact_type: str
+    value: str
+    polarity: Polarity
+    verdict: EntailmentVerdict
+    source_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationReceipt:
+    codec_id: str
+    codec_version: str
+    outcome: OptimizationOutcome
+    before_tokens: int
+    after_tokens: int
+    input_sha256: str
+    output_sha256: str
+    reason_code: str
+
+
 @dataclass(frozen=True, slots=True)
 class ContextPlan:
     scope: Scope
@@ -285,4 +313,6 @@ class ContextPlan:
     tokenizer_id: str
     tool_pairs: tuple[str, ...]
     raw_event_cursor: str
+    verified_facts: tuple[SourceBackedFact, ...] = ()
+    optimization_receipt: OptimizationReceipt | None = None
     schema_major: int = field(default=1, init=False)

@@ -70,6 +70,19 @@ def build_model_server(
 
     srv.register("model.context_eligible", context_eligible, {"runtime"})
 
+    async def context_compact(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            claim = Claim.from_wire(body["claim"])
+            auto_if_needed = bool(body.get("autoIfNeeded", False))
+            threshold_chars = int(body.get("thresholdChars", 4096))
+        except (KeyError, ValueError, TypeError):
+            raise RpcError("BAD_REQUEST") from None
+        return await asyncio.to_thread(
+            gw.compact_context, claim, auto_if_needed=auto_if_needed, threshold_chars=threshold_chars
+        )
+
+    srv.register("model.context_compact", context_compact, {"runtime"})
+
     async def complete_context(caller: str, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         try:
             claim = Claim.from_wire(body["claim"])

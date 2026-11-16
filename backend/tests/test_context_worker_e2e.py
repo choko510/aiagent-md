@@ -746,7 +746,35 @@ def test_restored_pre_update_memory_is_revoked_conservatively(
     admin.adopt_runs_after_restore(pg.owner)
     report = reconcile_owner(pg.owner, log, reconciled_by="restore-update-test")
     assert report.replayed == 1
-    item = api.get(f"/v1/tasks/{task}/memory", headers=auth(t)).json()["items"][0]
-    assert item["id"] == memory_id and item["revoked"] is True and item["revision"] == 2
+    rows = api.get(f"/v1/tasks/{task}/memory", headers=auth(t)).json()["items"]
+    assert [r["id"] for r in rows] == [memory_id] and rows[0]["revoked"] is True
     history = api.get(f"/v1/tasks/{task}/memory/{memory_id}/revisions", headers=auth(t)).json()["items"]
     assert history[-1]["changeKind"] == "revoked" and history[-1]["revision"] == 2
+
+
+def test_autonomous_worker_compaction_without_manual_publish(stack: Stack, api: TestClient, pg: PgEnv) -> None:
+    """Normal Worker autonomously invokes model.context_compact (without _publish_context),
+    seals Raw Artifacts + NLI facts + Context Manifest to HEAD, and completes via model.context."""
+    t = admin.provision_tenant(pg.owner)
+    goal = "autonomous context compaction " + ("detail item; " * 20)
+    task = submit(api, t, goal)
+    run_id = state(api, t, task)["run"]["id"]
+    source_ref, projection_ref = _context_ready(api, t, task, recipient="fake", model="fake-gateway")
+    _create_memory(api, t, task, source_ref, projection_ref)
+
+    res = stack.worker(AIAGENT_CONTEXT_AUTO_COMPACT_CHARS="64")
+    assert res.returncode == 0, res.stderr[-2500:]
+    st = state(api, t, task)
+    assert st["state"] == "SUCCEEDED", st
+    with _database(pg.owner) as db, db.conn() as c:
+        summary_rows = c.execute(
+            "SELECT checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s AND entry_kind='summary'"
+            " ORDER BY checkpoint_revision",
+            (run_id,),
+        ).fetchall()
+        assert any(r["checkpoint_json"].get("kind") == "context_manifest" for r in summary_rows), summary_rows
+        dispatches = c.execute(
+            "SELECT status_code FROM agent.context_dispatches WHERE run_id=%s ORDER BY created_at",
+            (run_id,),
+        ).fetchall()
+        assert [d["status_code"] for d in dispatches] == ["COMPLETED"]

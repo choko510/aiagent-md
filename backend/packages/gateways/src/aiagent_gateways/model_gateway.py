@@ -480,6 +480,153 @@ class ModelGateway:
             raise RpcError("CONTEXT_OUTCOME_UNKNOWN")
         return {"eligible": True, "head": str(head), "model": policy.model}
 
+    def compact_context(
+        self,
+        claim: Claim,
+        *,
+        auto_if_needed: bool = False,
+        threshold_chars: int = 4096,
+    ) -> dict[str, Any]:
+        """Autonomous server-side Context compaction triggered by Runtime Worker RPC."""
+        import json
+        from datetime import UTC, datetime
+
+        from aiagent_context import (
+            Anchor,
+            AnchorKind,
+            ContextRequest,
+            ContextService,
+            HeuristicNliVerifier,
+            ModelBoundTokenEstimator,
+            ModelBudget,
+            SafeStop,
+            SourceInput,
+        )
+
+        from .context_head import PostgresHeadPort
+        from .context_policy import ContextPolicyError, resolve_policy
+
+        if self.context_key is None:
+            return {"compacted": False, "reason": "CONTEXT_NOT_ELIGIBLE"}
+        context = ContextAdmission(self.db, claim, self.context_key, 1)
+        try:
+            unresolved = context.memory._call("context_dispatch_unresolved", context.scope)
+        except Exception:
+            raise RpcError("CONTEXT_OUTCOME_UNKNOWN") from None
+        if unresolved is None or unresolved["context_dispatch_unresolved"]:
+            raise RpcError("CONTEXT_OUTCOME_UNKNOWN")
+        try:
+            policy = resolve_policy(self.db, claim, context.memory, context.scope)
+        except ContextPolicyError as exc:
+            return {"compacted": False, "reason": exc.code}
+        try:
+            with self.db.tx() as c:
+                run = control.check_current(c, claim, for_update=True)
+                head = int(run["head_revision"])
+                task = c.execute(
+                    "SELECT t.profile_code, g.goal_text FROM agent.tasks t JOIN agent.task_goal_revisions g"
+                    " ON g.tenant_id=t.tenant_id AND g.task_id=t.id AND g.revision=t.goal_revision"
+                    " WHERE t.tenant_id=%s AND t.id=%s",
+                    (claim.tenant_id, claim.task_id),
+                ).fetchone()
+                rows = c.execute(
+                    "SELECT checkpoint_revision, entry_kind, checkpoint_json FROM agent.run_checkpoints"
+                    " WHERE tenant_id=%s AND run_id=%s ORDER BY checkpoint_revision ASC",
+                    (claim.tenant_id, claim.run_id),
+                ).fetchall()
+        except control.ControlError as exc:
+            raise RpcError(exc.code) from None
+        if task is None:
+            raise RpcError("NOT_FOUND")
+        if rows and rows[-1]["entry_kind"] == "summary":
+            manifest = dict(rows[-1]["checkpoint_json"])
+            if (
+                manifest.get("kind") == "context_manifest"
+                and manifest.get("recipient") == policy.recipient
+                and manifest.get("model") == policy.model
+                and manifest.get("restoreIncarnation") == str(claim.restore_incarnation)
+            ):
+                return {"compacted": True, "head": str(head), "reused": True}
+
+        total_chars = sum(len(json.dumps(r["checkpoint_json"], ensure_ascii=False)) for r in rows)
+        if auto_if_needed and total_chars < max(1, threshold_chars):
+            return {"compacted": False, "reason": "BELOW_THRESHOLD"}
+
+        now_iso = datetime.now(UTC).isoformat()
+        sources: list[SourceInput] = []
+        for idx, r in enumerate(rows[-32:]):
+            kind = str(r["entry_kind"])
+            if kind not in ("user", "assistant", "tool"):
+                continue
+            body_text = json.dumps(r["checkpoint_json"], ensure_ascii=False, separators=(",", ":"))
+            if not body_text.strip():
+                continue
+            try:
+                sources.append(
+                    SourceInput(
+                        source_ref=f"head:{claim.run_id}:{r['checkpoint_revision']}:{idx}",
+                        observed_at=now_iso,
+                        body=body_text.encode("utf-8"),
+                        locator_ref=f"run_checkpoint:{r['checkpoint_revision']}",
+                    )
+                )
+            except SafeStop as exc:
+                raise RpcError(exc.code) from None
+        if not sources:
+            try:
+                sources.append(
+                    SourceInput(
+                        source_ref=f"goal:{claim.goal_revision}",
+                        observed_at=now_iso,
+                        body=str(task["goal_text"]).encode("utf-8"),
+                        locator_ref=f"goal:{claim.goal_revision}",
+                    )
+                )
+            except SafeStop as exc:
+                raise RpcError(exc.code) from None
+
+        try:
+            head_port = PostgresHeadPort(self.db, claim, context.store, context.memory)
+            retrieval = context.memory.retrieval(
+                context.scope, query=str(task["goal_text"]), recipient=policy.recipient
+            )
+            req = ContextRequest(
+                scope=context.scope,
+                expected_head=str(head),
+                lease_epoch=str(claim.lease_epoch),
+                goal_revision=str(claim.goal_revision),
+                policy_version=head_port.policy_version(context.scope),
+                memory_source_epoch=retrieval.source_epoch,
+                raw_event_cursor=f"head:{head}",
+                anchors=(Anchor(AnchorKind.GOAL_REF, f"goal:{claim.goal_revision}", str(task["goal_text"])),),
+                budget=ModelBudget(
+                    policy.model,
+                    "v1",
+                    "cl100k_base",
+                    max(8000, int(run["token_budget"])),
+                    1024,
+                    512,
+                ),
+                memory=retrieval.projections,
+                recipient=policy.recipient,
+            )
+            svc = ContextService(
+                context.store,
+                head_port,
+                semantic_verifier=HeuristicNliVerifier(),
+                tokenizer=ModelBoundTokenEstimator(),
+            )
+            plan = svc.compact(req, tuple(sources))
+        except SafeStop as exc:
+            raise RpcError(exc.code) from None
+        return {
+            "compacted": True,
+            "head": plan.committed_head,
+            "planDigest": plan.context_digest,
+            "factCount": len(plan.verified_facts),
+            "reused": False,
+        }
+
     async def complete_context(self, claim: Claim, head: int) -> dict[str, Any]:
         """Send an already committed Context HEAD to the owner-approved recipient.
 
