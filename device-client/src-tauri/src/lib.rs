@@ -274,6 +274,35 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
     Ok(state.snapshot())
 }
 
+impl UiState {
+    fn recover_legacy_stop_internal(&mut self, confirmation: &str) -> Result<(), String> {
+        if self.init_error.is_some() {
+            return Err("JOURNAL_UNAVAILABLE".into());
+        }
+        if self.revoked {
+            return Err("CANNOT_RECOVER_REVOKED_DEVICE".into());
+        }
+        let Some(journal) = self.journal.as_mut() else {
+            return Err("JOURNAL_UNAVAILABLE".into());
+        };
+        let rec = journal.owner_confirm_clear_legacy_stop(confirmation)?;
+        self.stopped = rec.stopped;
+        self.revoked = rec.revoked;
+        self.audit = rec.audit;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn recover_legacy_stop(
+    state: tauri::State<'_, Mutex<UiState>>,
+    confirmation: String,
+) -> Result<UiSnapshot, String> {
+    let mut state = state.lock().map_err(|_| "STATE_LOCKED")?;
+    state.recover_legacy_stop_internal(&confirmation)?;
+    Ok(state.snapshot())
+}
+
 #[tauri::command]
 fn pair_cloud(
     state: tauri::State<'_, Mutex<UiState>>,
@@ -330,6 +359,7 @@ pub fn run() {
             snapshot,
             stop_local,
             revoke_local,
+            recover_legacy_stop,
             pair_cloud,
             perform_local_action
         ])
@@ -477,6 +507,29 @@ mod tests {
         assert_eq!(
             state.execute_admitted_action(&req, &grant, None, 100),
             Decision::Denied("LOCAL_STOP_OR_REVOKED")
+        );
+    }
+
+    #[test]
+    fn recover_legacy_stop_enforces_confirmation_and_permanent_revoke() {
+        let dir = TempDir::new();
+        let mut state = UiState::open_in(&dir.path().join("journal.db"));
+        assert_eq!(
+            state.recover_legacy_stop_internal("WRONG").unwrap_err(),
+            "OWNER_CONFIRMATION_REQUIRED"
+        );
+        assert_eq!(
+            state
+                .recover_legacy_stop_internal(LocalJournal::OWNER_RECOVERY_PHRASE)
+                .unwrap_err(),
+            "NOT_A_LEGACY_MIGRATED_STOP"
+        );
+        state.revoked = true;
+        assert_eq!(
+            state
+                .recover_legacy_stop_internal(LocalJournal::OWNER_RECOVERY_PHRASE)
+                .unwrap_err(),
+            "CANNOT_RECOVER_REVOKED_DEVICE"
         );
     }
 }
