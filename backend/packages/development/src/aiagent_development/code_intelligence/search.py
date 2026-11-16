@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .git_reader import GitSnapshot
 from .inventory import RepositoryInventory
 from .models import Coverage, Identity, ReadError
+from .paths import display_path
 
 
 @dataclass(frozen=True)
@@ -65,15 +66,15 @@ def search(  # noqa: PLR0912
                 raise ReadError("blob digest mismatch")
             content = data.decode("utf-8")
         except (ReadError, UnicodeError):
-            issues.append(f"{entry.path}: text read failed or invalid UTF-8")
+            issues.append(f"{display_path(entry.path)}: text read failed or invalid UTF-8")
             continue
-        for line_no, line in enumerate(content.splitlines(), 1):
+        for line_no, line in enumerate(content.split("\n"), 1):
             if query in line:
-                hits.append(SearchHit(inv.identity, entry.path, line_no, entry.oid, item.digest or ""))
-                if len(hits) >= reader.limits.hits:
+                if len(hits) == reader.limits.hits:
                     truncated = True
                     issues.append("hit limit reached")
                     break
+                hits.append(SearchHit(inv.identity, entry.path, line_no, entry.oid, item.digest or ""))
         if truncated:
             break
     return CodeSearchResult(

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 
 def validate_git_path(path: str) -> str:
-    """Reject paths that cannot safely be displayed or used as repository paths.
+    """Reject unsafe repository paths; callers must escape paths before display.
 
     Git paths may contain spaces, Unicode and newlines. They are never passed to
     a shell or opened relative to the host filesystem by this validator.
@@ -19,3 +21,8 @@ def validate_git_path(path: str) -> str:
     if any(":" in part for part in parts):
         raise ValueError("nonportable Git path component")
     return path
+
+
+def display_path(path: str) -> str:
+    """Return a single-line, ASCII JSON string for untrusted path display."""
+    return json.dumps(path, ensure_ascii=True)

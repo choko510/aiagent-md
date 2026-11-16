@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from .git_reader import GitSnapshot
 from .inventory import LOCKS, MANIFESTS, RepositoryInventory
 from .models import Coverage, Identity, ReadError
-from .paths import validate_git_path
+from .paths import display_path, validate_git_path
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,12 @@ class ImpactAnalysisResult:
     )
 
 
+def _test_matches(source_stem: str, test_stem: str) -> bool:
+    """Use whole names, not arbitrary substrings (e.g. a.py and banana.py)."""
+    source, target = source_stem.casefold(), test_stem.casefold()
+    return target in {f"test_{source}", f"{source}_test", f"{source}.test", f"{source}.spec"}
+
+
 def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ...]) -> ImpactAnalysisResult:  # noqa: PLR0912, PLR0915
     if inv.identity != reader.snapshot.identity:
         raise ReadError("inventory snapshot scope mismatch")
@@ -50,11 +56,13 @@ def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ..
     def add(path: str, reason: str) -> None:
         reasons.setdefault(path, set()).add(reason)
 
-    exhausted = False
+    # Direct changes are mandatory, even if they alone exceed the candidate limit.
     for path in paths:
         add(path, "direct change")
+    exhausted = False
+    for path in paths:
         if path not in files:
-            issues.append(f"{path}: absent from snapshot; may be a deletion")
+            issues.append(f"{display_path(path)}: absent from snapshot; may be a deletion")
         source = PurePosixPath(path)
         for candidate, item in files.items():
             if time.monotonic() > reader.deadline:
@@ -64,7 +72,7 @@ def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ..
             target = PurePosixPath(candidate)
             if target.parent == source.parent and candidate != path:
                 add(candidate, "same directory")
-            if item.classification == "TEST" and source.stem.lower() in target.stem.lower():
+            if item.classification == "TEST" and _test_matches(source.stem, target.stem):
                 add(candidate, "test filename heuristic")
             if (source.name in MANIFESTS or source.name in LOCKS) and (
                 target.parent == source.parent or target.is_relative_to(source.parent)
@@ -85,7 +93,7 @@ def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ..
                 raise ReadError("blob digest mismatch")
             tree = ast.parse(raw)
         except (ReadError, SyntaxError, ValueError, UnicodeError, RecursionError):
-            issues.append(f"{item.entry.path}: Python import analysis unavailable")
+            issues.append(f"{display_path(item.entry.path)}: Python import analysis unavailable")
             continue
         imports: set[str] = set()
         for node in ast.walk(tree):
@@ -108,7 +116,7 @@ def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ..
                     else ""
                 )
                 if name in {"__import__", "import_module", "getattr", "eval", "exec", "CDLL"}:
-                    issues.append(f"{item.entry.path}: dynamic reference or FFI detected")
+                    issues.append(f"{display_path(item.entry.path)}: dynamic reference or FFI detected")
         if any(stem in name.split(".") for name in imports for stem in stems):
             add(item.entry.path, "Python static import name candidate")
         if item.entry.path in paths:
@@ -120,10 +128,12 @@ def impact(reader: GitSnapshot, inv: RepositoryInventory, changed: tuple[str, ..
                         break
                     if imported.language == "Python" and PurePosixPath(imported.entry.path).stem in name.split("."):
                         add(imported.entry.path, "imported module name candidate")
-    ordered = sorted(reasons.items())
-    if len(ordered) > reader.limits.hits:
-        issues.append("impact candidate limit reached")
-        ordered = ordered[: reader.limits.hits]
+    direct = set(paths)
+    indirect = sorted((path, why) for path, why in reasons.items() if path not in direct)
+    remaining = max(0, reader.limits.hits - len(direct))
+    if len(indirect) > remaining or len(direct) > reader.limits.hits:
+        issues.append("impact candidate limit reached; direct changes retained")
+    ordered = sorted([(path, reasons[path]) for path in paths] + indirect[:remaining])
     return ImpactAnalysisResult(
         inv.identity,
         paths,

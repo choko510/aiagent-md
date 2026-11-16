@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 from .git_reader import GitSnapshot
 from .models import Coverage, Entry, Identity, ReadError
+from .paths import display_path
 
 MANIFESTS = {
     "pyproject.toml",
@@ -127,24 +128,24 @@ def inventory(reader: GitSnapshot) -> RepositoryInventory:
         )
         if entry.kind == "BLOB" and sensitive:
             reason = "sensitive filename withheld"
-            issues.append(f"{entry.path}: {reason}")
+            issues.append(f"{display_path(entry.path)}: {reason}")
         elif entry.kind == "BLOB":
             try:
                 data = reader.read(entry)
                 digest = hashlib.sha256(data).hexdigest()
             except ReadError as exc:
                 reason = str(exc)
-                issues.append(f"{entry.path}: {reason}")
+                issues.append(f"{display_path(entry.path)}: {reason}")
         language, classification, classification_reason = _classify(entry, data)
         if reason:
             classification = "UNKNOWN"
         reason = reason or classification_reason
         if reason and classification in {"SYMLINK", "SUBMODULE", "GENERATED", "THIRD_PARTY", "BINARY"}:
-            issues.append(f"{entry.path}: {reason}")
+            issues.append(f"{display_path(entry.path)}: {reason}")
         if classification_reason and (
             "LFS" in classification_reason or classification_reason == "unrecognized file type"
         ):
-            issues.append(f"{entry.path}: {classification_reason}")
+            issues.append(f"{display_path(entry.path)}: {classification_reason}")
         if language != "Other":
             languages[language] = languages.get(language, 0) + 1
         files.append(FileInfo(entry, language, classification, digest, reason))

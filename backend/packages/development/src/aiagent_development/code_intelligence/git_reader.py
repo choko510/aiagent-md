@@ -34,6 +34,8 @@ class GitSnapshot:
         self.limits = limits
         self.deadline = time.monotonic() + limits.total_seconds
         self.bytes_read = 0
+        # Verified immutable blob bytes, bounded by total_bytes and scoped to this reader.
+        self._blob_cache: dict[str, bytes] = {}
         self._entries: dict[str, Entry] | None = None
         self._issues: tuple[str, ...] = ()
         self.git = git_executable
@@ -227,6 +229,13 @@ class GitSnapshot:
             or entry.size is None
         ):
             raise ReadError("entry is not a readable tracked blob")
+        if time.monotonic() > self.deadline:
+            raise ReadError("overall time budget exceeded")
+        cached = self._blob_cache.get(entry.oid)
+        if cached is not None:
+            if len(cached) != entry.size:
+                raise ReadError("blob size mismatch")
+            return cached
         if entry.size > self.limits.file_bytes or self.bytes_read + entry.size > self.limits.total_bytes:
             raise ReadError("blob byte budget exceeded")
         data = self._git("cat-file", "blob", entry.oid)
@@ -234,6 +243,7 @@ class GitSnapshot:
             raise ReadError("blob size mismatch")
         self._verify_object("blob", entry.oid, data)
         self.bytes_read += len(data)
+        self._blob_cache[entry.oid] = data
         return data
 
 

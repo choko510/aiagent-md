@@ -41,7 +41,7 @@ def test_manifest_limits_secrets_and_injection(repo: tuple[Path, str, Path]) -> 
     assert inv.coverage == Coverage.PARTIAL
     assert any("large.py" in i for i in inv.issues)
     result = search(snap, inv, "topsecret")
-    assert result.hits and result.truncated and result.hits[0].excerpt is None
+    assert result.hits and not result.truncated and result.hits[0].excerpt is None
     assert "topsecret" not in repr(result)
     wide = reader((root, sha, git))
     assert any(c.path == "test_a.py" for c in impact(wide, inventory(wide), ("a.py",)).candidates)
@@ -217,3 +217,113 @@ def test_config_include_and_forged_entry_rejected(repo: tuple[Path, str, Path], 
     subprocess.run([str(git), "-C", str(root), "config", "include.path", str(config_path)], check=True)
     with pytest.raises(ReadError, match="include"):
         reader(repo)
+
+
+def test_three_stages_share_verified_blobs_above_20_mib(repo: tuple[Path, str, Path]) -> None:
+    root, _, git = repo
+    # Each object is distinct and below the default per-file cap; the repository
+    # exceeds 20 MiB but remains below the 32 MiB shared unique-byte budget.
+    payload = b"# " + b"x" * (1024 * 1024 - 100) + b"\n"
+    for number in range(22):
+        (root / f"module_{number:02}.py").write_bytes(f"# {number:02}\n".encode() + payload)
+    sha = commit(root, git)
+    snap = reader((root, sha, git))
+    inv = inventory(snap)
+    assert inv.coverage == Coverage.COMPLETE
+    consumed = snap.bytes_read
+    assert consumed > 20 * 1024 * 1024
+    result = search(snap, inv, "# 00")
+    assert result.coverage == Coverage.TEXT_ONLY and len(result.hits) == 1
+    impact_result = impact(snap, inv, ("module_00.py",))
+    assert impact_result.coverage == Coverage.TEXT_ONLY
+    assert snap.bytes_read == consumed
+
+
+def test_git_line_numbers_for_lf_crlf_and_unicode_separator(repo: tuple[Path, str, Path]) -> None:
+    root, _, git = repo
+    (root / "lines.py").write_bytes("first\nsecond\r\nthird\u2028needle\nneedle\r\n".encode("utf-8"))
+    sha = commit(root, git)
+    snap = reader((root, sha, git))
+    result = search(snap, inventory(snap), "needle")
+    assert [hit.line for hit in result.hits] == [3, 4]
+
+
+def test_exact_search_limit_is_not_truncation(repo: tuple[Path, str, Path]) -> None:
+    root, _, git = repo
+    (root / "b.py").write_text("target\ntarget\nextra\n", encoding="utf-8")
+    sha = commit(root, git)
+    snap = GitSnapshot(reader((root, sha, git)).snapshot, git, Limits(hits=2))
+    inv = inventory(snap)
+    exact = search(snap, inv, "target")
+    assert len(exact.hits) == 2 and not exact.truncated and exact.coverage == Coverage.TEXT_ONLY
+    overflow = search(snap, inv, "a")
+    assert len(overflow.hits) == 2 and overflow.truncated and overflow.coverage == Coverage.PARTIAL
+
+
+def test_impact_preserves_direct_changes_above_limit_and_matches_whole_test_names(
+    repo: tuple[Path, str, Path],
+) -> None:
+    root, _, git = repo
+    (root / "z.py").write_text("value = 1\n")
+    (root / "test_a.py").write_text("pass\n")
+    (root / "test_banana.py").write_text("pass\n")
+    sha = commit(root, git)
+    snap = GitSnapshot(reader((root, sha, git)).snapshot, git, Limits(hits=1))
+    inv = inventory(snap)
+    result = impact(snap, inv, ("z.py", "a.py"))
+    assert {c.path for c in result.candidates} == {"a.py", "z.py"}
+    assert all("direct change" in c.reasons for c in result.candidates)
+    assert result.coverage == Coverage.PARTIAL
+    wide = reader((root, sha, git))
+    candidates = {c.path: c.reasons for c in impact(wide, inventory(wide), ("a.py",)).candidates}
+    assert "test filename heuristic" in candidates["test_a.py"]
+    assert "test filename heuristic" not in candidates["test_banana.py"]
+
+
+def test_control_characters_are_escaped_in_issues_but_paths_remain_raw(repo: tuple[Path, str, Path]) -> None:
+    if __import__("os").name == "nt":
+        pytest.skip("control characters in filenames need a POSIX filesystem")
+    root, _, git = repo
+    unsafe = "bad\n\x1b.py"
+    valid = "good\n\x1b.py"
+    (root / unsafe).write_bytes(b"\xffbad")
+    (root / valid).write_text('import importlib\nimportlib.import_module("a")\nneedle\n', encoding="utf-8")
+    sha = commit(root, git)
+    snap = reader((root, sha, git))
+    inv = inventory(snap)
+    result = search(snap, inv, "needle")
+    imp = impact(snap, inv, (unsafe, "missing\n\x1b.py"))
+    assert result.hits[0].path == valid
+    assert unsafe in imp.changed
+    assert any("\\n\\u001b" in issue for issue in (*result.issues, *imp.issues))
+    assert all("\n" not in issue and "\x1b" not in issue for issue in (*inv.issues, *result.issues, *imp.issues))
+
+
+def test_blob_cache_preserves_verification_and_budget(
+    repo: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = reader(repo)
+    entry = snap.entries()[0][0]
+    original = snap._git
+
+    def corrupted(*args: str) -> bytes:
+        if args == ("cat-file", "blob", entry.oid):
+            return b"bad\n"  # same size as original, but not the same object
+        return original(*args)
+
+    monkeypatch.setattr(snap, "_git", corrupted)
+    with pytest.raises(ReadError, match="digest"):
+        snap.read(entry)
+    assert snap.bytes_read == 0
+    monkeypatch.setattr(snap, "_git", original)
+    assert snap.read(entry) == b"old\n"
+    assert snap.bytes_read == 4
+    monkeypatch.setattr(snap, "_git", corrupted)
+    assert snap.read(entry) == b"old\n"  # only the verified immutable bytes were cached
+    assert snap.bytes_read == 4
+
+    small = GitSnapshot(snap.snapshot, snap.git, Limits(total_bytes=3))
+    small.entries()
+    with pytest.raises(ReadError, match="budget"):
+        small.read(entry)
+    assert small.bytes_read == 0
