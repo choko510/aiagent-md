@@ -432,6 +432,115 @@ def create_app(db: Database | None = None) -> FastAPI:
 
         return StreamingResponse(sse(), media_type="text/event-stream")
 
+    @app.get("/v1/tasks")
+    async def list_tasks(s: S, limit: int = 50) -> dict[str, Any]:
+        bounded = max(1, min(limit, 200))
+
+        def q() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                rows = c.execute(
+                    "SELECT t.id, t.status_code, t.profile_code, t.goal_revision, t.active_run_id,"
+                    " t.created_at, t.updated_at, r.status_code AS run_state"
+                    " FROM agent.tasks t LEFT JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.id=t.active_run_id"
+                    " WHERE t.tenant_id=%s AND t.owner_user_id=%s ORDER BY t.created_at DESC LIMIT %s",
+                    (s.tenant_id, s.user_id, bounded),
+                ).fetchall()
+                return [
+                    {
+                        "id": str(r["id"]),
+                        "state": str(r["status_code"]),
+                        "profile": str(r["profile_code"]),
+                        "goalRevision": str(r["goal_revision"]),
+                        "activeRunId": str(r["active_run_id"]) if r["active_run_id"] else None,
+                        "runState": str(r["run_state"]) if r["run_state"] else None,
+                        "createdAt": r["created_at"].isoformat(),
+                        "updatedAt": r["updated_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+
+        return {"schemaVersion": "1.0", "items": await asyncio.to_thread(q)}
+
+    @app.get("/v1/browser/sessions")
+    async def list_browser_sessions(s: S, limit: int = 50) -> dict[str, Any]:
+        bounded = max(1, min(limit, 200))
+
+        def q() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                rows = c.execute(
+                    "SELECT id, task_id, run_id, state, mode, generation, goal_revision, lease_epoch, updated_at"
+                    " FROM agent.browser_sessions"
+                    " WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at DESC LIMIT %s",
+                    (s.tenant_id, s.user_id, bounded),
+                ).fetchall()
+                return [
+                    {
+                        "id": str(r["id"]),
+                        "taskId": str(r["task_id"]),
+                        "runId": str(r["run_id"]),
+                        "state": str(r["state"]),
+                        "mode": str(r["mode"]),
+                        "generation": int(r["generation"]),
+                        "goalRevision": str(r["goal_revision"]),
+                        "leaseEpoch": str(r["lease_epoch"]),
+                        "updatedAt": r["updated_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+
+        return {"schemaVersion": "1.0", "items": await asyncio.to_thread(q)}
+
+    @app.get("/v1/campaigns")
+    async def list_campaigns(s: S, limit: int = 50) -> dict[str, Any]:
+        bounded = max(1, min(limit, 200))
+
+        def q() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                rows = c.execute(
+                    "SELECT id, state, control_version, goal_revision, updated_at"
+                    " FROM agent.automation_campaigns"
+                    " WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at DESC LIMIT %s",
+                    (s.tenant_id, s.user_id, bounded),
+                ).fetchall()
+                return [
+                    {
+                        "id": str(r["id"]),
+                        "state": str(r["state"]),
+                        "controlVersion": int(r["control_version"]),
+                        "goalRevision": str(r["goal_revision"]),
+                        "updatedAt": r["updated_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+
+        return {"schemaVersion": "1.0", "items": await asyncio.to_thread(q)}
+
+    @app.get("/v1/watches")
+    async def list_watches(s: S, limit: int = 50) -> dict[str, Any]:
+        bounded = max(1, min(limit, 200))
+
+        def q() -> list[dict[str, Any]]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                rows = c.execute(
+                    "SELECT watch_id, timezone_id, max_occurrences, revision, active, created_at"
+                    " FROM agent.automation_watches"
+                    " WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at DESC LIMIT %s",
+                    (s.tenant_id, s.user_id, bounded),
+                ).fetchall()
+                return [
+                    {
+                        "watchId": str(r["watch_id"]),
+                        "timezoneId": str(r["timezone_id"]),
+                        "maxOccurrences": int(r["max_occurrences"]),
+                        "revision": int(r["revision"]),
+                        "active": bool(r["active"]),
+                        "createdAt": r["created_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+
+        return {"schemaVersion": "1.0", "items": await asyncio.to_thread(q)}
+
     @app.get("/v1/campaigns/{campaign_id}")
     async def get_campaign(campaign_id: str, s: S) -> dict[str, Any]:
         def q() -> dict[str, Any] | None:

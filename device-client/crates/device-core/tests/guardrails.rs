@@ -515,3 +515,83 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
     )
     .is_err());
 }
+
+#[test]
+fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
+    use aiagent_device_core::agent::AuthenticatedChannelPort;
+    use aiagent_device_core::mock::mock_grant;
+    use aiagent_device_core::{
+        make_start_permit, CloudPairingConfig, LocalAdapters, TlsAuthenticatedChannel,
+    };
+
+    let bad_http = CloudPairingConfig {
+        endpoint: "http://insecure.local/ws".into(),
+        ca_pin_sha256: "a".repeat(64),
+        client_cert_present: true,
+        tls_handshake_verified: true,
+    };
+    assert!(bad_http.validate().is_err());
+
+    let no_mtls = CloudPairingConfig {
+        endpoint: "wss://control.aiagent.example/ws".into(),
+        ca_pin_sha256: "a".repeat(64),
+        client_cert_present: false,
+        tls_handshake_verified: true,
+    };
+    assert!(no_mtls.validate().is_err());
+
+    let mut ch = TlsAuthenticatedChannel::unpaired();
+    assert!(!ch.online());
+    let valid_cfg = CloudPairingConfig {
+        endpoint: "wss://control.aiagent.example/ws".into(),
+        ca_pin_sha256: "b".repeat(64),
+        client_cert_present: true,
+        tls_handshake_verified: true,
+    };
+    ch.pair(valid_cfg).unwrap();
+    assert!(ch.online());
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("demo-ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let adapters = LocalAdapters {
+        build_root: Some(dir.path().to_path_buf()),
+        adb_probe_enabled: true,
+        chrome_native_host_connected: false,
+        desktop_accessibility_ready: false,
+        executed_count: 0,
+    };
+    let pol = LocalPolicy {
+        allow_mock_build: true,
+        allow_mock_android: true,
+        ..Default::default()
+    };
+    let build_req = ActionRequest::new(
+        scope("A"),
+        fence(),
+        "b1".into(),
+        Epoch(7),
+        Operation::BuildRun,
+        Target::Build {
+            workspace_id: "demo-ws".into(),
+        },
+        b"cargo test".to_vec(),
+    );
+    let build_grant = mock_grant(&build_req, "g1", 200);
+    ch.active_permit = Some(make_start_permit(&build_req, &build_grant, "p1", 200));
+
+    let j = LocalJournal::open(&dir.path().join("j.db"), &scope("A")).unwrap();
+    let mut agent = Agent::new(scope("A"), fence(), ch, adapters, pol, j);
+    assert_eq!(
+        agent.execute(&build_req, &build_grant, 100),
+        Decision::LocalCompleted
+    );
+    assert_eq!(agent.adapters.executed_count, 1);
+
+    // Without live OS UIA / Chrome extension / ADB serial attached, execution fails closed.
+    let desktop_req = request("A", "d1", Operation::DesktopClick);
+    agent.policy.desktop_apps.insert("mock.notepad".into());
+    let dg = mock_grant(&desktop_req, "g2", 200);
+    agent.channel.active_permit = Some(make_start_permit(&desktop_req, &dg, "p2", 200));
+    assert_eq!(agent.execute(&desktop_req, &dg, 100), Decision::Failed);
+}

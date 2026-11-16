@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import ConsoleView from "./ConsoleView";
 
 type Source = "all" | "mcp" | "clawhub";
 type Kind = "all" | "MCP" | "SKILL";
@@ -57,6 +58,7 @@ function safeSourceUrl(value: string) {
 }
 
 export default function App() {
+  const [tab, setTab] = useState<"console" | "marketplace">("console");
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<Kind>("all");
@@ -200,19 +202,41 @@ export default function App() {
       <aside className="sidebar">
         <div className="logo"><span className="logo-mark">✦</span><span>aiagent<span className="logo-muted">.md</span></span></div>
         <div className="section-label">ワークスペース</div>
-        <div className="nav-item muted"><span>▦</span> ダッシュボード</div>
-        <div className="nav-item muted"><span>◷</span> タスク</div>
+        <button
+          type="button"
+          className={tab === "console" ? "nav-item active nav-btn" : "nav-item muted nav-btn"}
+          onClick={() => setTab("console")}
+        >
+          <span>▦</span> Control Console
+        </button>
         <div className="section-label second-label">拡張機能</div>
-        <div className="nav-item active"><span>◈</span> Marketplace</div>
+        <button
+          type="button"
+          className={tab === "marketplace" ? "nav-item active nav-btn" : "nav-item muted nav-btn"}
+          onClick={() => setTab("marketplace")}
+        >
+          <span>◈</span> Marketplace
+        </button>
         <div className="nav-item muted" title="MKT-2で実装予定"><span>▤</span> 追加済み <small>準備中</small></div>
-        <div className="sidebar-bottom">Marketplace Preview <span>MKT-1</span></div>
+        <div className="sidebar-bottom">Control Plane &amp; MKT-1</div>
       </aside>
 
       <main className="main">
         <header className="topbar">
-          <span>拡張機能 <span className="breadcrumb">/ Marketplace</span></span>
-          <span className="preview-pill">閲覧専用プレビュー</span>
+          <span>
+            {tab === "console" ? "ワークスペース " : "拡張機能 "}
+            <span className="breadcrumb">/ {tab === "console" ? "Control Console" : "Marketplace"}</span>
+          </span>
+          <span className="preview-pill">{tab === "console" ? "Control Plane /v1" : "閲覧専用プレビュー"}</span>
         </header>
+        {tab === "console" ? (
+          <div className="content">
+            <div className="eyebrow">CONTROL PLANE CONSOLE</div>
+            <h1>エージェント実行・承認・セッション管理</h1>
+            <p className="lead">タスク投入、オーナー承認、Browser Takeover、Campaign/Watch、Capability 状態を管理します。</p>
+            <ConsoleView />
+          </div>
+        ) : (
         <div className="content">
           <div className="eyebrow">EXTENSION MARKETPLACE</div>
           <h1>エージェントに、新しい可能性を。</h1>
@@ -290,6 +314,7 @@ export default function App() {
           </div>
           <div className="note"><strong>現在は検索・閲覧のみ</strong> — インストール、認証、更新、削除はMKT-2以降で対応します。外部レジストリに掲載された内容の安全性は保証されません。</div>
         </div>
+        )}
       </main>
 
       {detailId && (

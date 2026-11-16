@@ -3,11 +3,13 @@
 pub mod agent;
 pub mod journal;
 pub mod mock;
+pub mod pairing;
 pub mod protocol;
 pub mod security;
 
 pub use agent::{Agent, ConnectionPhase, Decision, Delivery, LocalPolicy};
 pub use journal::{BeginResult, ControlRecord, EffectState, LocalJournal};
+pub use pairing::{make_start_permit, CloudPairingConfig, LocalAdapters, TlsAuthenticatedChannel};
 pub use protocol::{
     ActionRequest, CloudGrant, Epoch, Fence, Operation, Scope, StartPermit, Target,
 };
