@@ -77,3 +77,41 @@ encoding and framing (including stdout/stderr boundaries), its completeness,
 digest, scope, and authenticated transfer. Display excerpts must be separately
 UTF-8 byte bounded and explicitly marked as excerpts; truncation of required
 output must reject evidence. No digest is emitted by the blocked adapter.
+
+## B2b owner-boundary audit
+
+The Workflow now refuses executed build, static-check or test receipts without
+a source commit and compares any supplied SHA with the Workflow target. This
+is a necessary consistency check only: a populated SHA or `artifact_sha256`
+in the existing ExecutionEvidence is not authenticated proof. Fixture ports
+use synthetic values and must never be used as production attestation. The real
+ToolGatewaySandboxAdapter remains blocked pending the owner contracts below.
+
+The Run Authority already validates current owner, run, lease, goal and active
+state in canonical database transactions. The current sandbox grant binds argv,
+cwd, tenant, task, run, intent and lease at admission, but does not bind an
+execution artifact, verified workspace tree or active revocation stream. The
+Context Artifact Store has its own scoped claim and integrity checks, but its
+raw/summary storage does not implement an execution-bound Cell transfer or an
+atomic publication against a workspace revision. Neither is an appropriate
+stand-in for the requested broker.
+
+Required owner work: (1) a Gateway-admitted execution identity and receipt
+bound to verified source tree, workspace revision, recipe, Test ID and pinned
+toolchain/image; (2) bounded authenticated Source and Artifact transfer with
+no-follow file access and Source/output separation; (3) live cancellation and
+lease notification to the running supervisor; (4) canonical DB transaction
+serializing artifact publication with Run/Goal/Lease/Workspace revocation; and
+(5) explicit artifact bytes/digest semantics and concurrency/E2E tests. Until
+these exist, there is no authenticated transfer or publication, and no
+production receipt should be created from self-declared fields.
+
+WSL diagnostic snapshot: UID 1000 had 6 visible processes and threads; shell
+soft/hard RLIMIT_NPROC were 62081; cgroup pids.current was 2235 and pids.max
+was `max`; user/PID/network namespace creation was available; the inspecting
+shell's seccomp mode was 0. These are observations only. The Supervisor applies
+its own seccomp filter and a test NPROC limit of 32. Linux UID/user-namespace
+accounting and concurrent workloads must be measured for a dedicated Cell UID
+before choosing a limit; 256 from a temporary diagnostic is not a production
+recommendation. Separate-guest-kernel Cell and egress isolation remain
+NOT VERIFIED.

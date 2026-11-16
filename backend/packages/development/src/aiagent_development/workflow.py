@@ -114,6 +114,7 @@ class DevelopmentWorkflow:
             or receipt.intent_ref != request.intent_ref
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
+            or (receipt.executed and receipt.source_commit_sha is None)
             or (receipt.source_commit_sha is not None and receipt.source_commit_sha != target)
             or (
                 c.commit is not None

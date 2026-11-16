@@ -129,7 +129,7 @@ class FakeCell:
             request.toolchain_digest,
             "bounded stdout",
             "",
-            self.git.head_sha if is_test else None,
+            self.git.head_sha,
             request.argv[-1] if is_test else None,
             f"cell-receipt-{self.execute_calls}",
         )

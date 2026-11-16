@@ -438,3 +438,20 @@ def test_build_rejects_receipt_for_different_commit(env):
     sandbox.source_sha = "b" * 40 if scope.base_sha != "b" * 40 else "c" * 40
     with pytest.raises(InvalidEvidence, match="SHA"):
         flow.execute(scope, "cycle-sha", _request(env))
+
+
+@pytest.mark.parametrize("kind", ["build", "static-check"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_completed_receipt_requires_source_commit(env, kind, exit_code):
+    _, scope, run, _, _, sandbox, _, flow = env
+    sandbox.results["build-1"] = (True, exit_code, None)
+    original = sandbox.execute
+
+    def without_commit(request):
+        return replace(original(request), source_commit_sha=None)
+
+    sandbox.execute = without_commit
+    flow.create("cycle-no-sha", scope, run, "change-1")
+    flow.plan(scope, "cycle-no-sha", TaskPlan("plan-1", "change-1", ("unit",), run.goal_revision))
+    with pytest.raises(InvalidEvidence, match="SHA"):
+        flow.execute(scope, "cycle-no-sha", _request(env, kind=kind))
