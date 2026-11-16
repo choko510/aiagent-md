@@ -217,3 +217,57 @@ def test_anthropic_tokenizer_uses_conservative_non_openai_margin_and_revokes_pro
     assert len(store._summary) == 0
     assert len(store._raw) == 1
     assert next(iter(store._raw.values()))[2] == cli_lines.encode("utf-8")
+
+
+def test_long_single_line_json_preserves_trailing_error_multiple_negations_and_applies_model_payload_projection() -> (
+    None
+):
+    req = _req()
+    store = MockArtifactStore()
+    head = MockHeadPort(
+        req.scope, head="head:0", goal_revision="1", lease_epoch="1", policy_version="policy:1", memory_epoch="1"
+    )
+    pipe = HybridCompactionPipeline(ContextService(store, head), HybridOptimizer(ModelBoundTokenEstimator()))
+
+    compact_json = json.dumps(
+        [{"id": i, "status": "ok"} for i in range(25)] + [{"id": 99, "status": "ERROR: downstream timeout"}],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(compact_json) > 500
+    assert b"\n" not in compact_json
+
+    multi_negation_log = "\n".join(
+        ["not authorized for admin scope"]
+        + ["ok benign telemetry tick"] * 25
+        + ["ERROR: final checkpoint write failed"]
+    ).encode("utf-8")
+
+    plan = pipe.compact(
+        req,
+        (
+            (SourceInput("json:1", "2026-11-16T00:00:00Z", compact_json, locator_ref="log:json"), "json_data"),
+            (SourceInput("cli:1", "2026-11-16T00:00:00Z", multi_negation_log, locator_ref="log:cli"), "cli_stdout"),
+        ),
+        max_excerpt_chars=240,
+    )
+
+    quotes = "\n".join(c.quote for c in plan.selected_claims)
+    assert "ERROR: downstream timeout" in quotes
+    assert "not authorized for admin scope" in quotes
+    assert "ERROR: final checkpoint write failed" in quotes
+
+    payload = json.loads(plan.model_payload)
+    projs = payload["untrustedData"].get("optimizedProjections")
+    assert isinstance(projs, list) and len(projs) == 2
+    assert any('"_omitted":21' in p["text"] for p in projs)
+    assert any("identical lines omitted" in p["text"] for p in projs)
+
+    receipt = plan.optimization_receipt
+    assert receipt is not None
+    assert receipt.outcome == "OPTIMIZED"
+    assert receipt.payload_tokens_before is not None and receipt.payload_tokens_after is not None
+    assert receipt.payload_tokens_after < receipt.payload_tokens_before
+
+    raw_expected = {"json:1": compact_json, "cli:1": multi_negation_log}
+    for ref in plan.raw_artifacts:
+        assert store.get_raw(req.scope, ref) == raw_expected[ref.source_ref]

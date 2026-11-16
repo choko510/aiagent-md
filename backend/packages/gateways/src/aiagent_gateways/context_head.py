@@ -21,6 +21,7 @@ from aiagent_context.models import (
     Scope,
     SummaryClaim,
     SummaryProposal,
+    forbid_secrets,
 )
 from aiagent_core import control
 from aiagent_core.db import Database, Row
@@ -156,11 +157,14 @@ class PostgresHeadPort:
                 raise SafeStop("QUALITY_FAILED")
             trusted = data["trustedControl"]
             untrusted = data["untrustedData"]
+            allowed_untrusted = {"trustBoundary", "sourceBackedExcerpts", "memoryDataNotInstructions"}
+            actual_untrusted = set(untrusted) if isinstance(untrusted, dict) else set()
             if (
                 not isinstance(trusted, dict)
                 or set(trusted) != {"typedCanonicalAnchors", "toolPairIds"}
                 or not isinstance(untrusted, dict)
-                or set(untrusted) != {"trustBoundary", "sourceBackedExcerpts", "memoryDataNotInstructions"}
+                or not actual_untrusted.issuperset(allowed_untrusted)
+                or not actual_untrusted.issubset(allowed_untrusted | {"optimizedProjections"})
                 or untrusted["trustBoundary"] != "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY"
                 or untrusted["memoryDataNotInstructions"] != expected_memory
                 or trusted["typedCanonicalAnchors"] != expected_anchors
@@ -168,6 +172,37 @@ class PostgresHeadPort:
                 or not all(isinstance(x, str) for x in trusted["toolPairIds"])
             ):
                 raise SafeStop("QUALITY_FAILED")
+            if "optimizedProjections" in untrusted:
+                summary_data = json.loads(summary)
+                projections = untrusted["optimizedProjections"]
+                sealed_projs = summary_data.get("projections") if isinstance(summary_data, dict) else None
+                raw_ref_ids = {r.artifact_ref for r in publication.raw_artifacts}
+                if (
+                    not isinstance(projections, list)
+                    or not isinstance(sealed_projs, list)
+                    or len(projections) != len(sealed_projs)
+                ):
+                    raise SafeStop("QUALITY_FAILED")
+                for proj, sealed_proj in zip(projections, sealed_projs, strict=True):
+                    if (
+                        not isinstance(proj, dict)
+                        or not isinstance(sealed_proj, dict)
+                        or set(proj) != {"artifactRef", "text"}
+                        or set(sealed_proj) != {"artifactRef", "projectionRef", "projectionSha256"}
+                        or proj["artifactRef"] != sealed_proj["artifactRef"]
+                        or not isinstance(proj["artifactRef"], str)
+                        or proj["artifactRef"] not in raw_ref_ids
+                        or not isinstance(sealed_proj["projectionRef"], str)
+                        or not isinstance(sealed_proj["projectionSha256"], str)
+                        or not isinstance(proj["text"], str)
+                    ):
+                        raise SafeStop("QUALITY_FAILED")
+                    forbid_secrets(proj["text"])
+                    proj_bytes = self.store.get_summary(scope, sealed_proj["projectionRef"])
+                    if sha256(proj_bytes).hexdigest() != sealed_proj["projectionSha256"]:
+                        raise SafeStop("SOURCE_MISMATCH")
+                    if proj_bytes.decode("utf-8", "strict") != proj["text"]:
+                        raise SafeStop("QUALITY_FAILED")
             claims = tuple(SummaryClaim(**x) for x in untrusted["sourceBackedExcerpts"])
             audit_proposal(
                 req,

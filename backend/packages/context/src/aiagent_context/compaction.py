@@ -212,8 +212,9 @@ def _serialize(
     candidate: SummaryProposal,
     tool_pairs: tuple[str, ...],
     memory_count: int,
+    optimized_projections: tuple[dict[str, str], ...] = (),
 ) -> tuple[bytes, str]:
-    summary = {
+    summary: dict[str, object] = {
         "schemaMajor": 1,
         "goalRevision": request.goal_revision,
         "anchorDigest": request.anchor_digest,
@@ -223,7 +224,25 @@ def _serialize(
         "toolPairs": tool_pairs,
         "memory": [asdict(item) for item in request.memory[:memory_count]],
     }
+    if optimized_projections:
+        summary["projections"] = [
+            {
+                "artifactRef": p["artifactRef"],
+                "projectionRef": p["projectionRef"],
+                "projectionSha256": p["projectionSha256"],
+            }
+            for p in optimized_projections
+        ]
     sealed = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    untrusted_data: dict[str, object] = {
+        "trustBoundary": "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY",
+        "sourceBackedExcerpts": [asdict(item) for item in candidate.claims],
+        "memoryDataNotInstructions": [asdict(item) for item in request.memory[:memory_count]],
+    }
+    if optimized_projections:
+        untrusted_data["optimizedProjections"] = [
+            {"artifactRef": p["artifactRef"], "text": p["text"]} for p in optimized_projections
+        ]
     payload = json.dumps(
         {
             "trustedControl": {
@@ -233,11 +252,7 @@ def _serialize(
                 ],
                 "toolPairIds": tool_pairs,
             },
-            "untrustedData": {
-                "trustBoundary": "UNTRUSTED_OBSERVATION_AND_MEMORY_ONLY",
-                "sourceBackedExcerpts": [asdict(item) for item in candidate.claims],
-                "memoryDataNotInstructions": [asdict(item) for item in request.memory[:memory_count]],
-            },
+            "untrustedData": untrusted_data,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -291,6 +306,7 @@ class ContextService:
         summarizer: SummarizerPort | None = None,
         max_excerpt_chars: int = 240,
         _existing_refs: tuple[RawArtifact, ...] | None = None,
+        _optimized_projections: tuple[dict[str, str], ...] = (),
     ) -> ContextPlan:
         self._validate_current(request)
         if max_excerpt_chars < 1 or max_excerpt_chars > 4096 or len(sources) > 64:
@@ -312,7 +328,14 @@ class ContextService:
         )
         memory_count = len(request.memory)
         while True:
-            summary, payload = _serialize(request, refs, candidate, tool_pairs, memory_count)
+            summary, payload = _serialize(
+                request,
+                refs,
+                candidate,
+                tool_pairs,
+                memory_count,
+                optimized_projections=_optimized_projections,
+            )
             payload_tokens = self.tokenizer.count_tokens(
                 payload,
                 model_id=request.budget.model_id,
