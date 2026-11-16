@@ -29,6 +29,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     if len(idx.documents) > 10000:
         raise ResourceLimit("document limit")
     output = {
+        # A canonical protobuf round trip is a conservative proof of original
+        # top-level metadata order/uniqueness; other legal encodings are refused.
+        "wire_canonical": idx.SerializeToString() == data,
         "version": idx.metadata.version,
         "tool": idx.metadata.tool_info.name,
         "tool_version": idx.metadata.tool_info.version,

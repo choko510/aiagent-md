@@ -428,3 +428,26 @@ def test_external_relationships_are_not_silently_claimed_complete(repo: tuple[Pa
     result = load_index(snap, manifest, data)
     assert result.status == IndexStatus.PARTIAL
     assert "external symbol relationships not interpreted" in result.issues
+
+
+@pytest.mark.parametrize("raw", [b"\xef\xbb\xbftext", b"\xffinvalid"])
+def test_source_encoding_checked_even_without_occurrences(repo: tuple[Path, str, Path], raw: bytes) -> None:
+    root, _, _ = repo
+    (root / "a.py").write_bytes(raw)
+    idx = _basic_index()
+    del idx.documents[0].occurrences[:]
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    assert load_index(snap, manifest, data).status == IndexStatus.INVALID
+
+
+def test_duplicate_metadata_never_claims_validated(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    extra = scip_pb2.Index()
+    extra.metadata.CopyFrom(idx.metadata)
+    data = idx.SerializeToString() + extra.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    inv = inventory(snap)
+    result, text = fallback_text(snap, inv, manifest, data, "old")
+    assert result is not None and result.status == IndexStatus.UNAVAILABLE
+    assert text is not None and text.hits

@@ -237,6 +237,10 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
             None,
             (str(exc),),
         )
+    if not index["wire_canonical"]:
+        return LoadResult(
+            IndexStatus.UNAVAILABLE, None, ("noncanonical wire encoding cannot establish metadata ordering",)
+        )
     if (
         index["version"] != manifest.protocol_version
         or index["tool"] != manifest.indexer
@@ -303,6 +307,9 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
                 return LoadResult(IndexStatus.STALE, None, ("source provenance mismatch",))
             raw = reader.read(entry)
             digest = hashlib.sha256(raw).hexdigest()
+            if raw.startswith(b"\xef\xbb\xbf"):
+                return LoadResult(IndexStatus.INVALID, None, ("ambiguous UTF-8 BOM",))
+            raw.decode("utf-8", errors="strict")
             if b"\x00" in raw or raw.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
                 return LoadResult(IndexStatus.UNAVAILABLE, None, ("binary or LFS source unavailable",))
             if digest != source.digest:
