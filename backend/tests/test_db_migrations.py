@@ -169,3 +169,78 @@ def test_append_only_head_and_events_even_for_owner(pg: PgEnv, tenant: dict[str,
         for t in ("run_checkpoints", "domain_events", "task_goal_revisions"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 c.execute(f"UPDATE agent.{t} SET tenant_id = tenant_id")
+
+
+def test_upgrade_from_legacy_pr92_db_preserves_data_and_refuses_tampered() -> None:
+    from aiagent_core.commands import Scope, submit_task
+    from aiagent_core.db import Database
+
+    env = make_database("aiagent_legacy92")
+    try:
+        import os
+
+        os.environ["AIAGENT_ALLOW_DOWN"] = "1"
+        assert migrate.down(env.owner, 6) == [9, 8, 7]
+        seeded_tenant = admin.provision_tenant(env.owner)
+        api_db = Database(env.dsn["api"])
+        try:
+            task = submit_task(
+                api_db,
+                Scope(seeded_tenant["tenantId"], seeded_tenant["userId"], seeded_tenant["workspaceId"]),
+                "legacy-92-preserve",
+            )
+        finally:
+            api_db.close()
+
+        # Simulate legacy PR #92 metadata rows 0006..0016 + persisted consent data before upgrade.
+        with connect(env.owner) as c:
+            with c.transaction():
+                c.execute(
+                    "INSERT INTO agent.memory_scope_epochs(tenant_id, owner_user_id, task_id, source_epoch)"
+                    " VALUES (%s, %s, %s, 1)",
+                    (seeded_tenant["tenantId"], seeded_tenant["userId"], task["taskId"]),
+                )
+                c.execute("DELETE FROM aiagent_meta.schema_migrations WHERE version >= 6")
+                for ver, (name, sha) in migrate.LEGACY_PR92_MIGRATIONS.items():
+                    c.execute(
+                        "INSERT INTO aiagent_meta.schema_migrations(version, checksum_sha256, name, app_min_reader,"
+                        " app_min_writer) VALUES (%s,%s,%s,5,5)",
+                        (ver, sha, name),
+                    )
+                c.execute("UPDATE agent.schema_control SET schema_version = 16 WHERE singleton")
+
+        # Tampered legacy checksum must still fail closed.
+        with connect(env.owner) as c:
+            with c.transaction():
+                c.execute(
+                    "UPDATE aiagent_meta.schema_migrations SET checksum_sha256 = repeat('0', 64) WHERE version = 11"
+                )
+        with pytest.raises(migrate.MigrationError, match="checksum mismatch for legacy migration"):
+            migrate.up(env.owner)
+
+        # Restore genuine PR #92 checksum -> non-destructive upgrade reconciles 6..16 -> 6 and advances 7,8,9.
+        with connect(env.owner) as c:
+            with c.transaction():
+                _name, real_sha = migrate.LEGACY_PR92_MIGRATIONS[11]
+                c.execute(
+                    "UPDATE aiagent_meta.schema_migrations SET checksum_sha256 = %s WHERE version = 11", (real_sha,)
+                )
+
+        applied = migrate.up(env.owner)
+        assert applied == [7, 8, 9]
+        with connect(env.owner) as c:
+            migrate.check_compatible(c)
+            epoch_row = c.execute(
+                "SELECT source_epoch FROM agent.memory_scope_epochs WHERE tenant_id=%s AND task_id=%s",
+                (seeded_tenant["tenantId"], task["taskId"]),
+            ).fetchone()
+            assert epoch_row is not None and epoch_row["source_epoch"] == 1
+            versions = [
+                r["version"] for r in c.execute("SELECT version FROM aiagent_meta.schema_migrations ORDER BY version")
+            ]
+            assert versions == list(range(1, migrate.APP_SCHEMA_VERSION + 1))
+    finally:
+        import os
+
+        os.environ.pop("AIAGENT_ALLOW_DOWN", None)
+        drop_database(env.name)
