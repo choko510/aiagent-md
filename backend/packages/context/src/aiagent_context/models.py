@@ -304,6 +304,8 @@ class OptimizationReceipt:
     output_sha256: str
     reason_code: str
     traces: tuple[SourceProjectionTrace, ...] = ()
+    payload_tokens_before: int | None = None
+    payload_tokens_after: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
