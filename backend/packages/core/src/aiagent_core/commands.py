@@ -84,6 +84,7 @@ def create_task_tx(
     occurrence_id: str | None = None,
     token_budget: int | None = None,
     max_model_calls: int | None = None,
+    max_tool_calls: int | None = None,
 ) -> dict[str, str]:
     """Task + goal revision 1 + Run attempt 1 + seed HEAD entry + events + run.start outbox, inside caller's TX."""
     if not scope_active(c, tenant_id, owner_user_id, workspace_id):
@@ -126,6 +127,12 @@ def create_task_tx(
         cols += ", max_model_calls"
         placeholders += ",%s"
         vals.append(int(max_model_calls))
+    if max_tool_calls is not None:
+        if max_tool_calls < 1:
+            raise CommandError("INVALID_BUDGET", 422)
+        cols += ", max_tool_calls"
+        placeholders += ",%s"
+        vals.append(int(max_tool_calls))
     c.execute(f"INSERT INTO agent.runs({cols}) VALUES ({placeholders})", tuple(vals))
     entry = {"kind": "user", "content": goal, "tool_calls": []}
     snap = sha256_hex({"prev": None, "rev": 1, "kind": "user", "stream": "main", "payload": entry})

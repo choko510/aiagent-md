@@ -284,7 +284,7 @@ def check_current(
         " coalesce(r.lease_expires_at > clock_timestamp(), false) AS lease_valid,"
         " r.cancel_requested, r.pause_requested, r.restore_incarnation,"
         " r.head_revision, r.allowed_models, r.token_budget, r.tokens_reserved, r.tokens_used, r.max_model_calls,"
-        " r.model_calls, t.goal_revision, t.owner_user_id, t.workspace_id, t.active_run_id,"
+        " r.model_calls, r.max_tool_calls, t.goal_revision, t.owner_user_id, t.workspace_id, t.active_run_id,"
         " s.restore_incarnation AS current_incarnation"
         " FROM agent.runs r JOIN agent.tasks t ON t.tenant_id=r.tenant_id AND t.id=r.task_id"
         " CROSS JOIN agent.schema_control s"
