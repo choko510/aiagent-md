@@ -123,3 +123,44 @@ def test_real_authority_denies_stale_or_cancelled_before_fake_cell(dbs, tenant, 
                 gateway.submit(replace(claim, lease_epoch=claim.lease_epoch + 1), "stale-call", "sandbox_exec", args)
             )
     assert calls == []
+
+
+@pytest.mark.parametrize("case", ["tenant", "recipe"])
+def test_real_authority_rejects_other_tenant_or_unproposed_argv(dbs, tenant, monkeypatch, case):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    from aiagent_domain.rpcwire import RpcError
+
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    ids = commands.submit_task(dbs["api"], scope, "fixture", profile="sandbox")
+    claim = control.claim_run(dbs["runtime"], scope.tenant_id, ids["runId"], "fake-cell-worker")
+    args = {"argv": ["test-command"], "cwdRelative": "."}
+    with dbs["model_gateway"].tx() as c:
+        control.append_head(
+            c,
+            claim,
+            "assistant",
+            {
+                "kind": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "binding-call", "name": "sandbox_exec", "args": args}],
+            },
+            writer="test",
+            request_key=os.urandom(32).hex(),
+        )
+    calls = []
+
+    class FakeCell:
+        def __init__(self, *args, **kwargs):
+            calls.append("started")
+
+    monkeypatch.setattr(aiagent_core.rpc, "RpcClient", FakeCell)
+    gateway = ToolGateway(
+        dbs["tool_gateway"], {"sandbox_cell": SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)}
+    )
+    request_claim = replace(claim, tenant_id=str(uuid4())) if case == "tenant" else claim
+    request_args = {"argv": ["altered-command"], "cwdRelative": "."} if case == "recipe" else args
+    with pytest.raises(RpcError):
+        asyncio.run(gateway.submit(request_claim, "binding-call", "sandbox_exec", request_args))
+    assert calls == []

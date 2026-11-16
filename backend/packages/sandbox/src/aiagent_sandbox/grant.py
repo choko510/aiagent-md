@@ -53,7 +53,9 @@ def sign(key: bytes, g: Grant) -> dict[str, Any]:
     return {"grant": p, "mac": _mac(key, p)}
 
 
-def verify(key: bytes, token: Any, argv: list[str], cwd: str, *, now: float | None = None) -> Grant:
+def verify(
+    key: bytes, token: Any, argv: list[str], cwd: str, *, now: float | None = None, allow_legacy: bool = False
+) -> Grant:
     if not isinstance(token, dict) or not isinstance(token.get("grant"), dict) or not isinstance(token.get("mac"), str):
         raise GrantError("MALFORMED")
     p = token["grant"]
@@ -63,6 +65,8 @@ def verify(key: bytes, token: Any, argv: list[str], cwd: str, *, now: float | No
         g = Grant(**{**p, "argv": tuple(p["argv"])})
     except TypeError as e:
         raise GrantError("MALFORMED") from e
+    if g.attempt_binding_version is None and not allow_legacy:
+        raise GrantError("LEGACY_DISABLED")
     if g.attempt_binding_version is not None and (
         type(g.attempt_binding_version) is not int or g.attempt_binding_version != 1
     ):

@@ -29,6 +29,7 @@ def test_gateway_propagates_command_outcome(
         async def call(self, *args: object, **kwargs: object) -> dict[str, object]:
             return {
                 "status": "EXITED",
+                "attemptId": "test-attempt",
                 "exitCode": exit_code,
                 "timedOut": timeout,
                 "truncated": truncated,
@@ -38,7 +39,14 @@ def test_gateway_propagates_command_outcome(
 
     monkeypatch.setattr(aiagent_core.rpc, "RpcClient", Client)
     executor = SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)
-    executor.context["key"] = {"tenant_id": "t", "task_id": "t", "run_id": "r", "intent_id": "i", "lease_epoch": 1}
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": "test-attempt",
+    }
     result = asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
     assert result["outcome"] == outcome and result["truncated"] is truncated
     assert result["resourceLimit"] == "UNKNOWN"
@@ -78,7 +86,14 @@ def test_refused_and_malformed_results_are_distinct(
 
     monkeypatch.setattr(aiagent_core.rpc, "RpcClient", Client)
     executor = SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)
-    executor.context["key"] = {"tenant_id": "t", "task_id": "t", "run_id": "r", "intent_id": "i", "lease_epoch": 1}
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": "test-attempt",
+    }
     with pytest.raises(exception):
         asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
 
@@ -91,6 +106,7 @@ def test_gateway_clipping_marks_incomplete(monkeypatch: pytest.MonkeyPatch) -> N
         async def call(self, *args: object, **kwargs: object) -> dict[str, object]:
             return {
                 "status": "EXITED",
+                "attemptId": "test-attempt",
                 "exitCode": 0,
                 "timedOut": False,
                 "truncated": False,
@@ -100,7 +116,14 @@ def test_gateway_clipping_marks_incomplete(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(aiagent_core.rpc, "RpcClient", Client)
     executor = SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)
-    executor.context["key"] = {"tenant_id": "t", "task_id": "t", "run_id": "r", "intent_id": "i", "lease_epoch": 1}
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": "test-attempt",
+    }
     result = asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
     assert result["truncated"] and result["outcome"] == "OUTPUT_LIMIT"
     with pytest.raises(InvalidEvidence):
@@ -213,7 +236,9 @@ def test_attempt_binding_versions_fail_closed() -> None:
     values = ("g", "tenant", "task", "run", "intent", 1, ("tool",), ".", 1000, 1024, 9999999999)
     legacy = Grant(*values)
     assert "attempt_binding_version" not in legacy.payload()
-    assert verify(key, sign(key, legacy), ["tool"], ".").attempt_binding_version is None
+    with pytest.raises(GrantError, match="LEGACY_DISABLED"):
+        verify(key, sign(key, legacy), ["tool"], ".")
+    assert verify(key, sign(key, legacy), ["tool"], ".", allow_legacy=True).attempt_binding_version is None
     with pytest.raises(GrantError, match="MISSING_ATTEMPT"):
         verify(key, sign(key, Grant(*values, attempt_binding_version=1)), ["tool"], ".")
     for invalid_version in (2, True):
@@ -221,3 +246,23 @@ def test_attempt_binding_versions_fail_closed() -> None:
             verify(
                 key, sign(key, Grant(*values, attempt_id="a", attempt_binding_version=invalid_version)), ["tool"], "."
             )
+
+
+@pytest.mark.parametrize("attempt", [None, "", "  ", 42])
+def test_gateway_rejects_missing_attempt_before_cell(monkeypatch: pytest.MonkeyPatch, attempt: object) -> None:
+    from unittest.mock import Mock
+
+    client = Mock()
+    monkeypatch.setattr(aiagent_core.rpc, "RpcClient", client)
+    executor = SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": attempt,
+    }
+    with pytest.raises(ExecutorFailed, match="tool attempt"):
+        asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
+    client.assert_not_called()

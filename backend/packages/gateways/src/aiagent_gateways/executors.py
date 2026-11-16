@@ -167,6 +167,14 @@ class SandboxCellExecutor:
         ctx = self.context.get(effect_key)
         if ctx is None:
             raise ExecutorFailed("no admission context")
+        attempt_id = ctx.get("attempt_id")
+        if (
+            not isinstance(attempt_id, str)
+            or not attempt_id
+            or len(attempt_id) > 128
+            or attempt_id.strip() != attempt_id
+        ):
+            raise ExecutorFailed("missing or invalid tool attempt")
         g = Grant(
             uuid.uuid4().hex,
             ctx["tenant_id"],
@@ -179,8 +187,8 @@ class SandboxCellExecutor:
             self.wall_ms,
             self.memory_bytes,
             int(time.time()) + 120,
-            attempt_id=ctx.get("attempt_id"),
-            attempt_binding_version=1 if ctx.get("attempt_id") is not None else None,
+            attempt_id=attempt_id,
+            attempt_binding_version=1,
         )
         client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
         try:
@@ -197,7 +205,7 @@ class SandboxCellExecutor:
             raise ExecutorFailed(str(res.get("reason")))
         if (
             res.get("status") != "EXITED"
-            or (g.attempt_id is not None and res.get("attemptId") != g.attempt_id)
+            or res.get("attemptId") != attempt_id
             or type(res.get("exitCode")) is not int
             or type(res.get("timedOut")) is not bool
             or type(res.get("truncated")) is not bool

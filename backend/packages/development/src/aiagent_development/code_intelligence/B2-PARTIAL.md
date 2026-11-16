@@ -125,9 +125,9 @@ a distinct execution identity bound to a verified Workspace snapshot, tree,
 recipe, toolchain and Plan Test ID. The Gateway now includes its own attempt ID
 in the signed Sandbox grant. The Supervisor echoes the ID from the verified
 grant and the Gateway rejects an unmatched response as UNKNOWN. A fake Cell
-contract test verifies this binding and signed-grant tampering. Legacy grants
-remain accepted, and this binding alone must not be used to authorize B2 or to
-construct an authenticated execution receipt.
+contract test verifies this binding and signed-grant tampering. This binding
+alone must not be used to authorize B2 or construct an authenticated execution
+receipt. Current legacy handling is described below.
 
 The ToolGatewaySandboxAdapter stays blocked. The following remain missing:
 Authority-issued execution identity with tenant/owner/run/lease/goal and Intent;
@@ -137,16 +137,15 @@ actual result and Artifact bytes. A future owner must define atomic checks and
 revocation semantics before this path can be enabled. A fake Cell is not a real
 Supervisor E2E or proof of isolation; no Source/Artifact transfer is added.
 
-Compatibility: a new Supervisor accepts a legacy grant without an attempt ID,
-but an older Supervisor will reject the additional signed field rather than
-execute it. Roll out the Supervisor before the Gateway change; mixed-version
-operation has not been verified. Generic legacy grant acceptance does not
-satisfy the B2b-1 execution-identity requirement.
+Compatibility: Supervisor now rejects unversioned legacy grants by default. The
+low-level verifier exposes an explicit allow_legacy option for controlled
+compatibility use; the Supervisor does not enable it. Older Supervisors reject
+the versioned field. Mixed-version operation is not verified.
 
 ## B2b-2: attempt binding version and real-DB fixture
 
 Attempt binding version 1 is a signed field and requires an attempt ID. An
-absent field is the legacy form; unknown or malformed versions are rejected.
+absent field is legacy and is rejected by the Supervisor; unknown or malformed versions are rejected.
 The existing Gateway emits v1 when it has a Gateway-owned attempt ID. This is a
 versioned Tool Attempt binding, not a B2b Execution contract or a verified
 Workspace/Plan/Artifact binding. No version number upgrades legacy evidence to
@@ -168,3 +167,22 @@ canonical DB serialization of publication against cancellation and lease
 revocation. Artifact transfer must be authenticated before enabling the adapter.
 These owner changes are not implemented by inventing a Development-owned
 canonical table or treating the Fake Cell output as authority.
+
+
+## B2b-3: explicit attempt boundary and Workspace Owner gap
+
+SandboxCellExecutor now refuses a missing or malformed Gateway-issued Attempt ID
+before contacting a Cell; it always emits version 1. Supervisor-side verification
+rejects unversioned grants unless the caller explicitly requests legacy
+compatibility, which the Supervisor does not. This version protects Tool Attempt
+binding only; it does not assert verified source or B2b execution identity.
+
+The existing `agent.workspaces` stores membership and ownership, and
+`PostgresWorkspacePort.assert_scope` checks active membership. Neither supplies
+a verified immutable Commit, Git Tree or Workspace Revision. The TaskPlan holds
+Test IDs but no trusted approved-recipe binding. Existing Run Authority and
+Gateway admission therefore cannot produce the requested verified binding.
+The Development adapter remains blocked; no new Development-owned canonical DB,
+self-attested signed fields, Artifact Broker or publication transaction is
+introduced. An Owner-approved snapshot and recipe authority plus canonical
+Execution/Attempt binding and authenticated Artifact transfer remain required.

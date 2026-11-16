@@ -38,6 +38,8 @@ def grant(argv: list[str], cwd: str = ".", *, wall_ms: int = 5000, mem: int = 25
             wall_ms,
             mem,
             int(time.time()) + ttl,
+            attempt_id=uuid.uuid4().hex,
+            attempt_binding_version=1,
         ),
     )
 
