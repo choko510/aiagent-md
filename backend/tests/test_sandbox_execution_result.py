@@ -4,10 +4,9 @@ import asyncio
 
 import aiagent_core.rpc
 import pytest
-from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown, SandboxCellExecutor
-
 from aiagent_development.contracts import InvalidEvidence
 from aiagent_development.factory import _complete_sandbox_result
+from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown, SandboxCellExecutor
 
 
 @pytest.mark.parametrize(
