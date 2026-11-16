@@ -9,21 +9,26 @@ import time
 import tracemalloc
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from google.protobuf.internal.encoder import _VarintBytes
 from test_code_intelligence_git import reader
 from test_code_intelligence_git import repo as _repo  # noqa: F401
 
+from aiagent_development.code_intelligence import scip_navigation as module
 from aiagent_development.code_intelligence import scip_pb2
 from aiagent_development.code_intelligence.git_reader import GitSnapshot
 from aiagent_development.code_intelligence.inventory import inventory
 from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Limits
 from aiagent_development.code_intelligence.scip_navigation import (
+    GraphLimitExceeded,
+    GraphTimeExceeded,
     IndexManifest,
     IndexStatus,
     ScopeMismatch,
     SourceProvenance,
+    SymbolGraph,
     dependency_lock_fingerprint,
     fallback_text,
     load_index,
@@ -601,7 +606,9 @@ def test_many_occurrences_on_long_line_end_to_end(repo: tuple[Path, str, Path]) 
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert result.status == IndexStatus.VALIDATED and result.graph is not None
-    assert len(result.graph.references("symbol")) == 10000
+    assert len(result.graph.locations) == 10000
+    matches = result.graph.query_references("symbol")
+    assert len(matches.items) == 100 and matches.truncated
     assert time.monotonic() - started < 30
     assert peak < 64 * 1024 * 1024
 
@@ -682,3 +689,137 @@ def test_bad_wire_in_overwritten_oneof_is_rejected(repo: tuple[Path, str, Path])
     data = metadata.SerializeToString() + b"\x12" + _VarintBytes(len(document)) + document
     snap, manifest = prepare(repo, data, "fixture", "1")
     assert load_index(snap, manifest, data).status == IndexStatus.INVALID
+
+
+def test_graph_queries_limit_results_and_report_truncation(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    for _ in range(3):
+        idx.documents[0].occurrences.add(symbol="symbol", range=[0, 0, 3])
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    snap.limits = replace(snap.limits, hits=2)
+    inv = inventory(snap)
+    result = load_index(snap, manifest, data)
+    assert result.graph is not None
+    matches = result.graph.query_references("symbol")
+    assert len(matches.items) == 2 and matches.truncated
+    one_definition = result.graph.query_definitions("symbol", limit=1)
+    assert len(one_definition.items) == 1 and not one_definition.truncated
+    with pytest.raises(GraphLimitExceeded):
+        result.graph.references("symbol")
+    assert len(result.graph.query_references("symbol", limit=1).items) == 1
+    exact = result.graph.query_references("missing")
+    assert not exact.items and not exact.truncated
+    with pytest.raises(ValueError):
+        result.graph.query_references("x" * 4097)
+    with pytest.raises(ValueError):
+        result.graph.query_references("local 1", local_path="../escape")
+    navigated = navigate(snap, inv, manifest, data, symbol="symbol", text_query="old", operation="reference")
+    assert navigated.truncated and navigated.query_status == "PARTIAL" and len(navigated.locations) == 2
+
+
+def test_graph_deadlines_and_precomputed_adjacency(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    doc = idx.documents[0]
+    doc.occurrences.add(symbol="other", range=[0, 0, 3])
+    doc.symbols.add(symbol="symbol").relationships.add(symbol="other", is_reference=True)
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    result = load_index(snap, manifest, data)
+    assert result.graph is not None
+    graph = result.graph
+    adjacency = graph._ref_links
+    for _ in range(5):
+        assert graph.references("symbol")[0].symbol == "other"
+        assert graph._ref_links is adjacency
+    with pytest.raises(TypeError):
+        adjacency[("symbol", None)] = ()
+    past = time.monotonic() - 1
+    for method in (graph.definitions, graph.references, graph.find_implementations, graph.related_files):
+        with pytest.raises(GraphTimeExceeded):
+            method("symbol", deadline=past)
+
+
+def test_graph_traversal_deadline_and_prebuilt_large_graph(
+    repo: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = _basic_index()
+    doc = idx.documents[0]
+    for number in range(2000):
+        doc.occurrences.add(symbol=f"n{number}", range=[0, 0, 3])
+        if number:
+            doc.symbols.add(symbol=f"n{number - 1}").relationships.add(symbol=f"n{number}", is_reference=True)
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    result = load_index(snap, manifest, data)
+    assert result.graph is not None
+    graph = result.graph
+    links = graph._ref_links
+    for _ in range(3):
+        found = graph.query_references("n0", limit=5)
+        assert len(found.items) == 5 and found.truncated
+        assert graph._ref_links is links
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls < 30 else 2.0
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    with pytest.raises(GraphTimeExceeded):
+        graph.query_references("n0", deadline=1.0, limit=100)
+    assert calls >= 30
+
+
+def test_navigate_marks_graph_deadline_failure_unavailable(
+    repo: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = _basic_index()
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    inv = inventory(snap)
+
+    def expired(*_args: object, **_kwargs: object) -> object:
+        raise GraphTimeExceeded("graph search deadline exceeded")
+
+    monkeypatch.setattr(SymbolGraph, "query_definitions", expired)
+    result = navigate(snap, inv, manifest, data, symbol="symbol", text_query="old", operation="definition")
+    assert result.query_status == "UNAVAILABLE" and result.query_issue and not result.locations
+
+
+def test_graph_index_build_deadline_is_unavailable(
+    repo: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = _basic_index()
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+
+    def expired(_self: object) -> None:
+        raise GraphTimeExceeded("graph search deadline exceeded")
+
+    monkeypatch.setattr(SymbolGraph, "__post_init__", expired)
+    result = load_index(snap, manifest, data)
+    assert result.status == IndexStatus.UNAVAILABLE
+    assert "graph indexing deadline exceeded" in result.issues
+
+
+def test_definition_implementation_and_related_file_limits(repo: tuple[Path, str, Path]) -> None:
+    idx = _basic_index()
+    doc = idx.documents[0]
+    for number in range(3):
+        doc.occurrences.add(symbol="symbol", symbol_roles=1, range=[0, 0, 3])
+        doc.occurrences.add(symbol=f"child{number}", symbol_roles=1, range=[0, 0, 3])
+        doc.symbols.add(symbol=f"child{number}").relationships.add(symbol="symbol", is_implementation=True)
+    data = idx.SerializeToString()
+    snap, manifest = prepare(repo, data, "fixture", "1")
+    snap.limits = replace(snap.limits, hits=2)
+    result = load_index(snap, manifest, data)
+    assert result.graph is not None
+    graph = result.graph
+    assert graph.query_definitions("symbol").truncated
+    assert graph.query_implementations("symbol").truncated
+    assert graph.query_related_files("symbol").truncated
+    for method in (graph.definitions, graph.find_implementations, graph.related_files):
+        with pytest.raises(GraphLimitExceeded):
+            method("symbol")

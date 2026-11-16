@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import chain
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
+from typing import Generic, TypeVar
 
 from .git_reader import GitSnapshot
 from .inventory import LOCKS, RepositoryInventory
@@ -82,6 +87,24 @@ class ReferenceRelationship:
     document: str | None
 
 
+_T = TypeVar("_T")
+_Key = tuple[str, str | None]
+
+
+@dataclass(frozen=True)
+class GraphMatches(Generic[_T]):  # noqa: UP046
+    items: tuple[_T, ...]
+    truncated: bool
+
+
+class GraphTimeExceeded(ReadError):
+    """A graph search or index build exceeded the snapshot/query deadline."""
+
+
+class GraphLimitExceeded(ReadError):
+    """The tuple-returning convenience API cannot return a complete result."""
+
+
 @dataclass(frozen=True)
 class SymbolGraph:
     manifest: IndexManifest
@@ -91,78 +114,209 @@ class SymbolGraph:
     issues: tuple[str, ...]
     reference_relationships: tuple[ReferenceRelationship, ...]
     definition_relationships: tuple[ReferenceRelationship, ...]
+    deadline: float
+    max_results: int
     provenance_trust: str = "UNVERIFIED_INDEXER_ORIGIN"
     coverage: str = "UNKNOWN"
+    _defs: Mapping[_Key, tuple[SymbolLocation, ...]] = field(init=False, repr=False, compare=False)
+    _refs: Mapping[_Key, tuple[SymbolLocation, ...]] = field(init=False, repr=False, compare=False)
+    _impls: Mapping[_Key, tuple[Implementation, ...]] = field(init=False, repr=False, compare=False)
+    _def_links: Mapping[_Key, tuple[_Key, ...]] = field(init=False, repr=False, compare=False)
+    _ref_links: Mapping[_Key, tuple[_Key, ...]] = field(init=False, repr=False, compare=False)
 
     @staticmethod
-    def _symbol_key(name: str, path: str | None) -> tuple[str, str | None]:
+    def _symbol_key(name: str, path: str | None) -> _Key:
         return name, path if name.startswith("local ") else None
 
-    def _definition_keys(self, initial: set[tuple[str, str | None]]) -> set[tuple[str, str | None]]:
-        links: dict[tuple[str, str | None], set[tuple[str, str | None]]] = {}
-        for rel in self.definition_relationships:
-            links.setdefault(self._symbol_key(rel.source, rel.document), set()).add(
-                self._symbol_key(rel.target, rel.document)
+    def _check(self, deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise GraphTimeExceeded("graph search deadline exceeded")
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.deadline) or self.max_results <= 0 or self.max_results > 100000:
+            raise ValueError("invalid graph limits")
+        if any(
+            len(items) > 50000
+            for items in (
+                self.locations,
+                self.implementations,
+                self.reference_relationships,
+                self.definition_relationships,
             )
-        seen = set(initial)
-        pending = list(seen)
-        while pending:
-            for target in links.get(pending.pop(), set()):
-                if target not in seen:
-                    seen.add(target)
-                    pending.append(target)
-        return seen
-
-    def related_files(self, symbol: str, *, local_path: str | None = None) -> tuple[str, ...]:
-        """Files with indexed definition/reference/implementation occurrences."""
-        locations = list(
-            self.definitions(symbol, local_path=local_path) + self.references(symbol, local_path=local_path)
-        )
-        roots = {
-            self._symbol_key(rel.implementing, rel.document)
-            for rel in self.find_implementations(symbol, local_path=local_path)
-        }
-        targets = self._definition_keys(roots)
-        locations.extend(
-            item for item in self.locations if item.definition and self._symbol_key(item.symbol, item.path) in targets
-        )
-        return tuple(sorted({item.path for item in locations}))
-
-    def definitions(self, symbol: str, *, local_path: str | None = None) -> tuple[SymbolLocation, ...]:
-        if symbol.startswith("local ") and local_path is None:
-            raise ValueError("local symbol requires a document path")
-        targets = self._definition_keys({self._symbol_key(symbol, local_path)})
-        return tuple(x for x in self.locations if x.definition and self._symbol_key(x.symbol, x.path) in targets)
-
-    def references(self, symbol: str, *, local_path: str | None = None) -> tuple[SymbolLocation, ...]:
-        if symbol.startswith("local ") and local_path is None:
-            raise ValueError("local symbol requires a document path")
-
-        def key(name: str, path: str | None) -> tuple[str, str | None]:
-            return (name, path if name.startswith("local ") else None)
-
-        adjacency: dict[tuple[str, str | None], set[tuple[str, str | None]]] = {}
+        ):
+            raise ValueError("graph input limit exceeded")
+        definitions: dict[_Key, list[SymbolLocation]] = {}
+        references: dict[_Key, list[SymbolLocation]] = {}
+        implementations: dict[_Key, list[Implementation]] = {}
+        definition_links: dict[_Key, list[_Key]] = {}
+        reference_links: dict[_Key, list[_Key]] = {}
+        for item in self.locations:
+            self._check(self.deadline)
+            target = definitions if item.definition else references
+            target.setdefault(self._symbol_key(item.symbol, item.path), []).append(item)
+        for implementation in self.implementations:
+            self._check(self.deadline)
+            implementations.setdefault(
+                self._symbol_key(implementation.implemented, implementation.document), []
+            ).append(implementation)
+        for rel in self.definition_relationships:
+            self._check(self.deadline)
+            left, right = self._symbol_key(rel.source, rel.document), self._symbol_key(rel.target, rel.document)
+            definition_links.setdefault(left, []).append(right)
         for rel in self.reference_relationships + self.definition_relationships:
-            left, right = key(rel.source, rel.document), key(rel.target, rel.document)
-            adjacency.setdefault(left, set()).add(right)
-            adjacency.setdefault(right, set()).add(left)
-        seen = {key(symbol, local_path)}
-        pending = list(seen)
+            self._check(self.deadline)
+            left, right = self._symbol_key(rel.source, rel.document), self._symbol_key(rel.target, rel.document)
+            reference_links.setdefault(left, []).append(right)
+            reference_links.setdefault(right, []).append(left)
+        for attr, data in (
+            ("_defs", definitions),
+            ("_refs", references),
+            ("_impls", implementations),
+            ("_def_links", definition_links),
+            ("_ref_links", reference_links),
+        ):
+            frozen = {}
+            for key, values in data.items():
+                self._check(self.deadline)
+                frozen[key] = tuple(values)
+            object.__setattr__(self, attr, MappingProxyType(frozen))
+        self._check(self.deadline)
+
+    def _limits(self, deadline: float | None, limit: int | None) -> tuple[float, int]:
+        if deadline is not None and not math.isfinite(deadline):
+            raise ValueError("invalid query deadline")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+            raise ValueError("invalid query result limit")
+        end = min(self.deadline, deadline) if deadline is not None else self.deadline
+        self._check(end)
+        return end, min(self.max_results, limit) if limit is not None else self.max_results
+
+    def _walk(
+        self, initial: tuple[_Key, ...], links: Mapping[_Key, tuple[_Key, ...]], deadline: float
+    ) -> Iterator[_Key]:
+        seen: set[_Key] = set()
+        pending: list[_Key] = []
+        for key in initial:
+            self._check(deadline)
+            if key not in seen:
+                seen.add(key)
+                pending.append(key)
+        pending.reverse()
         while pending:
-            for other in adjacency.get(pending.pop(), set()):
+            self._check(deadline)
+            key = pending.pop()
+            yield key
+            for other in links.get(key, ()):
+                self._check(deadline)
                 if other not in seen:
                     seen.add(other)
                     pending.append(other)
-        return tuple(x for x in self.locations if not x.definition and key(x.symbol, x.path) in seen)
 
-    def find_implementations(self, symbol: str, *, local_path: str | None = None) -> tuple[Implementation, ...]:
+    def _collect(
+        self,
+        initial: tuple[_Key, ...],
+        links: Mapping[_Key, tuple[_Key, ...]],
+        buckets: Mapping[_Key, tuple[_T, ...]],
+        deadline: float,
+        limit: int,
+    ) -> GraphMatches[_T]:
+        result: list[_T] = []
+        for key in self._walk(initial, links, deadline):
+            for item in buckets.get(key, ()):
+                self._check(deadline)
+                if len(result) == limit:
+                    partial = tuple(result)
+                    self._check(deadline)
+                    return GraphMatches(partial, True)
+                result.append(item)
+        self._check(deadline)
+        complete = tuple(result)
+        self._check(deadline)
+        return GraphMatches(complete, False)
+
+    def _key(self, symbol: str, local_path: str | None) -> _Key:
+        if not isinstance(symbol, str) or not symbol or len(symbol) > 4096 or len(symbol.encode("utf-8")) > 4096:
+            raise ValueError("invalid graph symbol")
+        if local_path is not None:
+            if not isinstance(local_path, str) or len(local_path) > 4096:
+                raise ValueError("invalid local path")
+            validate_git_path(local_path)
         if symbol.startswith("local ") and local_path is None:
             raise ValueError("local symbol requires a document path")
-        return tuple(
-            x
-            for x in self.implementations
-            if x.implemented == symbol and (not symbol.startswith("local ") or x.document == local_path)
-        )
+        return self._symbol_key(symbol, local_path)
+
+    def query_definitions(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> GraphMatches[SymbolLocation]:
+        end, cap = self._limits(deadline, limit)
+        return self._collect((self._key(symbol, local_path),), self._def_links, self._defs, end, cap)
+
+    def query_references(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> GraphMatches[SymbolLocation]:
+        end, cap = self._limits(deadline, limit)
+        return self._collect((self._key(symbol, local_path),), self._ref_links, self._refs, end, cap)
+
+    def query_implementations(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> GraphMatches[Implementation]:
+        end, cap = self._limits(deadline, limit)
+        return self._collect((self._key(symbol, local_path),), {}, self._impls, end, cap)
+
+    @staticmethod
+    def _complete(matches: GraphMatches[_T]) -> tuple[_T, ...]:
+        if matches.truncated:
+            raise GraphLimitExceeded("graph result limit exceeded; use query_* for partial results")
+        return matches.items
+
+    def definitions(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> tuple[SymbolLocation, ...]:
+        return self._complete(self.query_definitions(symbol, local_path=local_path, deadline=deadline, limit=limit))
+
+    def references(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> tuple[SymbolLocation, ...]:
+        return self._complete(self.query_references(symbol, local_path=local_path, deadline=deadline, limit=limit))
+
+    def find_implementations(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> tuple[Implementation, ...]:
+        return self._complete(self.query_implementations(symbol, local_path=local_path, deadline=deadline, limit=limit))
+
+    def query_related_files(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> GraphMatches[str]:
+        end, cap = self._limits(deadline, limit)
+        definitions = self.query_definitions(symbol, local_path=local_path, deadline=end, limit=cap)
+        references = self.query_references(symbol, local_path=local_path, deadline=end, limit=cap)
+        implementations = self.query_implementations(symbol, local_path=local_path, deadline=end, limit=cap)
+        roots: list[_Key] = []
+        for rel in implementations.items:
+            self._check(end)
+            roots.append(self._symbol_key(rel.implementing, rel.document))
+        impl_defs = self._collect(tuple(roots), self._def_links, self._defs, end, cap)
+        seen_paths: set[str] = set()
+        ordered: list[str] = []
+        for item in chain(definitions.items, references.items, impl_defs.items):
+            self._check(end)
+            if item.path not in seen_paths:
+                if len(ordered) == cap:
+                    partial = tuple(ordered)
+                    self._check(end)
+                    return GraphMatches(partial, True)
+                seen_paths.add(item.path)
+                ordered.append(item.path)
+        self._check(end)
+        incomplete = definitions.truncated or references.truncated or implementations.truncated or impl_defs.truncated
+        complete = tuple(ordered)
+        self._check(end)
+        return GraphMatches(complete, incomplete)
+
+    def related_files(
+        self, symbol: str, *, local_path: str | None = None, deadline: float | None = None, limit: int | None = None
+    ) -> tuple[str, ...]:
+        return self._complete(self.query_related_files(symbol, local_path=local_path, deadline=deadline, limit=limit))
 
 
 @dataclass(frozen=True)
@@ -220,9 +374,9 @@ def dependency_lock_fingerprint(reader: GitSnapshot, entries: tuple[Entry, ...])
         if entry.kind != "BLOB":
             raise ReadError("dependency lock is not a regular blob")
         raw = reader.read(entry)
-        for field in (entry.path.encode("utf-8"), entry.oid.encode("ascii"), hashlib.sha256(raw).digest()):
-            digest.update(len(field).to_bytes(4, "big"))
-            digest.update(field)
+        for part in (entry.path.encode("utf-8"), entry.oid.encode("ascii"), hashlib.sha256(raw).digest()):
+            digest.update(len(part).to_bytes(4, "big"))
+            digest.update(part)
     return digest.hexdigest()
 
 
@@ -440,9 +594,8 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
     ):
         issues.append("reference relationship has an unresolved in-snapshot definition")
     status = IndexStatus.PARTIAL if issues else IndexStatus.VALIDATED
-    return LoadResult(
-        status,
-        SymbolGraph(
+    try:
+        graph = SymbolGraph(
             manifest,
             tuple(locations),
             tuple(relations),
@@ -450,9 +603,12 @@ def load_index(reader: GitSnapshot, manifest: IndexManifest, data: bytes) -> Loa
             tuple(issues),
             tuple(reference_relations),
             tuple(definition_relations),
-        ),
-        tuple(issues),
-    )
+            reader.deadline,
+            reader.limits.hits,
+        )
+    except GraphTimeExceeded:
+        return LoadResult(IndexStatus.UNAVAILABLE, None, ("graph indexing deadline exceeded",))
+    return LoadResult(status, graph, tuple(issues))
 
 
 def fallback_text(
@@ -482,6 +638,8 @@ class NavigationResult:
     implementations: tuple[Implementation, ...]
     fallback: CodeSearchResult | None
     truncated: bool
+    query_status: str = "COMPLETE"
+    query_issue: str | None = None
 
 
 def navigate(
@@ -506,14 +664,25 @@ def navigate(
     graph = result.graph if result else None
     locations: tuple[SymbolLocation, ...] = ()
     relations: tuple[Implementation, ...] = ()
-    if graph is not None:
-        if operation == "definition":
-            locations = graph.definitions(symbol, local_path=local_path)
-        elif operation == "reference":
-            locations = graph.references(symbol, local_path=local_path)
-        else:
-            relations = graph.find_implementations(symbol, local_path=local_path)
+    truncated = False
+    try:
+        if graph is not None:
+            if operation == "definition":
+                matches = graph.query_definitions(symbol, local_path=local_path)
+                locations, truncated = matches.items, matches.truncated
+            elif operation == "reference":
+                matches = graph.query_references(symbol, local_path=local_path)
+                locations, truncated = matches.items, matches.truncated
+            else:
+                implementations = graph.query_implementations(symbol, local_path=local_path)
+                relations, truncated = implementations.items, implementations.truncated
+    except GraphTimeExceeded as exc:
+        return NavigationResult(result, (), (), text, False, "UNAVAILABLE", str(exc))
     if text is None and not locations and not relations:
         text = search(reader, inv, text_query)
-    truncated = len(locations) > reader.limits.hits or len(relations) > reader.limits.hits
-    return NavigationResult(result, locations[: reader.limits.hits], relations[: reader.limits.hits], text, truncated)
+    status = "COMPLETE"
+    if truncated or result is None or result.status != IndexStatus.VALIDATED:
+        status = "PARTIAL"
+    if text is not None:
+        status = "UNAVAILABLE" if text.coverage.value == "UNAVAILABLE" else "PARTIAL"
+    return NavigationResult(result, locations, relations, text, truncated, status)
