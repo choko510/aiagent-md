@@ -96,8 +96,13 @@ export default function ConsoleView() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const authEpochRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const taskEpochRef = useRef(0);
+  const taskAbortRef = useRef<AbortController | null>(null);
 
   const clearOwnerState = useCallback(() => {
+    taskEpochRef.current += 1;
+    taskAbortRef.current?.abort();
+    taskAbortRef.current = null;
     setTasks([]);
     setSelectedTaskId(null);
     setTaskDetail(null);
@@ -107,6 +112,15 @@ export default function ConsoleView() {
     setWatches([]);
     setCapabilities([]);
     setStatusMsg(null);
+  }, []);
+
+  const selectTask = useCallback((nextId: string | null) => {
+    taskEpochRef.current += 1;
+    taskAbortRef.current?.abort();
+    taskAbortRef.current = null;
+    setSelectedTaskId(nextId);
+    setTaskDetail(null);
+    setEventsText("");
   }, []);
 
   const handleTokenChange = useCallback(
@@ -174,14 +188,21 @@ export default function ConsoleView() {
   const loadTaskDetail = useCallback(
     async (id: string) => {
       if (!token.trim()) return;
-      const epoch = authEpochRef.current;
+      const authEpoch = authEpochRef.current;
+      const taskEpoch = ++taskEpochRef.current;
+      taskAbortRef.current?.abort();
+      const controller = new AbortController();
+      taskAbortRef.current = controller;
       const headers = authHeaders();
       try {
         const [dRes, eRes] = await Promise.all([
-          fetch(`/v1/tasks/${encodeURIComponent(id)}`, { headers }),
-          fetch(`/v1/tasks/${encodeURIComponent(id)}/events/stream?follow=true&max_polls=4`, { headers }),
+          fetch(`/v1/tasks/${encodeURIComponent(id)}`, { headers, signal: controller.signal }),
+          fetch(`/v1/tasks/${encodeURIComponent(id)}/events/stream?follow=true&max_polls=4`, {
+            headers,
+            signal: controller.signal,
+          }),
         ]);
-        if (epoch !== authEpochRef.current) return;
+        if (authEpoch !== authEpochRef.current || taskEpoch !== taskEpochRef.current) return;
         if (!dRes.ok) {
           if (dRes.status === 401 || dRes.status === 403 || dRes.status === 404) {
             setTaskDetail(null);
@@ -191,18 +212,28 @@ export default function ConsoleView() {
         }
         const detail = (await dRes.json()) as FullTaskView;
         const evText = eRes.ok ? await eRes.text() : "";
-        if (epoch !== authEpochRef.current) return;
+        if (authEpoch !== authEpochRef.current || taskEpoch !== taskEpochRef.current) return;
+        if (detail.id !== id) return;
         setTaskDetail(detail);
         if (eRes.ok) setEventsText(evText);
-      } catch {
-        // Transient read failure is ignored if owner switched.
+      } catch (err) {
+        if ((err as { name?: string })?.name === "AbortError") return;
+        // Transient read failure is ignored if owner or task selection switched.
       }
     },
     [token, authHeaders],
   );
 
   useEffect(() => {
-    if (selectedTaskId) void loadTaskDetail(selectedTaskId);
+    if (!selectedTaskId) {
+      taskAbortRef.current?.abort();
+      taskAbortRef.current = null;
+      return;
+    }
+    void loadTaskDetail(selectedTaskId);
+    return () => {
+      taskAbortRef.current?.abort();
+    };
   }, [selectedTaskId, loadTaskDetail]);
 
   useEffect(() => {
@@ -231,13 +262,13 @@ export default function ConsoleView() {
     const created = (await res.json()) as { taskId: string };
     setGoal("");
     setStatusMsg(`タスクを投入しました: ${created.taskId}`);
-    setSelectedTaskId(created.taskId);
+    selectTask(created.taskId);
     await loadOverview();
-    await loadTaskDetail(created.taskId);
   }
 
   async function decideApproval(approval: ApprovalRow, decision: "APPROVED" | "REJECTED") {
-    if (!selectedTaskId) return;
+    const targetId = selectedTaskId;
+    if (!targetId || !taskDetail || taskDetail.id !== targetId) return;
     const res = await fetch(`/v1/approvals/${encodeURIComponent(approval.id)}/decision`, {
       method: "POST",
       headers: authHeaders(),
@@ -253,12 +284,13 @@ export default function ConsoleView() {
       return;
     }
     setStatusMsg(`承認操作を確定しました: ${approval.id} -> ${decision}`);
-    await loadTaskDetail(selectedTaskId);
+    await loadTaskDetail(targetId);
   }
 
   async function controlTask(action: "pause" | "resume" | "cancel") {
-    if (!selectedTaskId) return;
-    const res = await fetch(`/v1/tasks/${encodeURIComponent(selectedTaskId)}/${action}`, {
+    const targetId = selectedTaskId;
+    if (!targetId || !taskDetail || taskDetail.id !== targetId) return;
+    const res = await fetch(`/v1/tasks/${encodeURIComponent(targetId)}/${action}`, {
       method: "POST",
       headers: authHeaders(),
     });
@@ -268,13 +300,14 @@ export default function ConsoleView() {
     }
     setStatusMsg(`Run 制御を実行しました: ${action}`);
     await loadOverview();
-    await loadTaskDetail(selectedTaskId);
+    await loadTaskDetail(targetId);
   }
 
   async function sendSteer(event: FormEvent) {
     event.preventDefault();
-    if (!selectedTaskId || !taskDetail || !steerGoal.trim()) return;
-    const res = await fetch(`/v1/tasks/${encodeURIComponent(selectedTaskId)}/steer`, {
+    const targetId = selectedTaskId;
+    if (!targetId || !taskDetail || taskDetail.id !== targetId || !steerGoal.trim()) return;
+    const res = await fetch(`/v1/tasks/${encodeURIComponent(targetId)}/steer`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({
@@ -290,8 +323,10 @@ export default function ConsoleView() {
     setSteerGoal("");
     setStatusMsg("目標 (Steer) を更新しました");
     await loadOverview();
-    await loadTaskDetail(selectedTaskId);
+    await loadTaskDetail(targetId);
   }
+
+  const detailMatchesSelected = Boolean(taskDetail && selectedTaskId && taskDetail.id === selectedTaskId);
 
   return (
     <section className="console" aria-label="Control Plane Console">
@@ -346,7 +381,7 @@ export default function ConsoleView() {
                 <button
                   type="button"
                   className={selectedTaskId === t.id ? "chip chip-active" : "chip"}
-                  onClick={() => setSelectedTaskId(t.id)}
+                  onClick={() => selectTask(t.id)}
                 >
                   [{t.state}] {t.profile} · {t.id.slice(0, 8)}
                 </button>
@@ -357,8 +392,10 @@ export default function ConsoleView() {
 
         <div className="panel">
           <h2>Run 詳細・承認・Steer</h2>
-          {!taskDetail ? (
-            <p className="muted">左の一覧からタスクを選択してください。</p>
+          {!detailMatchesSelected || !taskDetail ? (
+            <p className="muted">
+              {selectedTaskId ? "タスク詳細を読み込み中です..." : "左の一覧からタスクを選択してください。"}
+            </p>
           ) : (
             <div className="detail-stack">
               <p>
@@ -370,9 +407,15 @@ export default function ConsoleView() {
                 {taskDetail.run.leaseEpoch}, HEAD {taskDetail.run.headRevision})
               </p>
               <div className="btn-row">
-                <button type="button" onClick={() => void controlTask("pause")}>Pause / Takeover</button>
-                <button type="button" onClick={() => void controlTask("resume")}>Resume</button>
-                <button type="button" onClick={() => void controlTask("cancel")}>Cancel</button>
+                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("pause")}>
+                  Pause / Takeover
+                </button>
+                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("resume")}>
+                  Resume
+                </button>
+                <button type="button" disabled={!detailMatchesSelected} onClick={() => void controlTask("cancel")}>
+                  Cancel
+                </button>
               </div>
               <form onSubmit={(e) => void sendSteer(e)} className="inline-form">
                 <input
@@ -382,7 +425,9 @@ export default function ConsoleView() {
                   placeholder="Steer 新しい目標"
                   aria-label="Steer目標"
                 />
-                <button type="submit" disabled={!steerGoal.trim()}>Steer 送信</button>
+                <button type="submit" disabled={!detailMatchesSelected || !steerGoal.trim()}>
+                  Steer 送信
+                </button>
               </form>
 
               <h3>承認リクエスト ({taskDetail.approvals.length})</h3>
@@ -393,8 +438,20 @@ export default function ConsoleView() {
                   </div>
                   {a.decision === "PENDING" && (
                     <div className="btn-row">
-                      <button type="button" onClick={() => void decideApproval(a, "APPROVED")}>承認 (APPROVE)</button>
-                      <button type="button" onClick={() => void decideApproval(a, "REJECTED")}>拒否 (REJECT)</button>
+                      <button
+                        type="button"
+                        disabled={!detailMatchesSelected}
+                        onClick={() => void decideApproval(a, "APPROVED")}
+                      >
+                        承認 (APPROVE)
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!detailMatchesSelected}
+                        onClick={() => void decideApproval(a, "REJECTED")}
+                      >
+                        拒否 (REJECT)
+                      </button>
                     </div>
                   )}
                 </div>

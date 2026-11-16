@@ -150,6 +150,9 @@ impl LocalJournal {
         })
     }
 
+    pub const OWNER_RECOVERY_PHRASE: &'static str = "CONFIRM_OWNER_RESUME";
+    pub const LEGACY_MIGRATED_MARKER: &'static str = "LEGACY_V1_JOURNAL_MIGRATED_FAILSAFE_STOP";
+
     pub fn load_control(&self, default_audit: Vec<String>) -> Result<ControlRecord, String> {
         let row: Option<(i64, i64, String)> = self
             .conn
@@ -168,18 +171,37 @@ impl LocalJournal {
                     "local_control",
                     &sealed_audit,
                 )?;
-                let envelope: SealedControlPayload =
+                if let Ok(envelope) = serde_json::from_slice::<SealedControlPayload>(&raw_json) {
+                    if envelope.v != 2
+                        || envelope.stopped != (stopped != 0)
+                        || envelope.revoked != (revoked != 0)
+                    {
+                        return Err("tampered local_control flags or unsupported version".into());
+                    }
+                    return Ok(ControlRecord {
+                        stopped: envelope.stopped,
+                        revoked: envelope.revoked,
+                        audit: envelope.audit,
+                    });
+                }
+                // Legacy v1 rows sealed only `Vec<String>` audit entries; plaintext stopped/revoked columns
+                // were not HMAC-covered. Migrate without bricking the client, NEVER trusting plaintext stopped=0.
+                let mut legacy_audit: Vec<String> =
                     serde_json::from_slice(&raw_json).map_err(|e| e.to_string())?;
-                if envelope.v != 2
-                    || envelope.stopped != (stopped != 0)
-                    || envelope.revoked != (revoked != 0)
+                let revoked_in_audit = legacy_audit
+                    .iter()
+                    .any(|entry| entry.contains("REVOKE") || entry.contains("revoke"));
+                let effective_revoked = (revoked != 0) || revoked_in_audit;
+                if !legacy_audit
+                    .iter()
+                    .any(|e| e == Self::LEGACY_MIGRATED_MARKER)
                 {
-                    return Err("tampered local_control flags or unsupported version".into());
+                    legacy_audit.push(Self::LEGACY_MIGRATED_MARKER.into());
                 }
                 Ok(ControlRecord {
-                    stopped: envelope.stopped,
-                    revoked: envelope.revoked,
-                    audit: envelope.audit,
+                    stopped: true,
+                    revoked: effective_revoked,
+                    audit: legacy_audit,
                 })
             }
             None => Ok(ControlRecord {
@@ -188,6 +210,26 @@ impl LocalJournal {
                 audit: default_audit,
             }),
         }
+    }
+
+    pub fn owner_confirm_clear_legacy_stop(
+        &mut self,
+        confirmation_phrase: &str,
+    ) -> Result<ControlRecord, String> {
+        if confirmation_phrase != Self::OWNER_RECOVERY_PHRASE {
+            return Err("OWNER_CONFIRMATION_REQUIRED".into());
+        }
+        let mut rec = self.load_control(vec![])?;
+        if rec.revoked {
+            return Err("CANNOT_RECOVER_REVOKED_DEVICE".into());
+        }
+        if !rec.audit.iter().any(|e| e == Self::LEGACY_MIGRATED_MARKER) {
+            return Err("NOT_A_LEGACY_MIGRATED_STOP".into());
+        }
+        rec.stopped = false;
+        rec.audit.push("OWNER_CONFIRMED_LEGACY_STOP_RESET".into());
+        self.save_control(&rec)?;
+        Ok(rec)
     }
 
     pub fn save_control(&mut self, record: &ControlRecord) -> Result<(), String> {
@@ -392,6 +434,127 @@ mod tests {
         let reopened = LocalJournal::open(&db_path, &scope).unwrap();
         let err = reopened.load_control(vec![]).unwrap_err();
         assert!(err.contains("tampered"), "unexpected err: {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_v1_hmac_vec_payload_migrates_to_failsafe_stop_never_trusting_plaintext_zero() {
+        let base =
+            std::env::temp_dir().join(format!("aiagent_journal_legacy_v1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("journal.db");
+        let scope = Scope {
+            os_user: "u-v1".into(),
+            tenant_id: "t-v1".into(),
+            owner_user_id: "o-v1".into(),
+            device_identity_id: "di-v1".into(),
+            device_id: "d-v1".into(),
+        };
+        let legacy_json =
+            serde_json::to_string(&vec!["LOCAL_STOP: legacy entry".to_string()]).unwrap();
+        let (scope_hash, legacy_sealed) = {
+            let j = LocalJournal::open(&db_path, &scope).unwrap();
+            let sealed = seal_payload(
+                &j.master_key,
+                &j.scope_hash,
+                "local_control",
+                legacy_json.as_bytes(),
+            )
+            .unwrap();
+            (j.scope_hash.clone(), sealed)
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // Even when plaintext stopped=0, revoked=0 on a legacy row, we must NEVER auto-resume!
+            conn.execute(
+                "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json) VALUES(?1, 0, 0, ?2)",
+                params![scope_hash, legacy_sealed],
+            )
+            .unwrap();
+        }
+        let mut reopened = LocalJournal::open(&db_path, &scope).unwrap();
+        let migrated = reopened.load_control(vec![]).unwrap();
+        assert!(
+            migrated.stopped,
+            "legacy migration must remain stopped until owner confirms"
+        );
+        assert!(!migrated.revoked);
+        assert!(migrated
+            .audit
+            .iter()
+            .any(|e| e == LocalJournal::LEGACY_MIGRATED_MARKER));
+
+        // Wrong owner confirmation phrase fails closed
+        assert_eq!(
+            reopened
+                .owner_confirm_clear_legacy_stop("WRONG")
+                .unwrap_err(),
+            "OWNER_CONFIRMATION_REQUIRED"
+        );
+        // Explicit owner confirmation clears legacy stop and seals into v2
+        let recovered = reopened
+            .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
+            .unwrap();
+        assert!(!recovered.stopped);
+        assert!(!recovered.revoked);
+        let reloaded = reopened.load_control(vec![]).unwrap();
+        assert!(!reloaded.stopped);
+        assert!(reloaded
+            .audit
+            .iter()
+            .any(|e| e == "OWNER_CONFIRMED_LEGACY_STOP_RESET"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_v1_revoked_audit_cannot_be_unrevoked_even_if_plaintext_column_zero() {
+        let base = std::env::temp_dir().join(format!(
+            "aiagent_journal_legacy_v1_revoked_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("journal.db");
+        let scope = Scope {
+            os_user: "u-v1r".into(),
+            tenant_id: "t-v1r".into(),
+            owner_user_id: "o-v1r".into(),
+            device_identity_id: "di-v1r".into(),
+            device_id: "d-v1r".into(),
+        };
+        let legacy_json =
+            serde_json::to_string(&vec!["LOCAL_REVOKE: device revoked".to_string()]).unwrap();
+        let (scope_hash, legacy_sealed) = {
+            let j = LocalJournal::open(&db_path, &scope).unwrap();
+            let sealed = seal_payload(
+                &j.master_key,
+                &j.scope_hash,
+                "local_control",
+                legacy_json.as_bytes(),
+            )
+            .unwrap();
+            (j.scope_hash.clone(), sealed)
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // Even if SQLite plaintext columns were tampered to 0/0, authenticated REVOKE entry enforces revoked=true!
+            conn.execute(
+                "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json) VALUES(?1, 0, 0, ?2)",
+                params![scope_hash, legacy_sealed],
+            )
+            .unwrap();
+        }
+        let mut reopened = LocalJournal::open(&db_path, &scope).unwrap();
+        let migrated = reopened.load_control(vec![]).unwrap();
+        assert!(migrated.stopped);
+        assert!(migrated.revoked);
+        assert_eq!(
+            reopened
+                .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
+                .unwrap_err(),
+            "CANNOT_RECOVER_REVOKED_DEVICE"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
