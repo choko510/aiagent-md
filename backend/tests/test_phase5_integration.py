@@ -3825,3 +3825,524 @@ def test_preview_submit_requires_non_mutating_worker_signature(
         assert called["extract"] is False
     finally:
         ex.close()
+
+
+def test_takeover_cookie_scoping_origin_path_secure_and_public_unverified(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1 & P2: Enforce RFC 6265 Domain/Path/Secure cookie scoping, block cross-origin verifyUrl, and refuse public-200 VERIFIED."""
+    from aiagent_api.app import _matching_cookie_header, _parse_set_cookie_records, create_app
+    from aiagent_browser import Authority
+    from aiagent_browser.pg_fence import PostgresFencePort
+    from aiagent_domain import uuid7
+
+    # 1) Direct RFC 6265 Cookie matching unit verification (Host-only, Subdomain, Path boundary, Secure, Expired)
+    recs = _parse_set_cookie_records(
+        "https://portal-a.test/app/login",
+        [
+            "c_host=v1; Path=/; HttpOnly",
+            "c_dom=v2; Domain=portal-a.test; Path=/app",
+            "c_sec=v3; Domain=portal-a.test; Path=/app; Secure",
+            "c_admin=v4; Path=/admin",
+            "c_exp=v5; Path=/; Max-Age=0",
+        ],
+    )
+    assert _matching_cookie_header(recs, "https://portal-b.test/app/dash") == ""
+    assert _matching_cookie_header(recs, "https://evilportal-a.test/app/dash") == ""
+    assert _matching_cookie_header(recs, "https://sub.portal-a.test/app/dash") == "c_dom=v2; c_sec=v3"
+    assert _matching_cookie_header(recs, "http://sub.portal-a.test/app/dash") == "c_dom=v2"
+    assert _matching_cookie_header(recs, "https://portal-a.test/app2") == "c_host=v1"
+    assert _matching_cookie_header(recs, "https://portal-a.test/app/dash") == "c_host=v1; c_dom=v2; c_sec=v3"
+
+    # 2) Full HTTP API enforcement with TWO allowed hosts (portal-a.test & portal-b.test)
+    _, _, srv_ctx, cli_ctx = _make_self_signed_tls(tmp_path, "portal-a.test")
+    b_hits: list[dict[str, Any]] = []
+    a_verify_cookies: list[str] = []
+
+    class _PortalAHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            ck = self.headers.get("Cookie", "")
+            if self.path == "/app/dash":
+                a_verify_cookies.append(ck)
+                if "c_host=v1" in ck and "c_app=v2" in ck and "c_sec=v3" in ck:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body>Member Dashboard</body></html>")
+                    return
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"<html><body>Auth required</body></html>")
+                return
+            if self.path == "/app/public":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<html><body>Public marketing page</body></html>")
+                return
+            if self.path == "/app/soft-gate":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                if "c_host=v1" in ck:
+                    self.wfile.write(b"<html><body>MemberOnly Welcome</body></html>")
+                else:
+                    self.wfile.write(b"<html><body>Guest Preview</body></html>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            if self.path == "/app/login" and "pw=GOOD99" in raw:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Set-Cookie", "c_host=v1; Path=/; HttpOnly")
+                self.send_header("Set-Cookie", "c_app=v2; Path=/app; HttpOnly")
+                self.send_header("Set-Cookie", "c_sec=v3; Path=/app; Secure")
+                self.send_header("Set-Cookie", "c_admin=v4; Path=/admin")
+                self.end_headers()
+                self.wfile.write(b"<html><body>Login accepted</body></html>")
+                return
+            self.send_response(401)
+            self.end_headers()
+
+    class _PortalBHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_GET(self) -> None:
+            b_hits.append({"path": self.path, "cookie": self.headers.get("Cookie", "")})
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"<html><body>Collector</body></html>")
+
+    srv_a = ThreadingHTTPServer(("127.0.0.1", 0), _PortalAHandler)
+    srv_a.socket = srv_ctx.wrap_socket(srv_a.socket, server_side=True)
+    srv_b = ThreadingHTTPServer(("127.0.0.1", 0), _PortalBHandler)
+    srv_b.socket = srv_ctx.wrap_socket(srv_b.socket, server_side=True)
+    threading.Thread(target=srv_a.serve_forever, daemon=True).start()
+    threading.Thread(target=srv_b.serve_forever, daemon=True).start()
+    port_a = srv_a.server_address[1]
+    port_b = srv_b.server_address[1]
+
+    async def _resolve(host: str, port: int) -> list[str]:
+        del port
+        return ["127.0.0.1"] if host in ("portal-a.test", "portal-b.test") else []
+
+    from aiagent_sentinel.authority import EgressConfig, Sentinel
+
+    ecfg_a = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "web-fetch-a": {
+                        "scheme": "https",
+                        "host": "portal-a.test",
+                        "port": port_a,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    },
+                    "web-fetch-b": {
+                        "scheme": "https",
+                        "host": "portal-b.test",
+                        "port": port_b,
+                        "methods": ["GET", "POST"],
+                        "allow_private": ["127.0.0.1"],
+                    },
+                }
+            }
+        ),
+        production=False,
+    )
+    monkeypatch.setenv("AIAGENT_WEB_FETCH_ALLOW_PRIVATE", "127.0.0.1")
+    sentinel = Sentinel(dbs["sentinel"], ecfg_a, secrets.token_bytes(32))
+
+    ring = KeyRing.single(b"k" * 32, key_id="p11")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=ring,
+        sentinel=LocalSentinel(sentinel),
+        egress_proxy="",
+        allowed_web_hosts=frozenset({"portal-a.test", "portal-b.test"}),
+        takeover_resolver=_resolve,
+        takeover_verify_ssl=cli_ctx,
+    )
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    _, cl = _claim_new(dbs, scope, "cookie scoping", profile="browser")
+    sid = uuid7()
+    auth = Authority(
+        cl.tenant_id,
+        cl.owner_user_id,
+        cl.task_id,
+        cl.run_id,
+        str(cl.goal_revision),
+        str(cl.lease_epoch),
+        cl.worker_ref,
+    )
+    _run(PostgresFencePort(dbs["tool_gateway"]).register(sid, auth))
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            assert (
+                client.post(
+                    f"/v1/browser/sessions/{sid}/takeover/start", headers=headers, json={"reason": "login"}
+                ).status_code
+                == 200
+            )
+            # a) Cross-origin allowed host verifyUrl MUST be blocked before sending ANY cookies!
+            r_cross = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal-a.test:{port_a}/app/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"https://portal-b.test:{port_b}/collect",
+                },
+            )
+            assert r_cross.status_code == 422, r_cross.text
+            assert b_hits == []
+
+            # b) HTTPS -> HTTP downgrade in verifyUrl MUST be blocked!
+            r_down = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal-a.test:{port_a}/app/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"http://portal-a.test:{port_a}/app/dash",
+                },
+            )
+            assert r_down.status_code == 422, r_down.text
+
+            # c) P2: Public HTTP 200 page (same response unauthenticated & authenticated) MUST stay UNVERIFIED!
+            r_pub = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal-a.test:{port_a}/app/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"https://portal-a.test:{port_a}/app/public",
+                },
+            )
+            assert r_pub.status_code == 200, r_pub.text
+            assert r_pub.json()["authStatus"] == "UNVERIFIED"
+            assert r_pub.json()["authenticated"] is False
+
+            # d) P2: Soft-gate public 200 with explicit verifyContains transition proves VERIFIED!
+            r_soft = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal-a.test:{port_a}/app/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"https://portal-a.test:{port_a}/app/soft-gate",
+                    "verifyContains": "MemberOnly",
+                },
+            )
+            assert r_soft.status_code == 200, r_soft.text
+            assert r_soft.json()["authStatus"] == "VERIFIED"
+            assert r_soft.json()["authenticated"] is True
+
+            # e) Protected 401 -> 200 verification ONLY sends c_host, c_app, c_sec (never c_admin!)
+            a_verify_cookies.clear()
+            r_ok = client.post(
+                f"/v1/browser/sessions/{sid}/takeover/authenticate",
+                headers=headers,
+                json={
+                    "url": f"https://portal-a.test:{port_a}/app/login",
+                    "method": "POST",
+                    "formData": {"pw": "GOOD99"},
+                    "verifyUrl": f"https://portal-a.test:{port_a}/app/dash",
+                },
+            )
+            assert r_ok.status_code == 200, r_ok.text
+            assert r_ok.json()["authStatus"] == "VERIFIED"
+            assert r_ok.json()["authenticated"] is True
+            # First GET is baseline unauthenticated (""), second GET has matching cookies only (no c_admin)
+            assert a_verify_cookies[0] == ""
+            assert "c_host=v1" in a_verify_cookies[1]
+            assert "c_app=v2" in a_verify_cookies[1]
+            assert "c_sec=v3" in a_verify_cookies[1]
+            assert "c_admin" not in a_verify_cookies[1]
+    finally:
+        srv_a.shutdown()
+        srv_a.server_close()
+        srv_b.shutdown()
+        srv_b.server_close()
+
+
+def test_send_message_post_4xx_records_unknown_no_retry(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-2: Irreversible send_message POST receiving HTTP 400/409/422 must record UNKNOWN (never FAILED) without retry."""
+    from aiagent_gateways.executors import Destination, HttpMessageExecutor
+    from aiagent_gateways.tool_gateway import ToolGateway
+    from aiagent_sentinel.authority import EgressConfig, Sentinel
+    from aiagent_sentinel.egress import EgressProxy
+
+    for status_code in (400, 409, 422):
+        hits: list[bytes] = []
+
+        class _ErrUpstream(BaseHTTPRequestHandler):
+            code = status_code
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                del fmt, args
+
+            def do_POST(self) -> None:
+                n = int(self.headers.get("Content-Length", "0"))
+                hits.append(self.rfile.read(n))
+                self.send_response(self.code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"accepted_then_4xx"}')
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _ErrUpstream)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        up_port = srv.server_address[1]
+        ecfg = EgressConfig.from_json(
+            json.dumps(
+                {
+                    "destinations": {
+                        "message-receiver": {
+                            "scheme": "http",
+                            "host": "127.0.0.1",
+                            "port": up_port,
+                            "methods": ["POST"],
+                            "allow_private": ["127.0.0.1"],
+                        }
+                    }
+                }
+            ),
+            production=False,
+        )
+        sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
+
+        class _LocalSentinel:
+            def authorize(self, cl: Any, intent_id: Any, dest: Destination) -> str:
+                return sentinel.authorize(cl, str(intent_id), dest.scheme, dest.host, dest.port, dest.method)
+
+        egress = EgressProxy(sentinel, ecfg)
+        proxy_loop = asyncio.new_event_loop()
+        ready_ev = threading.Event()
+        port_box: list[int] = []
+
+        def _run_proxy() -> None:
+            asyncio.set_event_loop(proxy_loop)
+            port_box.append(proxy_loop.run_until_complete(egress.start("127.0.0.1", 0)))
+            ready_ev.set()
+            proxy_loop.run_forever()
+
+        threading.Thread(target=_run_proxy, daemon=True).start()
+        ready_ev.wait(5)
+        try:
+            monkeypatch.delenv("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST", raising=False)
+            msg_exec = HttpMessageExecutor(
+                f"http://127.0.0.1:{up_port}/messages", proxy=f"http://127.0.0.1:{port_box[0]}"
+            )
+            gw = ToolGateway(dbs["tool_gateway"], {"http_message": msg_exec}, sentinel=_LocalSentinel())  # type: ignore[arg-type]
+            scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+            _, cl = _claim_new(dbs, scope, f"msg 4xx {status_code}")
+            args = {"to": "alice", "body": f"msg-{status_code}"}
+            _propose(dbs, cl, f"tc-4xx-{status_code}", "send_message", args)
+            p = _run(gw.submit(cl, f"tc-4xx-{status_code}", "send_message", args))
+            assert p["status"] == "PENDING_APPROVAL", p
+            with dbs["owner"].tx(tenant=cl.tenant_id) as c:
+                c.execute(
+                    "UPDATE agent.approval_records SET decision_code='APPROVED', decided_by_json=%s::jsonb,"
+                    " decided_at=now(), record_version=record_version+1"
+                    " WHERE tenant_id=%s AND id=%s",
+                    (json.dumps({"id": cl.owner_user_id}), cl.tenant_id, p["approvalId"]),
+                )
+            res = _run(gw.submit(cl, f"tc-4xx-{status_code}", "send_message", args))
+            assert res["status"] == "UNKNOWN", (status_code, res)
+            assert len(hits) == 1
+
+            # Duplicate retry MUST remain UNKNOWN without re-POSTing
+            res2 = _run(gw.submit(cl, f"tc-4xx-{status_code}", "send_message", args))
+            assert res2["status"] == "UNKNOWN"
+            assert len(hits) == 1
+        finally:
+            proxy_loop.call_soon_threadsafe(proxy_loop.stop)
+            srv.shutdown()
+            srv.server_close()
+
+
+def test_send_message_https_through_sentinel_without_connect_and_reconcile(
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path
+) -> None:
+    """P1-3: HTTPS send_message & reconciliation use single-request forward-proxy (TLS+SNI in Sentinel, no CONNECT)."""
+    from aiagent_core.config import Secret
+    from aiagent_gateways.executors import Destination, HttpMessageExecutor
+    from aiagent_gateways.tool_gateway import ToolGateway
+    from aiagent_sentinel.authority import EgressConfig, Sentinel
+    from aiagent_sentinel.egress import EgressProxy
+
+    _, _, srv_ctx, cli_ctx = _make_self_signed_tls(tmp_path, "receiver.test")
+    seen_posts: list[dict[str, Any]] = []
+    receipts: dict[str, str] = {}
+
+    class _TlsReceiverHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            if self.path == "/messages-drop":
+                n = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(n).decode("utf-8"))
+                idem = self.headers.get("Idempotency-Key", "")
+                seen_posts.append({"body": body, "idem": idem, "auth": self.headers.get("Authorization", "")})
+                receipts[idem] = "rcpt_tls_drop_" + str(len(seen_posts))
+                self.close_connection = True
+                self.connection.close()
+                return
+            if self.path != "/messages":
+                self.send_response(404)
+                self.end_headers()
+                return
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n).decode("utf-8"))
+            idem = self.headers.get("Idempotency-Key", "")
+            auth_hdr = self.headers.get("Authorization", "")
+            seen_posts.append({"body": body, "idem": idem, "auth": auth_hdr})
+            rcpt = "rcpt_tls_" + str(len(seen_posts))
+            receipts[idem] = rcpt
+            out = json.dumps({"receipt": rcpt}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def do_GET(self) -> None:
+            if self.path.startswith("/receipts/"):
+                key = self.path[len("/receipts/") :]
+                if key in receipts:
+                    out = json.dumps({"receipt": receipts[key]}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(out)))
+                    self.end_headers()
+                    self.wfile.write(out)
+                    return
+            self.send_response(404)
+            self.end_headers()
+
+    tls_srv = ThreadingHTTPServer(("127.0.0.1", 0), _TlsReceiverHandler)
+    tls_srv.socket = srv_ctx.wrap_socket(tls_srv.socket, server_side=True)
+    threading.Thread(target=tls_srv.serve_forever, daemon=True).start()
+    tls_port = tls_srv.server_address[1]
+
+    ecfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "message-receiver": {
+                        "scheme": "https",
+                        "host": "receiver.test",
+                        "port": tls_port,
+                        "methods": ["POST", "GET"],
+                        "allow_private": ["127.0.0.1"],
+                    }
+                }
+            }
+        ),
+        production=False,
+    )
+    sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
+
+    class _LocalSentinel:
+        def authorize(self, cl: Any, intent_id: Any, dest: Destination) -> str:
+            return sentinel.authorize(cl, str(intent_id), dest.scheme, dest.host, dest.port, dest.method)
+
+        def authorize_reconcile(self, tenant_id: str, intent_id: str, dest: Destination) -> str:
+            return sentinel.authorize_reconcile(tenant_id, intent_id, dest.scheme, dest.host, dest.port)
+
+    async def _local_resolver(host: str, port: int) -> list[str]:
+        del port
+        return ["127.0.0.1"] if host == "receiver.test" else []
+
+    egress = EgressProxy(sentinel, ecfg, resolver=_local_resolver, upstream_ssl=cli_ctx)
+    proxy_loop = asyncio.new_event_loop()
+    ready_ev = threading.Event()
+    port_box: list[int] = []
+
+    def _run_proxy() -> None:
+        asyncio.set_event_loop(proxy_loop)
+        port_box.append(proxy_loop.run_until_complete(egress.start("127.0.0.1", 0)))
+        ready_ev.set()
+        proxy_loop.run_forever()
+
+    threading.Thread(target=_run_proxy, daemon=True).start()
+    ready_ev.wait(5)
+    try:
+        proxy_url = f"http://127.0.0.1:{port_box[0]}"
+        msg_exec = HttpMessageExecutor(
+            f"https://receiver.test:{tls_port}/messages",
+            proxy=proxy_url,
+            credential=Secret("recv-tls-secret"),
+            credential_recipient="receiver.test",
+        )
+        gw = ToolGateway(dbs["tool_gateway"], {"http_message": msg_exec}, sentinel=_LocalSentinel())  # type: ignore[arg-type]
+        scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+        _, cl = _claim_new(dbs, scope, "https send message")
+        args = {"to": "alice", "body": "tls hello"}
+        _propose(dbs, cl, "tc-tls-msg", "send_message", args)
+        p = _run(gw.submit(cl, "tc-tls-msg", "send_message", args))
+        assert p["status"] == "PENDING_APPROVAL", p
+        with dbs["owner"].tx(tenant=cl.tenant_id) as c:
+            c.execute(
+                "UPDATE agent.approval_records SET decision_code='APPROVED', decided_by_json=%s::jsonb,"
+                " decided_at=now(), record_version=record_version+1"
+                " WHERE tenant_id=%s AND id=%s",
+                (json.dumps({"id": cl.owner_user_id}), cl.tenant_id, p["approvalId"]),
+            )
+        res = _run(gw.submit(cl, "tc-tls-msg", "send_message", args))
+        assert res["status"] == "CONFIRMED", res
+        assert res["result"]["receipt"] == "rcpt_tls_1"
+        assert len(seen_posts) == 1
+        assert seen_posts[0]["body"] == {"to": "alice", "body": "tls hello"}
+        assert seen_posts[0]["auth"] == "Bearer recv-tls-secret"
+
+        # Also prove HTTPS reconciliation GET /receipts/... works via forward-proxy without CONNECT
+        drop_exec = HttpMessageExecutor(
+            f"https://receiver.test:{tls_port}/messages-drop",
+            proxy=proxy_url,
+            credential=Secret("recv-tls-secret"),
+            credential_recipient="receiver.test",
+        )
+        drop_gw = ToolGateway(dbs["tool_gateway"], {"http_message": drop_exec}, sentinel=_LocalSentinel())  # type: ignore[arg-type]
+        _, cl_drop = _claim_new(dbs, scope, "https reconcile message")
+        args_drop = {"to": "alice", "body": "tls reconcile"}
+        _propose(dbs, cl_drop, "tc-tls-drop", "send_message", args_drop)
+        p_drop = _run(drop_gw.submit(cl_drop, "tc-tls-drop", "send_message", args_drop))
+        with dbs["owner"].tx(tenant=cl_drop.tenant_id) as c:
+            c.execute(
+                "UPDATE agent.approval_records SET decision_code='APPROVED', decided_by_json=%s::jsonb,"
+                " decided_at=now(), record_version=record_version+1"
+                " WHERE tenant_id=%s AND id=%s",
+                (json.dumps({"id": cl_drop.owner_user_id}), cl_drop.tenant_id, p_drop["approvalId"]),
+            )
+        res_unk = _run(drop_gw.submit(cl_drop, "tc-tls-drop", "send_message", args_drop))
+        assert res_unk["status"] == "UNKNOWN", res_unk
+        idem_drop = seen_posts[-1]["idem"]
+        drop_intent_id = idem_drop.split(":", 1)[1]
+        get_perm = sentinel.authorize_reconcile(cl_drop.tenant_id, drop_intent_id, "https", "receiver.test", tls_port)
+        rec = _run(drop_exec.query(idem_drop, get_perm))
+        assert rec == {"sent": True, "receipt": receipts[idem_drop]}
+        reconciled = _run(drop_gw.reconcile(cl_drop.tenant_id, drop_intent_id))
+        assert reconciled == {"status": "CONFIRMED"}, reconciled
+    finally:
+        proxy_loop.call_soon_threadsafe(proxy_loop.stop)
+        tls_srv.shutdown()
+        tls_srv.server_close()

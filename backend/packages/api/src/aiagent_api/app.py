@@ -100,10 +100,33 @@ def _encrypt_browser_storage_state(
     return nonce, cipher_bytes, key_id, sha256(plaintext).hexdigest()
 
 
-def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+def _default_cookie_path(origin_url: str) -> str:
+    uri_path = urlsplit(origin_url).path
+    if not uri_path or not uri_path.startswith("/") or uri_path.count("/") <= 1:
+        return "/"
+    return uri_path.rsplit("/", 1)[0] or "/"
+
+
+def _is_ip_literal(host: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def _parse_set_cookie_records(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+    import time
+    from datetime import UTC
+    from email.utils import parsedate_to_datetime
+
     u = urlsplit(origin_url)
     host = (u.hostname or "").lower()
     is_https = u.scheme.lower() == "https"
+    default_path = _default_cookie_path(origin_url)
+    now_ts = time.time()
     cookies: list[dict[str, Any]] = []
     for raw_hdr in set_cookie_headers:
         jar = SimpleCookie()
@@ -118,9 +141,29 @@ def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) ->
             if secure and not is_https:
                 continue
             domain_attr = str(morsel["domain"] or "").strip().lstrip(".").lower()
-            if domain_attr and not (host == domain_attr or host.endswith("." + domain_attr)):
-                continue
-            path_attr = str(morsel["path"] or "").strip() or "/"
+            if domain_attr:
+                if _is_ip_literal(host):
+                    if host != domain_attr:
+                        continue
+                elif not (host == domain_attr or host.endswith("." + domain_attr)):
+                    continue
+            raw_path = str(morsel["path"] or "").strip()
+            path_attr = raw_path if raw_path.startswith("/") else default_path
+            expires_at: float | None = None
+            max_age_raw = str(morsel["max-age"] or "").strip()
+            if max_age_raw and (max_age_raw.isdigit() or (max_age_raw[0] == "-" and max_age_raw[1:].isdigit())):
+                delta = int(max_age_raw)
+                expires_at = now_ts + delta if delta > 0 else 0.0
+            else:
+                exp_raw = str(morsel["expires"] or "").strip()
+                if exp_raw:
+                    try:
+                        dt = parsedate_to_datetime(exp_raw)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=UTC)
+                        expires_at = dt.timestamp()
+                    except (TypeError, ValueError):
+                        expires_at = None
             cookies.append(
                 {
                     "name": name,
@@ -129,9 +172,50 @@ def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) ->
                     "path": path_attr,
                     "secure": secure,
                     "httpOnly": bool(morsel["httponly"]),
+                    "_hostOnly": not bool(domain_attr),
+                    "_expiresAt": expires_at,
                 }
             )
     return cookies
+
+
+def _cookies_from_set_headers(origin_url: str, set_cookie_headers: list[str]) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in rec.items() if not k.startswith("_")}
+        for rec in _parse_set_cookie_records(origin_url, set_cookie_headers)
+    ]
+
+
+def _cookie_matches_url(cookie: dict[str, Any], target_url: str, *, now_ts: float | None = None) -> bool:
+    import time
+
+    exp = cookie.get("_expiresAt")
+    if exp is not None and float(exp) <= (now_ts if now_ts is not None else time.time()):
+        return False
+    tu = urlsplit(target_url)
+    t_scheme = tu.scheme.lower()
+    t_host = (tu.hostname or "").lower()
+    t_path = tu.path or "/"
+    if bool(cookie.get("secure")) and t_scheme != "https":
+        return False
+    c_dom = str(cookie.get("domain") or "").lower()
+    if not c_dom or not t_host:
+        return False
+    if bool(cookie.get("_hostOnly")) or _is_ip_literal(t_host):
+        if t_host != c_dom:
+            return False
+    elif t_host != c_dom and not t_host.endswith("." + c_dom):
+        return False
+    c_path = str(cookie.get("path") or "/")
+    if t_path == c_path:
+        return True
+    if c_path.endswith("/"):
+        return t_path.startswith(c_path)
+    return t_path.startswith(c_path) and t_path[len(c_path) : len(c_path) + 1] == "/"
+
+
+def _matching_cookie_header(cookies: list[dict[str, Any]], target_url: str) -> str:
+    return "; ".join(f"{c['name']}={c['value']}" for c in cookies if _cookie_matches_url(c, target_url))
 
 
 _CHUNK_HEX_RE = re.compile(rb"^[0-9a-fA-F]{1,16}$")
@@ -1127,43 +1211,95 @@ def create_app(
                 return resp.status_code, list(resp.headers.get_list("set-cookie")), resp.text
 
         status_code, set_cookies, resp_text = await _execute_takeover_http(req_url, method, req_headers, req_body)
-        cookies = _cookies_from_set_headers(req_url, set_cookies)
+        cookie_records = _parse_set_cookie_records(req_url, set_cookies)
+        req_u = urlsplit(req_url)
+        req_scheme = req_u.scheme.lower()
+        req_host = (req_u.hostname or "").lower()
+        req_port = req_u.port or (443 if req_scheme == "https" else 80)
 
         verify_url_raw = parsed.get("verifyUrl")
-        if isinstance(verify_url_raw, str) and verify_url_raw.strip():
-            verify_target: str | None = verify_url_raw.strip()
-        elif (
-            isinstance(session_current_url, str)
-            and session_current_url.startswith(("http://", "https://"))
-            and urlsplit(session_current_url).path != (u.path or "/")
-        ):
-            verify_target = session_current_url
-        else:
-            verify_target = None
+        explicit_verify = isinstance(verify_url_raw, str) and bool(verify_url_raw.strip())
+        verify_target: str | None = None
+        if explicit_verify:
+            candidate = str(verify_url_raw).strip()
+            vu = urlsplit(candidate)
+            v_scheme = vu.scheme.lower()
+            if (
+                v_scheme not in ("http", "https")
+                or not vu.hostname
+                or vu.username is not None
+                or vu.password is not None
+            ):
+                raise HTTPException(422, detail={"error": "INVALID_TARGET_URL"})
+            if req_scheme == "https" and v_scheme != "https":
+                raise HTTPException(422, detail={"error": "VERIFY_URL_DOWNGRADE"})
+            v_host = vu.hostname.lower()
+            v_port = vu.port or (443 if v_scheme == "https" else 80)
+            if (v_scheme, v_host, v_port) != (req_scheme, req_host, req_port):
+                raise HTTPException(422, detail={"error": "VERIFY_URL_ORIGIN_MISMATCH"})
+            verify_target = candidate
+        elif isinstance(session_current_url, str) and session_current_url.startswith(("http://", "https://")):
+            vu = urlsplit(session_current_url)
+            v_scheme = vu.scheme.lower()
+            v_host = (vu.hostname or "").lower()
+            v_port = vu.port or (443 if v_scheme == "https" else 80)
+            if (
+                (v_scheme, v_host, v_port) == (req_scheme, req_host, req_port)
+                and (not (req_scheme == "https" and v_scheme != "https"))
+                and (vu.path or "/") != (req_u.path or "/")
+            ):
+                verify_target = session_current_url
+
+        expected_marker_raw = parsed.get("verifyContains")
+        expected_marker = (
+            expected_marker_raw.strip()
+            if isinstance(expected_marker_raw, str) and 0 < len(expected_marker_raw.strip()) <= 256
+            else None
+        )
 
         if not _takeover_authenticated_page(status_code, resp_text):
             auth_status = "FAILED"
             authenticated = False
         elif verify_target is not None:
-            v_hdrs: dict[str, str] = {}
-            if cookies:
-                v_hdrs["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-            v_status, v_cookies_raw, v_text = await _execute_takeover_http(verify_target, "GET", v_hdrs, None)
-            if v_cookies_raw:
-                merged = {c["name"]: c for c in cookies}
-                for nc in _cookies_from_set_headers(verify_target, v_cookies_raw):
-                    merged[nc["name"]] = nc
-                cookies = list(merged.values())
-            if _takeover_authenticated_page(v_status, v_text):
-                auth_status = "VERIFIED"
-                authenticated = True
-            else:
-                auth_status = "FAILED"
+            cookie_hdr = _matching_cookie_header(cookie_records, verify_target)
+            if not cookie_hdr:
+                auth_status = "UNVERIFIED"
                 authenticated = False
+            else:
+                # Baseline unauthenticated check proves the verify URL actually restricts unauthenticated access
+                # (a public HTTP 200 page must not produce a false VERIFIED signal).
+                u_status, _, u_text = await _execute_takeover_http(verify_target, "GET", {}, None)
+                v_status, v_cookies_raw, v_text = await _execute_takeover_http(
+                    verify_target, "GET", {"Cookie": cookie_hdr}, None
+                )
+                if v_cookies_raw:
+                    merged = {(c["name"], c["domain"], c["path"]): c for c in cookie_records}
+                    for nc in _parse_set_cookie_records(verify_target, v_cookies_raw):
+                        merged[(nc["name"], nc["domain"], nc["path"])] = nc
+                    cookie_records = list(merged.values())
+                unauth_open = _takeover_authenticated_page(u_status, u_text)
+                auth_open = _takeover_authenticated_page(v_status, v_text)
+                if not auth_open or (expected_marker is not None and expected_marker not in v_text):
+                    auth_status = "FAILED"
+                    authenticated = False
+                elif not unauth_open or (expected_marker is not None and expected_marker not in u_text):
+                    auth_status = "VERIFIED"
+                    authenticated = True
+                else:
+                    auth_status = "UNVERIFIED"
+                    authenticated = False
         else:
             auth_status = "UNVERIFIED"
             authenticated = False
 
+        import time as _time
+
+        now_ts = _time.time()
+        cookies = [
+            {k: v for k, v in rec.items() if not k.startswith("_")}
+            for rec in cookie_records
+            if rec.get("_expiresAt") is None or float(rec["_expiresAt"]) > now_ts
+        ]
         new_storage = {"cookies": cookies, "origins": []}
         s_nonce, s_cipher, s_key_id, s_sha = _encrypt_browser_storage_state(
             storage_key_ring,
