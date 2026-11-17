@@ -490,6 +490,25 @@ def _validate_record_semantics(
             fail()
 
 
+def _is_local_fixture_refusal(record: Mapping[str, object], status: object) -> bool:
+    """True only for the pre-send provider/fixture mismatch rejection.
+
+    ``_probe()`` records such a rejection before the legacy check, the quota
+    reservation or any socket, so the fixture cannot be in ``allowed_fixtures``.
+    Every other status must still use an allowed fixture.
+    """
+    return (
+        status == "LOCAL_INPUT_INVALID"
+        and record.get("reason_code") == "INVALID_SCHEMA"
+        and record.get("http_status") is None
+        and record.get("model_observed") is None
+        and record.get("elapsed_ms") is None
+        and record.get("input_tokens") is None
+        and record.get("output_tokens") is None
+        and record.get("cost_reported_usd") is None
+    )
+
+
 def _validated_record(line: str) -> dict[str, object]:
     try:
         parsed = json.loads(
@@ -539,7 +558,10 @@ def _validated_record(line: str) -> dict[str, object]:
     spec = require_spec(provider_id)
     if parsed.get("model_requested") != spec.model_id:
         raise ReportError("log record does not match the frozen catalog model")
-    if parsed.get("fixture_id") not in allowed_fixtures(spec):
+    fixture_id = parsed.get("fixture_id")
+    if fixture_id not in FIXTURES:
+        raise ReportError("log record names an unknown fixture")
+    if fixture_id not in allowed_fixtures(spec) and not _is_local_fixture_refusal(parsed, status):
         raise ReportError("log record pairs the provider with a disallowed fixture")
     if reason not in STATUS_REASONS[cast("str", status)]:
         raise ReportError("log record pairs an impossible status and reason code")

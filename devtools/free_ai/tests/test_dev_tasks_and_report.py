@@ -558,7 +558,20 @@ def test_report_accepts_valid_legacy_records() -> None:
         http_status=None,
         cost_reported_usd=None,
     )
-    for record in (jev, alias, refused):
+    mismatch = _record(
+        provider_id="jev_legacy",
+        model_requested="jev-1.13-free",
+        fixture_id="dev_t01",
+        model_observed=None,
+        status="LOCAL_INPUT_INVALID",
+        reason_code="INVALID_SCHEMA",
+        http_status=None,
+        elapsed_ms=None,
+        input_tokens=None,
+        output_tokens=None,
+        cost_reported_usd=None,
+    )
+    for record in (jev, alias, refused, mismatch):
         validated = runner._validated_record(json.dumps(record))
         assert validated["provider_id"] == record["provider_id"]
 
@@ -593,6 +606,23 @@ _SEMANTIC_INVALID = [
     _record(status="REMOTE_ERROR", reason_code="REMOTE_FAILURE", http_status=200),
     _record(status="CONTENT_MISMATCH", reason_code="OUTPUT_MISMATCH", model_observed=None),
     _record(status="FORMAT_MISMATCH", reason_code="INVALID_JSON", cost_reported_usd=0.25),
+    _record(fixture_id="refund_noul"),
+    _record(
+        status="LOCAL_INPUT_INVALID",
+        reason_code="INVALID_SCHEMA",
+        fixture_id="refund_noul",
+        http_status=200,
+        model_observed=None,
+        cost_reported_usd=None,
+    ),
+    _record(
+        status="LOCAL_INPUT_INVALID",
+        reason_code="BODY_TOO_LARGE",
+        fixture_id="refund_noul",
+        http_status=None,
+        model_observed=None,
+        cost_reported_usd=None,
+    ),
     _record(
         status="UNVERIFIED_TERMS",
         reason_code="LEGACY_DISABLED",
@@ -774,3 +804,67 @@ def test_e2e_legacy_refusal_is_counted_as_local_skip(
     assert jev["communication_failures"] == 0
     assert jev["local_preflight_skips"] == 2
     assert jev["pass_rate"] is None
+
+
+def test_e2e_provider_fixture_mismatch_is_logged_and_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(monkeypatch, lambda _request: httpx.Response(200))
+
+    assert runner.main(_probe_argv(provider="jev_legacy", fixture="dev_t01")) == 2
+    record = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert record["status"] == "LOCAL_INPUT_INVALID"
+    assert record["reason_code"] == "INVALID_SCHEMA"
+    assert record["http_status"] is None
+    assert record["model_observed"] is None
+    assert record["cost_reported_usd"] is None
+    assert requests == []
+
+    log_lines = (runs / "probes.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 1
+    assert list(json.loads(log_lines[0])) == list(runner.RECORD_FIELDS)
+
+    assert runner.main(["report"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["records"] == 1
+    jev = report["providers"]["jev_legacy"]
+    assert jev["attempts"] == 1
+    assert jev["evaluated"] == 0
+    assert jev["communication_failures"] == 0
+    assert jev["local_preflight_skips"] == 1
+    assert jev["pass_rate"] is None
+
+
+def test_e2e_pass_then_local_fixture_refusal_keeps_aggregating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=_chat_text("INDEX_OUT_OF_RANGE"),
+        ),
+    )
+
+    assert runner.main(_probe_argv(provider="kilo", fixture="dev_t01")) == 0
+    capsys.readouterr()
+    assert runner.main(_probe_argv(provider="jev_legacy", fixture="dev_t01")) == 2
+    refusal = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert refusal["status"] == "LOCAL_INPUT_INVALID"
+    assert len(requests) == 1
+
+    assert runner.main(["report"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["records"] == 2
+    kilo = report["providers"]["kilo"]
+    assert kilo["attempts"] == 1
+    assert kilo["pass"] == 1
+    assert kilo["pass_rate"] == 1.0
+    assert kilo["local_preflight_skips"] == 0
+    jev = report["providers"]["jev_legacy"]
+    assert jev["attempts"] == 1
+    assert jev["local_preflight_skips"] == 1
+    assert jev["communication_failures"] == 0

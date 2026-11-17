@@ -87,6 +87,10 @@ Local refusals that happen before any socket is opened (quota interval or daily 
 disabled legacy service, held run lock, provider/fixture mismatch) are written to the same
 13-field log without sending anything, so `report` can account for them as
 `local_preflight_skips`. A log write failure still fails closed with exit `5`.
+A provider/fixture mismatch is accepted as `LOCAL_INPUT_INVALID / INVALID_SCHEMA` only
+when every send-stage field is empty (`http_status`, model, elapsed, tokens and cost);
+`PASS`, content and all communication-stage results still require an allowed fixture, and
+an unknown fixture id is always rejected.
 
 Records are validated for meaning as well as shape: `PASS` requires HTTP 200, no positive
 cost and, for Kilo/OVH, the exact requested model (legacy aliases stay exempt);
