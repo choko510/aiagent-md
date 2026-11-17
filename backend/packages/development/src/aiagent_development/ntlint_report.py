@@ -168,4 +168,4 @@ def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected
         status = "REVIEW_REQUIRED"
     else:
         status = "NO_CANDIDATES"
-    return NtlintReport(source_sha, exit_code, status, tuple(findings), verdicts, missing, unsure, failures, tokens, usd)
+    return NtlintReport(\n        source_sha, exit_code, status, tuple(findings), verdicts, missing, unsure, failures, tokens, usd\n    )
