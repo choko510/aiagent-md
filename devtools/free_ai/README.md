@@ -113,11 +113,13 @@ Scoring is deterministic Python:
   anything else is `CONTENT_MISMATCH`.
 
 `review-report` reads only the fixed `devtools/free_ai/.runs/review_scores.jsonl` (no
-path argument, no directory scan, no network). Each row has thirteen fields
+path argument, no directory scan, no network). Each new row has fourteen fields
 `schema_version, provider_id, model_requested, model_observed, fixture_id,
-observed_at_utc, http_status, status, reason_code, tp, fp, fn, severity_matches`.
-`tp/fp/fn/severity_matches` are integers only for a scored row
-(`PASS`/`CONTENT_MISMATCH`) and `null` for every non-scored row. The row contains catalog
+observed_at_utc, http_status, status, reason_code, tp, fp, fn, severity_matches,
+elapsed_ms`. `tp/fp/fn/severity_matches` are integers only for a scored row
+(`PASS`/`CONTENT_MISMATCH`) and `null` for every non-scored row; `elapsed_ms` is the
+observed wall time or `null`. Rows written before `elapsed_ms` was added (the same
+thirteen fields without it) remain readable with an unknown elapsed time. The row contains catalog
 ids, status and counts only — never code, a prompt, a model answer or reasoning. The file
 has the same 1 MiB / 5000-line limits and the same constant `INVALID_LOG` / exit `5`
 failure mode as `report`.

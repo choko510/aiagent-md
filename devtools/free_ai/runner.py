@@ -777,8 +777,15 @@ def _validated_review_record(line: str) -> dict[str, object]:
         )
     except (ValueError, RecursionError) as exc:
         raise ReportError("review record is not valid JSON") from exc
-    if not isinstance(parsed, dict) or set(parsed) != set(REVIEW_RECORD_FIELDS):
+    if not isinstance(parsed, dict):
         raise ReportError("review record has an unexpected shape")
+    fields = set(parsed)
+    full_fields = set(REVIEW_RECORD_FIELDS)
+    if fields != full_fields and fields != full_fields - {"elapsed_ms"}:
+        raise ReportError("review record has an unexpected shape")
+    if "elapsed_ms" not in parsed:
+        # Rows written before elapsed_ms was added stay readable; the value is unknown.
+        parsed["elapsed_ms"] = None
     if parsed.get("schema_version") != 1 or isinstance(parsed.get("schema_version"), bool):
         raise ReportError("review record has an unsupported schema version")
     provider_id = parsed.get("provider_id")
@@ -790,6 +797,9 @@ def _validated_review_record(line: str) -> dict[str, object]:
     model_observed = parsed.get("model_observed")
     if model_observed is not None and not isinstance(model_observed, str):
         raise ReportError("review record has an invalid observed model")
+    elapsed_ms = parsed.get("elapsed_ms")
+    if elapsed_ms is not None and (isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, int) or elapsed_ms < 0):
+        raise ReportError("review record has an invalid elapsed time")
     http_status = parsed.get("http_status")
     if http_status is not None and (
         isinstance(http_status, bool) or not isinstance(http_status, int) or not 100 <= http_status <= 599
@@ -1206,6 +1216,7 @@ REVIEW_RECORD_FIELDS: Final = (
     "fp",
     "fn",
     "severity_matches",
+    "elapsed_ms",
 )
 
 
@@ -1218,6 +1229,7 @@ def _review_record(
     reason_code: ReasonCode,
     model_observed: str | None,
     http_status: int | None,
+    elapsed_ms: int | None,
     score: ReviewScore | None,
 ) -> dict[str, object]:
     return {
@@ -1234,6 +1246,7 @@ def _review_record(
         "fp": None if score is None else score.fp,
         "fn": None if score is None else score.fn,
         "severity_matches": None if score is None else score.severity_matches,
+        "elapsed_ms": elapsed_ms,
     }
 
 
@@ -1267,6 +1280,7 @@ def _append_review_outcome(
             reason_code=record.reason_code,
             model_observed=record.model_observed,
             http_status=record.http_status,
+            elapsed_ms=record.elapsed_ms,
             score=score,
         )
     )

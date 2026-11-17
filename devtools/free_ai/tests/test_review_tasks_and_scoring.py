@@ -369,6 +369,8 @@ def test_e2e_perfect_review_is_pass_and_fully_aggregated(
     assert review_line["severity_matches"] == 2
     assert review_line["http_status"] == 200
     assert review_line["reason_code"] == "OK"
+    assert isinstance(review_line["elapsed_ms"], int)
+    assert review_line["elapsed_ms"] >= 0
 
     assert runner.main(["review-report"]) == 0
     kilo = json.loads(capsys.readouterr().out)["providers"]["kilo"]
@@ -600,6 +602,7 @@ def _review_row(overrides: dict[str, object] | None = None) -> dict[str, object]
         "fp": 0,
         "fn": 0,
         "severity_matches": 2,
+        "elapsed_ms": 100,
     }
     if overrides:
         row.update(overrides)
@@ -664,7 +667,23 @@ _INVALID_ROWS = [
     json.dumps(_review_row({"http_status": None})),
     json.dumps(_review_row({"schema_version": 2})),
     json.dumps(_review_row({"tp": True})),
+    json.dumps(_review_row({"elapsed_ms": -1})),
+    json.dumps(_review_row({"elapsed_ms": "100"})),
+    json.dumps(_review_row({"elapsed_ms": True})),
 ]
+
+
+def test_report_accepts_rows_written_before_elapsed_ms(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    row = _review_row()
+    del row["elapsed_ms"]
+    code, out = _run_report(monkeypatch, tmp_path, json.dumps(row) + "\n", capsys)
+    assert code == 0
+    kilo = json.loads(out)["providers"]["kilo"]
+    assert kilo["attempts"] == 1
+    assert kilo["valid_scored_cases"] == 1
+    assert kilo["tp"] == 2
 
 
 @pytest.mark.parametrize("content", _INVALID_ROWS)
@@ -836,3 +855,114 @@ def test_e2e_review_non_zero_cost_is_not_scored(
     assert kilo["valid_scored_cases"] == 0
     assert kilo["billing_or_tool_failures"] == 1
     assert kilo["coverage"] == 0.0
+
+
+def _numbered(fixture_id: str) -> dict[int, str]:
+    fixture = fixtures.require_fixture(fixture_id)
+    assert fixture.prompt is not None
+    numbered: dict[int, str] = {}
+    for line in fixture.prompt.splitlines():
+        prefix, separator, code = line.partition(": ")
+        if separator and prefix.isdigit():
+            numbered[int(prefix)] = code
+    return numbered
+
+
+def test_r08_lease_epoch_must_match_exactly_before_commit() -> None:
+    code = _numbered("review_r08")
+    assert "worker_epoch != run.lease_epoch" in code[2]
+    assert code[3].strip() == 'return "STALE"'
+    commit_lines = [line for line, text in code.items() if "run.committed = True" in text]
+    assert commit_lines == [4]
+    for line, text in code.items():
+        if "lease_epoch" in text and line != 2:
+            assert "worker_epoch" not in text
+    assert "< run.lease_epoch" not in "\n".join(code.values())
+    assert "> run.lease_epoch" not in "\n".join(code.values())
+    assert REVIEW_KEY["review_r08"] == ()
+
+
+def test_r06_lease_check_is_correct_and_only_secret_logging_is_gold() -> None:
+    code = _numbered("review_r06")
+    assert "worker_epoch != run.lease_epoch" in code[2]
+    assert code[3].strip() == 'return "STALE"'
+    assert [line for line, text in code.items() if "run.committed = True" in text] == [4]
+    assert 'headers["Authorization"]' in code[7]
+    assert "print(token)" in code[8]
+    key = REVIEW_KEY["review_r06"]
+    assert len(key) == 1
+    assert (key[0].line, key[0].rule_id, key[0].severity) == (8, "SECRET_LOGGING", "P1")
+    assert "STALE_LEASE" not in {defect.rule_id for defect in key}
+
+
+def test_r03_has_unvalidated_commit_and_automatic_retry() -> None:
+    code = _numbered("review_r03")
+    assert "run.commit(worker_epoch)" in code[2]
+    assert "lease_epoch" not in "\n".join(code.values())
+    assert "except TimeoutError:" in code[7]
+    assert code[8].strip() == "return send()"
+    key = {defect.line: defect.rule_id for defect in REVIEW_KEY["review_r03"]}
+    assert key == {2: "STALE_LEASE", 8: "UNSAFE_RETRY"}
+    prompt = fixtures.require_fixture("review_r03").prompt
+    assert prompt is not None
+    assert "must be rejected" not in prompt
+    assert "must not be retried" not in prompt
+
+
+def test_r01_secret_premise_is_explicit() -> None:
+    code = _numbered("review_r01")
+    assert "items[len(items)]" in code[2]
+    assert 'headers["Authorization"]' in code[4]
+    assert 'print("token=" + token)' in code[5]
+    prompt = fixtures.require_fixture("review_r01").prompt
+    assert prompt is not None
+    assert "shared log" in prompt
+    assert "secret Authorization token" in prompt
+    key = {(defect.line, defect.rule_id) for defect in REVIEW_KEY["review_r01"]}
+    assert key == {(2, "INDEX_OUT_OF_RANGE"), (5, "SECRET_LOGGING")}
+
+
+_GOLD_LINE_SNIPPETS = {
+    ("review_r01", 2): "items[len(items)]",
+    ("review_r01", 5): 'print("token=" + token)',
+    ("review_r02", 2): "SELECT * FROM users WHERE name = ",
+    ("review_r02", 6): "return age > 18",
+    ("review_r03", 2): "run.commit(worker_epoch)",
+    ("review_r03", 8): "return send()",
+    ("review_r06", 8): "print(token)",
+    ("review_r07", 5): "return send()",
+}
+
+
+def test_each_gold_line_contains_the_expected_defect_code() -> None:
+    assert set(_GOLD_LINE_SNIPPETS) == {
+        (fixture_id, defect.line) for fixture_id, key in REVIEW_KEY.items() for defect in key
+    }
+    for (fixture_id, line), snippet in _GOLD_LINE_SNIPPETS.items():
+        code = _numbered(fixture_id)
+        assert snippet in code[line]
+
+
+def test_clean_cases_have_no_defect_patterns() -> None:
+    for fixture_id in ("review_r04", "review_r05", "review_r08"):
+        assert REVIEW_KEY[fixture_id] == ()
+        code = _numbered(fixture_id)
+        text = "\n".join(code.values())
+        assert "items[len(items)]" not in text
+        assert "WHERE name = '" not in text
+        assert 'print("token=" + token)' not in text
+        assert "print(token)" not in text
+        assert "return age > 18" not in text
+        assert "run.commit(worker_epoch)" not in text
+        except_lines = [line for line, value in code.items() if "except TimeoutError:" in value]
+        for line in except_lines:
+            following = code.get(line + 1, "")
+            assert "send()" not in following
+
+
+def test_gold_findings_are_not_false_positives() -> None:
+    for fixture_id, key in REVIEW_KEY.items():
+        findings = tuple(review.ReviewFinding(defect.line, defect.rule_id, defect.severity) for defect in key)
+        score = review.score_review(fixture_id, findings)
+        assert (score.tp, score.fp, score.fn) == (len(key), 0, 0)
+        assert score.severity_matches == len(key)

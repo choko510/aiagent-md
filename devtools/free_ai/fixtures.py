@@ -156,10 +156,13 @@ def _review_prompt(code: str, specification: str | None = None) -> str:
 
 REVIEW_R01_CODE = """def take(items, index):
     return items[len(items)]
-
-def log_token(token):
+def log_request(headers):
+    token = headers["Authorization"]
     print("token=" + token)"""
-REVIEW_R01_PROMPT = _review_prompt(REVIEW_R01_CODE)
+REVIEW_R01_PROMPT = _review_prompt(
+    REVIEW_R01_CODE,
+    "stdout is shipped to a shared log, and incoming headers contain a secret Authorization token.",
+)
 
 REVIEW_R02_CODE = """def find_user(conn, name):
     query = "SELECT * FROM users WHERE name = '" + name + "'"
@@ -179,9 +182,9 @@ def retry_unknown(send):
         return send()"""
 REVIEW_R03_PROMPT = _review_prompt(
     REVIEW_R03_CODE,
-    "A completion whose worker_epoch is older than run.lease_epoch must be rejected, and "
-    "a timed-out side-effecting send has an unknown outcome and must not be retried "
-    "automatically.",
+    "A completion carries worker_epoch while run.lease_epoch is the current lease. "
+    "send performs an external side effect; when the connection times out, no response "
+    "is received.",
 )
 
 REVIEW_R04_CODE = """def last_item(items):
@@ -204,14 +207,17 @@ def allowed(age):
 REVIEW_R05_PROMPT = _review_prompt(REVIEW_R05_CODE)
 
 REVIEW_R06_CODE = """def complete(run, worker_epoch):
-    if worker_epoch < run.lease_epoch:
+    if worker_epoch != run.lease_epoch:
         return "STALE"
     run.committed = True
     return "OK"
 def debug_headers(headers):
     token = headers["Authorization"]
     print(token)"""
-REVIEW_R06_PROMPT = _review_prompt(REVIEW_R06_CODE)
+REVIEW_R06_PROMPT = _review_prompt(
+    REVIEW_R06_CODE,
+    "stdout is shipped to a shared log, and incoming headers contain a secret Authorization token.",
+)
 
 REVIEW_R07_CODE = """def send_with_retry(send):
     try:
@@ -224,7 +230,7 @@ REVIEW_R07_PROMPT = _review_prompt(
 )
 
 REVIEW_R08_CODE = """def complete(run, worker_epoch):
-    if worker_epoch < run.lease_epoch:
+    if worker_epoch != run.lease_epoch:
         return "STALE"
     run.committed = True
     return "OK"
