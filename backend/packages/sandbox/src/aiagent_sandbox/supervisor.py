@@ -188,7 +188,6 @@ class Supervisor:
     cell_uid: int | None = None
     cell_gid: int | None = None
     consumed_path: Path | None = None
-    _consumed: set[str] = field(default_factory=set)
     _active: dict[str, tuple[str, str, str, asyncio.Event]] = field(default_factory=dict)
     _heartbeats: dict[str, tuple[float, float]] = field(default_factory=dict)
 
@@ -199,18 +198,50 @@ class Supervisor:
             raise RuntimeError("refusing to run generated code as root: configure an unprivileged cell uid/gid")
         self.root.mkdir(parents=True, exist_ok=True)
         self.consumed_path = self.consumed_path or self.root / ".consumed-grants"
-        if self.consumed_path.exists():
-            self._consumed = set(self.consumed_path.read_text().split())
 
     def _consume(self, gid: str) -> None:
-        if gid in self._consumed:
-            raise GrantError("REPLAYED")
-        self._consumed.add(gid)
+        # The journal is a local replay safeguard, not the canonical Authority.
+        # Serialize independent Supervisor processes and fail closed when busy,
+        # corrupt or too large; never read an unbounded journal into memory.
+        import fcntl
+        import stat
+
         assert self.consumed_path is not None
-        with open(self.consumed_path, "a", encoding="utf-8") as f:
-            f.write(gid + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            fd = os.open(self.consumed_path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "r+b") as journal:
+                try:
+                    fcntl.flock(journal.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise GrantError("REPLAY_JOURNAL_BUSY") from exc
+                info = os.fstat(journal.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or info.st_size > 64 * 1024 * 1024
+                ):
+                    raise GrantError("REPLAY_JOURNAL_INVALID")
+                deadline = time.monotonic() + 1
+                while True:
+                    line = journal.readline(258)
+                    if not line:
+                        break
+                    if time.monotonic() > deadline or len(line) > 257 or not line.endswith(b"\n"):
+                        raise GrantError("REPLAY_JOURNAL_INVALID")
+                    if line[:-1] == gid.encode("ascii"):
+                        raise GrantError("REPLAYED")
+                journal.write(gid.encode("ascii") + b"\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+                parent_fd = os.open(self.consumed_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+        except OSError as exc:
+            raise GrantError("REPLAY_JOURNAL_UNAVAILABLE") from exc
 
     def workspace(self, tenant: str, task: str, cwd_rel: str) -> tuple[Path, Path]:
         ws = (self.root / tenant / task).resolve()

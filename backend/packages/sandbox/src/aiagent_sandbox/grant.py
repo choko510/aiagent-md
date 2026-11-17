@@ -79,6 +79,8 @@ def verify(
         g = Grant(**{**p, "argv": tuple(p["argv"])})
     except TypeError as e:
         raise GrantError("MALFORMED") from e
+    if not isinstance(g.grant_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", g.grant_id) is None:
+        raise GrantError("MALFORMED")
     if g.attempt_binding_version is None and not allow_legacy:
         raise GrantError("LEGACY_DISABLED")
     if g.attempt_binding_version is not None and (

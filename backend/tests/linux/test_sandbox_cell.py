@@ -875,6 +875,46 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
     assert not list(output_parent.iterdir())
 
 
+def test_replay_journal_serializes_supervisors_and_rejects_corruption(tmp_path: Path) -> None:
+    import concurrent.futures
+    import threading
+
+    first, second = sup(tmp_path, netns=False), sup(tmp_path, netns=False)
+    barrier = threading.Barrier(2)
+
+    def consume(supervisor):
+        barrier.wait()
+        try:
+            supervisor._consume("execution:fixture")
+            return "ACCEPTED"
+        except GrantError as exc:
+            return str(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        values = list(pool.map(consume, (first, second)))
+    assert values.count("ACCEPTED") == 1
+    assert set(values) <= {"ACCEPTED", "REPLAYED", "REPLAY_JOURNAL_BUSY"}
+    restarted = sup(tmp_path, netns=False)
+    with pytest.raises(GrantError, match="REPLAYED"):
+        restarted._consume("execution:fixture")
+    assert restarted.consumed_path is not None
+    with restarted.consumed_path.open("ab") as journal:
+        journal.write(b"truncated")
+    with pytest.raises(GrantError, match="REPLAY_JOURNAL_INVALID"):
+        restarted._consume("another")
+
+
+def test_grant_id_cannot_inject_replay_journal_records(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from aiagent_sandbox.grant import verify
+
+    argv = ["/bin/true"]
+    g = verify(KEY, grant(argv), argv, ".")
+    with pytest.raises(GrantError, match="MALFORMED"):
+        run(sup(tmp_path, netns=False).execute(sign(KEY, replace(g, grant_id="x\nforged")), argv, "."))
+
+
 def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
     if os.geteuid() != 0:
         pytest.skip("projected output requires privileged Supervisor")
