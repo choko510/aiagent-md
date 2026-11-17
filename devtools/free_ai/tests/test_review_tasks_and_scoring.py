@@ -989,3 +989,23 @@ def test_gold_findings_are_not_false_positives() -> None:
         score = review.score_review(fixture_id, findings)
         assert (score.tp, score.fp, score.fn) == (len(key), 0, 0)
         assert score.severity_matches == len(key)
+
+
+def test_report_reads_probe_rows_written_by_review_tasks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+    _probe(
+        monkeypatch,
+        capsys,
+        fixture="review_r01",
+        content=_findings((2, "INDEX_OUT_OF_RANGE", "P2"), (5, "SECRET_LOGGING", "P1")),
+    )
+    assert runner.main(["report"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["records"] == 1
+    kilo = report["providers"]["kilo"]
+    assert kilo["attempts"] == 1
+    assert kilo["evaluated"] == 1
+    assert kilo["pass"] == 1
+    assert kilo["local_preflight_skips"] == 0

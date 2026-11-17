@@ -41,8 +41,10 @@ python -m devtools.free_ai review-report
 
 `probe` accepts `--fixture jp_hello`, `--fixture arithmetic_2plus2` and the six
 synthetic development tasks `--fixture dev_t01` … `dev_t06` for the two official chat
-services (Kilo and OVHcloud). `--fixture refund_noul` is only valid for `jev_legacy`,
-and the `dev_*` tasks are never allowed on the legacy services. Legacy services
+services (Kilo and OVHcloud). It also accepts the eight review tasks
+`--fixture review_r01` … `review_r08` for the two official chat services.
+`--fixture refund_noul` is only valid for `jev_legacy`, and the `dev_*`/`review_*`
+tasks are never allowed on the legacy services. Legacy services
 additionally require `--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS`
 while their anonymous terms are unconfirmed (see below).
 
@@ -152,9 +154,9 @@ fails, the command also exits `5` and prints `SAFETY_BLOCKED / INVALID_SCHEMA`; 
 row exists, but no review row exists, so `review-report` cannot count that attempt as a
 success. Failed sends are never retried and corrupt logs are never repaired.
 
-Old STEP 2 review log rows (the former `review_01 … review_08` ids and the old
-`kind`/`high|medium|low` contract) are rejected as `INVALID_LOG`; they are not mixed with
-the new gold. Old STEP 1/2 non-review rows remain valid.
+Old review log rows from the earlier STEP 3 draft (the former `review_01 … review_08`
+ids and the old `kind`/`high|medium|low` contract) are rejected as `INVALID_LOG`; they
+are not mixed with the new gold. Old STEP 1/2 non-review rows remain valid.
 
 ### `report`
 
