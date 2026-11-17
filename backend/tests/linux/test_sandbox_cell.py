@@ -305,7 +305,7 @@ def test_trusted_source_descriptor_is_read_only_in_real_supervisor(tmp_path: Pat
                 "Path('output').write_text('ok')\n"
             )
             argv = [sys.executable, "-c", code]
-            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=source_fd))
+            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=source_fd, heartbeat_seconds=10))
         finally:
             os.close(source_fd)
         assert result["status"] == "EXITED" and result["exitCode"] == 0, result
@@ -359,7 +359,7 @@ def test_staged_source_descriptor_through_real_supervisor(tmp_path: Path) -> Non
                 "Path('output').write_text('ok')\n"
             )
             argv = [sys.executable, "-c", code]
-            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=root_fd))
+            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=root_fd, heartbeat_seconds=10))
             assert result["status"] == "EXITED" and result["exitCode"] == 0, result
             assert "SOURCE_READ_ONLY" in result["stdout"] and "WRITABLE" not in result["stdout"]
             fd = os.open("input.py", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -409,7 +409,16 @@ def test_projected_execution_rejects_wrong_output_descriptor(tmp_path: Path) -> 
     try:
         argv = ["/bin/true"]
         with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_MISMATCH"):
-            run(s._execute(grant(argv, projected=True), argv, ".", source_fd=source_fd, output_fd=output_fd))
+            run(
+                s._execute(
+                    grant(argv, projected=True),
+                    argv,
+                    ".",
+                    source_fd=source_fd,
+                    output_fd=output_fd,
+                    heartbeat_seconds=10,
+                )
+            )
     finally:
         os.close(source_fd)
         os.close(output_fd)
@@ -481,7 +490,7 @@ def test_projected_cancel_is_scoped_to_signed_identity(tmp_path: Path) -> None:
     payload = token["grant"]
 
     async def run_cancel():
-        task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd))
+        task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd, heartbeat_seconds=10))
         for _ in range(100):
             if payload["execution_id"] in s._active:
                 break
@@ -603,5 +612,36 @@ def test_projected_heartbeat_loss_kills_process_and_cannot_be_revived(tmp_path: 
 
     try:
         run(exercise())
+    finally:
+        os.close(fd)
+
+
+def test_projected_execution_requires_heartbeat_before_start(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "required-heartbeat"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        argv = ["/bin/true"]
+        with pytest.raises(GrantError, match="HEARTBEAT_REQUIRED"):
+            run(s._execute(grant(argv, projected=True), argv, ".", source_fd=fd))
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("invalid", [True, 0.0, 11.0, float("nan"), float("inf")])
+def test_projected_execution_rejects_invalid_heartbeat(tmp_path: Path, invalid: float) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "invalid-heartbeat"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        argv = ["/bin/true"]
+        with pytest.raises(GrantError, match="INVALID_HEARTBEAT"):
+            run(s._execute(grant(argv, projected=True), argv, ".", source_fd=fd, heartbeat_seconds=invalid))
     finally:
         os.close(fd)

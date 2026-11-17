@@ -279,7 +279,9 @@ class Supervisor:
                     raise GrantError("SOURCE_OWNER_MISMATCH")
             except OSError as exc:
                 raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
-        if heartbeat_seconds is not None and (source_fd is None or not 0.1 <= heartbeat_seconds <= 10):
+        if heartbeat_seconds is not None and (
+            source_fd is None or isinstance(heartbeat_seconds, bool) or not 0.1 <= heartbeat_seconds <= 10
+        ):
             raise GrantError("INVALID_HEARTBEAT")
         if output_fd is not None and (source_fd is None or output_fd == source_fd):
             raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
@@ -288,6 +290,8 @@ class Supervisor:
             raise GrantError("PROJECTED_BINDING_REQUIRED")
         if source_fd is None and g.execution_binding_version is not None:
             raise GrantError("PROJECTED_SOURCE_REQUIRED")
+        if source_fd is not None and heartbeat_seconds is None:
+            raise GrantError("HEARTBEAT_REQUIRED")
         self._consume(g.grant_id)
         execution = g.execution_id
         if source_fd is not None:

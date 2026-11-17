@@ -314,11 +314,16 @@ particular, loss of the RPC channel does not yet trigger an independent Cell
 heartbeat watchdog, and cancellation racing initial registration is not closed.
 No Artifact may be considered safe to publish on this basis alone.
 
-An optional Cell-side watchdog now expires a projected execution when a scoped
+A Cell-side watchdog now expires a projected execution when a scoped
 heartbeat stops, kills/reaps the process and refuses late renewal. Heartbeats
 use authenticated RPC and must match tenant/Execution/Attempt/binding. The
 internal Gateway helper checks canonical Run authority before each heartbeat and
 fails closed on DB/RPC error. Real Docker Cell tests cover timeout and scoped
 heartbeat/cancellation. This remains unwired to the actual source broker and
-production dispatch; opting into the watchdog and solving registration races,
+production dispatch; solving registration races,
 Supervisor restart/process cleanup, and real transport failure are still required.
+
+Projected execution now requires a finite 0.1–10 second watchdog window;
+it cannot start through the private hook without one. Generic sandbox.exec is
+unchanged. There is still no production orchestration or authenticated Source
+Broker, and Supervisor process-death cleanup is not yet guaranteed.
