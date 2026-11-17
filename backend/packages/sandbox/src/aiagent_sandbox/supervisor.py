@@ -313,6 +313,7 @@ class Supervisor:
         *,
         source_fd: int | None,
         output_fd: int | None = None,
+        output_path: Path | None = None,
         revoked: asyncio.Event | None = None,
         heartbeat_seconds: float | None = None,
     ) -> dict[str, Any]:
@@ -330,7 +331,9 @@ class Supervisor:
             source_fd is None or isinstance(heartbeat_seconds, bool) or not 0.1 <= heartbeat_seconds <= 10
         ):
             raise GrantError("INVALID_HEARTBEAT")
-        if output_fd is not None and (source_fd is None or output_fd == source_fd):
+        if (output_fd is None) != (output_path is None):
+            raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
+        if output_fd is not None and (source_fd is None or output_fd == source_fd or cwd_rel != "."):
             raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         g = verify(self.grant_key, token, argv, cwd_rel)
         if source_fd is not None and g.execution_binding_version != 1:
@@ -341,6 +344,9 @@ class Supervisor:
             raise GrantError("HEARTBEAT_REQUIRED")
         self._consume(g.grant_id)
         execution = g.execution_id
+        if source_fd is not None:
+            assert execution is not None
+            self._consume("execution:" + execution)
         if source_fd is not None:
             assert execution is not None and g.attempt_id is not None and g.execution_binding_sha256 is not None
             if execution in self._active:
@@ -355,7 +361,10 @@ class Supervisor:
         try:
             if revoked is not None and revoked.is_set():
                 return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
-            ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+            if output_path is None:
+                ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+            else:
+                ws = cwd = output_path
             if output_fd is not None:
                 try:
                     actual, expected = os.fstat(output_fd), os.stat(cwd, follow_symlinks=False)
@@ -425,7 +434,7 @@ class Supervisor:
         cwd_rel: str,
         *,
         source_fd: int,
-        output_fd: int,
+        output_parent: Path,
         binding: dict[str, Any],
         receipt_key: bytes,
         private_parent: Path,
@@ -441,6 +450,7 @@ class Supervisor:
         from aiagent_development.code_intelligence.artifact_capture import capture_scip
 
         from .capture_signing import sign_capture, validate_capture_binding
+        from .projected_output import projected_output
 
         g = verify(self.grant_key, token, argv, cwd_rel)
         if g.execution_binding_version != 1 or self.cell_uid is None:
@@ -448,43 +458,43 @@ class Supervisor:
         validate_capture_binding(receipt_key, g, binding)
         if not math.isfinite(deadline) or not time.monotonic() < deadline <= time.monotonic() + 300:
             raise GrantError("CAPTURE_DEADLINE")
-        try:
-            os.stat("index.scip", dir_fd=output_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise GrantError("CAPTURE_OUTPUT_PREEXISTS")
-        result = await self._execute(
-            token,
-            argv,
-            cwd_rel,
-            source_fd=source_fd,
-            output_fd=output_fd,
-            revoked=revoked,
-            heartbeat_seconds=heartbeat_seconds,
-        )
-        if (
-            result.get("status") != "EXITED"
-            or type(result.get("exitCode")) is not int
-            or result.get("exitCode") != 0
-            or result.get("timedOut") is not False
-            or result.get("truncated") is not False
-            or revoked.is_set()
-        ):
-            raise GrantError("PROJECTED_EXECUTION_INCOMPLETE")
-        with capture_scip(output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline) as captured:
-            proof = sign_capture(
-                receipt_key,
-                g,
-                binding,
-                captured.fd,
-                expected_sha256=captured.sha256,
-                size=captured.byte_length,
-                deadline=deadline,
+        assert g.execution_id is not None
+        with projected_output(
+            output_parent, g, cell_uid=self.cell_uid, cell_gid=self.cell_gid or self.cell_uid
+        ) as output_fd:
+            output_path = output_parent / g.execution_id
+            result = await self._execute(
+                token,
+                argv,
+                cwd_rel,
+                source_fd=source_fd,
+                output_fd=output_fd,
+                output_path=output_path,
+                revoked=revoked,
+                heartbeat_seconds=heartbeat_seconds,
             )
-            if revoked.is_set():
-                raise GrantError("PROJECTED_EXECUTION_REVOKED")
-            yield result, captured.fd, proof
+            if (
+                result.get("status") != "EXITED"
+                or type(result.get("exitCode")) is not int
+                or result.get("exitCode") != 0
+                or result.get("timedOut") is not False
+                or result.get("truncated") is not False
+                or revoked.is_set()
+            ):
+                raise GrantError("PROJECTED_EXECUTION_INCOMPLETE")
+            with capture_scip(output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline) as captured:
+                proof = sign_capture(
+                    receipt_key,
+                    g,
+                    binding,
+                    captured.fd,
+                    expected_sha256=captured.sha256,
+                    size=captured.byte_length,
+                    deadline=deadline,
+                )
+                if revoked.is_set():
+                    raise GrantError("PROJECTED_EXECUTION_REVOKED")
+                yield result, captured.fd, proof
 
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:

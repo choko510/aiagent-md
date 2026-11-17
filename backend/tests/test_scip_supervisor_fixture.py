@@ -164,7 +164,13 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                         before = resource.getrusage(resource.RUSAGE_CHILDREN)
                         result = asyncio.run(
                             supervisor._execute(
-                                token, argv, ".", source_fd=fd, output_fd=output_fd, heartbeat_seconds=10
+                                token,
+                                argv,
+                                ".",
+                                source_fd=fd,
+                                output_fd=output_fd,
+                                output_path=workspace,
+                                heartbeat_seconds=10,
                             )
                         )
                         after = resource.getrusage(resource.RUSAGE_CHILDREN)

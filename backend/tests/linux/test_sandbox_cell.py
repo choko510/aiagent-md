@@ -416,6 +416,7 @@ def test_projected_execution_rejects_wrong_output_descriptor(tmp_path: Path) -> 
                     ".",
                     source_fd=source_fd,
                     output_fd=output_fd,
+                    output_path=source,
                     heartbeat_seconds=10,
                 )
             )
@@ -728,7 +729,9 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
     source.mkdir()
     source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     workspace, _ = s.workspace("t1", "task1", ".")
-    output_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    (workspace / "index.scip").write_bytes(b"untrusted stale task artifact")
+    output_parent = tmp_path / "capture-output"
+    output_parent.mkdir(mode=0o700)
     parent = tmp_path / "capture-private"
     parent.mkdir(mode=0o700)
     execution = uuid7()
@@ -772,7 +775,7 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
                 argv,
                 ".",
                 source_fd=source_fd,
-                output_fd=output_fd,
+                output_parent=output_parent,
                 binding={**binding, "intent": "other"},
                 receipt_key=b"r" * 32,
                 private_parent=parent,
@@ -781,13 +784,13 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
                 revoked=asyncio.Event(),
             ):
                 pytest.fail("invalid binding started")
-        assert not (workspace / "index.scip").exists()
+        assert (workspace / "index.scip").read_bytes() == b"untrusted stale task artifact"
         async with s._execute_and_capture(
             token,
             argv,
             ".",
             source_fd=source_fd,
-            output_fd=output_fd,
+            output_parent=output_parent,
             binding=binding,
             receipt_key=b"r" * 32,
             private_parent=parent,
@@ -801,13 +804,15 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
             assert envelope["payload"]["artifact_sha256"] == hashlib.sha256(b"fixture").hexdigest()
             expected = hmac.new(b"r" * 32, canonical_json(envelope["payload"]).encode(), hashlib.sha256).hexdigest()
             assert hmac.compare_digest(expected, envelope["mac"])
-        with pytest.raises(GrantError, match="CAPTURE_OUTPUT_PREEXISTS"):
+        assert not list(output_parent.iterdir())
+        assert (workspace / "index.scip").read_bytes() == b"untrusted stale task artifact"
+        with pytest.raises(GrantError, match="REPLAYED"):
             async with s._execute_and_capture(
                 token,
                 argv,
                 ".",
                 source_fd=source_fd,
-                output_fd=output_fd,
+                output_parent=output_parent,
                 binding=binding,
                 receipt_key=b"r" * 32,
                 private_parent=parent,
@@ -815,20 +820,45 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
                 heartbeat_seconds=10,
                 revoked=asyncio.Event(),
             ):
-                pytest.fail("existing output accepted")
+                pytest.fail("replayed execution accepted")
         from dataclasses import replace
 
-        (workspace / "index.scip").unlink()
+        restarted = sup(tmp_path, netns=False)
+        reissued = replace(g, grant_id=uuid.uuid4().hex)
+        with pytest.raises(GrantError, match="REPLAYED"):
+            async with restarted._execute_and_capture(
+                sign(KEY, reissued),
+                argv,
+                ".",
+                source_fd=source_fd,
+                output_parent=output_parent,
+                binding=binding,
+                receipt_key=b"r" * 32,
+                private_parent=parent,
+                deadline=time.monotonic() + 10,
+                heartbeat_seconds=10,
+                revoked=asyncio.Event(),
+            ):
+                pytest.fail("reissued execution accepted after restart")
+        assert not list(output_parent.iterdir())
+
         failed_argv = [sys.executable, "-c", "raise SystemExit(7)"]
-        failed_grant = replace(g, grant_id=uuid.uuid4().hex, argv=tuple(failed_argv))
+        failed_binding = {**binding, "execution": uuid7()}
+        failed_grant = replace(
+            g,
+            grant_id=uuid.uuid4().hex,
+            argv=tuple(failed_argv),
+            execution_id=failed_binding["execution"],
+            execution_binding_sha256=sha256_hex(failed_binding),
+        )
         with pytest.raises(GrantError, match="PROJECTED_EXECUTION_INCOMPLETE"):
             async with s._execute_and_capture(
                 sign(KEY, failed_grant),
                 failed_argv,
                 ".",
                 source_fd=source_fd,
-                output_fd=output_fd,
-                binding=binding,
+                output_parent=output_parent,
+                binding=failed_binding,
                 receipt_key=b"r" * 32,
                 private_parent=parent,
                 deadline=time.monotonic() + 10,
@@ -841,8 +871,8 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
         run(exercise())
     finally:
         os.close(source_fd)
-        os.close(output_fd)
     assert not list(parent.iterdir())
+    assert not list(output_parent.iterdir())
 
 
 def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
