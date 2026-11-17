@@ -724,3 +724,29 @@ def test_signed_capture_proof_is_bound_to_real_execution_row(dbs, verified_setup
                 verifier.verify(
                     claim, prepared.id, captured.sha256, captured.byte_length, sign({**payload, field: value})
                 )
+
+
+def test_real_run_cancel_sets_authority_watch_event(dbs, verified_setup):
+    import asyncio
+
+    from aiagent_gateways.execution_watch import watch_run_authority
+
+    claim, _binding, _manifest, _proof, _receipt, _wire, _parent = verified_setup
+    workspace = dbs["owner"].one(
+        "SELECT workspace_id FROM agent.tasks WHERE tenant_id=%s AND id=%s", (claim.tenant_id, claim.task_id)
+    )["workspace_id"]
+
+    async def run_watch():
+        revoked, stop, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        watcher = asyncio.create_task(
+            watch_run_authority(dbs["tool_gateway"], claim, revoked, stop, ready, interval=0.05)
+        )
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        assert not revoked.is_set()
+        await asyncio.to_thread(
+            commands.cancel, dbs["api"], Scope(claim.tenant_id, claim.owner_user_id, str(workspace)), claim.task_id
+        )
+        await asyncio.wait_for(revoked.wait(), timeout=5)
+        await asyncio.wait_for(watcher, timeout=5)
+
+    asyncio.run(run_watch())

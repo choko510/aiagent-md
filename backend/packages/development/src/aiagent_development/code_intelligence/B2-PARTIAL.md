@@ -291,3 +291,14 @@ stdout/stderr. A real Docker Cell test covers the process-stop path. This event
 is not yet fed by authenticated Run Authority polling or cancellation RPC;
 a disconnected or failed authority therefore does not yet trigger it. It is
 not a completed live-lease or production revocation implementation.
+
+The Gateway now has an internal Run Authority watcher that signals a local
+revocation event when the canonical claim becomes stale, is cancelled, the DB
+fails, or an authority check exceeds its timeout. A ready event is set only
+after the first successful check. The real-PostgreSQL test covers a committed
+Run cancellation; unit tests cover failure and stalled authority. The watcher
+is not yet connected to an authenticated remote Cell cancellation channel or
+started by the production adapter. A stop signal must only be used after the
+execution has ended and publication authority has been rechecked. The local
+poller cannot terminate a remote process during transport failure; live Cell
+lease revocation remains incomplete.
