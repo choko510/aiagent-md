@@ -284,3 +284,10 @@ revocation during network transfer and real broker crash recovery remain open.
 The operator-provisioned repository/recipe rows are trusted policy inputs;
 provider authorization and image provenance are not established by their text
 references alone. SHA-1 snapshot integrity remains LEGACY_SHA1 / PARTIAL.
+
+The Supervisor's private execution hook can now consume a local revocation
+event: when set, it kills and reaps the process group and discards partial
+stdout/stderr. A real Docker Cell test covers the process-stop path. This event
+is not yet fed by authenticated Run Authority polling or cancellation RPC;
+a disconnected or failed authority therefore does not yet trigger it. It is
+not a completed live-lease or production revocation implementation.

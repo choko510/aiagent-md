@@ -451,3 +451,19 @@ def test_projected_execution_requires_bound_grant(tmp_path: Path) -> None:
             run(s.execute(grant(argv, projected=True), argv, "."))
     finally:
         os.close(fd)
+
+
+def test_revocation_stops_running_supervisor_process(tmp_path: Path) -> None:
+    """Local event is a test hook; no real Run Authority bridge is claimed."""
+    s = sup(tmp_path, netns=False)
+    argv = [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(30)"]
+
+    async def execute_and_revoke():
+        event = asyncio.Event()
+        task = asyncio.create_task(s._execute(grant(argv), argv, ".", source_fd=None, revoked=event))
+        await asyncio.sleep(0.3)
+        event.set()
+        return await asyncio.wait_for(task, 5)
+
+    result = run(execute_and_revoke())
+    assert result["status"] == "REVOKED" and "stdout" not in result

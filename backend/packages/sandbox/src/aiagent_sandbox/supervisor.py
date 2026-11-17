@@ -107,6 +107,27 @@ async def _bounded_output(proc: asyncio.subprocess.Process, wall_seconds: float)
     return bytes(buffers[0]), bytes(buffers[1]), timed_out, overflow.is_set()
 
 
+async def _run_with_revocation(
+    proc: asyncio.subprocess.Process, wall_seconds: float, revoked: asyncio.Event
+) -> tuple[bytes, bytes, bool, bool, bool]:
+    """Kill and reap on revocation; event source must be a trusted authority bridge."""
+    output = asyncio.create_task(_bounded_output(proc, wall_seconds))
+    stopped = asyncio.create_task(revoked.wait())
+    try:
+        await asyncio.wait({output, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if revoked.is_set():
+            output.cancel()
+            await asyncio.gather(output, return_exceptions=True)
+            return b"", b"", False, False, True
+        out, err, timed_out, truncated = await output
+        return out, err, timed_out, truncated, False
+    finally:
+        stopped.cancel()
+        if not output.done():
+            output.cancel()
+        await asyncio.gather(stopped, output, return_exceptions=True)
+
+
 @dataclass
 class Limits:
     cpu_s: int = 30
@@ -209,7 +230,14 @@ class Supervisor:
         return await self._execute(token, argv, cwd_rel, source_fd=None)
 
     async def _execute(
-        self, token: Any, argv: list[str], cwd_rel: str, *, source_fd: int | None, output_fd: int | None = None
+        self,
+        token: Any,
+        argv: list[str],
+        cwd_rel: str,
+        *,
+        source_fd: int | None,
+        output_fd: int | None = None,
+        revoked: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         # source_fd is reserved for a future trusted projection broker. It is
         # deliberately not accepted from RPC and is not an authorization token.
@@ -229,6 +257,8 @@ class Supervisor:
         if source_fd is None and g.execution_binding_version is not None:
             raise GrantError("PROJECTED_SOURCE_REQUIRED")
         self._consume(g.grant_id)
+        if revoked is not None and revoked.is_set():
+            return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
         ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
         if output_fd is not None:
             try:
@@ -255,7 +285,12 @@ class Supervisor:
             close_fds=True,
             pass_fds=tuple(fd for fd in (source_fd, output_fd) if fd is not None),
         )
-        out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
+        if revoked is None:
+            out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
+        else:
+            out, err, timed_out, truncated, was_revoked = await _run_with_revocation(proc, g.wall_ms / 1000, revoked)
+            if was_revoked:
+                return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
         rc = proc.returncode
         if rc == 98:
             return {

@@ -105,3 +105,26 @@ def test_nonzero_exit_is_retained() -> None:
         assert proc.returncode == 7 and not timed_out and not truncated
 
     asyncio.run(run())
+
+
+def test_revocation_kills_process_and_discards_partial_output() -> None:
+    from aiagent_sandbox.supervisor import _run_with_revocation
+
+    async def run() -> None:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; print('partial',flush=True); time.sleep(30)",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        revoked = asyncio.Event()
+        task = asyncio.create_task(_run_with_revocation(proc, 20, revoked))
+        await asyncio.sleep(0.1)
+        revoked.set()
+        out, err, timed_out, truncated, was_revoked = await asyncio.wait_for(task, 5)
+        assert was_revoked and out == err == b"" and not timed_out and not truncated
+        assert proc.returncode is not None
+
+    asyncio.run(run())
