@@ -34,7 +34,9 @@ def test_checksum_mismatch_fails_closed(pg: PgEnv, tmp_path: Path) -> None:
 def test_failed_migration_rolls_back_atomically(pg: PgEnv, tmp_path: Path) -> None:
     d = tmp_path / "m"
     shutil.copytree(migrate.default_dir(), d)
-    (d / "0012_broken.up.sql").write_text("CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n")
+    (d / f"{migrate.APP_SCHEMA_VERSION + 1:04d}_broken.up.sql").write_text(
+        "CREATE TABLE agent.half_done(x int);\nSELECT * FROM no_such_table;\n"
+    )
     with pytest.raises(psycopg.errors.UndefinedTable):
         migrate.up(pg.owner, d)
     with connect(pg.owner) as c:
