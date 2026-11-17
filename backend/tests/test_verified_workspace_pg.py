@@ -162,7 +162,7 @@ def test_binding_change_during_verification_is_rejected(dbs, verified_setup, mon
     assert not list(parent.iterdir())
 
 
-def prepared_execution_fixture(dbs, verified_setup):
+def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None):
     import asyncio
     from dataclasses import asdict
 
@@ -302,6 +302,8 @@ def prepared_execution_fixture(dbs, verified_setup):
                 == prepared
             )
             observed.append(prepared)
+            if on_prepared is not None:
+                on_prepared(claim, prepared, snapshot, parent)
             return {"fixture": "no real Cell execution"}
 
         async def query(self, key, permit=None):
@@ -318,7 +320,8 @@ def prepared_execution_fixture(dbs, verified_setup):
         "SELECT state, artifact_sha256 FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
         (claim.tenant_id, prepared.id),
     )
-    assert row is not None and row["state"] == "PREPARED" and row["artifact_sha256"] is None
+    assert row is not None and row["state"] == ("RUNNING" if on_prepared else "PREPARED")
+    assert row["artifact_sha256"] is None
     import psycopg
 
     with pytest.raises(psycopg.errors.InsufficientPrivilege), dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
@@ -464,8 +467,7 @@ def finished_artifact_fixture(dbs, verified_setup, *, running=False):
     from aiagent_gateways.context_keys import KeyRing
     from aiagent_gateways.execution_artifacts import PostgresExecutionArtifactStore
 
-    claim, prepared, snapshot, parent = prepared_execution_fixture(dbs, verified_setup)
-    if running:
+    def start_before_settlement(claim, prepared, _snapshot, _parent):
         from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
         from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
 
@@ -473,7 +475,11 @@ def finished_artifact_fixture(dbs, verified_setup, *, running=False):
         ExecutionLifecycle(dbs["tool_gateway"], claim, verifier).start(
             prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 10
         )
-    else:
+
+    claim, prepared, snapshot, parent = prepared_execution_fixture(
+        dbs, verified_setup, on_prepared=start_before_settlement if running else None
+    )
+    if not running:
         with dbs["owner"].tx() as c:
             c.execute(
                 "UPDATE agent.execution_instances SET state='RUNNING' WHERE tenant_id=%s AND id=%s",
@@ -823,24 +829,33 @@ def test_execution_start_race_allows_one_dispatch_reservation(dbs, verified_setu
     from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
     from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
 
+    def race_before_settlement(claim, prepared, _snapshot, _parent):
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"k" * 32))
+        barrier = Barrier(2)
+
+        def start(_):
+            barrier.wait(timeout=10)
+            try:
+                lifecycle.start(prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 20)
+                return "STARTED"
+            except ExecutionArtifactError:
+                return "DENIED"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(start, range(2))) == ["DENIED", "STARTED"]
+
+    prepared_execution_fixture(dbs, verified_setup, on_prepared=race_before_settlement)
+
+
+def test_execution_start_rejects_already_settled_attempt(dbs, verified_setup):
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+
     claim, prepared, _snapshot, _parent = prepared_execution_fixture(dbs, verified_setup)
     lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"k" * 32))
-    barrier = Barrier(2)
-
-    def start(_):
-        barrier.wait(timeout=10)
-        try:
-            lifecycle.start(prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 20)
-            return "STARTED"
-        except ExecutionArtifactError:
-            return "DENIED"
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        assert sorted(pool.map(start, range(2))) == ["DENIED", "STARTED"]
-    row = dbs["owner"].one(
-        "SELECT state FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
-    )
-    assert row["state"] == "RUNNING"
+    with pytest.raises(ExecutionArtifactError, match="EXECUTION_START_DENIED"):
+        lifecycle.start(prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 10)
 
 
 @pytest.mark.parametrize("cancel_before_finish", [False, True])

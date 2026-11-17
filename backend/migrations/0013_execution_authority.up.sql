@@ -351,7 +351,12 @@ CREATE FUNCTION agent.execution_start(
 DECLARE e agent.execution_instances%ROWTYPE;
 BEGIN
   e := agent.execution_artifact_lock(p_tenant,p_owner,p_workspace,p_task,p_run,p_goal,p_lease,p_worker,p_restore,p_execution);
-  IF e.state <> 'PREPARED' OR e.binding_sha256 <> p_binding THEN
+  IF e.state <> 'PREPARED' OR e.binding_sha256 <> p_binding OR NOT EXISTS (
+    SELECT 1 FROM agent.tool_attempts a JOIN agent.tool_intents i
+      ON i.tenant_id=a.tenant_id AND i.id=a.tool_intent_id
+    WHERE a.tenant_id=p_tenant AND a.id=e.tool_attempt_id
+      AND a.status_code='SENDING' AND i.status_code='SENDING'
+  ) THEN
     RAISE EXCEPTION 'EXECUTION_NOT_PREPARED' USING ERRCODE='check_violation';
   END IF;
   UPDATE agent.execution_instances SET state='RUNNING' WHERE tenant_id=p_tenant AND id=p_execution;
