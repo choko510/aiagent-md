@@ -20,7 +20,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Literal, cast, get_args
+from typing import Final, Literal, NoReturn, cast, get_args
 
 from . import ProbeStatus, ReasonCode
 from .adapters import (
@@ -326,6 +326,33 @@ EVALUATED_STATUSES: Final = frozenset(
 PROBE_STATUSES: Final = frozenset(get_args(ProbeStatus))
 REASON_CODES: Final = frozenset(get_args(ReasonCode))
 
+#: Providers whose chat responses must report the exact requested model.
+OFFICIAL_CHAT_PROVIDERS: Final = frozenset({"kilo", "ovh"})
+ACCESS_RESTRICTED_HTTP: Final = frozenset({401, 402, 403, 404, 410})
+
+#: The only status/reason pairs this lab can produce. Anything else is a corrupt log.
+STATUS_REASONS: Final[dict[str, frozenset[str]]] = {
+    "PASS": frozenset({"OK", "COST_UNKNOWN"}),
+    "CONTENT_MISMATCH": frozenset({"OUTPUT_MISMATCH"}),
+    "FORMAT_MISMATCH": frozenset({"INVALID_JSON", "INVALID_SCHEMA"}),
+    "MODEL_DRIFT": frozenset({"MODEL_CHANGED"}),
+    "UNEXPECTED_BILLING": frozenset({"REMOTE_FAILURE"}),
+    "UNEXPECTED_TOOL_OUTPUT": frozenset({"PROHIBITED_TOOL"}),
+    "ACCESS_RESTRICTED": frozenset({"AUTH_REQUIRED"}),
+    "RATE_LIMITED": frozenset({"RATE_LIMIT"}),
+    "REMOTE_ERROR": frozenset({"REMOTE_FAILURE"}),
+    "NETWORK_ERROR": frozenset({"UNKNOWN_OUTCOME"}),
+    "TIMEOUT": frozenset({"UNKNOWN_OUTCOME"}),
+    "UNVERIFIED_TERMS": frozenset({"LEGACY_DISABLED"}),
+    "LOCAL_INPUT_INVALID": frozenset({"INVALID_SCHEMA", "BODY_TOO_LARGE"}),
+    "SAFETY_BLOCKED": frozenset(
+        {"UNEXPECTED_REDIRECT", "BODY_TOO_LARGE", "RATE_LIMIT", "LEGACY_DISABLED", "INVALID_SCHEMA"}
+    ),
+}
+
+#: Statuses that can only be produced after a request was actually attempted.
+COMMUNICATION_ATTEMPT_STATUSES: Final = frozenset({"NETWORK_ERROR", "TIMEOUT", "REMOTE_ERROR", "ACCESS_RESTRICTED"})
+
 
 class ReportError(RuntimeError):
     """The local probe log is missing required structure or exceeds a fixed limit."""
@@ -341,6 +368,7 @@ class _ProviderTotals:
     model_drift: int = 0
     other_failures: int = 0
     communication_failures: int = 0
+    local_preflight_skips: int = 0
     elapsed_ms: list[int] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -355,6 +383,104 @@ def _optional_count(record: Mapping[str, object], key: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ReportError("log record has an invalid count")
     return value
+
+
+def _record_cost(record: Mapping[str, object]) -> float | None:
+    cost = record.get("cost_reported_usd")
+    if cost is None:
+        return None
+    return float(cast("int | float", cost))
+
+
+def _validate_record_semantics(
+    record: Mapping[str, object],
+    *,
+    spec: ProviderSpec,
+    status: str,
+    reason: str,
+) -> None:
+    """Reject records whose fields contradict the status this lab can actually produce."""
+
+    def fail() -> NoReturn:
+        raise ReportError("log record is semantically inconsistent")
+
+    provider_id = cast("str", record["provider_id"])
+    http_status = record.get("http_status")
+    cost = _record_cost(record)
+    model_observed = record.get("model_observed")
+    official = provider_id in OFFICIAL_CHAT_PROVIDERS
+
+    if status == "PASS":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if (reason == "OK") != (cost is not None):
+            fail()
+        if official and model_observed != spec.model_id:
+            fail()
+    elif status == "CONTENT_MISMATCH":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if official and model_observed != spec.model_id:
+            fail()
+    elif status == "MODEL_DRIFT":
+        if not official or http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if model_observed is None or model_observed == spec.model_id:
+            fail()
+    elif status == "UNEXPECTED_BILLING":
+        if http_status != 200:
+            fail()
+        if cost is None or cost <= 0:
+            fail()
+    elif status == "UNEXPECTED_TOOL_OUTPUT":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+    elif status == "FORMAT_MISMATCH":
+        # A decoding failure can be recorded without an HTTP status.
+        if http_status not in (None, 200):
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+    elif status == "ACCESS_RESTRICTED":
+        if http_status not in ACCESS_RESTRICTED_HTTP:
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status == "RATE_LIMITED":
+        # 429 means the provider was reached; no HTTP status means a local quota skip.
+        if http_status not in (None, 429):
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status == "REMOTE_ERROR":
+        if not isinstance(http_status, int) or isinstance(http_status, bool):
+            fail()
+        if http_status in {200, 429} or http_status in ACCESS_RESTRICTED_HTTP or 300 <= http_status < 400:
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status in {"NETWORK_ERROR", "TIMEOUT", "UNVERIFIED_TERMS", "LOCAL_INPUT_INVALID"}:
+        if http_status is not None or cost is not None or model_observed is not None:
+            fail()
+    elif status == "SAFETY_BLOCKED":
+        if cost is not None or model_observed is not None:
+            fail()
+        if reason == "UNEXPECTED_REDIRECT":
+            if not isinstance(http_status, int) or isinstance(http_status, bool) or not 300 <= http_status < 400:
+                fail()
+        elif reason == "BODY_TOO_LARGE":
+            if http_status != 200:
+                fail()
+        elif http_status is not None:
+            fail()
 
 
 def _validated_record(line: str) -> dict[str, object]:
@@ -397,12 +523,25 @@ def _validated_record(line: str) -> dict[str, object]:
             raise ReportError("log record has an invalid cost") from None
         if not math.isfinite(amount) or amount < 0:
             raise ReportError("log record has an invalid cost")
-    if parsed.get("status") not in PROBE_STATUSES:
+    status = parsed.get("status")
+    reason = parsed.get("reason_code")
+    if status not in PROBE_STATUSES:
         raise ReportError("log record has an unknown status")
-    if parsed.get("reason_code") not in REASON_CODES:
+    if reason not in REASON_CODES:
         raise ReportError("log record has an unknown reason code")
-    if parsed.get("fixture_id") not in FIXTURES:
-        raise ReportError("log record names an unknown fixture")
+    spec = require_spec(provider_id)
+    if parsed.get("model_requested") != spec.model_id:
+        raise ReportError("log record does not match the frozen catalog model")
+    if parsed.get("fixture_id") not in allowed_fixtures(spec):
+        raise ReportError("log record pairs the provider with a disallowed fixture")
+    if reason not in STATUS_REASONS[cast("str", status)]:
+        raise ReportError("log record pairs an impossible status and reason code")
+    _validate_record_semantics(
+        parsed,
+        spec=spec,
+        status=cast("str", status),
+        reason=cast("str", reason),
+    )
     return parsed
 
 
@@ -455,6 +594,7 @@ def _provider_report(totals: _ProviderTotals) -> dict[str, object]:
         "other_failures": totals.other_failures,
         "pass_rate": pass_rate,
         "communication_failures": totals.communication_failures,
+        "local_preflight_skips": totals.local_preflight_skips,
         "median_elapsed_ms": median_elapsed,
         "input_tokens": totals.input_tokens,
         "output_tokens": totals.output_tokens,
@@ -483,8 +623,10 @@ def _build_report() -> dict[str, object]:
                 entry.model_drift += 1
             else:
                 entry.other_failures += 1
-        else:
+        elif status in COMMUNICATION_ATTEMPT_STATUSES or record.get("http_status") is not None:
             entry.communication_failures += 1
+        else:
+            entry.local_preflight_skips += 1
         elapsed = _optional_count(record, "elapsed_ms")
         if elapsed is not None:
             entry.elapsed_ms.append(elapsed)

@@ -334,38 +334,77 @@ def test_report_separates_quality_from_transport_failures(
         _record(
             status="NETWORK_ERROR",
             reason_code="UNKNOWN_OUTCOME",
+            http_status=None,
+            model_observed=None,
             elapsed_ms=None,
             input_tokens=None,
             output_tokens=None,
+            cost_reported_usd=None,
         ),
         _record(
             provider_id="ovh",
             model_requested=_OVH_MODEL,
             model_observed=_OVH_MODEL,
             status="PASS",
+            reason_code="COST_UNKNOWN",
             elapsed_ms=200,
             input_tokens=5,
             output_tokens=1,
             cost_reported_usd=None,
         ),
-        _record(provider_id="ovh", status="TIMEOUT", reason_code="UNKNOWN_OUTCOME", elapsed_ms=50),
+        _record(
+            provider_id="ovh",
+            model_requested=_OVH_MODEL,
+            model_observed=None,
+            status="TIMEOUT",
+            reason_code="UNKNOWN_OUTCOME",
+            http_status=None,
+            elapsed_ms=50,
+            input_tokens=None,
+            output_tokens=None,
+            cost_reported_usd=None,
+        ),
+        _record(
+            status="RATE_LIMITED",
+            reason_code="RATE_LIMIT",
+            http_status=None,
+            model_observed=None,
+            elapsed_ms=None,
+            input_tokens=None,
+            output_tokens=None,
+            cost_reported_usd=None,
+        ),
+        _record(
+            provider_id="jev_legacy",
+            model_requested="jev-1.13-free",
+            fixture_id="refund_noul",
+            model_observed=None,
+            status="UNVERIFIED_TERMS",
+            reason_code="LEGACY_DISABLED",
+            http_status=None,
+            elapsed_ms=None,
+            input_tokens=None,
+            output_tokens=None,
+            cost_reported_usd=None,
+        ),
     ]
     code, out = _run_report(monkeypatch, tmp_path, "\n".join(json.dumps(line) for line in lines) + "\n", capsys)
     assert code == 0
     report = json.loads(out)
-    assert report["records"] == 5
+    assert report["records"] == 7
     kilo = report["providers"]["kilo"]
-    assert kilo["attempts"] == 3
+    assert kilo["attempts"] == 4
     assert kilo["evaluated"] == 2
     assert kilo["pass"] == 1
     assert kilo["content_mismatch"] == 1
     assert kilo["pass_rate"] == 0.5
     assert kilo["communication_failures"] == 1
+    assert kilo["local_preflight_skips"] == 1
     assert kilo["median_elapsed_ms"] == 200.0
     assert kilo["input_tokens"] == 20
     assert kilo["output_tokens"] == 4
     assert kilo["token_records"] == 2
-    assert kilo["cost_unreported"] == 1
+    assert kilo["cost_unreported"] == 3
 
     ovh = report["providers"]["ovh"]
     assert ovh["attempts"] == 2
@@ -374,11 +413,14 @@ def test_report_separates_quality_from_transport_failures(
     assert ovh["pass_rate"] == 1.0
     assert ovh["communication_failures"] == 1
     assert ovh["median_elapsed_ms"] == 125.0
-    assert ovh["cost_unreported"] == 1
+    assert ovh["cost_unreported"] == 2
 
-    for provider_id in ("jev_legacy", "pollinations_legacy"):
-        assert report["providers"][provider_id]["attempts"] == 0
-        assert report["providers"][provider_id]["pass_rate"] is None
+    assert report["providers"]["jev_legacy"]["attempts"] == 1
+    assert report["providers"]["jev_legacy"]["evaluated"] == 0
+    assert report["providers"]["jev_legacy"]["communication_failures"] == 0
+    assert report["providers"]["jev_legacy"]["local_preflight_skips"] == 1
+    assert report["providers"]["pollinations_legacy"]["attempts"] == 0
+    assert report["providers"]["pollinations_legacy"]["pass_rate"] is None
 
 
 _INVALID_LOGS = [
@@ -482,3 +524,121 @@ def test_failed_probe_output_stays_out_of_the_report(
     assert "last_item" not in log
     assert "INDEX_OUT_OF_RANGE" not in log
     assert len(json.loads(log.splitlines()[0])) == 13
+
+
+def test_report_accepts_valid_legacy_records() -> None:
+    jev = _record(
+        provider_id="jev_legacy",
+        model_requested="jev-1.13-free",
+        fixture_id="refund_noul",
+        model_observed=None,
+        status="PASS",
+        reason_code="OK",
+        http_status=200,
+        cost_reported_usd=0.0,
+    )
+    alias = _record(
+        provider_id="pollinations_legacy",
+        model_requested="openai-fast",
+        fixture_id="jp_hello",
+        model_observed="openai-fast-2026-01",
+        status="PASS",
+        reason_code="OK",
+        http_status=200,
+        cost_reported_usd=0.0,
+    )
+    for record in (jev, alias):
+        validated = runner._validated_record(json.dumps(record))
+        assert validated["provider_id"] == record["provider_id"]
+
+
+_SEMANTIC_INVALID = [
+    _record(cost_reported_usd=0.5),
+    _record(model_observed="some-other-model"),
+    _record(status="MODEL_DRIFT", reason_code="MODEL_CHANGED", model_observed=_KILO_MODEL),
+    _record(
+        status="MODEL_DRIFT",
+        reason_code="MODEL_CHANGED",
+        provider_id="jev_legacy",
+        model_requested="jev-1.13-free",
+        fixture_id="refund_noul",
+        model_observed="other",
+    ),
+    _record(status="UNEXPECTED_BILLING", reason_code="REMOTE_FAILURE", cost_reported_usd=0.0),
+    _record(status="UNEXPECTED_BILLING", reason_code="REMOTE_FAILURE", cost_reported_usd=None),
+    _record(reason_code="OUTPUT_MISMATCH"),
+    _record(provider_id="jev_legacy", model_requested="jev-1.13-free", fixture_id="dev_t01"),
+    _record(provider_id="pollinations_legacy", model_requested="openai-fast", fixture_id="dev_t02"),
+    _record(http_status=429),
+    _record(status="ACCESS_RESTRICTED", reason_code="AUTH_REQUIRED", http_status=200),
+    _record(status="NETWORK_ERROR", reason_code="UNKNOWN_OUTCOME", http_status=200),
+    _record(model_requested="some-other-model"),
+    _record(status="SAFETY_BLOCKED", reason_code="UNEXPECTED_REDIRECT", http_status=200),
+    _record(status="SAFETY_BLOCKED", reason_code="BODY_TOO_LARGE", http_status=None),
+    _record(status="PASS", reason_code="COST_UNKNOWN", cost_reported_usd=0.0),
+    _record(status="PASS", reason_code="OK", cost_reported_usd=None),
+    _record(status="PASS", http_status=None),
+    _record(status="RATE_LIMITED", reason_code="RATE_LIMIT", http_status=503),
+    _record(status="REMOTE_ERROR", reason_code="REMOTE_FAILURE", http_status=200),
+    _record(status="CONTENT_MISMATCH", reason_code="OUTPUT_MISMATCH", model_observed=None),
+    _record(status="FORMAT_MISMATCH", reason_code="INVALID_JSON", cost_reported_usd=0.25),
+]
+
+
+@pytest.mark.parametrize("record", _SEMANTIC_INVALID)
+def test_report_rejects_semantically_impossible_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    record: dict[str, object],
+) -> None:
+    code, out = _run_report(monkeypatch, tmp_path, json.dumps(record) + "\n", capsys)
+    assert code == 5
+    expected = {"schema_version": 1, "status": "INVALID_LOG", "reason_code": "INVALID_SCHEMA"}
+    assert json.loads(out) == expected
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        _record(
+            status="SAFETY_BLOCKED",
+            reason_code="UNEXPECTED_REDIRECT",
+            http_status=302,
+            model_observed=None,
+            cost_reported_usd=None,
+        ),
+        _record(
+            status="SAFETY_BLOCKED",
+            reason_code="BODY_TOO_LARGE",
+            http_status=200,
+            model_observed=None,
+            cost_reported_usd=None,
+        ),
+        _record(
+            provider_id="ovh",
+            model_requested=_OVH_MODEL,
+            model_observed=None,
+            status="REMOTE_ERROR",
+            reason_code="REMOTE_FAILURE",
+            http_status=503,
+            cost_reported_usd=None,
+        ),
+        _record(
+            status="FORMAT_MISMATCH",
+            reason_code="INVALID_JSON",
+            http_status=None,
+            model_observed=None,
+            cost_reported_usd=None,
+        ),
+    ],
+)
+def test_report_accepts_valid_transport_failure_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    record: dict[str, object],
+) -> None:
+    code, out = _run_report(monkeypatch, tmp_path, json.dumps(record) + "\n", capsys)
+    assert code == 0
+    assert json.loads(out)["records"] == 1

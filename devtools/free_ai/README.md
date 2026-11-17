@@ -38,16 +38,12 @@ python -m devtools.free_ai probe \
 python -m devtools.free_ai report
 ```
 
-`probe` also accepts `--fixture arithmetic_2plus2` for the two chat services, and
-`--fixture refund_noul` for `jev_legacy` only. Legacy services additionally require
-`--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS` while their anonymous
-terms are unconfirmed (see below).
-
-`probe` also accepts `--fixture arithmetic_2plus2` and the six synthetic development
-tasks `--fixture dev_t01` … `dev_t06` for the two official chat services, and
-`--fixture refund_noul` for `jev_legacy` only. The `dev_*` tasks are never allowed on the
-legacy services. Legacy services additionally require `--allow-legacy`; they are still
-skipped with `UNVERIFIED_TERMS` while their anonymous terms are unconfirmed (see below).
+`probe` accepts `--fixture jp_hello`, `--fixture arithmetic_2plus2` and the six
+synthetic development tasks `--fixture dev_t01` … `dev_t06` for the two official chat
+services (Kilo and OVHcloud). `--fixture refund_noul` is only valid for `jev_legacy`,
+and the `dev_*` tasks are never allowed on the legacy services. Legacy services
+additionally require `--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS`
+while their anonymous terms are unconfirmed (see below).
 
 ### Synthetic development tasks (STEP 2)
 
@@ -77,14 +73,26 @@ The prompt asks for exactly one identifier. Scoring is deterministic Python:
 `report` reads only the fixed `devtools/free_ai/.runs/probes.jsonl` (no path argument, no
 directory scan, no network) and prints one JSON line aggregating per provider: attempts,
 evaluated responses, `PASS`, `CONTENT_MISMATCH`, `FORMAT_MISMATCH`, `MODEL_DRIFT`, other
-evaluated failures, pass rate over evaluated responses, communication failures (kept out
-of the quality denominator), median `elapsed_ms`, observed token sums, and how many
-records had no reported cost. It never prints prompts, answers, reasoning or headers.
+evaluated failures, pass rate over evaluated responses, `communication_failures`,
+`local_preflight_skips`, median `elapsed_ms`, observed token sums, and how many records
+had no reported cost. It never prints prompts, answers, reasoning or headers.
+
+`communication_failures` counts only outcomes where a request was actually attempted
+(`NETWORK_ERROR`, `TIMEOUT`, `REMOTE_ERROR`, `ACCESS_RESTRICTED`, HTTP 429, and a
+response-stage `SAFETY_BLOCKED`). Results rejected before any send (`UNVERIFIED_TERMS`,
+`LOCAL_INPUT_INVALID`, local quota `/` held lock, local legacy refusal) are counted as
+`local_preflight_skips` and are never part of the quality denominator.
+
+Records are validated for meaning as well as shape: `PASS` requires HTTP 200, no positive
+cost and, for Kilo/OVH, the exact requested model (legacy aliases stay exempt);
+`MODEL_DRIFT` requires a different observed model; `UNEXPECTED_BILLING` requires a
+positive cost; status/reason pairs, provider/fixture pairs, catalog model ids and
+HTTP/status pairings are checked against what the lab can actually produce.
 
 The log is limited to 1 MiB and 5000 lines. A missing or empty file is an empty report;
 malformed JSON, duplicate keys, `NaN`/`Infinity`, unexpected or missing fields, wrong
-types, unknown status/reason/provider/fixture or limit violations print a constant
-`INVALID_LOG` JSON line and exit `5`.
+types, unknown or impossible values, semantic contradictions or limit violations print a
+constant `INVALID_LOG` JSON line and exit `5`; no partial aggregate is printed as success.
 
 Exit codes: `0` fixture contract satisfied (never a production guarantee), `2` safe
 skip (missing acknowledgement, disabled legacy service, local quota), `3` provider
@@ -100,9 +108,11 @@ credentials and exception messages are never printed or logged.
 
 ## Data that leaves the machine
 
-Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, and a
-synthetic refund sentence with a `noul` question. No private repository content, customer
-data, cookies, tokens or `.env` values can be attached. `devtools/free_ai/.runs/` holds a
+Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, a
+synthetic refund sentence with a `noul` question, and the six synthetic development
+tasks (fixed code snippets or a fixed situation plus their allowed identifiers). No
+private repository content, customer data, cookies, tokens or `.env` values can be
+attached. `devtools/free_ai/.runs/` holds a
 local quota file and a metadata-only JSONL log; it is git-ignored and is never created by
 `list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
 ignored (`trust_env=False`), redirects are refused, and the TLS certificate is always
