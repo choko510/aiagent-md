@@ -1,4 +1,5 @@
 """Read-only ntlint report integration tests."""
+
 from __future__ import annotations
 
 import json
@@ -13,10 +14,20 @@ SHA = "a" * 40
 
 def finding(**kw: object) -> dict[str, object]:
     d: dict[str, object] = dict(
-        type="finding", ruleId="test-name-verifies-claim", docs="docs/rules/claim.md",
-        severity="warning", messageId="candidate", file="tests/test_cart.py",
-        line=12, endLine=14, subject="untrusted text", subjectSource="test",
-        value=0.72, at=0.66, margin=1.09, confidence=None,
+        type="finding",
+        ruleId="test-name-verifies-claim",
+        docs="docs/rules/claim.md",
+        severity="warning",
+        messageId="candidate",
+        file="tests/test_cart.py",
+        line=12,
+        endLine=14,
+        subject="untrusted text",
+        subjectSource="test",
+        value=0.72,
+        at=0.66,
+        margin=1.09,
+        confidence=None,
     )
     d.update(kw)
     return d
@@ -24,9 +35,18 @@ def finding(**kw: object) -> dict[str, object]:
 
 def summary(**kw: object) -> dict[str, object]:
     d: dict[str, object] = dict(
-        type="summary", verdicts=2, reported=1, candidates=1, unsure=0,
-        missing=0, requests=1, inputTokens=100, usd=0.001,
-        cached=0, failures=0, complete=True,
+        type="summary",
+        verdicts=2,
+        reported=1,
+        candidates=1,
+        unsure=0,
+        missing=0,
+        requests=1,
+        inputTokens=100,
+        usd=0.001,
+        cached=0,
+        failures=0,
+        complete=True,
     )
     d.update(kw)
     return d
