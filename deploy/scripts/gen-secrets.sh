@@ -59,9 +59,11 @@ done
 RM=$(r); RT=$(r); TS=$(r); OPS=$(r); API_MODEL=$(r)
 w model_gateway_rpc_keys "runtime=$RM,api=$API_MODEL"; w runtime_model_rpc_key "$RM"; w api_model_rpc_key "$API_MODEL"
 CONTEXT_KEY=$(r); w context_artifact_keys "{\"active\":\"context-1\",\"keys\":{\"context-1\":\"$CONTEXT_KEY\"}}"
+BROWSER_KEY=$(r); w browser_storage_keys "{\"active\":\"browser-1\",\"keys\":{\"browser-1\":\"$BROWSER_KEY\"}}"
 w memory_tombstone_hmac_key "$(r)"
 w tool_gateway_rpc_keys "runtime=$RT,ops=$OPS"; w runtime_tool_rpc_key "$RT"
-w sentinel_rpc_keys "tool_gateway=$TS"; w tool_sentinel_client_key "$TS"
+API_SENTINEL=$(r)
+w sentinel_rpc_keys "tool_gateway=$TS,api=$API_SENTINEL"; w tool_sentinel_client_key "$TS"; w api_sentinel_rpc_key "$API_SENTINEL"
 EM=$(r); w egress_model_token "$EM"; w egress_static_tokens "model_gateway=$EM"
 w sentinel_permit_key "$(r)"; w sandbox_rpc_key "$(r)"; w sandbox_grant_key "$(r)"; w receiver_token "$(r)"
 [ -f "$D/anthropic_api_key" ] || w anthropic_api_key ""

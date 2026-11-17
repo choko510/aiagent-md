@@ -21,6 +21,17 @@
     "enabled": {
       "type": "boolean"
     },
+    "semanticVerifierMode": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": ["HEURISTIC", "LLM_GATED"]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "expectedRecordVersion": {
       "anyOf": [
         {

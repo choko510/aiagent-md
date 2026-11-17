@@ -9,6 +9,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +25,9 @@ from aiagent_domain.tools import TOOLS
 from .netpolicy import EgressDenied, normalize_host
 
 PERMIT_TTL_S = 60
+_PG_PERMIT_HOST = re.compile(r"^[a-z0-9.-]{1,253}$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 @dataclass(frozen=True)
@@ -54,10 +59,21 @@ class EgressConfig:
                 {"model_gateway"}
             ):
                 raise ValueError(f"destination {name}: static egress is reserved for model_gateway")
+            raw_host = str(d["host"]).strip()
+            if raw_host == "*":
+                if (
+                    name != "web-fetch"
+                    or not bool(d.get("needs_permit", True))
+                    or not set(d["methods"]) <= {"GET", "HEAD"}
+                ):
+                    raise ValueError(f"destination {name}: wildcard host is restricted to read-only permit web-fetch")
+                norm_host = "*"
+            else:
+                norm_host = normalize_host(raw_host)
             out.destinations[name] = DestinationPolicy(
                 name,
                 d["scheme"],
-                normalize_host(d["host"]),
+                norm_host,
                 int(d["port"]),
                 frozenset(d["methods"]),
                 allow_private,
@@ -70,6 +86,9 @@ class EgressConfig:
     def match(self, scheme: str, host: str, port: int) -> DestinationPolicy | None:
         for d in self.destinations.values():
             if (d.scheme, d.host, d.port) == (scheme, host, port):
+                return d
+        for d in self.destinations.values():
+            if d.host == "*" and d.scheme in (scheme, "http*") and d.port in (0, port):
                 return d
         return None
 
@@ -89,6 +108,8 @@ class Sentinel:
             host = normalize_host(host)
         except EgressDenied as e:
             raise RpcError(e.code) from None
+        if not _PG_PERMIT_HOST.fullmatch(host):
+            raise RpcError("DESTINATION_NOT_ALLOWED")
         dest = self.config.match(scheme, host, port)
         if dest is None or not dest.needs_permit or method not in dest.methods or "tool_gateway" not in dest.identities:
             raise RpcError("DESTINATION_NOT_ALLOWED")
@@ -156,6 +177,152 @@ class Sentinel:
             )
         return f"{tenant_id}.{pid}.{expires}.{_mac(self.key, tenant_id, pid, scheme, host, port, 'GET', expires)}"
 
+    def authorize_human_takeover(
+        self,
+        tenant_id: str,
+        user_id: str,
+        workspace_id: str,
+        session_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
+    ) -> str:
+        """Issue single-use Human Takeover permit bound to a PAUSED/HUMAN browser session, destination, path, and body."""
+        try:
+            host = normalize_host(host)
+        except EgressDenied as e:
+            raise RpcError(e.code) from None
+        if not _PG_PERMIT_HOST.fullmatch(host) or method not in ("GET", "POST"):
+            raise RpcError("DESTINATION_NOT_ALLOWED")
+        if (
+            not isinstance(target_path, str)
+            or not target_path.startswith("/")
+            or "\r" in target_path
+            or "\n" in target_path
+            or len(target_path) > 2048
+        ):
+            raise RpcError("BAD_REQUEST")
+        if not isinstance(body_sha256, str) or not _SHA256_HEX_RE.fullmatch(body_sha256):
+            raise RpcError("BAD_REQUEST")
+        dest = self.config.match(scheme, host, port)
+        if dest is None or not dest.needs_permit or method not in dest.methods:
+            raise RpcError("DESTINATION_NOT_ALLOWED")
+        with self.db.tx() as c:
+            row = c.execute(
+                "SELECT s.id FROM agent.browser_sessions s"
+                " JOIN agent.tasks t ON t.tenant_id=s.tenant_id AND t.id=s.task_id"
+                " JOIN agent.runs r ON r.tenant_id=s.tenant_id AND r.id=s.run_id"
+                " JOIN agent.schema_control sc ON sc.singleton"
+                " JOIN agent.tenants tn ON tn.id=s.tenant_id"
+                " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=%s"
+                " JOIN agent.users u ON u.id=m.user_id"
+                " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=%s AND w.owner_user_id=%s"
+                " WHERE s.tenant_id=%s AND s.id=%s AND s.owner_user_id=%s AND s.closed_at IS NULL"
+                " AND s.mode='HUMAN' AND s.state IN ('PAUSED','NEEDS_LOGIN')"
+                " AND s.restore_incarnation=sc.restore_incarnation AND r.restore_incarnation=sc.restore_incarnation"
+                " AND t.owner_user_id=%s AND t.workspace_id=%s AND t.active_run_id=s.run_id"
+                " AND NOT r.cancel_requested AND r.status_code NOT IN ('CANCELLED','CANCELLING','FAILED','SUCCEEDED','PARTIAL','EXPIRED','BUDGET_EXHAUSTED')"
+                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
+                (user_id, workspace_id, user_id, tenant_id, session_id, user_id, user_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                raise RpcError("TAKEOVER_NOT_AUTHORIZED")
+        nonce = secrets.token_hex(12)
+        expires = int(time.time()) + PERMIT_TTL_S
+        mac = _mac(
+            self.key,
+            "human_takeover",
+            tenant_id,
+            session_id,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
+        return f"ht.{tenant_id}.{session_id}.{nonce}.{expires}.{mac}"
+
+    def verify_human_takeover(
+        self,
+        token: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        target_path: str = "/",
+        body_sha256: str = _EMPTY_BODY_SHA256,
+    ) -> tuple[str, None]:
+        """Verify MAC, destination/path/body binding, and atomically consume nonce in PostgreSQL."""
+        parts = token.split(".")
+        if len(parts) != 6 or parts[0] != "ht":
+            raise EgressDenied("PERMIT_MALFORMED")
+        _, tenant, sid, nonce, expires_s, mac = parts
+        if not re.fullmatch(r"[0-9a-f]{24}", nonce):
+            raise EgressDenied("PERMIT_MALFORMED")
+        try:
+            expires = int(expires_s)
+        except ValueError:
+            raise EgressDenied("PERMIT_MALFORMED") from None
+        good = _mac(
+            self.key,
+            "human_takeover",
+            tenant,
+            sid,
+            nonce,
+            scheme,
+            host,
+            port,
+            method,
+            target_path,
+            body_sha256,
+            expires,
+        )
+        if not hmac.compare_digest(mac, good):
+            raise EgressDenied("PERMIT_BINDING")
+        if time.time() >= expires:
+            raise EgressDenied("PERMIT_EXPIRED")
+        # Persist single-use nonce consumption atomically in PostgreSQL so restarts, replicas, and expiry boundaries
+        # reject replay; retain expired nonces for a 60s grace window so clock jitter cannot delete and allow reuse.
+        with self.db.tx() as c:
+            c.execute("DELETE FROM agent.human_takeover_nonces WHERE expires_at < now() - interval '60 seconds'")
+            clk = c.execute("SELECT to_timestamp(%s) > clock_timestamp() AS valid", (expires,)).fetchone()
+            if clk is None or not clk["valid"]:
+                raise EgressDenied("PERMIT_EXPIRED")
+            burned = c.execute(
+                "INSERT INTO agent.human_takeover_nonces(nonce, tenant_id, session_id, expires_at)"
+                " VALUES (%s,%s,%s,to_timestamp(%s)) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",
+                (nonce, tenant, sid, expires),
+            ).fetchone()
+            if burned is None:
+                raise EgressDenied("PERMIT_INVALID_AT_SEND")
+        with self.db.tx() as c:
+            row = c.execute(
+                "SELECT 1 FROM agent.browser_sessions s"
+                " JOIN agent.tasks t ON t.tenant_id=s.tenant_id AND t.id=s.task_id"
+                " JOIN agent.runs r ON r.tenant_id=s.tenant_id AND r.id=s.run_id"
+                " JOIN agent.schema_control sc ON sc.singleton"
+                " JOIN agent.tenants tn ON tn.id=t.tenant_id"
+                " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=t.owner_user_id"
+                " JOIN agent.users u ON u.id=m.user_id"
+                " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=t.workspace_id AND w.owner_user_id=t.owner_user_id"
+                " WHERE s.tenant_id=%s AND s.id=%s AND s.closed_at IS NULL"
+                " AND s.mode='HUMAN' AND s.state IN ('PAUSED','NEEDS_LOGIN')"
+                " AND s.restore_incarnation=sc.restore_incarnation AND r.restore_incarnation=sc.restore_incarnation"
+                " AND t.active_run_id=s.run_id AND NOT r.cancel_requested"
+                " AND r.status_code NOT IN ('CANCELLED','CANCELLING','FAILED','SUCCEEDED','PARTIAL','EXPIRED','BUDGET_EXHAUSTED')"
+                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
+                (tenant, sid),
+            ).fetchone()
+        if row is None:
+            raise EgressDenied("PERMIT_INVALID_AT_SEND")
+        return tenant, None
+
     def verify_and_consume(self, token: str, scheme: str, host: str, port: int, method: str) -> tuple[str, str]:
         """Called by the egress proxy at send time. Returns (tenant_id, permit_id) or raises EgressDenied."""
         try:
@@ -184,7 +351,7 @@ class Sentinel:
                 " AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL)"
                 " AND p.method = %s AND p.host = %s AND p.port = %s AND p.scheme = %s"
                 " AND NOT r.pause_requested AND r.status_code <> 'PAUSED'"
-                " AND (p.method = 'GET' OR (NOT r.cancel_requested"
+                " AND (p.method = 'GET' AND i.status_code = 'UNKNOWN' OR (NOT r.cancel_requested"
                 " AND r.status_code NOT IN ('CANCELLED','CANCELLING')"
                 " AND t.goal_revision=i.goal_revision AND r.lease_epoch = p.run_lease_epoch))"
                 " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN'))"

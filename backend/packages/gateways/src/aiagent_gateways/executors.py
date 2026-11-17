@@ -6,8 +6,12 @@ effect key (= idempotency key towards the remote side). It must classify failure
 
 from __future__ import annotations
 
+import hmac
+import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -21,6 +25,22 @@ class ExecutorFailed(Exception):
 
 class ExecutorUnknown(Exception):
     pass
+
+
+def is_authenticated_proxy_denial(status_code: int, headers: Mapping[str, str], permit: str | None) -> bool:
+    """Verify HMAC proof on 403 x-aiagent-egress: denied so spoofed upstream 403s never look like pre-send denials."""
+    if status_code != 403 or not permit:
+        return False
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    if lowered.get("x-aiagent-egress") != "denied":
+        return False
+    proof = lowered.get("x-aiagent-egress-proof", "")
+    code_part, sep, mac_part = proof.partition(":")
+    if not sep or not code_part or not mac_part:
+        return False
+    key = sha256(permit.encode("utf-8")).digest()
+    expected = hmac.new(key, f"DENIED:{code_part}".encode(), sha256).hexdigest()
+    return hmac.compare_digest(mac_part, expected)
 
 
 def valid_receipt(value: Any) -> bool:
@@ -61,8 +81,9 @@ class MockSearchExecutor:
 
 
 class HttpMessageExecutor:
-    """Sends a message to a receiver over HTTP *through the Trusted Egress proxy* (with a Sentinel permit). The
-    receiver credential is injected here only when the destination equals its bound recipient host."""
+    """Sends a message to a receiver over HTTP/HTTPS *through the Trusted Egress proxy* (single forward-proxy
+    requests with a Sentinel permit, never CONNECT tunnels). The receiver credential is injected here only when
+    the destination equals its bound recipient host."""
 
     def __init__(
         self,
@@ -84,10 +105,8 @@ class HttpMessageExecutor:
         return self._dest
 
     def _client(self, permit: str | None) -> httpx.AsyncClient:
-        proxy = None
-        if self.proxy:
-            proxy = httpx.Proxy(self.proxy, headers={"Proxy-Authorization": f"Aiagent tool_gateway:{permit or ''}"})
-        return httpx.AsyncClient(proxy=proxy, timeout=self.timeout_s, trust_env=False)
+        del permit
+        return httpx.AsyncClient(proxy=None, timeout=self.timeout_s, trust_env=False)
 
     def _headers(self, effect_key: str) -> dict[str, str]:
         h = {"Idempotency-Key": effect_key}
@@ -96,38 +115,85 @@ class HttpMessageExecutor:
         return h
 
     async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
+        from aiagent_core import config
+
+        from .web_fetch import _send_via_forward_proxy, parse_safe_http_url
+
+        if self.proxy is None and config.profile() == "production":
+            raise ExecutorFailed("egress_proxy_required")
+
+        payload = json.dumps(
+            {"to": args["to"], "body": args["body"]}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        headers = {**self._headers(effect_key), "Content-Type": "application/json"}
+
+        if self.proxy is not None:
+            parsed = parse_safe_http_url(self.url)
+            status_code, _, raw_body, _ = await _send_via_forward_proxy(
+                self.proxy,
+                method="POST",
+                parsed=parsed,
+                permit=permit or "",
+                extra_headers=headers,
+                request_body=payload,
+                max_bytes=65_536,
+                timeout_s=self.timeout_s,
+            )
+        else:
+            try:
+                async with self._client(permit) as client:
+                    r = await client.post(self.url, content=payload, headers=headers)
+                status_code = r.status_code
+                raw_body = r.content[:65_536]
+            except httpx.ConnectError as e:
+                raise ExecutorFailed("connect") from e  # nothing was sent: connection never established
+            except httpx.HTTPError as e:
+                raise ExecutorUnknown(type(e).__name__) from e  # request may have been delivered
+
+        # Any response >= 400 after sending an irreversible POST without a verified pre-send Sentinel
+        # denial leaves external side-effect state uncertain -> UNKNOWN (never FAILED / auto-retried).
+        if status_code >= 400:
+            raise ExecutorUnknown(f"http_{status_code}")
         try:
-            async with self._client(permit) as client:
-                r = await client.post(
-                    self.url, json={"to": args["to"], "body": args["body"]}, headers=self._headers(effect_key)
-                )
-        except httpx.ConnectError as e:
-            raise ExecutorFailed("connect") from e  # nothing was sent: connection never established
-        except httpx.HTTPError as e:
-            raise ExecutorUnknown(type(e).__name__) from e  # request may have been delivered
-        if r.status_code == 403 and r.headers.get("x-aiagent-egress") == "denied":
-            raise ExecutorFailed("egress_denied")  # Sentinel refused before forwarding
-        if r.status_code >= 500 or r.status_code == 408:
-            raise ExecutorUnknown(f"http_{r.status_code}")
-        if r.status_code >= 400:
-            raise ExecutorFailed(f"http_{r.status_code}")
-        receipt = r.json().get("receipt")
+            body_obj = json.loads(raw_body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise ExecutorUnknown("invalid_receipt") from e
+        receipt = body_obj.get("receipt") if isinstance(body_obj, dict) else None
         if not isinstance(receipt, str) or not receipt:
             raise ExecutorUnknown("no_receipt")
         return {"receipt": receipt[:120]}
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
         """Reconciliation: ask the receiver whether an effect with this idempotency key exists."""
+        from .web_fetch import _send_via_forward_proxy, parse_safe_http_url
+
         base = self.url.rsplit("/", 1)[0]
-        async with self._client(permit) as client:
-            r = await client.get(f"{base}/receipts/{effect_key}", headers=self._headers(effect_key))
+        query_url = f"{base}/receipts/{effect_key}"
+        if self.proxy is not None:
+            parsed = parse_safe_http_url(query_url)
+            status_code, _, raw_body, _ = await _send_via_forward_proxy(
+                self.proxy,
+                method="GET",
+                parsed=parsed,
+                permit=permit or "",
+                extra_headers=self._headers(effect_key),
+                request_body=None,
+                max_bytes=65_536,
+                timeout_s=self.timeout_s,
+            )
+            body_text = raw_body.decode("utf-8", "replace")
+        else:
+            async with self._client(permit) as client:
+                r = await client.get(query_url, headers=self._headers(effect_key))
+            status_code = r.status_code
+            body_text = r.text
         # 404 is not proof of non-delivery: the receiver may have restarted,
         # forgotten its in-memory idempotency store, or expired its receipts.
         # No durable, strongly consistent negative-proof protocol is configured.
-        if r.status_code != 200:
+        if status_code != 200:
             return None
         try:
-            data = r.json()
+            data = json.loads(body_text)
         except ValueError:
             return None
         if not isinstance(data, dict) or not valid_receipt(data.get("receipt")):
@@ -241,11 +307,33 @@ class SandboxCellExecutor:
 
 
 def from_env(db: Any = None) -> dict[str, Executor]:
+    from aiagent_core import config
     from aiagent_core.config import secret
 
     from .browser_executor import browser_from_env
+    from .web_fetch import HttpFetchExecutor, SearchRouterExecutor
 
-    out: dict[str, Executor] = {"mock_search": MockSearchExecutor()}
+    proxy_url = os.environ.get("AIAGENT_EGRESS_PROXY")
+    allow_priv: frozenset[str] = frozenset()
+    if config.profile() != "production" and os.environ.get("AIAGENT_WEB_FETCH_ALLOW_PRIVATE"):
+        allow_priv = frozenset(x.strip() for x in os.environ["AIAGENT_WEB_FETCH_ALLOW_PRIVATE"].split(",") if x.strip())
+
+    search_url = os.environ.get("AIAGENT_SEARCH_URL")
+    if search_url:
+        search_exec: Executor = SearchRouterExecutor(
+            search_url,
+            backend_kind=os.environ.get("AIAGENT_SEARCH_BACKEND", "searxng"),
+            api_key=secret("AIAGENT_SEARCH_API_KEY", required=False),
+            proxy=proxy_url,
+            allow_private_addrs=allow_priv,
+        )
+    else:
+        search_exec = MockSearchExecutor()
+
+    out: dict[str, Executor] = {
+        "mock_search": search_exec,
+        "http_fetch": HttpFetchExecutor(proxy=proxy_url, allow_private_addrs=allow_priv),
+    }
     bf = browser_from_env(db)
     if bf is not None:
         out["browser_fixture"] = bf
@@ -253,7 +341,7 @@ def from_env(db: Any = None) -> dict[str, Executor]:
     if url:
         out["http_message"] = HttpMessageExecutor(
             url,
-            proxy=os.environ.get("AIAGENT_EGRESS_PROXY"),
+            proxy=proxy_url,
             credential=secret("AIAGENT_MESSAGE_RECEIVER_TOKEN", required=False),
             credential_recipient=os.environ.get("AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST"),
         )

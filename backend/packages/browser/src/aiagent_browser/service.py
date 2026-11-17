@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
+from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .contracts import (
@@ -18,6 +21,7 @@ from .contracts import (
     FencePort,
     FixtureGatePort,
     FixturePort,
+    FixtureResponse,
     FormInput,
     IdFactory,
     Observation,
@@ -25,8 +29,29 @@ from .contracts import (
     SessionView,
     State,
     WorkerPort,
-    validate_fixture_url,
+    validate_browser_url,
 )
+
+
+def compute_form_binding(action_url: str, form_method: str, fields: list[tuple[str, str]]) -> dict[str, Any]:
+    parts = urlsplit(action_url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    port = parts.port or (443 if scheme == "https" else 80)
+    origin = f"{scheme}://{host}:{port}"
+    method = form_method.upper()
+    canonical = json.dumps(
+        {"action": action_url, "method": method, "origin": origin, "fields": [list(p) for p in fields]},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "action": action_url,
+        "method": method,
+        "origin": origin,
+        "payloadDigest": hashlib.sha256(canonical).hexdigest(),
+    }
 
 
 def _resolve_redirect(current: str, redirect_to: str) -> str:
@@ -39,10 +64,15 @@ def _resolve_redirect(current: str, redirect_to: str) -> str:
     if redir_parts.scheme:
         return redirect_to
     base = urlsplit(current)
-    joined = urlsplit(urljoin(f"http://{base.netloc}{base.path or '/'}", redirect_to))
-    if joined.scheme != "http":
-        raise BrowserError("EGRESS_DENIED")
-    return urlunsplit(("fixture", joined.netloc, joined.path, joined.query, joined.fragment))
+    target_scheme = base.scheme.lower()
+    if target_scheme == "fixture":
+        joined = urlsplit(urljoin(f"http://{base.netloc}{base.path or '/'}", redirect_to))
+        if joined.scheme != "http":
+            raise BrowserError("EGRESS_DENIED")
+        return urlunsplit(("fixture", joined.netloc, joined.path, joined.query, joined.fragment))
+    if target_scheme in ("http", "https"):
+        return urljoin(current, redirect_to)
+    raise BrowserError("EGRESS_DENIED")
 
 
 @dataclass(slots=True)
@@ -51,6 +81,7 @@ class _Entry:
     state: State = State.STARTING
     generation: int = 1
     current_url: str | None = None
+    last_challenge: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -72,6 +103,10 @@ class BrowserSessionService:
         auth_transition: AuthTransitionPort | None = None,
         max_sessions_per_task: int = 2,
         max_observation_chars: int = 4096,
+        allowed_web_hosts: frozenset[str] = frozenset(),
+        allow_https: bool = False,
+        allow_http_web: bool = False,
+        web_submitter: object | None = None,
     ) -> None:
         if (
             not allowed_fixture_hosts
@@ -88,12 +123,25 @@ class BrowserSessionService:
         self._redactor = redactor
         self._new_id = new_id
         self._hosts = allowed_fixture_hosts
+        self._web_hosts = frozenset(h.strip().lower() for h in allowed_web_hosts if h.strip())
+        self._allow_https = allow_https
+        self._allow_http_web = allow_http_web
+        self._web_submitter = web_submitter
         self._approval = approval
         self._auth_transition = auth_transition
         self._max_sessions_per_task = max_sessions_per_task
         self._max_chars = max_observation_chars
         self._entries: dict[str, _Entry] = {}
         self._create_lock = asyncio.Lock()
+
+    def _validate_url(self, url: str) -> str:
+        return validate_browser_url(
+            url,
+            self._hosts,
+            allowed_web_hosts=self._web_hosts,
+            allow_https=self._allow_https,
+            allow_http=self._allow_http_web,
+        )
 
     def _entry(self, session_id: str, authority: Authority) -> _Entry:
         entry = self._entries.get(session_id)
@@ -166,7 +214,7 @@ class BrowserSessionService:
         url: str,
         operation: str,
     ) -> Observation:
-        current = validate_fixture_url(url, self._hosts)
+        current = self._validate_url(url)
         visited: set[str] = set()
         try:
             for _ in range(4):
@@ -176,30 +224,68 @@ class BrowserSessionService:
                 await self._check(session_id, authority, operation)
                 # Cannot infer a real-network permit from a mock fixture permission.
                 await self._gate.permit(authority, current)
-                response = await self._fixture.fetch(current)
+                fetch_session = getattr(self._fixture, "fetch_session", None)
+                if fetch_session is not None:
+                    response = await fetch_session(session_id, current)
+                else:
+                    response = await self._fixture.fetch(current)
                 if response.status in (301, 302, 303, 307, 308):
                     if response.redirect_to is None or not response.redirect_to.strip():
                         raise BrowserError("INVALID_FIXTURE_REDIRECT")
-                    current = validate_fixture_url(_resolve_redirect(current, response.redirect_to), self._hosts)
+                    current = self._validate_url(_resolve_redirect(current, response.redirect_to))
                     continue
-                if response.status != 200 or len(response.html.encode("utf-8")) > 65536:
-                    raise BrowserError("FIXTURE_RESPONSE_DENIED")
-                await self._check(session_id, authority, operation)
-                await self._worker.render(session_id, response.html)
-                await self._fence.check(session_id, authority)
-                entry.current_url = current
-                return await self._observe_locked(session_id, authority, entry)
+                return await self._render_response_locked(session_id, authority, entry, current, response, operation)
             raise BrowserError("REDIRECT_LIMIT")
         except BrowserError as exc:
             if exc.code == "BROWSER_CRASHED":
                 entry.state = State.RECOVERING
             raise
 
+    async def _render_response_locked(
+        self,
+        session_id: str,
+        authority: Authority,
+        entry: _Entry,
+        current: str,
+        response: FixtureResponse,
+        operation: str,
+    ) -> Observation:
+        is_web = current.startswith(("http://", "https://"))
+        max_html_bytes = 524_288 if is_web else 65_536
+        if (
+            response.status not in ((200, 401, 403) if is_web else (200,))
+            or (operation == "submit" and getattr(response, "truncated", False))
+            or len(response.html.encode("utf-8")) > max_html_bytes
+        ):
+            raise BrowserError("FIXTURE_RESPONSE_DENIED")
+        await self._check(session_id, authority, operation)
+        if is_web and hasattr(self._worker, "render"):
+            try:
+                status_str = await self._worker.render(  # type: ignore[call-arg]
+                    session_id, response.html, origin_url=current, status=response.status
+                )
+            except TypeError:
+                status_str = await self._worker.render(session_id, response.html)
+        else:
+            status_str = await self._worker.render(session_id, response.html)
+        await self._fence.check(session_id, authority)
+        entry.current_url = current
+        if is_web and status_str in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
+            entry.state = State.NEEDS_LOGIN
+            entry.last_challenge = status_str
+        else:
+            entry.last_challenge = None
+        return await self._observe_locked(session_id, authority, entry)
+
     async def navigate_fixture(self, session_id: str, authority: Authority, url: str) -> Observation:
         entry = await self._operation(session_id, authority, "navigate_fixture")
         async with entry.lock:
             await self._operation(session_id, authority, "navigate_fixture")
             return await self._fetch_and_render_locked(session_id, authority, entry, url, "navigate_fixture")
+
+    async def navigate(self, session_id: str, authority: Authority, url: str) -> Observation:
+        """Navigate either `fixture://` or explicitly allowed `https://`/`http://` URLs safely."""
+        return await self.navigate_fixture(session_id, authority, url)
 
     async def _observe_locked(self, session_id: str, authority: Authority, entry: _Entry) -> Observation:
         await self._check(session_id, authority, "observe")
@@ -309,9 +395,31 @@ class BrowserSessionService:
         async with entry.lock:
             await self._operation(session_id, authority, "click")
             if entry.current_url is not None:
-                validate_fixture_url(entry.current_url, self._hosts)
+                self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
+            is_web = entry.current_url is not None and entry.current_url.startswith(("http://", "https://"))
+            if is_web:
+                extract_nav_fn = getattr(self._worker, "extract_click_navigation", None)
+                if callable(extract_nav_fn):
+                    assert entry.current_url is not None
+                    try:
+                        nav_info = await extract_nav_fn(
+                            session_id, target, current_url=entry.current_url, timeout_ms=timeout_ms
+                        )
+                    except BrowserError as exc:
+                        if exc.code == "BROWSER_CRASHED":
+                            entry.state = State.RECOVERING
+                        raise
+                    nav_url = nav_info.get("navUrl") if isinstance(nav_info, dict) else None
+                    if isinstance(nav_url, str) and nav_url:
+                        after = await self._fetch_and_render_locked(session_id, authority, entry, nav_url, "click")
+                        if entry.state is State.NEEDS_LOGIN:
+                            nav_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                                "CAPTCHA_CHALLENGE" if entry.last_challenge == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                            )
+                            return ActionOutcome(session_id, entry.generation, "click", nav_status, before, after)
+                        return ActionOutcome(session_id, entry.generation, "click", "EXECUTED", before, after)
             try:
                 worker_status = await self._worker.click(session_id, target, timeout_ms=timeout_ms)
             except BrowserError as exc:
@@ -323,9 +431,13 @@ class BrowserSessionService:
                 raise
             await self._fence.check(session_id, authority)
             after = await self._observe_locked(session_id, authority, entry)
-            if worker_status == "NEEDS_LOGIN":
+            if worker_status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
                 entry.state = State.NEEDS_LOGIN
-                return ActionOutcome(session_id, entry.generation, "click", "NEEDS_LOGIN", before, after)
+                entry.last_challenge = worker_status
+                outcome_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                    "CAPTCHA_CHALLENGE" if worker_status == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                )
+                return ActionOutcome(session_id, entry.generation, "click", outcome_status, before, after)
             return ActionOutcome(session_id, entry.generation, "click", "EXECUTED", before, after)
 
     async def submit(
@@ -336,6 +448,7 @@ class BrowserSessionService:
         inputs: tuple[FormInput, ...] = (),
         *,
         timeout_ms: int = 5000,
+        expected_bound_form: dict[str, Any] | None = None,
     ) -> ActionOutcome:
         if (
             not isinstance(target, BrowserTarget)
@@ -352,9 +465,81 @@ class BrowserSessionService:
             await self._approval.approve(authority, session_id, target)
             await self._operation(session_id, authority, "submit")
             if entry.current_url is not None:
-                validate_fixture_url(entry.current_url, self._hosts)
+                self._validate_url(entry.current_url)
                 await self._gate.permit(authority, entry.current_url)
             before = await self._observe_locked(session_id, authority, entry)
+            is_web = entry.current_url is not None and entry.current_url.startswith(("http://", "https://"))
+            if is_web:
+                extract_fn = getattr(self._worker, "extract_form_submission", None)
+                submit_fn = getattr(self._web_submitter, "submit_form", None)
+                if extract_fn is None or submit_fn is None:
+                    raise BrowserError("CONTROLLED_EGRESS_REQUIRED")
+                assert entry.current_url is not None
+                try:
+                    extracted = await extract_fn(
+                        session_id, target, inputs, current_url=entry.current_url, timeout_ms=timeout_ms
+                    )
+                except BrowserError as exc:
+                    if exc.code == "BROWSER_CRASHED":
+                        entry.state = State.RECOVERING
+                    raise
+                if not extracted.get("hasForm"):
+                    raise BrowserError("CONTROLLED_EGRESS_REQUIRED")
+                action_url = self._validate_url(str(extracted["action"]))
+                form_method = str(extracted.get("method") or "GET").upper()
+                fields = list(extracted.get("fields") or ())
+                if expected_bound_form is not None:
+                    live_binding = compute_form_binding(action_url, form_method, fields)
+                    if (
+                        live_binding["action"] != expected_bound_form.get("action")
+                        or live_binding["method"] != expected_bound_form.get("method")
+                        or live_binding["origin"] != expected_bound_form.get("origin")
+                        or live_binding["payloadDigest"] != expected_bound_form.get("payloadDigest")
+                    ):
+                        raise BrowserError("APPROVAL_BINDING_MISMATCH")
+                await self._gate.permit(authority, action_url)
+                try:
+                    sub_resp = await submit_fn(session_id, action_url, form_method, fields)
+                except BrowserError as exc:
+                    if exc.code == "ACTION_OUTCOME_UNKNOWN":
+                        entry.state = State.PAUSED
+                    raise
+                try:
+                    if (
+                        form_method != "GET"
+                        and sub_resp.status >= 400
+                        and sub_resp.status not in (301, 302, 303, 307, 308)
+                    ):
+                        entry.state = State.PAUSED
+                        raise BrowserError("ACTION_OUTCOME_UNKNOWN")
+                    if sub_resp.status in (301, 302, 303, 307, 308):
+                        if form_method == "POST" and sub_resp.status in (307, 308):
+                            entry.state = State.PAUSED
+                            raise BrowserError("ACTION_OUTCOME_UNKNOWN")
+                        if sub_resp.redirect_to is None or not sub_resp.redirect_to.strip():
+                            raise BrowserError("INVALID_FIXTURE_REDIRECT")
+                        redir_url = self._validate_url(_resolve_redirect(action_url, sub_resp.redirect_to))
+                        after = await self._fetch_and_render_locked(session_id, authority, entry, redir_url, "submit")
+                    else:
+                        after = await self._render_response_locked(
+                            session_id, authority, entry, action_url, sub_resp, "submit"
+                        )
+                except BrowserError as exc:
+                    if exc.code == "ACTION_OUTCOME_UNKNOWN":
+                        entry.state = State.PAUSED
+                        raise
+                    entry.state = State.PAUSED
+                    raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
+                except Exception as exc:
+                    entry.state = State.PAUSED
+                    raise BrowserError("ACTION_OUTCOME_UNKNOWN") from exc
+                if entry.state is State.NEEDS_LOGIN:
+                    out_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                        "CAPTCHA_CHALLENGE" if entry.last_challenge == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                    )
+                    return ActionOutcome(session_id, entry.generation, "submit", out_status, before, after)
+                return ActionOutcome(session_id, entry.generation, "submit", "EXECUTED", before, after)
+
             try:
                 worker_status = await self._worker.submit(session_id, target, inputs, timeout_ms=timeout_ms)
             except BrowserError as exc:
@@ -366,9 +551,13 @@ class BrowserSessionService:
                 raise
             await self._fence.check(session_id, authority)
             after = await self._observe_locked(session_id, authority, entry)
-            if worker_status == "NEEDS_LOGIN":
+            if worker_status in ("NEEDS_LOGIN", "CAPTCHA_CHALLENGE"):
                 entry.state = State.NEEDS_LOGIN
-                return ActionOutcome(session_id, entry.generation, "submit", "NEEDS_LOGIN", before, after)
+                entry.last_challenge = worker_status
+                sub_status: Literal["NEEDS_LOGIN", "CAPTCHA_CHALLENGE"] = (
+                    "CAPTCHA_CHALLENGE" if worker_status == "CAPTCHA_CHALLENGE" else "NEEDS_LOGIN"
+                )
+                return ActionOutcome(session_id, entry.generation, "submit", sub_status, before, after)
             return ActionOutcome(session_id, entry.generation, "submit", "EXECUTED", before, after)
 
     async def authenticated_navigate(self, session_id: str, authority: Authority, url: str) -> Observation:
@@ -381,11 +570,30 @@ class BrowserSessionService:
             entry = await self._check(session_id, authority, "authenticated_navigate")
             if entry.state not in (State.ACTIVE, State.NEEDS_LOGIN):
                 raise BrowserError("INVALID_STATE")
-            target_url = validate_fixture_url(url, self._hosts)
+            target_url = self._validate_url(url)
             await self._auth_transition.permit_transition(authority, session_id, target_url)
             await self._fence.check(session_id, authority)
             obs = await self._fetch_and_render_locked(
                 session_id, authority, entry, target_url, "authenticated_navigate"
             )
             entry.state = State.ACTIVE
+            entry.last_challenge = None
             return obs
+
+    def session_details(self, session_id: str, authority: Authority) -> tuple[State, int, str | None, str | None]:
+        entry = self._entry(session_id, authority)
+        return entry.state, entry.generation, entry.current_url, entry.last_challenge
+
+    async def apply_owner_takeover_resume(
+        self,
+        session_id: str,
+        authority: Authority,
+        *,
+        db_generation: int,
+    ) -> None:
+        entry = await self._check(session_id, authority, "takeover_resume")
+        async with entry.lock:
+            if db_generation > entry.generation and entry.state in (State.PAUSED, State.NEEDS_LOGIN, State.ACTIVE):
+                entry.generation = db_generation
+                entry.state = State.ACTIVE
+                entry.last_challenge = None

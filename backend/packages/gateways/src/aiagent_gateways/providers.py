@@ -66,6 +66,20 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
     r = _results(messages)
     if stream == "summarize":
         return {"content": f"SUMMARY of {len(messages)} earlier messages (goal: widget price)."}
+    if stream == "verify":
+        override = os.environ.get("AIAGENT_FAKE_NLI_VERDICT")
+        if override in ("SUPPORTED", "REFUTED", "UNVERIFIED"):
+            return {"content": json.dumps({"verdict": override})}
+        last_user = next((str(m.get("content", "")) for m in reversed(messages) if m.get("kind") == "user"), "")
+        try:
+            payload = json.loads(last_user)
+            quote = str(payload.get("quote", ""))
+            source_text = str(payload.get("sourceText", ""))
+        except (ValueError, TypeError, AttributeError):
+            return {"content": json.dumps({"verdict": "UNVERIFIED"})}
+        if not quote or quote not in source_text or "__FORCE_NLI_REFUTE__" in source_text:
+            return {"content": json.dumps({"verdict": "REFUTED"})}
+        return {"content": json.dumps({"verdict": "SUPPORTED"})}
     if stream.startswith("subagent"):
         if "search" in r:
             return {"content": "child-result: widget price is 42"}
@@ -119,6 +133,19 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 {"name": "send_message", "args": {"to": "bob", "body": "hi"}},
             ],
         }
+    if "compose browser" in first:
+        navs = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "browser_navigate"]
+        if not navs:
+            return _call("browser_navigate", url="http://portal:8099/portal/entry")
+        first_nav = json.loads(str(navs[0].get("content", "{}")))
+        sid = str(first_nav.get("sessionId") or "")
+        if "browser_submit" not in r:
+            return _call("browser_submit", sessionId=sid, kind="test_id", selector="enter-portal")
+        if len(navs) == 1:
+            return _call("browser_navigate", url="http://portal:8099/portal/dashboard", sessionId=sid)
+        last_nav = json.loads(str(navs[-1].get("content", "{}")))
+        obs = str(last_nav.get("observation") or "")
+        return {"content": f"done:compose-browser:{last_nav.get('state')}:{obs[:120]}"}
     if "sandbox" in first:
         if "sandbox_exec" in r:
             return {"content": f"done:sandbox:{r['sandbox_exec'].get('status')}"}
@@ -199,11 +226,7 @@ class AnthropicProvider:
         self.url = url or self.URL
 
     def _client(self) -> httpx.AsyncClient:
-        proxy = None
-        if self.proxy:
-            tok = self.proxy_token.reveal() if self.proxy_token is not None else ""
-            proxy = httpx.Proxy(self.proxy, headers={"Proxy-Authorization": f"Aiagent model_gateway:{tok}"})
-        return httpx.AsyncClient(proxy=proxy, timeout=self.timeout_s, trust_env=False, verify=self.verify)
+        return _egress_http_client(self.proxy, self.proxy_token, self.timeout_s, self.verify)
 
     def capability(self, model: str) -> Capability:
         return Capability(True, True, 600_000, "anthropic", True)
@@ -303,4 +326,336 @@ class AnthropicProvider:
             # UNKNOWN. Never feed it to the ordinary transient retry path.
             raise ProviderError("OUTCOME_UNKNOWN", False) from exc
         if not message_stop_seen:
+            raise ProviderError("INCOMPLETE_STREAM", False)
+
+
+def _egress_http_client(
+    proxy_url: str | None,
+    proxy_token: Secret | None,
+    timeout_s: float,
+    verify: bool | ssl.SSLContext,
+) -> httpx.AsyncClient:
+    proxy = None
+    if proxy_url:
+        tok = proxy_token.reveal() if proxy_token is not None else ""
+        proxy = httpx.Proxy(proxy_url, headers={"Proxy-Authorization": f"Aiagent model_gateway:{tok}"})
+    return httpx.AsyncClient(proxy=proxy, timeout=timeout_s, trust_env=False, verify=verify)
+
+
+# ------------------------------------------------------------------------------------------------ OpenAI / Compatible
+class OpenAIProvider:
+    """OpenAI Chat Completions & OpenAI-compatible (Ollama/vLLM/LiteLLM) streaming provider."""
+
+    URL = "https://api.openai.com/v1/chat/completions"
+
+    def __init__(
+        self,
+        key: Secret | None,
+        proxy: str | None,
+        *,
+        proxy_token: Secret | None = None,
+        url: str | None = None,
+        provider_name: str = "openai",
+        external_recipient: bool = True,
+        max_context_chars: int = 400_000,
+        timeout_s: float = 120.0,
+        verify: bool | ssl.SSLContext = True,
+    ) -> None:
+        self.key = key
+        self.proxy = proxy
+        self.proxy_token = proxy_token
+        self.url = url or self.URL
+        self.provider_name = provider_name
+        self.external_recipient = external_recipient
+        self.max_context_chars = max_context_chars
+        self.timeout_s = timeout_s
+        self.verify = verify
+
+    def capability(self, model: str) -> Capability:
+        del model
+        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+
+    @staticmethod
+    def _messages(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+        for m in messages:
+            if m["kind"] == "user":
+                out.append({"role": "user", "content": m["content"]})
+            elif m["kind"] == "assistant":
+                msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or ""}
+                tcs = m.get("tool_calls") or []
+                if tcs:
+                    msg["tool_calls"] = [
+                        {
+                            "id": t["id"],
+                            "type": "function",
+                            "function": {"name": t["name"], "arguments": json.dumps(t["args"])},
+                        }
+                        for t in tcs
+                    ]
+                out.append(msg)
+            elif m["kind"] == "tool":
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": m["tool_call_id"],
+                        "content": m["content"],
+                    }
+                )
+        return out
+
+    async def stream(
+        self,
+        model: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: str = "main",
+    ) -> AsyncIterator[ProviderEvent]:
+        del stream
+        body: dict[str, Any] = {
+            "model": model,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": self._messages(system, messages),
+        }
+        if tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]},
+                }
+                for t in tools
+            ]
+        headers = {"content-type": "application/json"}
+        if self.key is not None:
+            headers["authorization"] = "Bearer " + self.key.reveal()
+        done_seen = False
+        pending_tools: dict[int, dict[str, Any]] = {}
+        open_tools: dict[int, str] = {}
+        try:
+            async with _egress_http_client(self.proxy, self.proxy_token, self.timeout_s, self.verify) as client:
+                async with client.stream("POST", self.url, headers=headers, json=body) as resp:
+                    if resp.status_code in (429, 529):
+                        raise ProviderError("RATE_LIMITED", True)
+                    if resp.status_code >= 500:
+                        raise ProviderError("OUTCOME_UNKNOWN", False)
+                    if resp.status_code >= 400:
+                        raise ProviderError(f"HTTP_{resp.status_code}", False)
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if raw == "[DONE]":
+                            done_seen = True
+                            if pending_tools:
+                                raise ProviderError("INVALID_STREAM", False)
+                            for idx in sorted(open_tools):
+                                yield ProviderEvent("tool_end", tool_id=open_tools.pop(idx))
+                            yield ProviderEvent("stop")
+                            continue
+                        try:
+                            ev = json.loads(raw)
+                        except ValueError as exc:
+                            raise ProviderError("INVALID_STREAM", False) from exc
+                        usage = ev.get("usage")
+                        if isinstance(usage, dict):
+                            u_out: dict[str, int] = {}
+                            if isinstance(usage.get("prompt_tokens"), int):
+                                u_out["input_tokens"] = usage["prompt_tokens"]
+                            if isinstance(usage.get("completion_tokens"), int):
+                                u_out["output_tokens"] = usage["completion_tokens"]
+                            if u_out:
+                                yield ProviderEvent("usage", usage=u_out)
+                        choices = ev.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if isinstance(reasoning, str) and reasoning:
+                            yield ProviderEvent("reasoning", text=reasoning)
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            yield ProviderEvent("text", text=content)
+                        for tc in delta.get("tool_calls") or []:
+                            idx = int(tc.get("index", 0))
+                            fn = tc.get("function") or {}
+                            if idx in open_tools:
+                                args_part = fn.get("arguments")
+                                if isinstance(args_part, str) and args_part:
+                                    yield ProviderEvent("tool_args", tool_id=open_tools[idx], text=args_part)
+                                continue
+                            buf = pending_tools.setdefault(
+                                idx,
+                                {"id": None, "name": "", "args": []},
+                            )
+                            if tc.get("id"):
+                                buf["id"] = str(tc["id"])
+                            if fn.get("name"):
+                                buf["name"] = str(fn["name"])
+                            args_part = fn.get("arguments")
+                            if isinstance(args_part, str) and args_part:
+                                buf["args"].append(args_part)
+                            if buf["name"]:
+                                tid = str(buf["id"] or f"call_{uuid.uuid4().hex[:16]}")
+                                open_tools[idx] = tid
+                                yield ProviderEvent("tool_start", tool_id=tid, tool_name=buf["name"])
+                                for buffered_arg in buf["args"]:
+                                    if buffered_arg:
+                                        yield ProviderEvent("tool_args", tool_id=tid, text=buffered_arg)
+                                pending_tools.pop(idx, None)
+                        if choice.get("finish_reason") is not None:
+                            if pending_tools:
+                                raise ProviderError("INVALID_STREAM", False)
+                            for idx in sorted(open_tools):
+                                yield ProviderEvent("tool_end", tool_id=open_tools.pop(idx))
+        except httpx.TransportError as exc:
+            raise ProviderError("OUTCOME_UNKNOWN", False) from exc
+        if not done_seen:
+            raise ProviderError("INCOMPLETE_STREAM", False)
+
+
+# ------------------------------------------------------------------------------------------------ Gemini
+class GeminiProvider:
+    """Google Gemini `:streamGenerateContent?alt=sse` streaming provider (header API key, never URL query)."""
+
+    URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+
+    def __init__(
+        self,
+        key: Secret,
+        proxy: str | None,
+        *,
+        proxy_token: Secret | None = None,
+        url_template: str | None = None,
+        provider_name: str = "gemini",
+        external_recipient: bool = True,
+        max_context_chars: int = 800_000,
+        timeout_s: float = 120.0,
+        verify: bool | ssl.SSLContext = True,
+    ) -> None:
+        self.key = key
+        self.proxy = proxy
+        self.proxy_token = proxy_token
+        self.url_template = url_template or self.URL_TEMPLATE
+        self.provider_name = provider_name
+        self.external_recipient = external_recipient
+        self.max_context_chars = max_context_chars
+        self.timeout_s = timeout_s
+        self.verify = verify
+
+    def capability(self, model: str) -> Capability:
+        del model
+        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+
+    @staticmethod
+    def _contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            if m["kind"] == "user":
+                out.append({"role": "user", "parts": [{"text": m["content"]}]})
+            elif m["kind"] == "assistant":
+                parts: list[dict[str, Any]] = [{"text": m["content"]}] if m.get("content") else []
+                for tc in m.get("tool_calls") or []:
+                    parts.append({"functionCall": {"name": tc["name"], "args": tc["args"]}})
+                out.append({"role": "model", "parts": parts or [{"text": ""}]})
+            elif m["kind"] == "tool":
+                out.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": m.get("tool_name") or "tool",
+                                    "response": {"content": m["content"]},
+                                }
+                            }
+                        ],
+                    }
+                )
+        return out
+
+    async def stream(
+        self,
+        model: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: str = "main",
+    ) -> AsyncIterator[ProviderEvent]:
+        del stream
+        url = self.url_template.format(model=model)
+        body: dict[str, Any] = {"contents": self._contents(messages)}
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        if tools:
+            body["tools"] = [
+                {
+                    "functionDeclarations": [
+                        {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}
+                        for t in tools
+                    ]
+                }
+            ]
+        headers = {"x-goog-api-key": self.key.reveal(), "content-type": "application/json"}
+        finish_seen = False
+        try:
+            async with _egress_http_client(self.proxy, self.proxy_token, self.timeout_s, self.verify) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code in (429, 529):
+                        raise ProviderError("RATE_LIMITED", True)
+                    if resp.status_code >= 500:
+                        raise ProviderError("OUTCOME_UNKNOWN", False)
+                    if resp.status_code >= 400:
+                        raise ProviderError(f"HTTP_{resp.status_code}", False)
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if raw == "[DONE]":
+                            finish_seen = True
+                            yield ProviderEvent("stop")
+                            continue
+                        try:
+                            ev = json.loads(raw)
+                        except ValueError as exc:
+                            raise ProviderError("INVALID_STREAM", False) from exc
+                        um = ev.get("usageMetadata")
+                        if isinstance(um, dict):
+                            u_out: dict[str, int] = {}
+                            if isinstance(um.get("promptTokenCount"), int):
+                                u_out["input_tokens"] = um["promptTokenCount"]
+                            if isinstance(um.get("candidatesTokenCount"), int):
+                                u_out["output_tokens"] = um["candidatesTokenCount"]
+                            if u_out:
+                                yield ProviderEvent("usage", usage=u_out)
+                        for cand in ev.get("candidates") or []:
+                            content = cand.get("content") or {}
+                            for part in content.get("parts") or []:
+                                if not isinstance(part, dict):
+                                    continue
+                                if part.get("thought") is True and isinstance(part.get("text"), str):
+                                    yield ProviderEvent("reasoning", text=part["text"])
+                                elif isinstance(part.get("text"), str) and part["text"]:
+                                    yield ProviderEvent("text", text=part["text"])
+                                elif isinstance(part.get("functionCall"), dict):
+                                    fc = part["functionCall"]
+                                    tid = f"call_{uuid.uuid4().hex[:16]}"
+                                    tname = str(fc.get("name") or "")
+                                    if not tname:
+                                        raise ProviderError("INVALID_STREAM", False)
+                                    yield ProviderEvent("tool_start", tool_id=tid, tool_name=tname)
+                                    yield ProviderEvent("tool_args", tool_id=tid, text=json.dumps(fc.get("args") or {}))
+                                    yield ProviderEvent("tool_end", tool_id=tid)
+                            if cand.get("finishReason") is not None:
+                                finish_seen = True
+                                yield ProviderEvent("stop")
+        except httpx.TransportError as exc:
+            raise ProviderError("OUTCOME_UNKNOWN", False) from exc
+        if not finish_seen:
             raise ProviderError("INCOMPLETE_STREAM", False)

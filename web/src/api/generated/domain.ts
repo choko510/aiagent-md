@@ -60,6 +60,7 @@ export interface ContextPolicyCommandV1 {
   readonly recipient: string;
   readonly model: string;
   readonly enabled: boolean;
+  readonly semanticVerifierMode?: "HEURISTIC" | "LLM_GATED" | null;
   readonly expectedRecordVersion?: NonNegativeInt64 | null;
 }
 

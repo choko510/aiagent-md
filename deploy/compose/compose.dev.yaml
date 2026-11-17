@@ -11,7 +11,10 @@ services:
     volumes: ["memory_tombstones:/var/lib/aiagent/memory-tombstones"]
   api:
     image: "aiagent/all:${TAG:-dev}"
-    environment: {AIAGENT_PROFILE: development}
+    environment:
+      AIAGENT_PROFILE: development
+      AIAGENT_BROWSER_ALLOWED_WEB_HOSTS: portal
+      AIAGENT_WEB_FETCH_ALLOW_PRIVATE: "10.250.250.10"
     volumes: ["memory_tombstones:/var/lib/aiagent/memory-tombstones"]
   edge: {image: "aiagent/all:${TAG:-dev}"}
   relay: {image: "aiagent/all:${TAG:-dev}", environment: {AIAGENT_PROFILE: development}, volumes: !reset []}
@@ -28,11 +31,15 @@ services:
   tool-gateway:
     image: "aiagent/all:${TAG:-dev}"
     volumes: !reset []
+    security_opt: !override ["no-new-privileges:true", "seccomp=unconfined", "apparmor=unconfined"]
     environment:
       AIAGENT_PROFILE: development
       AIAGENT_SANDBOX_ENDPOINT: tcp:cell:7000
       AIAGENT_MESSAGE_RECEIVER_URL: http://receiver:8099/messages
       AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST: receiver
+      AIAGENT_BROWSER_ALLOWED_WEB_HOSTS: portal
+      AIAGENT_BROWSER_ALLOW_HTTP_WEB: "1"
+      AIAGENT_WEB_FETCH_ALLOW_PRIVATE: "10.250.250.10"
   sentinel:
     image: "aiagent/all:${TAG:-dev}"
     networks: [db, rpc, egress, devsim]
@@ -40,7 +47,10 @@ services:
     environment: {AIAGENT_PROFILE: development}
   receiver:  # fake external world, reachable ONLY through sentinel (devsim network)
     image: "aiagent/all:${TAG:-dev}"
-    networks: {devsim: {ipv4_address: 10.250.250.10}}
+    networks:
+      devsim:
+        ipv4_address: 10.250.250.10
+        aliases: [portal]
     read_only: true
     user: "10001:10001"
     tmpfs: ["/tmp"]

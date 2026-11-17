@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from http.cookies import CookieError, SimpleCookie
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin, urlsplit
 
 from .contracts import BrowserError, BrowserTarget, FormInput
 
@@ -45,21 +49,30 @@ class PlaywrightBrowserWorker:
             raise BrowserError("BROWSER_START_BLOCKED") from exc
         return self._browser
 
-    async def start(self, session_id: str) -> None:
+    async def start(
+        self,
+        session_id: str,
+        *,
+        storage_state: dict[str, Any] | None = None,
+        allow_js: bool = False,
+    ) -> None:
         async with self._lock:
             if session_id in self._pages:
                 raise BrowserError("DUPLICATE_SESSION")
             browser = await self._browser_or_start()
             context: BrowserContext | None = None
             try:
-                context = await browser.new_context(
-                    java_script_enabled=False,
-                    service_workers="block",
-                    accept_downloads=False,
-                    permissions=[],
-                )
+                ctx_kwargs: dict[str, Any] = {
+                    "java_script_enabled": allow_js,
+                    "service_workers": "block",
+                    "accept_downloads": False,
+                    "permissions": [],
+                }
+                if storage_state is not None:
+                    ctx_kwargs["storage_state"] = storage_state
+                context = await browser.new_context(**ctx_kwargs)
 
-                # Nothing in fixture HTML may open a socket (including images, fonts, redirects).
+                # Nothing inside the browser may open a raw socket bypassing the gateway/SSRF layer.
                 async def reject_network(route: Route) -> None:
                     await route.abort("blockedbyclient")
 
@@ -120,17 +133,138 @@ class PlaywrightBrowserWorker:
         return loc
 
     @staticmethod
-    async def _has_auth_wall(page: Page) -> bool:
-        return await page.locator("[data-auth-wall='true'], input[type='password']").count() > 0
+    async def _detect_challenge(page: Page) -> str | None:
+        if await page.locator("[data-auth-wall='true'], input[type='password']").count() > 0:
+            return "NEEDS_LOGIN"
+        if (
+            await page.locator(
+                "[data-captcha='true'], iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
+                "iframe[src*='turnstile'], .g-recaptcha, .cf-turnstile"
+            ).count()
+            > 0
+        ):
+            return "CAPTCHA_CHALLENGE"
+        return None
 
-    async def render(self, session_id: str, html: str) -> None:
+    async def render(
+        self,
+        session_id: str,
+        html: str,
+        *,
+        origin_url: str | None = None,
+        status: int = 200,
+    ) -> str:
         async with self._lock:
             try:
-                await self._page(session_id).set_content(html, wait_until="domcontentloaded", timeout=10_000)
+                page = self._page(session_id)
+                if origin_url is not None:
+                    obj = self._pages[session_id]
+
+                    async def fulfill_main_only(route: Route) -> None:
+                        if route.request.url == origin_url and route.request.resource_type == "document":
+                            await route.fulfill(status=status, body=html, content_type="text/html; charset=utf-8")
+                        else:
+                            await route.abort("blockedbyclient")
+
+                    await obj.context.unroute("**/*")
+                    await obj.context.route("**/*", fulfill_main_only)
+                    try:
+                        await page.goto(origin_url, wait_until="domcontentloaded", timeout=10_000)
+                    finally:
+
+                        async def reject_network(route: Route) -> None:
+                            await route.abort("blockedbyclient")
+
+                        await obj.context.unroute("**/*")
+                        await obj.context.route("**/*", reject_network)
+                else:
+                    await page.set_content(html, wait_until="domcontentloaded", timeout=10_000)
+                if status in (401, 403):
+                    return "NEEDS_LOGIN"
+                challenge = await self._detect_challenge(page)
+                return challenge or "OK"
             except BrowserError:
                 raise
             except Exception as exc:
                 raise self._classify_error(session_id, exc) from exc
+
+    async def export_storage_state(self, session_id: str) -> dict[str, Any]:
+        async with self._lock:
+            obj = self._pages.get(session_id)
+            if obj is None or obj.page.is_closed():
+                raise BrowserError("BROWSER_CRASHED")
+            state = await obj.context.storage_state()
+            return dict(state)
+
+    async def cookies_for_url(self, session_id: str, url: str) -> str:
+        async with self._lock:
+            obj = self._pages.get(session_id)
+            if obj is None or obj.page.is_closed():
+                raise BrowserError("BROWSER_CRASHED")
+            cookies = await obj.context.cookies([url])
+            return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
+
+    async def apply_set_cookies(self, session_id: str, origin_url: str, set_cookies: tuple[str, ...]) -> None:
+        if not set_cookies:
+            return
+        async with self._lock:
+            obj = self._pages.get(session_id)
+            if obj is None or obj.page.is_closed():
+                raise BrowserError("BROWSER_CRASHED")
+            u = urlsplit(origin_url)
+            host = (u.hostname or "").lower()
+            is_https = u.scheme.lower() == "https"
+            to_add: list[dict[str, Any]] = []
+            for raw_hdr in set_cookies:
+                jar = SimpleCookie()
+                try:
+                    jar.load(raw_hdr)
+                except CookieError:
+                    jar.clear()
+                for name, morsel in jar.items():
+                    if not name:
+                        continue
+                    secure = bool(morsel["secure"])
+                    if secure and not is_https:
+                        continue
+                    domain_attr = str(morsel["domain"] or "").strip().lstrip(".").lower()
+                    if domain_attr and not (host == domain_attr or host.endswith("." + domain_attr)):
+                        continue
+                    path_attr = str(morsel["path"] or "").strip() or "/"
+                    cookie: dict[str, Any] = {
+                        "name": name,
+                        "value": morsel.value,
+                        "httpOnly": bool(morsel["httponly"]),
+                        "secure": secure,
+                    }
+                    if domain_attr:
+                        cookie["domain"] = domain_attr
+                        cookie["path"] = path_attr
+                    else:
+                        cookie["url"] = f"{u.scheme.lower()}://{u.netloc}{path_attr}"
+                    max_age = str(morsel["max-age"] or "").strip()
+                    expires_raw = str(morsel["expires"] or "").strip()
+                    if max_age.isdigit():
+                        cookie["expires"] = datetime.now(UTC).timestamp() + int(max_age)
+                    elif expires_raw:
+                        try:
+                            cookie["expires"] = parsedate_to_datetime(expires_raw).timestamp()
+                        except Exception:
+                            pass
+                    to_add.append(cookie)
+            if to_add:
+                await obj.context.add_cookies(to_add)  # type: ignore[arg-type]
+
+    async def restore_storage_state(
+        self,
+        session_id: str,
+        storage_state: dict[str, Any],
+        *,
+        allow_js: bool = False,
+    ) -> None:
+        async with self._lock:
+            await self._close_locked(session_id)
+        await self.start(session_id, storage_state=storage_state, allow_js=allow_js)
 
     async def observe(self, session_id: str) -> str:
         async with self._lock:
@@ -147,13 +281,161 @@ class PlaywrightBrowserWorker:
                 page = self._page(session_id)
                 loc = await self._strict_target(page, target)
                 await loc.click(timeout=timeout_ms)
-                return "NEEDS_LOGIN" if await self._has_auth_wall(page) else "OK"
+                challenge = await self._detect_challenge(page)
+                return challenge or "OK"
             except BrowserError:
                 raise
             except Exception as exc:
                 raise self._classify_error(
                     session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
                 ) from exc
+
+    async def extract_click_navigation(
+        self,
+        session_id: str,
+        target: BrowserTarget,
+        *,
+        current_url: str,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            try:
+                page = self._page(session_id)
+                loc = await self._strict_target(page, target)
+                info = await loc.evaluate(
+                    """el => {
+                        const anchor = el.closest('a[href]');
+                        if (!anchor) return { navUrl: null };
+                        const raw = (anchor.getAttribute('href') || '').trim();
+                        if (!raw || raw.startsWith('#')) return { navUrl: null };
+                        return { navUrl: raw };
+                    }""",
+                    timeout=timeout_ms,
+                )
+                raw = info.get("navUrl") if isinstance(info, dict) else None
+                if not isinstance(raw, str) or not raw:
+                    return {"navUrl": None}
+                return {"navUrl": urljoin(current_url, raw)}
+            except BrowserError:
+                raise
+            except Exception as exc:
+                raise self._classify_error(
+                    session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
+                ) from exc
+
+    async def extract_form_submission(
+        self,
+        session_id: str,
+        target: BrowserTarget,
+        inputs: tuple[FormInput, ...] = (),
+        *,
+        current_url: str,
+        timeout_ms: int = 5000,
+        apply_inputs: bool = True,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            handles: list[Any] = []
+            try:
+                page = self._page(session_id)
+                if apply_inputs:
+                    for item in inputs:
+                        field_loc = await self._strict_target(page, item.target)
+                        await field_loc.fill(item.value, timeout=timeout_ms)
+                    submit_loc = await self._strict_target(page, target)
+                    info = await submit_loc.evaluate(
+                        """el => {
+                            const form = el.form || el.closest('form');
+                            if (!form) return { hasForm: false };
+                            const fields = [];
+                            for (const ctrl of Array.from(form.elements)) {
+                                if (!ctrl.name || ctrl.disabled) continue;
+                                const typ = (ctrl.type || '').toLowerCase();
+                                if ((typ === 'checkbox' || typ === 'radio') && !ctrl.checked) continue;
+                                if (typ === 'submit' || typ === 'button') {
+                                    if (ctrl !== el) continue;
+                                }
+                                fields.push([String(ctrl.name), String(ctrl.value ?? '')]);
+                            }
+                            return {
+                                hasForm: true,
+                                action: String(form.getAttribute('action') || ''),
+                                method: String(form.getAttribute('method') || 'GET').toUpperCase(),
+                                fields: fields,
+                            };
+                        }""",
+                        timeout=timeout_ms,
+                    )
+                else:
+                    # Non-mutating DOM preview: resolve elements strictly without writing .fill() values.
+                    override_pairs: list[tuple[Any, str]] = []
+                    for item in inputs:
+                        field_loc = await self._strict_target(page, item.target)
+                        fh = await field_loc.element_handle(timeout=timeout_ms)
+                        if fh is None:
+                            raise BrowserError("ACTION_FAILED")
+                        handles.append(fh)
+                        override_pairs.append((fh, item.value))
+                    submit_loc = await self._strict_target(page, target)
+                    submit_handle = await submit_loc.element_handle(timeout=timeout_ms)
+                    if submit_handle is None:
+                        raise BrowserError("ACTION_FAILED")
+                    handles.append(submit_handle)
+                    info = await asyncio.wait_for(
+                        page.evaluate(
+                            """([submitEl, overrides]) => {
+                                const form = submitEl.form || submitEl.closest('form');
+                                if (!form) return { hasForm: false };
+                                const ov = new Map();
+                                for (const pair of overrides) {
+                                    ov.set(pair[0], String(pair[1] ?? ''));
+                                }
+                                const fields = [];
+                                for (const ctrl of Array.from(form.elements)) {
+                                    if (!ctrl.name || ctrl.disabled) continue;
+                                    const typ = (ctrl.type || '').toLowerCase();
+                                    if ((typ === 'checkbox' || typ === 'radio') && !ctrl.checked) continue;
+                                    if (typ === 'submit' || typ === 'button') {
+                                        if (ctrl !== submitEl) continue;
+                                    }
+                                    const val = ov.has(ctrl) ? ov.get(ctrl) : String(ctrl.value ?? '');
+                                    fields.push([String(ctrl.name), val]);
+                                }
+                                return {
+                                    hasForm: true,
+                                    action: String(form.getAttribute('action') || ''),
+                                    method: String(form.getAttribute('method') || 'GET').toUpperCase(),
+                                    fields: fields,
+                                };
+                            }""",
+                            [submit_handle, [[fh, val] for fh, val in override_pairs]],
+                        ),
+                        timeout=timeout_ms / 1000.0,
+                    )
+                if not isinstance(info, dict) or not info.get("hasForm"):
+                    return {"hasForm": False}
+                raw_action = str(info.get("action") or "").strip()
+                action_url = urljoin(current_url, raw_action) if raw_action else current_url
+                method = str(info.get("method") or "GET").upper()
+                if method not in ("GET", "POST"):
+                    method = "GET"
+                pairs = [
+                    (str(pair[0]), str(pair[1]))
+                    for pair in (info.get("fields") or [])
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2
+                ]
+                return {"hasForm": True, "action": action_url, "method": method, "fields": pairs}
+            except BrowserError:
+                raise
+            except Exception as exc:
+                raise self._classify_error(
+                    session_id, exc, timeout_code="ACTION_TIMEOUT", default_code="ACTION_FAILED"
+                ) from exc
+            finally:
+                for fh in handles:
+                    try:
+                        await fh.dispose()
+                    except Exception:
+                        pass
 
     async def submit(
         self,
@@ -171,7 +453,8 @@ class PlaywrightBrowserWorker:
                     await field_loc.fill(item.value, timeout=timeout_ms)
                 submit_loc = await self._strict_target(page, target)
                 await submit_loc.click(timeout=timeout_ms)
-                return "NEEDS_LOGIN" if await self._has_auth_wall(page) else "OK"
+                challenge = await self._detect_challenge(page)
+                return challenge or "OK"
             except BrowserError:
                 raise
             except Exception as exc:

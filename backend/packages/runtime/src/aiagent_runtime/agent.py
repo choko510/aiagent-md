@@ -393,6 +393,20 @@ async def browser_click(
 
 
 @tool
+async def http_fetch(
+    url: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    config: RunnableConfig,
+    maxBytes: int | None = None,
+) -> str:
+    """Fetch a read-only HTTP/HTTPS webpage or JSON endpoint safely with SSRF checks and secret redaction."""
+    args: dict[str, Any] = {"url": url}
+    if maxBytes is not None:
+        args["maxBytes"] = maxBytes
+    return await gateway_tool(run_ctx(config), tool_call_id, "http_fetch", args)
+
+
+@tool
 async def browser_submit(
     sessionId: str,
     kind: str,
@@ -413,6 +427,7 @@ async def browser_submit(
 
 STUBS = {
     "search": search,
+    "http_fetch": http_fetch,
     "send_message": send_message,
     "sandbox_exec": sandbox_exec,
     "browser_navigate": browser_navigate,
