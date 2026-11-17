@@ -18,12 +18,21 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="needs Linux kernel (rlimits/namespaces)")
 
+from aiagent_domain import uuid7  # noqa: E402
 from aiagent_sandbox.grant import Grant, GrantError, sign  # noqa: E402
 
 KEY = os.urandom(32)
 
 
-def grant(argv: list[str], cwd: str = ".", *, wall_ms: int = 5000, mem: int = 256 * 1024 * 1024, ttl: int = 60) -> dict:
+def grant(
+    argv: list[str],
+    cwd: str = ".",
+    *,
+    wall_ms: int = 5000,
+    mem: int = 256 * 1024 * 1024,
+    ttl: int = 60,
+    projected: bool = False,
+) -> dict:
     return sign(
         KEY,
         Grant(
@@ -40,6 +49,9 @@ def grant(argv: list[str], cwd: str = ".", *, wall_ms: int = 5000, mem: int = 25
             int(time.time()) + ttl,
             attempt_id=uuid.uuid4().hex,
             attempt_binding_version=1,
+            execution_binding_version=1 if projected else None,
+            execution_id=uuid7() if projected else None,
+            execution_binding_sha256="a" * 64 if projected else None,
         ),
     )
 
@@ -293,7 +305,7 @@ def test_trusted_source_descriptor_is_read_only_in_real_supervisor(tmp_path: Pat
                 "Path('output').write_text('ok')\n"
             )
             argv = [sys.executable, "-c", code]
-            result = run(s._execute(grant(argv), argv, ".", source_fd=source_fd))
+            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=source_fd))
         finally:
             os.close(source_fd)
         assert result["status"] == "EXITED" and result["exitCode"] == 0, result
@@ -347,7 +359,7 @@ def test_staged_source_descriptor_through_real_supervisor(tmp_path: Path) -> Non
                 "Path('output').write_text('ok')\n"
             )
             argv = [sys.executable, "-c", code]
-            result = run(s._execute(grant(argv), argv, ".", source_fd=root_fd))
+            result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=root_fd))
             assert result["status"] == "EXITED" and result["exitCode"] == 0, result
             assert "SOURCE_READ_ONLY" in result["stdout"] and "WRITABLE" not in result["stdout"]
             fd = os.open("input.py", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -397,7 +409,7 @@ def test_projected_execution_rejects_wrong_output_descriptor(tmp_path: Path) -> 
     try:
         argv = ["/bin/true"]
         with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_MISMATCH"):
-            run(s._execute(grant(argv), argv, ".", source_fd=source_fd, output_fd=output_fd))
+            run(s._execute(grant(argv, projected=True), argv, ".", source_fd=source_fd, output_fd=output_fd))
     finally:
         os.close(source_fd)
         os.close(output_fd)
@@ -422,3 +434,20 @@ def test_cell_source_traversal_restores_mode_on_failure(tmp_path: Path) -> None:
     with pytest.raises(ReadError, match="not private"):
         with cell_source_traversal(parent, cell_gid=20001):
             pytest.fail("non-private source parent accepted")
+
+
+def test_projected_execution_requires_bound_grant(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "source-binding-test"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    argv = ["/bin/true"]
+    try:
+        with pytest.raises(GrantError, match="PROJECTED_BINDING_REQUIRED"):
+            run(s._execute(grant(argv), argv, ".", source_fd=fd))
+        with pytest.raises(GrantError, match="PROJECTED_SOURCE_REQUIRED"):
+            run(s.execute(grant(argv, projected=True), argv, "."))
+    finally:
+        os.close(fd)

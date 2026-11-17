@@ -7,9 +7,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
+
+from aiagent_domain import is_uuid7
 
 GRANT_TTL_S = 120
 
@@ -33,12 +36,23 @@ class Grant:
     expires: int
     attempt_id: str | None = None
     attempt_binding_version: int | None = None
+    execution_binding_version: int | None = None
+    execution_id: str | None = None
+    execution_binding_sha256: str | None = None
 
     def payload(self) -> dict[str, Any]:
         d = asdict(self)
         d["argv"] = list(self.argv)
         if self.attempt_binding_version is None:
             del d["attempt_binding_version"]
+        if (
+            self.execution_binding_version is None
+            and self.execution_id is None
+            and self.execution_binding_sha256 is None
+        ):
+            del d["execution_binding_version"]
+            del d["execution_id"]
+            del d["execution_binding_sha256"]
         return d
 
 
@@ -75,6 +89,17 @@ def verify(
         raise GrantError("MISSING_ATTEMPT")
     if g.attempt_id is not None and (not isinstance(g.attempt_id, str) or not 1 <= len(g.attempt_id) <= 128):
         raise GrantError("MALFORMED")
+    if any(
+        value is not None for value in (g.execution_binding_version, g.execution_id, g.execution_binding_sha256)
+    ) and (
+        type(g.execution_binding_version) is not int
+        or g.execution_binding_version != 1
+        or g.attempt_binding_version != 1
+        or not is_uuid7(g.execution_id)
+        or not isinstance(g.execution_binding_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", g.execution_binding_sha256) is None
+    ):
+        raise GrantError("INVALID_EXECUTION_BINDING")
     if list(g.argv) != argv or g.cwd != cwd:
         raise GrantError("BINDING")  # the request differs from what was admitted
     if g.expires < (now if now is not None else time.time()):

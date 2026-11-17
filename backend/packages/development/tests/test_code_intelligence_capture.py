@@ -117,3 +117,16 @@ def test_captured_official_scip_fixture_revalidated_by_b1(repo: tuple[Path, str,
             assert {item.path for item in result.graph.references(symbol)} == {"main.py"}
     finally:
         os.close(output_fd)
+
+
+def test_capture_interrupted_read_never_yields_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent, output_fd = directories(tmp_path)
+    (tmp_path / "output" / "index.scip").write_bytes(b"x" * 200)
+    monkeypatch.setattr(os, "read", lambda _fd, _size: b"")
+    try:
+        with pytest.raises(ReadError, match="incomplete"):
+            with capture_scip(output_fd, parent, expected_uid=os.geteuid(), deadline=time.monotonic() + 10):
+                pytest.fail("partial Artifact exposed")
+        assert not list(parent.iterdir())
+    finally:
+        os.close(output_fd)

@@ -224,6 +224,10 @@ class Supervisor:
         if output_fd is not None and (source_fd is None or output_fd == source_fd):
             raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         g = verify(self.grant_key, token, argv, cwd_rel)
+        if source_fd is not None and g.execution_binding_version != 1:
+            raise GrantError("PROJECTED_BINDING_REQUIRED")
+        if source_fd is None and g.execution_binding_version is not None:
+            raise GrantError("PROJECTED_SOURCE_REQUIRED")
         self._consume(g.grant_id)
         ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
         if output_fd is not None:
@@ -264,6 +268,7 @@ class Supervisor:
         return {
             "status": "EXITED",
             "attemptId": g.attempt_id,
+            "executionId": g.execution_id,
             "exitCode": rc,
             "timedOut": timed_out,
             "wallMs": int((time.monotonic() - started) * 1000),

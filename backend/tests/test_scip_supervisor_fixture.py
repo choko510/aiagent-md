@@ -34,6 +34,7 @@ from aiagent_development.code_intelligence.scip_navigation import (
     SourceProvenance,
     load_index,
 )
+from aiagent_domain import uuid7
 from aiagent_sandbox.grant import Grant, sign
 from aiagent_sandbox.supervisor import Limits, Supervisor
 
@@ -155,6 +156,9 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                                 int(time.time()) + 60,
                                 attempt_id=uuid.uuid4().hex,
                                 attempt_binding_version=1,
+                                execution_binding_version=1,
+                                execution_id=uuid7(),
+                                execution_binding_sha256=hashlib.sha256(wire).hexdigest(),
                             ),
                         )
                         before = resource.getrusage(resource.RUSAGE_CHILDREN)

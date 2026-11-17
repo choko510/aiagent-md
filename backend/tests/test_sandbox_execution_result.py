@@ -266,3 +266,31 @@ def test_gateway_rejects_missing_attempt_before_cell(monkeypatch: pytest.MonkeyP
     with pytest.raises(ExecutorFailed, match="tool attempt"):
         asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
     client.assert_not_called()
+
+
+def test_execution_binding_is_signed_and_requires_complete_versioned_fields() -> None:
+    from aiagent_domain import uuid7
+    from aiagent_sandbox.grant import Grant, GrantError, sign, verify
+
+    key = b"g" * 32
+    values = ("g", "tenant", "task", "run", "intent", 1, ("tool",), ".", 1000, 1024, 9999999999)
+    execution_id = uuid7()
+    grant = Grant(
+        *values,
+        attempt_id="attempt",
+        attempt_binding_version=1,
+        execution_binding_version=1,
+        execution_id=execution_id,
+        execution_binding_sha256="a" * 64,
+    )
+    token = sign(key, grant)
+    verified = verify(key, token, ["tool"], ".")
+    assert verified.execution_id == execution_id and verified.execution_binding_sha256 == "a" * 64
+    for field, value in (("execution_id", uuid7()), ("execution_binding_sha256", "b" * 64)):
+        changed = {"grant": dict(token["grant"]), "mac": token["mac"]}
+        changed["grant"][field] = value
+        with pytest.raises(GrantError, match="BAD_SIGNATURE"):
+            verify(key, changed, ["tool"], ".")
+    invalid = Grant(*values, attempt_id="attempt", attempt_binding_version=1, execution_id=execution_id)
+    with pytest.raises(GrantError, match="INVALID_EXECUTION_BINDING"):
+        verify(key, sign(key, invalid), ["tool"], ".")

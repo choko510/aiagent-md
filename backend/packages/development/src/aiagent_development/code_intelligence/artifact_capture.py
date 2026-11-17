@@ -17,6 +17,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from .deadline import require_deadline
 from .models import ReadError
 from .projection_stage import _open_trusted_parent
 
@@ -99,6 +100,7 @@ def capture_scip(
     max_bytes: int = _MAX_ARTIFACT,
 ) -> Iterator[CapturedScip]:
     """Copy one regular, single-link SCIP file, without following paths or publishing it."""
+    require_deadline(deadline)
     if os.name != "posix" or not private_parent.is_absolute():
         raise ReadError("secure artifact capture unavailable")
     if type(expected_uid) is not int or expected_uid < 0 or not 1 <= max_bytes <= _MAX_ARTIFACT:

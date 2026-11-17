@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from .deadline import require_deadline
 from .git_proof import GitTreeCheck, GitTreeProof, verify_git_tree_proof
 from .models import Identity, ReadError
 from .paths import validate_git_path
@@ -199,6 +200,7 @@ def stage_projection(
     readable by other UIDs only through an explicitly passed descriptor; a
     separate kernel restriction must deny writes. No identities here authorize.
     """
+    require_deadline(deadline)
     if os.name != "posix" or not trusted_parent.is_absolute():
         raise ReadError("secure POSIX staging unavailable")
     prefix = _validate_manifest(manifest, receipt, deadline)

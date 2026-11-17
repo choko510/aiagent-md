@@ -12,6 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 
+from .deadline import require_deadline
 from .git_reader import GitSnapshot
 from .models import Identity, ReadError
 from .paths import validate_git_path
@@ -199,6 +200,7 @@ def verify_git_tree_proof(
     proof: GitTreeProof, manifest: ProjectionManifest, expected_identity: Identity, *, deadline: float
 ) -> GitTreeCheck:
     """Check a supplied proof against a caller-selected identity; caller owns authorization."""
+    require_deadline(deadline)
     objects = _validated_objects(proof, manifest, expected_identity, deadline)
     selected, count, visited = _walk_proof(objects, manifest.tree, len(expected_identity.commit), deadline)
     if visited != objects.keys():

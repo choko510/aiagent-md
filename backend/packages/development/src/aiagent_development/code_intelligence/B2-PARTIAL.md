@@ -260,3 +260,27 @@ independently checks each Git blob ID and SHA-256 against the manifest. This
 proves only object relationships relative to the supplied expected identity; it
 does not authorize a repository or authenticate the execution. SHA-1 Git
 object IDs remain legacy collision-sensitive and are marked `LEGACY_SHA1`.
+
+## Execution preparation and transactional Artifact storage
+
+Migration 0011 adds operator-provisioned repository bindings and recipe
+approvals, verified Workspace snapshot metadata, and a distinct PREPARED
+Execution ID in the existing canonical PostgreSQL database. The Workspace
+operation independently verifies bounded Git object proof and source bytes,
+then rechecks the scoped Run and binding under database locks. Recipe binding
+checks the actual Tool Intent request digest, Plan content/Test ID, toolchain
+and approved image digest. PREPARED is not an authorization to execute: the
+provider authorization, running image attestation, authenticated source and
+artifact transfer, and Supervisor receipt authority are not wired.
+
+The Gateway Artifact owner encrypts bounded captured bytes and uses a database
+transaction to recheck scope, Run, Lease, Goal, current snapshot, binding,
+recipe, Plan and Tool Attempt before publication. DB tests use explicitly fake
+capture and SCIP verifiers and an operator-simulated FINISHED state. No real
+FINISHED transition or production verifier is configured; the Development
+adapter remains fail-closed. Idempotency, cancellation-before-publication and
+concurrent publication are tested against disposable PostgreSQL, but live
+revocation during network transfer and real broker crash recovery remain open.
+The operator-provisioned repository/recipe rows are trusted policy inputs;
+provider authorization and image provenance are not established by their text
+references alone. SHA-1 snapshot integrity remains LEGACY_SHA1 / PARTIAL.
