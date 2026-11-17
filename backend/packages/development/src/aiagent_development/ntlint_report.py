@@ -96,8 +96,8 @@ def _finding(d: dict[str, object]) -> NtlintFinding:
         path,
         start,
         end,
-        cast(Literal["candidate", "violation"], message),
-        cast(Literal["info", "warning", "error"], severity),
+        message,
+        severity,
         _number(d, "value", 1.0),
     )
 
