@@ -79,7 +79,10 @@ def test_future_fitted_violation_retained_only_as_diagnostic() -> None:
 @pytest.mark.parametrize(
     "bad",
     [
-        "",\n        "not json",\n        encode(finding()),\n        encode(summary(), finding()),
+        "",
+        "not json",
+        encode(finding()),
+        encode(summary(), finding()),
         encode(summary(), summary()),
         encode(finding(file="../secret"), summary()),
         encode(finding(file="C:\\secrets"), summary()),
