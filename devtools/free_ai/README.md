@@ -2,9 +2,9 @@
 
 This directory is a **development-time experiment harness**, not a product feature.
 
-It sends three fixed synthetic fixtures to at most four fixed external AI endpoints so
-that the implementation agent can note whether an unauthenticated service currently
-answers with the expected schema. Nothing here is registered in the aiagent-md Model
+It sends fixed synthetic fixtures to at most four fixed external AI endpoints so that
+the implementation agent can note whether an unauthenticated service currently answers
+with the expected schema, and can compare deterministic task scores offline. Nothing here is registered in the aiagent-md Model
 Gateway, Agent Runtime, Sentinel, Web UI, public API, Docker image, release path or CI
 gate that ships the product. Production model selection, routing, fallback, tool
 execution, billing, contracts, database and deployment are untouched.
@@ -36,6 +36,7 @@ python -m devtools.free_ai probe \
   --provider kilo --fixture jp_hello \
   --ack-synthetic-only --ack-external-request
 python -m devtools.free_ai report
+python -m devtools.free_ai review-report
 ```
 
 `probe` accepts `--fixture jp_hello`, `--fixture arithmetic_2plus2` and the six
@@ -67,6 +68,56 @@ The prompt asks for exactly one identifier. Scoring is deterministic Python:
 - missing/unsafe/other model id, tool calls and non-zero reported cost keep their
   existing `FORMAT_MISMATCH` / `MODEL_DRIFT` / `UNEXPECTED_TOOL_OUTPUT` /
   `UNEXPECTED_BILLING` behaviour
+
+### Synthetic code-review tasks (STEP 3)
+
+Eight fixed tasks `review_01` … `review_08` ask a chat model to review numbered,
+synthetic Python code and reply with a strict JSON defect list. The code is a source
+constant in `fixtures.py`; the ground truth lives only in the separate
+`review_key.py`, which `fixtures.py` never imports, so the answer key cannot be sent.
+
+| Fixture | Ground-truth defects | Clean code |
+|---|---|---|
+| `review_01` | 1 (array boundary) | no |
+| `review_02` | 2 (SQL injection, secret logging) | no |
+| `review_03` | 0 | yes |
+| `review_04` | 1 (boundary condition) | no |
+| `review_05` | 0 | yes |
+| `review_06` | 2 (race condition, missing validation) | no |
+| `review_07` | 3 (validation, SQL injection, secret logging) | no |
+| `review_08` | 0 | yes |
+
+The prompt asks for exactly one JSON object and nothing else:
+
+```json
+{"findings":[{"line":2,"kind":"SQL_INJECTION","severity":"high"}]}
+```
+
+Allowed kinds are `INDEX_OUT_OF_RANGE`, `SQL_INJECTION`, `SECRET_LOGGING`,
+`BOUNDARY_BUG`, `RACE_CONDITION` and `MISSING_VALIDATION`; severities are `low`,
+`medium` and `high`. The parser accepts only that shape: no markdown fences, prose,
+trailing text, duplicate keys, `NaN`/`Infinity`, extra/missing keys, wrong types,
+unknown values, out-of-range line numbers or more than 20 findings. Anything else is
+`FORMAT_MISMATCH` and is never scored.
+
+Scoring is deterministic Python. A finding is a true positive when its `(line, kind)`
+matches an unmatched ground-truth defect; every other finding is a false positive, and
+each unmatched ground-truth defect is a false negative. Severity is scored separately,
+so a correct location and kind with the wrong severity is still a TP. `PASS` requires
+`fp == 0` and `fn == 0` (including an empty finding list for clean code);
+otherwise the probe is `CONTENT_MISMATCH`. Precision, recall and F1 use the usual
+formulas, and are `null` when the denominator is zero. A clean task with no findings is
+a `clean_pass`; any finding on clean code is a false positive.
+
+`review-report` reads only the fixed `devtools/free_ai/.runs/review_scores.jsonl`
+(no path argument, no directory scan, no network) and aggregates per provider: tasks,
+perfect tasks, clean tasks/passes, TP/FP/FN sums, precision, recall, F1, severity
+matches and severity accuracy. Each row has eleven fields
+`schema_version, provider_id, model_requested, model_observed, fixture_id,
+observed_at_utc, status, tp, fp, fn, severity_matches`; it contains counts and catalog
+ids only, never code, a prompt, a model answer or reasoning. The file has the same
+1 MiB / 5000-line limits and the same constant `INVALID_LOG` / exit `5` failure mode as
+`report`. A parse failure is visible in `probes.jsonl` but has no score row.
 
 ### `report`
 
@@ -119,12 +170,14 @@ credentials and exception messages are never printed or logged.
 ## Data that leaves the machine
 
 Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, a
-synthetic refund sentence with a `noul` question, and the six synthetic development
-tasks (fixed code snippets or a fixed situation plus their allowed identifiers). No
+synthetic refund sentence with a `noul` question, the six synthetic development tasks
+(fixed code snippets or a fixed situation plus their allowed identifiers), and the eight
+synthetic code-review tasks (fixed numbered code plus the output format). The review
+answer key is never part of a payload. No
 private repository content, customer data, cookies, tokens or `.env` values can be
 attached. `devtools/free_ai/.runs/` holds a
-local quota file and a metadata-only JSONL log; it is git-ignored and is never created by
-`list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
+local quota file and metadata-only JSONL logs (`probes.jsonl` and, after a review task,
+`review_scores.jsonl`); it is git-ignored and is never created by `list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
 ignored (`trust_env=False`), redirects are refused, and the TLS certificate is always
 verified.
 

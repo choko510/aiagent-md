@@ -62,6 +62,7 @@ def _temp_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(runner, "QUOTA_FILE", runs / "quota.json")
     monkeypatch.setattr(runner, "LOCK_FILE", runs / "lock")
     monkeypatch.setattr(runner, "LOG_FILE", runs / "probes.jsonl")
+    monkeypatch.setattr(runner, "REVIEW_SCORE_LOG_FILE", runs / "review_scores.jsonl")
     return runs
 
 

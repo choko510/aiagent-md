@@ -5,7 +5,10 @@ function that accepts free text, a file path, stdin, a repository or a user-supp
 prompt, so arbitrary data (source code, customer data, secrets) cannot reach a provider.
 
 The ``dev_*`` fixtures are synthetic, self-contained development tasks that ask a model
-for one identifier from a fixed list. They are evaluation aids, not product features.
+for one identifier from a fixed list. The ``review_*`` fixtures ask for a strict JSON
+defect list about similarly fixed synthetic code. They are evaluation aids, not product
+features. The ground-truth answer key lives in ``review_key.py`` and is never imported
+here, so it cannot be serialized into a prompt.
 """
 
 from __future__ import annotations
@@ -27,6 +30,14 @@ FixtureId = Literal[
     "dev_t04",
     "dev_t05",
     "dev_t06",
+    "review_01",
+    "review_02",
+    "review_03",
+    "review_04",
+    "review_05",
+    "review_06",
+    "review_07",
+    "review_08",
 ]
 
 #: Synthetic chat prompt 1. The expected answer is a single Japanese word.
@@ -114,6 +125,98 @@ DEV_T06_PROMPT = (
 DEV_T06_ALLOWED: tuple[str, ...] = ("BOUNDARY_BUG", "TYPE_ERROR", "NO_BUG")
 DEV_T06_EXPECTED = "BOUNDARY_BUG"
 
+# --- REVIEW-01..REVIEW-08: synthetic code-review tasks (chat providers only) -----------
+#
+# The code is fixed, synthetic and numbered. The model must answer with a strict JSON
+# object and nothing else. Ground truth lives in ``review_key.py`` only.
+
+
+def _numbered_code(code: str) -> str:
+    return "\n".join(f"{number}: {line}" for number, line in enumerate(code.splitlines(), 1))
+
+
+def _review_prompt(code: str) -> str:
+    numbered = _numbered_code(code)
+    return (
+        "Review the following synthetic Python code. Each line is prefixed with its line "
+        "number.\n\n"
+        f"{numbered}\n\n"
+        "Report every real defect. Reply with ONLY a JSON object, no prose and no markdown "
+        "fences, in exactly this shape:\n"
+        '{"findings":[{"line":<line number>,"kind":"<kind>","severity":"<severity>"}]}\n\n'
+        "Allowed kinds: INDEX_OUT_OF_RANGE, SQL_INJECTION, SECRET_LOGGING, BOUNDARY_BUG, "
+        "RACE_CONDITION, MISSING_VALIDATION\n"
+        "Allowed severities: low, medium, high\n"
+        'Use an empty list when the code has no defect: {"findings":[]}\n'
+        "Report each defect once and do not use any other keys."
+    )
+
+
+REVIEW_01_CODE = """def last_item(items):
+    return items[len(items)]"""
+REVIEW_01_PROMPT = _review_prompt(REVIEW_01_CODE)
+
+REVIEW_02_CODE = """def find_user(conn, name):
+    query = "SELECT * FROM users WHERE name = '" + name + "'"
+    print("Authorization: Bearer synthetic-token")
+    return conn.execute(query)"""
+REVIEW_02_PROMPT = _review_prompt(REVIEW_02_CODE)
+
+REVIEW_03_CODE = """from typing import Optional
+
+
+def last_item(items: list[str]) -> Optional[str]:
+    return items[-1] if items else None"""
+REVIEW_03_PROMPT = _review_prompt(REVIEW_03_CODE)
+
+REVIEW_04_CODE = """def allowed(age):
+    return age > 18"""
+REVIEW_04_PROMPT = _review_prompt(REVIEW_04_CODE)
+
+REVIEW_05_CODE = """import sqlite3
+
+
+def find_user(conn: sqlite3.Connection, name: str):
+    return conn.execute("SELECT * FROM users WHERE name = ?", (name,))"""
+REVIEW_05_PROMPT = _review_prompt(REVIEW_05_CODE)
+
+REVIEW_06_CODE = """def increment(counter):
+    current = counter.value
+    counter.value = current + 1
+
+
+def withdraw(balance, amount):
+    return balance - amount"""
+REVIEW_06_PROMPT = _review_prompt(REVIEW_06_CODE)
+
+REVIEW_07_CODE = """def withdraw(balance, amount):
+    return balance - amount
+def load(conn, user_id):
+    query = f"SELECT * FROM users WHERE id = {user_id}"
+    row = conn.execute(query).fetchone()
+    headers = {"Authorization": "Bearer synthetic-token"}
+    print(headers)
+    return row"""
+REVIEW_07_PROMPT = _review_prompt(REVIEW_07_CODE)
+
+REVIEW_08_CODE = """def load(conn, user_id):
+    if user_id <= 0:
+        raise ValueError("invalid user id")
+    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()"""
+REVIEW_08_PROMPT = _review_prompt(REVIEW_08_CODE)
+
+#: Identifiers for the synthetic code-review tasks, in task order.
+REVIEW_FIXTURE_IDS: tuple[FixtureId, ...] = (
+    "review_01",
+    "review_02",
+    "review_03",
+    "review_04",
+    "review_05",
+    "review_06",
+    "review_07",
+    "review_08",
+)
+
 #: Identifiers for the synthetic development tasks, in task order.
 DEV_FIXTURE_IDS: tuple[FixtureId, ...] = (
     "dev_t01",
@@ -141,6 +244,7 @@ class Fixture:
     expected_answer: str | None
     allowed_answers: tuple[str, ...]
     description: str
+    review_task: bool = False
 
 
 _FIXTURES: tuple[Fixture, ...] = (
@@ -234,6 +338,94 @@ _FIXTURES: tuple[Fixture, ...] = (
         allowed_answers=DEV_T06_ALLOWED,
         description="synthetic boundary condition classification",
     ),
+    Fixture(
+        fixture_id="review_01",
+        wire_kind="chat_completions",
+        prompt=REVIEW_01_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: one array-boundary defect",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_02",
+        wire_kind="chat_completions",
+        prompt=REVIEW_02_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: SQL injection plus secret logging",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_03",
+        wire_kind="chat_completions",
+        prompt=REVIEW_03_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean defensive implementation",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_04",
+        wire_kind="chat_completions",
+        prompt=REVIEW_04_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: off-by-one boundary defect",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_05",
+        wire_kind="chat_completions",
+        prompt=REVIEW_05_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean parameterized query",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_06",
+        wire_kind="chat_completions",
+        prompt=REVIEW_06_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: race condition plus missing validation",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_07",
+        wire_kind="chat_completions",
+        prompt=REVIEW_07_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: three defects across validation, SQL and logging",
+        review_task=True,
+    ),
+    Fixture(
+        fixture_id="review_08",
+        wire_kind="chat_completions",
+        prompt=REVIEW_08_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean validation and parameterized query",
+        review_task=True,
+    ),
 )
 
 FIXTURES: Mapping[str, Fixture] = MappingProxyType({fixture.fixture_id: fixture for fixture in _FIXTURES})
@@ -243,6 +435,7 @@ ALL_FIXTURE_IDS: tuple[FixtureId, ...] = (
     "arithmetic_2plus2",
     "refund_noul",
     *DEV_FIXTURE_IDS,
+    *REVIEW_FIXTURE_IDS,
 )
 
 
@@ -269,7 +462,7 @@ def allowed_fixtures(spec: ProviderSpec) -> tuple[FixtureId, ...]:
         return ("refund_noul",)
     if spec.is_legacy:
         return ("jp_hello", "arithmetic_2plus2")
-    return ("jp_hello", "arithmetic_2plus2", *DEV_FIXTURE_IDS)
+    return ("jp_hello", "arithmetic_2plus2", *DEV_FIXTURE_IDS, *REVIEW_FIXTURE_IDS)
 
 
 def build_payload(spec: ProviderSpec, fixture_id: str) -> dict[str, object]:

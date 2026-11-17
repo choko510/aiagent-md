@@ -48,6 +48,8 @@ from .fixtures import (
     build_payload,
     require_fixture,
 )
+from .review import ReviewFormatError, ReviewScore, parse_review_findings, score_review
+from .review_key import MAX_REVIEW_FINDINGS, REVIEW_KEY, truth_count
 from .transport import (
     LocalInputError,
     TransportResult,
@@ -60,7 +62,9 @@ RUNS_DIR: Final = PACKAGE_DIR / ".runs"
 QUOTA_FILE: Final = RUNS_DIR / "quota.json"
 LOCK_FILE: Final = RUNS_DIR / "lock"
 LOG_FILE: Final = RUNS_DIR / "probes.jsonl"
+REVIEW_SCORE_LOG_FILE: Final = RUNS_DIR / "review_scores.jsonl"
 REPORT_LOG_PATH: Final = "devtools/free_ai/.runs/probes.jsonl"
+REVIEW_LOG_PATH: Final = "devtools/free_ai/.runs/review_scores.jsonl"
 REPORT_MAX_BYTES: Final = 1_048_576
 REPORT_MAX_LINES: Final = 5_000
 
@@ -158,6 +162,7 @@ class Evaluation:
     reason_code: ReasonCode
     exit_code: int
     normalized: NormalizedResponse | None
+    review_score: ReviewScore | None = None
 
 
 @dataclass(slots=True)
@@ -203,6 +208,38 @@ def _make_record(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_reported_usd=cost_reported_usd,
+    )
+
+
+def _evaluate_review(fixture: Fixture, normalized: NormalizedResponse) -> Evaluation:
+    """Parse and score a review answer; every mismatch is deterministic."""
+    text = normalized.text if normalized.text is not None else ""
+    try:
+        findings = parse_review_findings(text)
+    except ReviewFormatError as exc:
+        return Evaluation(
+            status="FORMAT_MISMATCH",
+            reason_code=exc.reason_code,
+            exit_code=EXIT_RESPONSE_ISSUE,
+            normalized=normalized,
+            review_score=None,
+        )
+    score = score_review(fixture.fixture_id, findings)
+    if score.fp == 0 and score.fn == 0:
+        reason: ReasonCode = "OK" if normalized.cost_reported_usd is not None else "COST_UNKNOWN"
+        return Evaluation(
+            status="PASS",
+            reason_code=reason,
+            exit_code=EXIT_OK,
+            normalized=normalized,
+            review_score=score,
+        )
+    return Evaluation(
+        status="CONTENT_MISMATCH",
+        reason_code="OUTPUT_MISMATCH",
+        exit_code=EXIT_RESPONSE_ISSUE,
+        normalized=normalized,
+        review_score=score,
     )
 
 
@@ -268,6 +305,8 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
                 exit_code=EXIT_RESPONSE_ISSUE,
                 normalized=normalized,
             )
+    if fixture.review_task:
+        return _evaluate_review(fixture, normalized)
     if fixture.fixture_id == "refund_noul":
         threshold = fixture.noul_threshold
         matched = normalized.noul is not None and threshold is not None and normalized.noul >= threshold
@@ -692,6 +731,166 @@ def _run_report() -> int:
     return EXIT_OK
 
 
+def _validated_review_record(line: str) -> dict[str, object]:
+    """Validate one review score row against the key and the fixed closed sets."""
+    try:
+        parsed = json.loads(
+            line,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=_reject_json_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ReportError("review score record is not valid JSON") from exc
+    if not isinstance(parsed, dict) or set(parsed) != set(REVIEW_SCORE_FIELDS):
+        raise ReportError("review score record has an unexpected shape")
+    if parsed.get("schema_version") != 1 or isinstance(parsed.get("schema_version"), bool):
+        raise ReportError("review score record has an unsupported schema version")
+    provider_id = parsed.get("provider_id")
+    if not isinstance(provider_id, str) or provider_id not in PROVIDERS:
+        raise ReportError("review score record names an unknown provider")
+    for key in ("model_requested", "fixture_id", "observed_at_utc", "status"):
+        if not isinstance(parsed.get(key), str):
+            raise ReportError("review score record has a non-string field")
+    model_observed = parsed.get("model_observed")
+    if model_observed is not None and not isinstance(model_observed, str):
+        raise ReportError("review score record has an invalid observed model")
+    spec = require_spec(provider_id)
+    if spec.is_legacy:
+        raise ReportError("review score record names a legacy provider")
+    if parsed.get("model_requested") != spec.model_id:
+        raise ReportError("review score record does not match the frozen catalog model")
+    fixture_id = cast("str", parsed["fixture_id"])
+    if fixture_id not in REVIEW_KEY or fixture_id not in allowed_fixtures(spec):
+        raise ReportError("review score record names an unknown or disallowed fixture")
+
+    counts: dict[str, int] = {}
+    for key in ("tp", "fp", "fn", "severity_matches"):
+        value = parsed.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ReportError("review score record has an invalid count")
+        counts[key] = value
+    if counts["tp"] + counts["fn"] != truth_count(fixture_id):
+        raise ReportError("review score record contradicts the answer key")
+    if counts["severity_matches"] > counts["tp"]:
+        raise ReportError("review score record has too many severity matches")
+    if counts["tp"] + counts["fp"] > MAX_REVIEW_FINDINGS:
+        raise ReportError("review score record has too many findings")
+
+    status = parsed["status"]
+    if status not in {"PASS", "CONTENT_MISMATCH"}:
+        raise ReportError("review score record has an unknown status")
+    perfect = counts["fp"] == 0 and counts["fn"] == 0
+    if (status == "PASS") != perfect:
+        raise ReportError("review score record has an inconsistent status")
+    return parsed
+
+
+def _read_review_records() -> list[dict[str, object]]:
+    """Read only the fixed review score log, with the same hard limits."""
+    try:
+        size = REVIEW_SCORE_LOG_FILE.stat().st_size
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("review score log is unreadable") from exc
+    if size > REPORT_MAX_BYTES:
+        raise ReportError("review score log is too large")
+    try:
+        raw = REVIEW_SCORE_LOG_FILE.read_bytes()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("review score log is unreadable") from exc
+    if len(raw) > REPORT_MAX_BYTES:
+        raise ReportError("review score log is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReportError("review score log is not UTF-8") from exc
+    lines = text.splitlines()
+    if len(lines) > REPORT_MAX_LINES:
+        raise ReportError("review score log has too many lines")
+    records: list[dict[str, object]] = []
+    for line in lines:
+        if not line.strip():
+            raise ReportError("review score log has a blank line")
+        records.append(_validated_review_record(line))
+    return records
+
+
+@dataclass(slots=True)
+class _ReviewTotals:
+    tasks: int = 0
+    perfect_tasks: int = 0
+    clean_tasks: int = 0
+    clean_passes: int = 0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    severity_matches: int = 0
+
+
+def _review_provider_report(totals: _ReviewTotals) -> dict[str, object]:
+    precision = None if totals.tp + totals.fp == 0 else round(totals.tp / (totals.tp + totals.fp), 4)
+    recall = None if totals.tp + totals.fn == 0 else round(totals.tp / (totals.tp + totals.fn), 4)
+    denominator = 2 * totals.tp + totals.fp + totals.fn
+    f1 = None if denominator == 0 else round(2 * totals.tp / denominator, 4)
+    severity_accuracy = None if totals.tp == 0 else round(totals.severity_matches / totals.tp, 4)
+    return {
+        "tasks": totals.tasks,
+        "perfect_tasks": totals.perfect_tasks,
+        "clean_tasks": totals.clean_tasks,
+        "clean_passes": totals.clean_passes,
+        "tp": totals.tp,
+        "fp": totals.fp,
+        "fn": totals.fn,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "severity_matches": totals.severity_matches,
+        "severity_accuracy": severity_accuracy,
+    }
+
+
+def _build_review_report() -> dict[str, object]:
+    records = _read_review_records()
+    totals: dict[str, _ReviewTotals] = {provider_id: _ReviewTotals() for provider_id in ALL_PROVIDER_IDS}
+    for record in records:
+        provider_id = cast("str", record["provider_id"])
+        entry = totals[provider_id]
+        entry.tasks += 1
+        if record["status"] == "PASS":
+            entry.perfect_tasks += 1
+        fixture_id = cast("str", record["fixture_id"])
+        if not REVIEW_KEY[fixture_id]:
+            entry.clean_tasks += 1
+            if record["status"] == "PASS":
+                entry.clean_passes += 1
+        entry.tp += cast("int", record["tp"])
+        entry.fp += cast("int", record["fp"])
+        entry.fn += cast("int", record["fn"])
+        entry.severity_matches += cast("int", record["severity_matches"])
+    return {
+        "schema_version": 1,
+        "log_path": REVIEW_LOG_PATH,
+        "records": len(records),
+        "providers": {provider_id: _review_provider_report(entry) for provider_id, entry in totals.items()},
+    }
+
+
+def _run_review_report() -> int:
+    try:
+        report = _build_review_report()
+    except ReportError:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    except Exception:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return EXIT_OK
+
+
 def _flock_exclusive(fd: int) -> None:
     """Take a non-blocking exclusive POSIX lock; the lab runs in WSL/Linux for probes."""
     import fcntl
@@ -856,6 +1055,58 @@ def _append_probe(record: ProbeRecord) -> None:
         raise QuotaStateError("probe log cannot be appended") from exc
 
 
+REVIEW_SCORE_FIELDS: Final = (
+    "schema_version",
+    "provider_id",
+    "model_requested",
+    "model_observed",
+    "fixture_id",
+    "observed_at_utc",
+    "status",
+    "tp",
+    "fp",
+    "fn",
+    "severity_matches",
+)
+
+
+def _review_score_record(
+    *,
+    spec: ProviderSpec,
+    fixture: Fixture,
+    observed_at_utc: str,
+    status: ProbeStatus,
+    model_observed: str | None,
+    score: ReviewScore,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "provider_id": spec.provider_id,
+        "model_requested": spec.model_id,
+        "model_observed": model_observed,
+        "fixture_id": fixture.fixture_id,
+        "observed_at_utc": observed_at_utc,
+        "status": status,
+        "tp": score.tp,
+        "fp": score.fp,
+        "fn": score.fn,
+        "severity_matches": score.severity_matches,
+    }
+
+
+def _append_review_score(record: Mapping[str, object]) -> None:
+    line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+    try:
+        RUNS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(str(REVIEW_SCORE_LOG_FILE), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, (line + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise QuotaStateError("review score log cannot be appended") from exc
+
+
 def _probe(args: argparse.Namespace) -> ProbeOutcome:
     observed_at = _utc_now_iso()
     spec: ProviderSpec = require_spec(cast("str", args.provider))
@@ -938,6 +1189,20 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         _append_probe(outcome_value.record)
     except QuotaStateError:
         return outcome("SAFETY_BLOCKED", "INVALID_SCHEMA", EXIT_UNSAFE)
+    if evaluation.review_score is not None and normalized is not None:
+        try:
+            _append_review_score(
+                _review_score_record(
+                    spec=spec,
+                    fixture=fixture,
+                    observed_at_utc=observed_at,
+                    status=evaluation.status,
+                    model_observed=normalized.model_observed,
+                    score=evaluation.review_score,
+                )
+            )
+        except QuotaStateError:
+            return outcome("SAFETY_BLOCKED", "INVALID_SCHEMA", EXIT_UNSAFE)
     return outcome_value
 
 
@@ -996,6 +1261,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("list", help="show the frozen catalog without any network access")
     subparsers.add_parser("dry-run", help="show fixture ids, payload sizes and destinations; send nothing")
     subparsers.add_parser("report", help="aggregate the local probe log; no network access")
+    subparsers.add_parser("review-report", help="aggregate the local review score log; no network access")
     probe = subparsers.add_parser("probe", help="send one fixed synthetic fixture to one provider")
     probe.add_argument("--provider", required=True, choices=list(ALL_PROVIDER_IDS))
     probe.add_argument("--fixture", required=True, choices=list(FIXTURES))
@@ -1021,6 +1287,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     if command == "report":
         return _run_report()
+    if command == "review-report":
+        return _run_review_report()
     try:
         probe_outcome = _probe(args)
     except Exception:
