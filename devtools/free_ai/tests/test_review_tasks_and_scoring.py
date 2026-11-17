@@ -96,8 +96,8 @@ def _chat_body(content: str, *, model: str = _KILO_MODEL, cost: object = 0) -> b
     return json.dumps(body).encode()
 
 
-def _ok(content: str, *, model: str = _KILO_MODEL) -> Callable[[httpx.Request], httpx.Response]:
-    payload = _chat_body(content, model=model)
+def _ok(content: str, *, model: str = _KILO_MODEL, cost: object = 0) -> Callable[[httpx.Request], httpx.Response]:
+    payload = _chat_body(content, model=model, cost=cost)
     return lambda _request: httpx.Response(200, headers={"content-type": "application/json"}, content=payload)
 
 
@@ -338,8 +338,9 @@ def _probe(
     content: str,
     provider: str = "kilo",
     model: str = _KILO_MODEL,
+    cost: object = 0,
 ) -> tuple[int, dict[str, object], list[httpx.Request]]:
-    requests = _mock_transport(monkeypatch, _ok(content, model=model))
+    requests = _mock_transport(monkeypatch, _ok(content, model=model, cost=cost))
     code = runner.main(_probe_argv(provider=provider, fixture=fixture))
     record = _last(capsys.readouterr().out)
     return code, record, requests
@@ -803,3 +804,35 @@ def test_report_rejects_old_eleven_field_review_rows(
     code, out = _run_report(monkeypatch, tmp_path, json.dumps(old) + "\n", capsys)
     assert code == 5
     assert "INVALID_LOG" in out
+
+
+def test_e2e_review_model_drift_is_recorded_without_a_score(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+    content = _findings((8, "SECRET_LOGGING", "P1"))
+    code, record, _ = _probe(monkeypatch, capsys, fixture="review_r06", content=content, model="some-other-model")
+    assert code == 4
+    assert record["status"] == "MODEL_DRIFT"
+    assert runner.main(["review-report"]) == 0
+    kilo = json.loads(capsys.readouterr().out)["providers"]["kilo"]
+    assert kilo["attempts"] == 1
+    assert kilo["valid_scored_cases"] == 0
+    assert kilo["model_drift"] == 1
+    assert kilo["coverage"] == 0.0
+
+
+def test_e2e_review_non_zero_cost_is_not_scored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+    content = _findings((8, "SECRET_LOGGING", "P1"))
+    code, record, _ = _probe(monkeypatch, capsys, fixture="review_r06", content=content, cost=0.01)
+    assert code == 4
+    assert record["status"] == "UNEXPECTED_BILLING"
+    assert runner.main(["review-report"]) == 0
+    kilo = json.loads(capsys.readouterr().out)["providers"]["kilo"]
+    assert kilo["attempts"] == 1
+    assert kilo["valid_scored_cases"] == 0
+    assert kilo["billing_or_tool_failures"] == 1
+    assert kilo["coverage"] == 0.0
