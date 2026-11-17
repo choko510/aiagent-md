@@ -35,12 +35,56 @@ python -m devtools.free_ai dry-run
 python -m devtools.free_ai probe \
   --provider kilo --fixture jp_hello \
   --ack-synthetic-only --ack-external-request
+python -m devtools.free_ai report
 ```
 
 `probe` also accepts `--fixture arithmetic_2plus2` for the two chat services, and
 `--fixture refund_noul` for `jev_legacy` only. Legacy services additionally require
 `--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS` while their anonymous
 terms are unconfirmed (see below).
+
+`probe` also accepts `--fixture arithmetic_2plus2` and the six synthetic development
+tasks `--fixture dev_t01` … `dev_t06` for the two official chat services, and
+`--fixture refund_noul` for `jev_legacy` only. The `dev_*` tasks are never allowed on the
+legacy services. Legacy services additionally require `--allow-legacy`; they are still
+skipped with `UNVERIFIED_TERMS` while their anonymous terms are unconfirmed (see below).
+
+### Synthetic development tasks (STEP 2)
+
+| Fixture | Task | Expected identifier | Allowed identifiers |
+|---|---|---|---|
+| `dev_t01` | array boundary defect | `INDEX_OUT_OF_RANGE` | `INDEX_OUT_OF_RANGE`, `TYPE_ERROR`, `NO_BUG` |
+| `dev_t02` | SQL injection | `SQL_INJECTION` | `SQL_INJECTION`, `MEMORY_LEAK`, `NO_BUG` |
+| `dev_t03` | unknown side-effect outcome | `DO_NOT_RETRY_AUTOMATICALLY` | `RETRY_IMMEDIATELY`, `DO_NOT_RETRY_AUTOMATICALLY` |
+| `dev_t04` | secret logging | `SECRET_LOGGING` | `SECRET_LOGGING`, `SQL_INJECTION`, `NO_BUG` |
+| `dev_t05` | stale `leaseEpoch` completion | `REJECT_STALE` | `COMMIT`, `REJECT_STALE` |
+| `dev_t06` | boundary condition | `BOUNDARY_BUG` | `BOUNDARY_BUG`, `TYPE_ERROR`, `NO_BUG` |
+
+Each task is a fixed constant in `fixtures.py` built from synthetic code or a synthetic
+situation; nothing is read from files, stdin, environment variables or the repository.
+The prompt asks for exactly one identifier. Scoring is deterministic Python:
+
+- exact identifier after trimming surrounding whitespace → `PASS`
+- an allowed identifier that is not the expected one → `CONTENT_MISMATCH`
+- any other text (prose, different casing, partial match, empty answer) →
+  `FORMAT_MISMATCH`; an answer is never extracted from an explanation
+- missing/unsafe/other model id, tool calls and non-zero reported cost keep their
+  existing `FORMAT_MISMATCH` / `MODEL_DRIFT` / `UNEXPECTED_TOOL_OUTPUT` /
+  `UNEXPECTED_BILLING` behaviour
+
+### `report`
+
+`report` reads only the fixed `devtools/free_ai/.runs/probes.jsonl` (no path argument, no
+directory scan, no network) and prints one JSON line aggregating per provider: attempts,
+evaluated responses, `PASS`, `CONTENT_MISMATCH`, `FORMAT_MISMATCH`, `MODEL_DRIFT`, other
+evaluated failures, pass rate over evaluated responses, communication failures (kept out
+of the quality denominator), median `elapsed_ms`, observed token sums, and how many
+records had no reported cost. It never prints prompts, answers, reasoning or headers.
+
+The log is limited to 1 MiB and 5000 lines. A missing or empty file is an empty report;
+malformed JSON, duplicate keys, `NaN`/`Infinity`, unexpected or missing fields, wrong
+types, unknown status/reason/provider/fixture or limit violations print a constant
+`INVALID_LOG` JSON line and exit `5`.
 
 Exit codes: `0` fixture contract satisfied (never a production guarantee), `2` safe
 skip (missing acknowledgement, disabled legacy service, local quota), `3` provider

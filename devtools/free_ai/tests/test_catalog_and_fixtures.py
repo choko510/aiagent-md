@@ -193,9 +193,14 @@ def test_fixtures_are_exact_constants_and_wire_kind_restricted() -> None:
     ovh = catalog.require_spec("ovh")
     jev = catalog.require_spec("jev_legacy")
 
-    assert fixtures.allowed_fixtures(kilo) == ("jp_hello", "arithmetic_2plus2")
-    assert fixtures.allowed_fixtures(ovh) == ("jp_hello", "arithmetic_2plus2")
+    chat_fixtures = ("jp_hello", "arithmetic_2plus2", *fixtures.DEV_FIXTURE_IDS)
+    assert fixtures.allowed_fixtures(kilo) == chat_fixtures
+    assert fixtures.allowed_fixtures(ovh) == chat_fixtures
     assert fixtures.allowed_fixtures(jev) == ("refund_noul",)
+    assert fixtures.allowed_fixtures(catalog.require_spec("pollinations_legacy")) == (
+        "jp_hello",
+        "arithmetic_2plus2",
+    )
 
     assert fixtures.build_payload(kilo, "jp_hello") == {
         "model": "nvidia/nemotron-3.5-super-vl:free",

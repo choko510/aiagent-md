@@ -14,12 +14,13 @@ import contextlib
 import json
 import math
 import os
+import statistics
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, cast, get_args
 
 from . import ProbeStatus, ReasonCode
 from .adapters import (
@@ -33,6 +34,7 @@ from .catalog import (
     ALL_PROVIDER_IDS,
     CATALOG_CHECKED_ON,
     LEGACY_ANONYMOUS_ALLOWED,
+    PROVIDERS,
     ProviderSpec,
     catalog_specs,
     get_spec,
@@ -58,6 +60,9 @@ RUNS_DIR: Final = PACKAGE_DIR / ".runs"
 QUOTA_FILE: Final = RUNS_DIR / "quota.json"
 LOCK_FILE: Final = RUNS_DIR / "lock"
 LOG_FILE: Final = RUNS_DIR / "probes.jsonl"
+REPORT_LOG_PATH: Final = "devtools/free_ai/.runs/probes.jsonl"
+REPORT_MAX_BYTES: Final = 1_048_576
+REPORT_MAX_LINES: Final = 5_000
 
 SCHEMA_VERSION: Final = 1
 LAB_VERSION: Final = "0.1"
@@ -266,6 +271,18 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
     if fixture.fixture_id == "refund_noul":
         threshold = fixture.noul_threshold
         matched = normalized.noul is not None and threshold is not None and normalized.noul >= threshold
+    elif fixture.allowed_answers:
+        # The model must reply with exactly one allowed identifier; prose is never mined
+        # for an answer and partial matches never count.
+        answer = normalized.text.strip() if normalized.text is not None else ""
+        if answer not in fixture.allowed_answers:
+            return Evaluation(
+                status="FORMAT_MISMATCH",
+                reason_code="INVALID_SCHEMA",
+                exit_code=EXIT_RESPONSE_ISSUE,
+                normalized=normalized,
+            )
+        matched = answer == fixture.expected_answer
     else:
         expected = fixture.expected_text
         matched = expected is not None and normalized.text is not None and normalized.text.strip() == expected
@@ -278,6 +295,230 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
         )
     reason: ReasonCode = "OK" if normalized.cost_reported_usd is not None else "COST_UNKNOWN"
     return Evaluation(status="PASS", reason_code=reason, exit_code=EXIT_OK, normalized=normalized)
+
+
+RECORD_FIELDS: Final = (
+    "schema_version",
+    "provider_id",
+    "model_requested",
+    "model_observed",
+    "fixture_id",
+    "observed_at_utc",
+    "http_status",
+    "status",
+    "reason_code",
+    "elapsed_ms",
+    "input_tokens",
+    "output_tokens",
+    "cost_reported_usd",
+)
+
+EVALUATED_STATUSES: Final = frozenset(
+    {
+        "PASS",
+        "CONTENT_MISMATCH",
+        "FORMAT_MISMATCH",
+        "MODEL_DRIFT",
+        "UNEXPECTED_BILLING",
+        "UNEXPECTED_TOOL_OUTPUT",
+    }
+)
+PROBE_STATUSES: Final = frozenset(get_args(ProbeStatus))
+REASON_CODES: Final = frozenset(get_args(ReasonCode))
+
+
+class ReportError(RuntimeError):
+    """The local probe log is missing required structure or exceeds a fixed limit."""
+
+
+@dataclass(slots=True)
+class _ProviderTotals:
+    attempts: int = 0
+    evaluated: int = 0
+    pass_count: int = 0
+    content_mismatch: int = 0
+    format_mismatch: int = 0
+    model_drift: int = 0
+    other_failures: int = 0
+    communication_failures: int = 0
+    elapsed_ms: list[int] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    token_records: int = 0
+    cost_unreported: int = 0
+
+
+def _optional_count(record: Mapping[str, object], key: str) -> int | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ReportError("log record has an invalid count")
+    return value
+
+
+def _validated_record(line: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(
+            line,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=_reject_json_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ReportError("log record is not valid JSON") from exc
+    if not isinstance(parsed, dict) or set(parsed) != set(RECORD_FIELDS):
+        raise ReportError("log record has an unexpected shape")
+    if parsed.get("schema_version") != 1 or isinstance(parsed.get("schema_version"), bool):
+        raise ReportError("log record has an unsupported schema version")
+    provider_id = parsed.get("provider_id")
+    if not isinstance(provider_id, str) or provider_id not in PROVIDERS:
+        raise ReportError("log record names an unknown provider")
+    for key in ("model_requested", "fixture_id", "observed_at_utc", "status", "reason_code"):
+        if not isinstance(parsed.get(key), str):
+            raise ReportError("log record has a non-string field")
+    model_observed = parsed.get("model_observed")
+    if model_observed is not None and not isinstance(model_observed, str):
+        raise ReportError("log record has an invalid observed model")
+    http_status = parsed.get("http_status")
+    if http_status is not None and (
+        isinstance(http_status, bool) or not isinstance(http_status, int) or not 100 <= http_status <= 599
+    ):
+        raise ReportError("log record has an invalid HTTP status")
+    _optional_count(parsed, "elapsed_ms")
+    _optional_count(parsed, "input_tokens")
+    _optional_count(parsed, "output_tokens")
+    cost = parsed.get("cost_reported_usd")
+    if cost is not None:
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            raise ReportError("log record has an invalid cost")
+        try:
+            amount = float(cost)
+        except (OverflowError, ValueError):
+            raise ReportError("log record has an invalid cost") from None
+        if not math.isfinite(amount) or amount < 0:
+            raise ReportError("log record has an invalid cost")
+    if parsed.get("status") not in PROBE_STATUSES:
+        raise ReportError("log record has an unknown status")
+    if parsed.get("reason_code") not in REASON_CODES:
+        raise ReportError("log record has an unknown reason code")
+    if parsed.get("fixture_id") not in FIXTURES:
+        raise ReportError("log record names an unknown fixture")
+    return parsed
+
+
+def _read_report_records() -> list[dict[str, object]]:
+    """Read only the fixed local log, with a hard byte and line limit."""
+    try:
+        size = LOG_FILE.stat().st_size
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("probe log is unreadable") from exc
+    if size > REPORT_MAX_BYTES:
+        # Refuse before allocating a buffer for an oversized log.
+        raise ReportError("probe log is too large")
+    try:
+        raw = LOG_FILE.read_bytes()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("probe log is unreadable") from exc
+    if len(raw) > REPORT_MAX_BYTES:
+        raise ReportError("probe log is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReportError("probe log is not UTF-8") from exc
+    lines = text.splitlines()
+    if len(lines) > REPORT_MAX_LINES:
+        raise ReportError("probe log has too many lines")
+    records: list[dict[str, object]] = []
+    for line in lines:
+        if not line.strip():
+            raise ReportError("probe log has a blank line")
+        records.append(_validated_record(line))
+    return records
+
+
+def _provider_report(totals: _ProviderTotals) -> dict[str, object]:
+    pass_rate: float | None = None if totals.evaluated == 0 else round(totals.pass_count / totals.evaluated, 4)
+    median_elapsed: float | None = (
+        None if not totals.elapsed_ms else round(float(statistics.median(totals.elapsed_ms)), 3)
+    )
+    return {
+        "attempts": totals.attempts,
+        "evaluated": totals.evaluated,
+        "pass": totals.pass_count,
+        "content_mismatch": totals.content_mismatch,
+        "format_mismatch": totals.format_mismatch,
+        "model_drift": totals.model_drift,
+        "other_failures": totals.other_failures,
+        "pass_rate": pass_rate,
+        "communication_failures": totals.communication_failures,
+        "median_elapsed_ms": median_elapsed,
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "token_records": totals.token_records,
+        "cost_unreported": totals.cost_unreported,
+    }
+
+
+def _build_report() -> dict[str, object]:
+    records = _read_report_records()
+    totals: dict[str, _ProviderTotals] = {provider_id: _ProviderTotals() for provider_id in ALL_PROVIDER_IDS}
+    for record in records:
+        provider_id = cast("str", record["provider_id"])
+        entry = totals[provider_id]
+        entry.attempts += 1
+        status = record["status"]
+        if status in EVALUATED_STATUSES:
+            entry.evaluated += 1
+            if status == "PASS":
+                entry.pass_count += 1
+            elif status == "CONTENT_MISMATCH":
+                entry.content_mismatch += 1
+            elif status == "FORMAT_MISMATCH":
+                entry.format_mismatch += 1
+            elif status == "MODEL_DRIFT":
+                entry.model_drift += 1
+            else:
+                entry.other_failures += 1
+        else:
+            entry.communication_failures += 1
+        elapsed = _optional_count(record, "elapsed_ms")
+        if elapsed is not None:
+            entry.elapsed_ms.append(elapsed)
+        input_tokens = _optional_count(record, "input_tokens")
+        output_tokens = _optional_count(record, "output_tokens")
+        if input_tokens is not None or output_tokens is not None:
+            entry.token_records += 1
+        entry.input_tokens += 0 if input_tokens is None else input_tokens
+        entry.output_tokens += 0 if output_tokens is None else output_tokens
+        if record.get("cost_reported_usd") is None:
+            entry.cost_unreported += 1
+    return {
+        "schema_version": 1,
+        "log_path": REPORT_LOG_PATH,
+        "records": len(records),
+        "providers": {provider_id: _provider_report(entry) for provider_id, entry in totals.items()},
+    }
+
+
+def _invalid_report_output() -> str:
+    return '{"schema_version":1,"status":"INVALID_LOG","reason_code":"INVALID_SCHEMA"}'
+
+
+def _run_report() -> int:
+    try:
+        report = _build_report()
+    except ReportError:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    except Exception:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return EXIT_OK
 
 
 def _flock_exclusive(fd: int) -> None:
@@ -572,6 +813,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("list", help="show the frozen catalog without any network access")
     subparsers.add_parser("dry-run", help="show fixture ids, payload sizes and destinations; send nothing")
+    subparsers.add_parser("report", help="aggregate the local probe log; no network access")
     probe = subparsers.add_parser("probe", help="send one fixed synthetic fixture to one provider")
     probe.add_argument("--provider", required=True, choices=list(ALL_PROVIDER_IDS))
     probe.add_argument("--fixture", required=True, choices=list(FIXTURES))
@@ -595,6 +837,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "dry-run":
         _print_dry_run()
         return EXIT_OK
+    if command == "report":
+        return _run_report()
     try:
         probe_outcome = _probe(args)
     except Exception:
