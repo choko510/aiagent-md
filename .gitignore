@@ -2,3 +2,4 @@ deploy/compose/secrets/
 __pycache__/
 *.py[cod]
 
+devtools/free_ai/.runs/
