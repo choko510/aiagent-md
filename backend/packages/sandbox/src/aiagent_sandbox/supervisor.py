@@ -314,6 +314,7 @@ class Supervisor:
         source_fd: int | None,
         output_fd: int | None = None,
         output_path: Path | None = None,
+        source_cwd: bool = False,
         revoked: asyncio.Event | None = None,
         heartbeat_seconds: float | None = None,
     ) -> dict[str, Any]:
@@ -331,6 +332,8 @@ class Supervisor:
             source_fd is None or isinstance(heartbeat_seconds, bool) or not 0.1 <= heartbeat_seconds <= 10
         ):
             raise GrantError("INVALID_HEARTBEAT")
+        if source_cwd and (source_fd is None or output_fd is None):
+            raise GrantError("SOURCE_CWD_INVALID")
         if (output_fd is None) != (output_path is None):
             raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         if output_fd is not None and (source_fd is None or output_fd == source_fd or cwd_rel != "."):
@@ -372,6 +375,20 @@ class Supervisor:
                         raise GrantError("OUTPUT_DESCRIPTOR_MISMATCH")
                 except OSError as exc:
                     raise GrantError("OUTPUT_DESCRIPTOR_INVALID") from exc
+            if source_cwd:
+                assert source_fd is not None
+                try:
+                    source_path = Path(os.readlink(f"/proc/self/fd/{source_fd}"))
+                    source_actual = os.fstat(source_fd)
+                    source_named = os.stat(source_path, follow_symlinks=False)
+                    if not source_path.is_absolute() or (source_actual.st_dev, source_actual.st_ino) != (
+                        source_named.st_dev,
+                        source_named.st_ino,
+                    ):
+                        raise GrantError("SOURCE_DESCRIPTOR_INVALID")
+                    cwd = source_path
+                except OSError as exc:
+                    raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
             env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
             started = time.monotonic()
             proc = await asyncio.create_subprocess_exec(

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from aiagent_development.code_intelligence.scip_navigation import (
 )
 from aiagent_domain import uuid7
 from aiagent_sandbox.grant import Grant, sign
+from aiagent_sandbox.projected_output import projected_output
 from aiagent_sandbox.supervisor import Limits, Supervisor
 
 resource = pytest.importorskip("resource")
@@ -90,7 +92,8 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
             cell_uid=20001,
             cell_gid=20001,
         )
-        workspace, _ = supervisor.workspace("tenant", "task", ".")
+        output_parent = fixture_root / "output"
+        output_parent.mkdir(mode=0o700)
         sources = tuple(SourceProvenance(f.path, f.blob_id, f.sha256) for f in projection.files)
         with stage_git_projection(
             parent,
@@ -137,30 +140,28 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                 assert denied["status"] == "EXITED" and denied["exitCode"] == 0, denied
                 assert "DENIED" in denied["stdout"] and "CROSS_TASK_READ" not in denied["stdout"]
                 for attempt in range(2):
-                    output_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
+                    execution = uuid7()
+                    provisional = Grant(
+                        uuid.uuid4().hex,
+                        "tenant",
+                        "task",
+                        "run",
+                        "intent",
+                        1,
+                        (),
+                        ".",
+                        40000,
+                        8 * 1024**3,
+                        int(time.time()) + 60,
+                        attempt_id=uuid.uuid4().hex,
+                        attempt_binding_version=1,
+                        execution_binding_version=1,
+                        execution_id=execution,
+                        execution_binding_sha256=hashlib.sha256(wire).hexdigest(),
+                    )
+                    with projected_output(output_parent, provisional, cell_uid=20001, cell_gid=20001) as output_fd:
                         argv = list(python_scip_argv(fd, output_fd))
-                        token = sign(
-                            b"g" * 32,
-                            Grant(
-                                uuid.uuid4().hex,
-                                "tenant",
-                                "task",
-                                "run",
-                                "intent",
-                                1,
-                                tuple(argv),
-                                ".",
-                                40000,
-                                8 * 1024**3,
-                                int(time.time()) + 60,
-                                attempt_id=uuid.uuid4().hex,
-                                attempt_binding_version=1,
-                                execution_binding_version=1,
-                                execution_id=uuid7(),
-                                execution_binding_sha256=hashlib.sha256(wire).hexdigest(),
-                            ),
-                        )
+                        token = sign(b"g" * 32, replace(provisional, argv=tuple(argv)))
                         before = resource.getrusage(resource.RUSAGE_CHILDREN)
                         result = asyncio.run(
                             supervisor._execute(
@@ -169,7 +170,8 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                                 ".",
                                 source_fd=fd,
                                 output_fd=output_fd,
-                                output_path=workspace,
+                                output_path=output_parent / execution,
+                                source_cwd=True,
                                 heartbeat_seconds=10,
                             )
                         )
@@ -214,9 +216,7 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                                 f"consumer_ms={consumer_ms:.1f} sources={len(projection.files)} "
                                 f"occurrences={len(loaded.graph.locations)} status={loaded.status}"
                             )
-                    finally:
-                        os.close(output_fd)
-                    (workspace / "index.scip").unlink()
+                    assert not list(output_parent.iterdir())
             assert parent.stat().st_mode & 0o777 == 0o700 and parent.stat().st_gid == original_gid
             for item in projection.files:
                 file_fd = os.open(item.path, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
