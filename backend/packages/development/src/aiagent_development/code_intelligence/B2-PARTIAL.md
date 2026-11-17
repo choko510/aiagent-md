@@ -302,3 +302,14 @@ started by the production adapter. A stop signal must only be used after the
 execution has ended and publication authority has been rechecked. The local
 poller cannot terminate a remote process during transport failure; live Cell
 lease revocation remains incomplete.
+
+The private projected-execution path now registers its signed Execution/Attempt
+binding while active. An authenticated Tool Gateway `exec.cancel` RPC can only
+signal an exact tenant, Execution, Attempt and binding digest match; mismatches
+return no cancellation. Docker Cell tests exercise a real running Supervisor,
+a rejected wrong RPC key, wrong scope and successful scoped cancellation.
+A Gateway relay helper forwards a local Authority-watch event through that RPC.
+These pieces are not yet orchestrated by a production execution path. In
+particular, loss of the RPC channel does not yet trigger an independent Cell
+heartbeat watchdog, and cancellation racing initial registration is not closed.
+No Artifact may be considered safe to publish on this basis alone.

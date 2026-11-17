@@ -467,3 +467,107 @@ def test_revocation_stops_running_supervisor_process(tmp_path: Path) -> None:
 
     result = run(execute_and_revoke())
     assert result["status"] == "REVOKED" and "stdout" not in result
+
+
+def test_projected_cancel_is_scoped_to_signed_identity(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "source-for-cancel"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    token = grant(argv, projected=True)
+    payload = token["grant"]
+
+    async def run_cancel():
+        task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd))
+        for _ in range(100):
+            if payload["execution_id"] in s._active:
+                break
+            await asyncio.sleep(0.01)
+        assert not s.cancel_projected(
+            "other", payload["execution_id"], payload["attempt_id"], payload["execution_binding_sha256"]
+        )
+        assert not s.cancel_projected("t1", payload["execution_id"], "other", payload["execution_binding_sha256"])
+        assert s.cancel_projected(
+            "t1", payload["execution_id"], payload["attempt_id"], payload["execution_binding_sha256"]
+        )
+        result = await asyncio.wait_for(task, 5)
+        assert result["status"] == "REVOKED" and "stdout" not in result
+        assert payload["execution_id"] not in s._active
+
+    try:
+        run(run_cancel())
+    finally:
+        os.close(fd)
+
+
+def test_authenticated_rpc_cancel_rejects_wrong_key_and_scope(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    import json
+
+    from aiagent_domain.rpcwire import decode_length, encode_frame, sign_request, verify_response
+    from aiagent_sandbox.supervisor import serve
+
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "source-rpc-cancel"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    token = grant(argv, projected=True)
+    payload = token["grant"]
+    key = b"r" * 32
+    socket_path = tmp_path / "cancel.sock"
+
+    async def rpc(secret, body):
+        env = sign_request(secret, "tool_gateway", "exec.cancel", body)
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        try:
+            writer.write(encode_frame(env))
+            await writer.drain()
+            frame = json.loads(await reader.readexactly(decode_length(await reader.readexactly(4))))
+            return env, frame
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def exercise():
+        server = asyncio.create_task(serve(s, {"tool_gateway": key}, f"unix:{socket_path}"))
+        task = None
+        try:
+            for _ in range(100):
+                if socket_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd))
+            for _ in range(100):
+                if payload["execution_id"] in s._active:
+                    break
+                await asyncio.sleep(0.01)
+            body = {
+                "tenantId": "t1",
+                "executionId": payload["execution_id"],
+                "attemptId": payload["attempt_id"],
+                "bindingSha256": payload["execution_binding_sha256"],
+            }
+            _, rejected = await rpc(b"x" * 32, body)
+            assert rejected["code"] == "UNAUTHENTICATED"
+            env, mismatched = await rpc(key, {**body, "tenantId": "other"})
+            assert not verify_response(key, env["nonce"], mismatched)["data"]["cancelled"]
+            env, accepted = await rpc(key, body)
+            assert verify_response(key, env["nonce"], accepted)["data"]["cancelled"]
+            result = await asyncio.wait_for(task, 5)
+            assert result["status"] == "REVOKED" and "stdout" not in result
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
+
+    try:
+        run(exercise())
+    finally:
+        os.close(fd)

@@ -23,7 +23,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aiagent_domain.rpcwire import (
     NonceCache,
@@ -149,6 +149,7 @@ class Supervisor:
     cell_gid: int | None = None
     consumed_path: Path | None = None
     _consumed: set[str] = field(default_factory=set)
+    _active: dict[str, tuple[str, str, str, asyncio.Event]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if sys.platform != "linux":
@@ -181,6 +182,14 @@ class Supervisor:
             for p in (ws, cwd):
                 os.chown(p, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
         return ws, cwd
+
+    def cancel_projected(self, tenant: str, execution: str, attempt: str, binding: str) -> bool:
+        """Signal only the exact active signed execution; not an Authority check."""
+        active = self._active.get(execution)
+        if active is None or active[:3] != (tenant, attempt, binding):
+            return False
+        active[3].set()
+        return True
 
     def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
         import resource
@@ -257,60 +266,73 @@ class Supervisor:
         if source_fd is None and g.execution_binding_version is not None:
             raise GrantError("PROJECTED_SOURCE_REQUIRED")
         self._consume(g.grant_id)
-        if revoked is not None and revoked.is_set():
-            return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
-        ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
-        if output_fd is not None:
-            try:
-                actual, expected = os.fstat(output_fd), os.stat(cwd, follow_symlinks=False)
-                if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
-                    raise GrantError("OUTPUT_DESCRIPTOR_MISMATCH")
-            except OSError as exc:
-                raise GrantError("OUTPUT_DESCRIPTOR_INVALID") from exc
-        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
-        started = time.monotonic()
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            "-S",
-            "-c",
-            _PID_NAMESPACE_EXEC,
-            *argv,
-            cwd=str(cwd),
-            env=env,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws, source_fd),
-            close_fds=True,
-            pass_fds=tuple(fd for fd in (source_fd, output_fd) if fd is not None),
-        )
-        if revoked is None:
-            out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
-        else:
-            out, err, timed_out, truncated, was_revoked = await _run_with_revocation(proc, g.wall_ms / 1000, revoked)
-            if was_revoked:
+        execution = g.execution_id
+        if source_fd is not None:
+            assert execution is not None and g.attempt_id is not None and g.execution_binding_sha256 is not None
+            if execution in self._active:
+                raise GrantError("EXECUTION_ALREADY_ACTIVE")
+            revoked = revoked or asyncio.Event()
+            self._active[execution] = (g.tenant_id, g.attempt_id, g.execution_binding_sha256, revoked)
+        try:
+            if revoked is not None and revoked.is_set():
                 return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
-        rc = proc.returncode
-        if rc == 98:
+            ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+            if output_fd is not None:
+                try:
+                    actual, expected = os.fstat(output_fd), os.stat(cwd, follow_symlinks=False)
+                    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                        raise GrantError("OUTPUT_DESCRIPTOR_MISMATCH")
+                except OSError as exc:
+                    raise GrantError("OUTPUT_DESCRIPTOR_INVALID") from exc
+            env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
+            started = time.monotonic()
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                _PID_NAMESPACE_EXEC,
+                *argv,
+                cwd=str(cwd),
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws, source_fd),
+                close_fds=True,
+                pass_fds=tuple(fd for fd in (source_fd, output_fd) if fd is not None),
+            )
+            if revoked is None:
+                out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
+            else:
+                out, err, timed_out, truncated, was_revoked = await _run_with_revocation(
+                    proc, g.wall_ms / 1000, revoked
+                )
+                if was_revoked:
+                    return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
+            rc = proc.returncode
+            if rc == 98:
+                return {
+                    "status": "REFUSED",
+                    "reason": "FS_ISOLATION_UNAVAILABLE",
+                    "detail": err[:400].decode("utf-8", "replace"),
+                }
+            if rc == 97:
+                return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
             return {
-                "status": "REFUSED",
-                "reason": "FS_ISOLATION_UNAVAILABLE",
-                "detail": err[:400].decode("utf-8", "replace"),
+                "status": "EXITED",
+                "attemptId": g.attempt_id,
+                "executionId": g.execution_id,
+                "exitCode": rc,
+                "timedOut": timed_out,
+                "wallMs": int((time.monotonic() - started) * 1000),
+                "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
+                "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
+                "truncated": truncated,
             }
-        if rc == 97:
-            return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
-        return {
-            "status": "EXITED",
-            "attemptId": g.attempt_id,
-            "executionId": g.execution_id,
-            "exitCode": rc,
-            "timedOut": timed_out,
-            "wallMs": int((time.monotonic() - started) * 1000),
-            "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
-            "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
-            "truncated": truncated,
-        }
+        finally:
+            if source_fd is not None and execution is not None:
+                self._active.pop(execution, None)
 
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
@@ -326,11 +348,26 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method != "exec.run":
+            if caller != "tool_gateway" or method not in ("exec.run", "exec.cancel"):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                res = await sup.execute(body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", "")))
+                if method == "exec.cancel":
+                    fields = (
+                        body.get("tenantId"),
+                        body.get("executionId"),
+                        body.get("attemptId"),
+                        body.get("bindingSha256"),
+                    )
+                    if set(body) != {"tenantId", "executionId", "attemptId", "bindingSha256"} or not all(
+                        isinstance(value, str) and 1 <= len(value) <= 128 for value in fields
+                    ):
+                        raise GrantError("MALFORMED")
+                    res = {"cancelled": sup.cancel_projected(*cast(tuple[str, str, str, str], fields))}
+                else:
+                    res = await sup.execute(
+                        body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))
+                    )
                 frame = {"type": "result", "data": res}
             except GrantError as e:
                 frame = {"type": "error", "code": f"GRANT_{e}"}

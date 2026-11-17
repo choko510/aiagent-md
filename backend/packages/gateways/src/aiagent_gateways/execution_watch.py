@@ -51,3 +51,49 @@ async def watch_run_authority(
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:
             pass
+
+
+async def relay_revocation(
+    endpoint: str,
+    rpc_key: bytes,
+    revoked: asyncio.Event,
+    stop: asyncio.Event,
+    *,
+    tenant_id: str,
+    execution_id: str,
+    attempt_id: str,
+    binding_sha256: str,
+) -> bool:
+    """Send a scoped cancellation over authenticated RPC; False means no confirmed stop.
+
+    This does not poll authority itself or handle disconnected Cell fail-closed
+    watchdogs. The caller must couple it to a verified Execution and track UNKNOWN.
+    """
+    from aiagent_core.rpc import RpcClient
+
+    revoked_wait = asyncio.create_task(revoked.wait())
+    stop_wait = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({revoked_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED)
+        if not revoked.is_set():
+            return False
+        try:
+            result = await asyncio.wait_for(
+                RpcClient(endpoint, "tool_gateway", rpc_key, timeout_s=2).call(
+                    "exec.cancel",
+                    {
+                        "tenantId": tenant_id,
+                        "executionId": execution_id,
+                        "attemptId": attempt_id,
+                        "bindingSha256": binding_sha256,
+                    },
+                ),
+                timeout=3,
+            )
+            return result.get("cancelled") is True
+        except Exception:
+            return False
+    finally:
+        revoked_wait.cancel()
+        stop_wait.cancel()
+        await asyncio.gather(revoked_wait, stop_wait, return_exceptions=True)
