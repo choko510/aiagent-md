@@ -138,7 +138,7 @@ def test_fa_t02_unknown_provider_and_tampered_spec_are_rejected_without_network(
         with pytest.raises(catalog.CatalogError):
             catalog.validate_spec(spec)
         with pytest.raises(catalog.CatalogError):
-            asyncio.run(transport.post_json(spec, {"model": spec.model_id}))
+            asyncio.run(transport.post_json(spec, "jp_hello"))
 
     monkeypatch.setenv("KILO_API_BASE", "https://evil.example")
     monkeypatch.setenv("AIAGENT_FREE_AI_MODEL", "paid/model")

@@ -139,7 +139,12 @@ def test_fa_t19_chat_arithmetic_requires_exactly_four(monkeypatch: pytest.Monkey
     explained = _evaluate(
         _OVH,
         "arithmetic_2plus2",
-        json.dumps({"choices": [{"message": {"content": "2+2 equals 4"}}]}).encode(),
+        json.dumps(
+            {
+                "model": "gpt-oss-120b",
+                "choices": [{"message": {"content": "2+2 equals 4"}}],
+            }
+        ).encode(),
     )
     assert explained.status == "CONTENT_MISMATCH"
     assert explained.reason_code == "OUTPUT_MISMATCH"
@@ -357,3 +362,152 @@ def test_fa_t36_control_characters_and_long_reasoning_are_not_stored(
     assert "SECRET_REASONING" not in printed
     assert "\x07" not in printed
     capsys.readouterr()
+
+
+def test_model_absent_is_not_pass_even_with_the_expected_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outcome, _requests, _runs = _probe(
+        monkeypatch,
+        tmp_path,
+        lambda _request: _json_response({"choices": [{"message": {"content": "こんにちは"}}]}),
+    )
+    assert outcome.record.status == "FORMAT_MISMATCH"
+    assert outcome.record.reason_code == "INVALID_SCHEMA"
+    assert outcome.record.model_observed is None
+    assert outcome.exit_code == 4
+
+    evaluation = _evaluate(
+        _KILO,
+        "jp_hello",
+        json.dumps({"model": None, "choices": [{"message": {"content": "こんにちは"}}]}).encode(),
+    )
+    assert evaluation.status == "FORMAT_MISMATCH"
+    assert evaluation.normalized is not None
+    assert evaluation.normalized.model_observed is None
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/nemotron-3.5-super-vl:free\nSECRET_LINE",
+        "nvidia/nemotron-3.5-super-vl:free\x00tail",
+        "nvidia/nemotron-3.5-super-vl:free\x1b[31mred",
+        "x" * 5000,
+        123,
+        None,
+        ["nvidia/nemotron-3.5-super-vl:free"],
+    ],
+)
+def test_unsafe_model_ids_are_dropped_not_recorded(model: object) -> None:
+    body = json.dumps({"model": model, "choices": [{"message": {"content": "こんにちは"}}]}).encode()
+    evaluation = _evaluate(_KILO, "jp_hello", body)
+    assert evaluation.status == "FORMAT_MISMATCH"
+    assert evaluation.exit_code == 4
+    assert evaluation.normalized is not None
+    assert evaluation.normalized.model_observed is None
+
+
+def test_unsafe_model_never_reaches_stdout_or_the_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    _mock_transport(
+        monkeypatch,
+        lambda _request: _json_response(
+            {
+                "model": "nvidia/nemotron-3.5-super-vl:free\nSECRET_LINE",
+                "choices": [{"message": {"content": "こんにちは"}}],
+            }
+        ),
+    )
+    code = runner.main(
+        [
+            "probe",
+            "--provider",
+            "kilo",
+            "--fixture",
+            "jp_hello",
+            "--ack-synthetic-only",
+            "--ack-external-request",
+        ]
+    )
+    printed = capsys.readouterr().out
+    assert code == 4
+    assert "SECRET_LINE" not in printed
+    assert "\x1b" not in printed
+    assert "\x00" not in printed
+    assert printed.count("\n") == 1
+
+    log = (runs / "probes.jsonl").read_text(encoding="utf-8")
+    assert "SECRET_LINE" not in log
+    assert log.count("\n") == 1
+    record = json.loads(log.splitlines()[0])
+    assert record["model_observed"] is None
+    assert record["status"] == "FORMAT_MISMATCH"
+
+
+_HUGE_INTEGER = int("9" * 309)
+
+
+@pytest.mark.parametrize(
+    ("spec", "fixture_id", "body"),
+    [
+        (
+            _KILO,
+            "jp_hello",
+            {
+                "model": _KILO_MODEL,
+                "choices": [{"message": {"content": "こんにちは"}}],
+                "cost": _HUGE_INTEGER,
+            },
+        ),
+        (
+            _JEV,
+            "refund_noul",
+            {"model": "jev-1.13-free", "answers": {"refund": {"type": "noul", "noul": _HUGE_INTEGER}}},
+        ),
+    ],
+)
+def test_absurd_integer_cost_or_noul_is_a_format_mismatch(
+    spec: catalog.ProviderSpec, fixture_id: str, body: dict[str, object]
+) -> None:
+    evaluation = _evaluate(spec, fixture_id, json.dumps(body).encode())
+    assert evaluation.status == "FORMAT_MISMATCH"
+    assert evaluation.reason_code == "INVALID_SCHEMA"
+    assert evaluation.exit_code == 4
+    assert evaluation.normalized is None
+
+
+def test_absurd_integer_cost_does_not_leak_the_conversion_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    _mock_transport(
+        monkeypatch,
+        lambda _request: _json_response(
+            {
+                "model": _KILO_MODEL,
+                "choices": [{"message": {"content": "こんにちは"}}],
+                "cost": _HUGE_INTEGER,
+            }
+        ),
+    )
+    code = runner.main(
+        [
+            "probe",
+            "--provider",
+            "kilo",
+            "--fixture",
+            "jp_hello",
+            "--ack-synthetic-only",
+            "--ack-external-request",
+        ]
+    )
+    printed = capsys.readouterr().out
+    assert code == 4
+    for forbidden in ("Overflow", "int too large", "traceback", "Error"):
+        assert forbidden not in printed
+    log = (runs / "probes.jsonl").read_text(encoding="utf-8")
+    assert "Overflow" not in log
+    assert json.loads(log.splitlines()[0])["status"] == "FORMAT_MISMATCH"

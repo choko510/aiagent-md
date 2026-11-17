@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -60,6 +61,10 @@ LOG_FILE: Final = RUNS_DIR / "probes.jsonl"
 
 SCHEMA_VERSION: Final = 1
 LAB_VERSION: Final = "0.1"
+
+#: Bounds that make an "impossible" persisted number a hard error instead of a bypass.
+MAX_QUOTA_EPOCH: Final = 4102444800.0  # 2100-01-01T00:00:00Z
+MAX_LOCAL_DAY_COUNT: Final = 10_000
 
 EXIT_OK: Final = 0
 EXIT_SKIPPED: Final = 2
@@ -241,18 +246,23 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
             exit_code=EXIT_RESPONSE_ISSUE,
             normalized=normalized,
         )
-    if (
-        spec.wire_kind == "chat_completions"
-        and spec.evidence_class != "user_observed_legacy"
-        and normalized.model_observed is not None
-        and normalized.model_observed != spec.model_id
-    ):
-        return Evaluation(
-            status="MODEL_DRIFT",
-            reason_code="MODEL_CHANGED",
-            exit_code=EXIT_RESPONSE_ISSUE,
-            normalized=normalized,
-        )
+    if spec.wire_kind == "chat_completions" and spec.evidence_class != "user_observed_legacy":
+        # Official services must report the requested model; a missing, unparsable or
+        # different model id is never scored as PASS.
+        if normalized.model_observed is None:
+            return Evaluation(
+                status="FORMAT_MISMATCH",
+                reason_code="INVALID_SCHEMA",
+                exit_code=EXIT_RESPONSE_ISSUE,
+                normalized=normalized,
+            )
+        if normalized.model_observed != spec.model_id:
+            return Evaluation(
+                status="MODEL_DRIFT",
+                reason_code="MODEL_CHANGED",
+                exit_code=EXIT_RESPONSE_ISSUE,
+                normalized=normalized,
+            )
     if fixture.fixture_id == "refund_noul":
         threshold = fixture.noul_threshold
         matched = normalized.noul is not None and threshold is not None and normalized.noul >= threshold
@@ -292,6 +302,33 @@ def _exclusive_run() -> Iterator[None]:
         os.close(fd)
 
 
+def _reject_json_constant(token: str) -> object:
+    raise ValueError("non-finite number in quota state")
+
+
+def _pairs_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key in quota state")
+        result[key] = value
+    return result
+
+
+def _finite_epoch(value: object) -> float:
+    """Return a finite, plausible epoch or fail closed (no send, exit 5)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise QuotaStateError("quota entry has an invalid timestamp")
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        # A 309-digit timestamp is valid JSON but not a usable clock reading.
+        raise QuotaStateError("quota entry has an invalid timestamp") from None
+    if not math.isfinite(number) or number < 0 or number > MAX_QUOTA_EPOCH:
+        raise QuotaStateError("quota entry has an invalid timestamp")
+    return number
+
+
 def _read_quota() -> dict[str, _QuotaEntry]:
     try:
         raw = QUOTA_FILE.read_text(encoding="utf-8")
@@ -300,8 +337,12 @@ def _read_quota() -> dict[str, _QuotaEntry]:
     except OSError as exc:
         raise QuotaStateError("quota state is unreadable") from exc
     try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
+        parsed = json.loads(
+            raw,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=_reject_json_constant,
+        )
+    except (ValueError, RecursionError) as exc:
         raise QuotaStateError("quota state is not valid JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("version") != 1:
         raise QuotaStateError("quota state has an unsupported shape")
@@ -316,17 +357,17 @@ def _read_quota() -> dict[str, _QuotaEntry]:
             raise QuotaStateError("quota entry is not an object")
         if set(entry) != {"last_utc_epoch", "local_day", "day_count"}:
             raise QuotaStateError("quota entry has unexpected fields")
-        last_utc_epoch = entry.get("last_utc_epoch")
+        last_utc_epoch = _finite_epoch(entry.get("last_utc_epoch"))
         local_day = entry.get("local_day")
         day_count = entry.get("day_count")
-        if isinstance(last_utc_epoch, bool) or not isinstance(last_utc_epoch, (int, float)):
-            raise QuotaStateError("quota entry has an invalid timestamp")
         if not isinstance(local_day, str) or len(local_day) != 10:
             raise QuotaStateError("quota entry has an invalid day")
-        if isinstance(day_count, bool) or not isinstance(day_count, int) or day_count < 0:
+        if isinstance(day_count, bool) or not isinstance(day_count, int):
+            raise QuotaStateError("quota entry has an invalid count")
+        if day_count < 0 or day_count > MAX_LOCAL_DAY_COUNT:
             raise QuotaStateError("quota entry has an invalid count")
         state[provider_id] = _QuotaEntry(
-            last_utc_epoch=float(last_utc_epoch),
+            last_utc_epoch=last_utc_epoch,
             local_day=local_day,
             day_count=day_count,
         )
@@ -451,7 +492,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         with _exclusive_run():
             if _reserve_slot(spec) != "RESERVED":
                 return outcome("RATE_LIMITED", "RATE_LIMIT", EXIT_SKIPPED)
-            result = asyncio.run(post_json(spec, payload))
+            result = asyncio.run(post_json(spec, fixture.fixture_id))
     except LockBusyError:
         return outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE)
     except QuotaStateError:

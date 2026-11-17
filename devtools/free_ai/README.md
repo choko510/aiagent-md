@@ -100,6 +100,29 @@ Implementation note: the fixed reason-code set has no billing code, so
 authoritative signal. Local quota skips use `status=RATE_LIMITED` with
 `reason_code=RATE_LIMIT` and exit `2`, which is distinct from a provider 429 (exit `3`).
 
+## Hardening invariants
+
+- `transport.post_json(spec, fixture_id)` takes no body. The payload is rebuilt from the
+  frozen catalog and `fixtures.py` constants immediately before serialization, so a
+  caller cannot send a free-form prompt, a file or a different model. The legacy
+  services are refused at this egress boundary as well as in the CLI
+  (`SAFETY_BLOCKED` / `LEGACY_DISABLED`, no network).
+- Kilo and OVHcloud must report the exact requested model id. A missing model, a
+  non-string model, or a model id that is not a short printable token (≤128 chars) is
+  never scored as `PASS`; a different reported model is `MODEL_DRIFT`. Unsafe model ids
+  are dropped, so no provider-controlled text or control character can reach stdout or
+  `probes.jsonl`.
+- The quota file is parsed with duplicate-key and `NaN`/`Infinity` rejection, finite and
+  bounded timestamps, and a bounded day counter. Any malformed value means zero requests
+  and exit `5`; it is never repaired silently.
+- Reported `cost` and System One `noul` values that cannot be represented as a finite
+  float (for example a 309-digit integer) are a `FORMAT_MISMATCH`, not an exception, and
+  no conversion error text is stored.
+- Response bodies are capped before a chunk is appended to the buffer. The request asks
+  for `Accept-Encoding: identity`; only `identity`, `gzip`, `deflate` and `br` responses
+  are accepted, `Content-Length` is validated, and the decoded size is capped, so a
+  compressed or mis-declared body cannot bypass the 131072-byte limit.
+
 ## Tests
 
 The four test modules exercise FA-T01–FA-T36 without any network access

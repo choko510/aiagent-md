@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -20,6 +21,12 @@ from .catalog import ProviderSpec
 
 MAX_CONTENT_CHARS = 4096
 MAX_JSON_DEPTH = 8
+MAX_MODEL_ID_CHARS = 128
+
+#: A reported model id is only kept when it is a short, printable token. Anything else
+#: (control characters, newlines, huge strings) is treated as "not reported" so that no
+#: provider-controlled text can reach stdout or the JSONL log.
+_MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*")
 
 
 class ResponseFormatError(ValueError):
@@ -116,21 +123,34 @@ def _usage_tokens(payload: Mapping[str, object]) -> tuple[int | None, int | None
     return (input_tokens, output_tokens)
 
 
+def _to_finite_float(value: object) -> float:
+    """Convert a JSON number to a finite float, never leaking the conversion error."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ResponseFormatError("INVALID_SCHEMA")
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        # A 309-digit integer is valid JSON but cannot be a sane cost or probability.
+        raise ResponseFormatError("INVALID_SCHEMA") from None
+    if not math.isfinite(number):
+        raise ResponseFormatError("INVALID_SCHEMA")
+    return number
+
+
 def _cost(payload: Mapping[str, object]) -> float | None:
     if "cost" not in payload:
         return None
-    value = payload.get("cost")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ResponseFormatError("INVALID_SCHEMA")
-    amount = float(value)
-    if not math.isfinite(amount) or amount < 0:
+    amount = _to_finite_float(payload.get("cost"))
+    if amount < 0:
         raise ResponseFormatError("INVALID_SCHEMA")
     return amount
 
 
 def _model_observed(payload: Mapping[str, object]) -> str | None:
     value = payload.get("model")
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str) or len(value) > MAX_MODEL_ID_CHARS:
+        return None
+    return value if _MODEL_ID_PATTERN.fullmatch(value) else None
 
 
 def _has_tool_output(message: Mapping[str, object]) -> bool:
@@ -185,10 +205,8 @@ def normalize_system_one(payload: Mapping[str, object], spec: ProviderSpec) -> N
     if refund.get("type") != "noul":
         raise ResponseFormatError("INVALID_SCHEMA")
     raw_noul = refund.get("noul")
-    if isinstance(raw_noul, bool) or not isinstance(raw_noul, (int, float)):
-        raise ResponseFormatError("INVALID_SCHEMA")
-    noul = float(raw_noul)
-    if not math.isfinite(noul) or not 0.0 <= noul <= 1.0:
+    noul = _to_finite_float(raw_noul)
+    if not 0.0 <= noul <= 1.0:
         raise ResponseFormatError("INVALID_SCHEMA")
     input_tokens, output_tokens = _usage_tokens(payload)
     return NormalizedResponse(
@@ -204,6 +222,7 @@ def normalize_system_one(payload: Mapping[str, object], spec: ProviderSpec) -> N
 
 __all__ = [
     "MAX_CONTENT_CHARS",
+    "MAX_MODEL_ID_CHARS",
     "NormalizedResponse",
     "ResponseFormatError",
     "decode_object",

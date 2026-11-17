@@ -500,3 +500,48 @@ def test_lab_modules_do_not_read_files_or_environment_outside_runner() -> None:
                 assert not (node.value.id == "os" and node.attr in {"environ", "getenv"}), (
                     f"{path} reads the environment"
                 )
+
+
+_TODAY = time.strftime("%Y-%m-%d", time.gmtime())
+_HUGE_DIGITS = "9" * 309
+
+
+def _quota_text(*, timestamp: str, day_count: str = "1", extra_provider: bool = False) -> str:
+    entry = f'{{"last_utc_epoch":{timestamp},"local_day":"{_TODAY}","day_count":{day_count}}}'
+    providers = f'"kilo":{entry}' + (f',"kilo":{entry}' if extra_provider else "")
+    return f'{{"version":1,"providers":{{{providers}}}}}'
+
+
+@pytest.mark.parametrize(
+    "quota_text",
+    [
+        _quota_text(timestamp="NaN"),
+        _quota_text(timestamp="Infinity"),
+        _quota_text(timestamp="-Infinity"),
+        _quota_text(timestamp="1e309"),
+        _quota_text(timestamp=_HUGE_DIGITS),
+        _quota_text(timestamp="1799999999", day_count=_HUGE_DIGITS),
+        _quota_text(timestamp="1799999999", day_count="1.5"),
+        _quota_text(timestamp="1799999999", extra_provider=True),
+        '{"version":1,"version":1,"providers":{}}',
+    ],
+)
+def test_quota_non_finite_or_absurd_values_block_every_send(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    quota_text: str,
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    runs.mkdir(parents=True)
+    (runs / "quota.json").write_text(quota_text, encoding="utf-8")
+    requests = _mock_transport(monkeypatch, lambda _request: _json_ok())
+
+    code = runner.main(_probe_argv())
+    printed = capsys.readouterr().out
+    record = _last_record(printed)
+    assert code == 5
+    assert record["status"] == "SAFETY_BLOCKED"
+    assert requests == []
+    for forbidden in ("Overflow", "invalid literal", "traceback", "Error"):
+        assert forbidden not in printed

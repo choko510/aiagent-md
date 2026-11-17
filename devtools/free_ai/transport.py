@@ -18,7 +18,8 @@ from typing import Final, Literal
 import httpx
 
 from . import ReasonCode
-from .catalog import ProviderSpec, validate_spec
+from .catalog import LEGACY_ANONYMOUS_ALLOWED, ProviderSpec, validate_spec
+from .fixtures import FixtureError, build_payload
 
 MAX_REQUEST_BYTES: Final = 4096
 MAX_RESPONSE_BYTES: Final = 131072
@@ -106,6 +107,15 @@ def _is_json_content_type(value: str | None) -> bool:
     return media_type == "application/json" or media_type.endswith("+json")
 
 
+#: Encodings a provider may legitimately return even though we asked for ``identity``.
+#: Anything else is refused instead of decompressed.
+ALLOWED_CONTENT_ENCODINGS: Final = frozenset({"", "identity", "gzip", "deflate", "br"})
+
+
+def _is_allowed_content_encoding(value: str | None) -> bool:
+    return value is None or value.strip().lower() in ALLOWED_CONTENT_ENCODINGS
+
+
 def _map_http_status(http_status: int, started: float) -> TransportResult:
     if http_status in ACCESS_RESTRICTED_STATUSES:
         return TransportResult(
@@ -129,16 +139,30 @@ def _map_http_status(http_status: int, started: float) -> TransportResult:
     )
 
 
-async def post_json(spec: ProviderSpec, body: dict[str, object]) -> TransportResult:
-    """POST one fixed body to the spec's fixed endpoint. Retries: none, ever."""
+async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
+    """POST exactly one fixed synthetic fixture to the spec's fixed endpoint.
+
+    The caller cannot supply a body: the payload is rebuilt from the frozen catalog and
+    ``fixtures.py`` constants immediately before serialization. Legacy services are
+    refused here as well as in the CLI, so no path can reach their endpoints while
+    their anonymous terms are unconfirmed.
+    """
     validate_spec(spec)
+    if spec.is_legacy and not LEGACY_ANONYMOUS_ALLOWED.get(spec.provider_id, False):
+        return TransportResult(status="SAFETY_BLOCKED", reason_code="LEGACY_DISABLED")
+    if not isinstance(fixture_id, str):
+        return TransportResult(status="LOCAL_INPUT_INVALID", reason_code="INVALID_SCHEMA")
     try:
-        encoded = encode_body(body)
+        payload = build_payload(spec, fixture_id)
+        encoded = encode_body(payload)
+    except FixtureError:
+        return TransportResult(status="LOCAL_INPUT_INVALID", reason_code="INVALID_SCHEMA")
     except LocalInputError as exc:
         return TransportResult(status="LOCAL_INPUT_INVALID", reason_code=exc.reason_code)
 
     headers = {
         "Accept": "application/json",
+        "Accept-Encoding": "identity",
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
@@ -165,16 +189,51 @@ async def post_json(spec: ProviderSpec, body: dict[str, object]) -> TransportRes
                             http_status=http_status,
                             elapsed_ms=_elapsed_ms(started),
                         )
-                    received = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        received.extend(chunk)
-                        if len(received) > MAX_RESPONSE_BYTES:
+                    if not _is_allowed_content_encoding(response.headers.get("content-encoding")):
+                        # Never decompress an encoding we did not request.
+                        return TransportResult(
+                            status="FORMAT_MISMATCH",
+                            reason_code="INVALID_JSON",
+                            http_status=http_status,
+                            elapsed_ms=_elapsed_ms(started),
+                        )
+                    declared_header = response.headers.get("content-length")
+                    if declared_header is not None:
+                        try:
+                            declared = int(declared_header.strip())
+                        except ValueError:
+                            return TransportResult(
+                                status="FORMAT_MISMATCH",
+                                reason_code="INVALID_JSON",
+                                http_status=http_status,
+                                elapsed_ms=_elapsed_ms(started),
+                            )
+                        if declared < 0:
+                            return TransportResult(
+                                status="FORMAT_MISMATCH",
+                                reason_code="INVALID_JSON",
+                                http_status=http_status,
+                                elapsed_ms=_elapsed_ms(started),
+                            )
+                        if declared > MAX_RESPONSE_BYTES:
                             return TransportResult(
                                 status="SAFETY_BLOCKED",
                                 reason_code="BODY_TOO_LARGE",
                                 http_status=http_status,
                                 elapsed_ms=_elapsed_ms(started),
                             )
+                    received = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        # Check the decoded size *before* appending so an oversized chunk
+                        # is never copied, stored or parsed.
+                        if len(received) + len(chunk) > MAX_RESPONSE_BYTES:
+                            return TransportResult(
+                                status="SAFETY_BLOCKED",
+                                reason_code="BODY_TOO_LARGE",
+                                http_status=http_status,
+                                elapsed_ms=_elapsed_ms(started),
+                            )
+                        received.extend(chunk)
                     return TransportResult(
                         status="OK",
                         reason_code="OK",
@@ -195,6 +254,13 @@ async def post_json(spec: ProviderSpec, body: dict[str, object]) -> TransportRes
             reason_code="UNKNOWN_OUTCOME",
             elapsed_ms=_elapsed_ms(started),
             unknown_outcome=True,
+        )
+    except httpx.DecodingError:
+        # A corrupt or unsupported encoding is a response-format problem, not a retry.
+        return TransportResult(
+            status="FORMAT_MISMATCH",
+            reason_code="INVALID_JSON",
+            elapsed_ms=_elapsed_ms(started),
         )
     except httpx.TransportError:
         return TransportResult(
