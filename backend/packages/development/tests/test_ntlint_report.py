@@ -171,9 +171,7 @@ def test_non_utf8_encodable_text_is_a_typed_failure() -> None:
 
 def test_sha256_is_accepted_via_shared_development_contract() -> None:
     sha256 = "c" * 64
-    result = parse_ntlint_jsonl(
-        encode(finding(), summary()), exit_code=0, source_sha=sha256, expected_sha=sha256
-    )
+    result = parse_ntlint_jsonl(encode(finding(), summary()), exit_code=0, source_sha=sha256, expected_sha=sha256)
     assert result.source_sha == sha256
     assert result.status == "REVIEW_REQUIRED"
 
