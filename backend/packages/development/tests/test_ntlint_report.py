@@ -145,6 +145,77 @@ def test_stale_sha_rejected() -> None:
             parse(raw, sha=sha)
 
 
+def test_disjoint_verdict_counts_cannot_exceed_total() -> None:
+    raw = encode(finding(), summary(verdicts=2, reported=1, unsure=2))
+    with pytest.raises(InvalidEvidence, match="inconsistent ntlint summary"):
+        parse(raw)
+
+
+@pytest.mark.parametrize("field", ["value", "at", "margin", "confidence"])
+def test_giant_numeric_finding_is_a_typed_failure(field: str) -> None:
+    raw = encode(finding(**{field: 10**309}), summary())
+    with pytest.raises(InvalidEvidence):
+        parse(raw)
+
+
+def test_giant_usd_is_a_typed_failure() -> None:
+    with pytest.raises(InvalidEvidence):
+        parse(encode(finding(), summary(usd=10**309)))
+
+
+def test_non_utf8_encodable_text_is_a_typed_failure() -> None:
+    raw = encode(finding(), summary()) + "\ud800"
+    with pytest.raises(InvalidEvidence, match="UTF-8"):
+        parse(raw)
+
+
+def test_sha256_is_accepted_via_shared_development_contract() -> None:
+    sha256 = "c" * 64
+    result = parse_ntlint_jsonl(
+        encode(finding(), summary()), exit_code=0, source_sha=sha256, expected_sha=sha256
+    )
+    assert result.source_sha == sha256
+    assert result.status == "REVIEW_REQUIRED"
+
+
+def test_mismatched_sha_algorithms_are_rejected() -> None:
+    with pytest.raises(InvalidEvidence):
+        parse_ntlint_jsonl(
+            encode(finding(), summary()),
+            exit_code=0,
+            source_sha="a" * 40,
+            expected_sha="a" * 64,
+        )
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_duplicate_json_keys_are_rejected(index: int) -> None:
+    lines = encode(finding(), summary()).splitlines()
+    key = '"ruleId": "test-name-verifies-claim"' if index == 0 else '"reported": 1'
+    lines[index] = lines[index].replace(key, key + ", " + key)
+    with pytest.raises(InvalidEvidence, match="duplicate"):
+        parse("\n".join(lines))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        encode(finding(unexpected="injected"), summary()),
+        encode(finding(), summary(extra=1)),
+        encode(finding(subjectSource="arbitrary"), summary()),
+        encode(finding(confidence={"nested": "object"}), summary()),
+        encode(finding(at=2.0), summary()),
+        encode(finding(), summary(requests=True)),
+        encode(finding(), summary(requests=-1)),
+        encode(finding(), summary(cached="1")),
+        encode(finding(), summary(cached=-1)),
+    ],
+)
+def test_unknown_fields_or_unused_metadata_are_checked(invalid: str) -> None:
+    with pytest.raises(InvalidEvidence):
+        parse(invalid)
+
+
 def test_finding_count_is_bounded() -> None:
     raw = encode(*([finding()] * 1025), summary(reported=1025, candidates=1025, verdicts=1025))
     with pytest.raises(InvalidEvidence):
