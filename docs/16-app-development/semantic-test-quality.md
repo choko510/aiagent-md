@@ -6,7 +6,7 @@
 ## 調査（upstream 0.1.1）
 
 - 公式情報: https://github.com/L4Ph/ntlint （README、docs/design.md、packages/cli/src/main.ts、packages/core/src/report.ts、gate.ts）。
-- npmは noul-testlint、CLIは ntlint、Node >=24、MIT。TypeScript/JavaScript、Python、Rust、Goに対応するテスト構文抽出。
+- npmは noul-testlint、CLIは ntlint、Node >=24、MIT。JavaScript系、Python、Rust、Goに対応するテスト構文抽出。
 - 17ルール中、自前でfitted cutoff = 0、borrowed = 5、placeholder = 12。検出結果を**確定バグやP0/P1と扱わない**。
 - CLIは JSONL が既定。finding行の後にsummary行。--format jsonは異なる構造。complete:false、missing>0、failures>0、exit 2は不完全。--fitted-onlyは現時点でルールが0になりexit 2。
 - --dry-runはAPI不要で費用概算のみ。**実スキャンの既定 --arm file は実装ファイルも外部モデルに送る**。--arm bareでもテスト本文を外部送信する。どちらも個別同意が必要。
@@ -30,7 +30,7 @@ backend/packages/development/src/aiagent_development/ntlint_report.py:
 4. Typesafe AI API宛てのTLS egressは既存Sentinel/Gatewayの認可・Permit・実送信を経由。Tool HTTPS CONNECT拒否を迂回しない。未対応ならBLOCKED。
 5. SHA、tool version、runtime digest、input scope、receipt/artifact digestを記録し、現在のHEAD/Goal/lease/policyと再照合。Cacheはtenant+source SHAで隔離し、private codeやAPI keyをログに出さない。
 6. DEV-14 FAST_FEEDBACKの任意diagnosticとして起動し、DEV-07の独立reviewへ**候補**として渡す。候補の自動修正・自動merge・P0/P1昇格は禁止。必要なテストの実行と独立reviewは従来どおり。
-7. Python/TS/Rust/Goのtest discovery vs runner、canary、false positives/negatives、安定性、実費、失効・中断・partial・secret漏洩の負例を実測してからlimited beta。
+7. Python/JavaScript/Rust/Goのtest discovery vs runner、canary、false positives/negatives、安定性、実費、失効・中断・partial・secret漏洩の負例を実測してからlimited beta。
 
 ## 受入追跡（今回のSlice）
 
