@@ -313,7 +313,6 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 | `docs/15-multimodal/multimodal-ingestion.md` | B | 論理型、parserは隔離Python Worker |
 | `docs/16-app-development/README.md` | C | OpenHands SDK等の統合はSTEP 2で検証 |
 | `docs/16-app-development/code-intelligence-and-adaptive-testing.md` | B | 対象プロジェクトの言語サポート一覧（TS/JS含む） |
-| `docs/16-app-development/semantic-test-quality.md` | B | 上流ntlintのNode/TS依存は非信頼Cell内の任意解析ツールに限定。BackendはPython-firstで実行経路未実装 |
 
 ## ADR-041: Rust製ユーザー所有Device ClientとCua Driverの分離統合（2026-11-10）
 
