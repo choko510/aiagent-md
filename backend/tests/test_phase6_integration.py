@@ -2200,3 +2200,510 @@ def test_web_ui_final_review_regressions_p1_3_and_p2_1_to_4(
         uv_sock.close()
         wh_srv.shutdown()
         wh_srv.server_close()
+
+
+def test_strict_boolean_validation_and_dispatch_toctou_and_quiet_hours_consistency(
+    pg: Any, dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1 + P1-2 + P2-1:
+    - P1-1: Strict JSON bool check rejects string 'false'/'true', int 0/1, null, list, dict with 422 and 0 writes/sends
+    - P1-2: Explicit dispatch intentIds snapshot excludes B added after preview, skips revoked/delivered/foreign intents,
+            and pre-send verify blocks mid-flight consent revocation with 0 HTTP sends
+    - P2-1: Watch Dry-Run and live enqueue share execution-time Quiet Hours across timezones & DST regardless of slotUtc."""
+    hits: list[dict[str, Any]] = []
+
+    class _StrictTestReceiver(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            hits.append(json.loads(self.rfile.read(n).decode("utf-8")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"strict-ok"}')
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _StrictTestReceiver)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    notify_ring = KeyRing.single(b"S" * 32, key_id="notify-strict")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            # 1. P1-1: Invalid bool values on Binding create -> 422, 0 rows inserted
+            for bad_bool in ("false", "true", 0, 1, None, [], {}):
+                r_bad_b = client.post(
+                    "/v1/notifications/bindings",
+                    headers=headers,
+                    json={
+                        "channel": "webhook",
+                        "label": "Bad Bool Binding",
+                        "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                        "consentGranted": bad_bool,
+                    },
+                )
+                assert r_bad_b.status_code == 422, (bad_bool, r_bad_b.text)
+            assert (
+                dbs["owner"].all(
+                    "SELECT id FROM agent.notification_bindings WHERE tenant_id=%s",
+                    (tenant["tenantId"],),
+                )
+                == []
+            )
+
+            # Valid JSON False stays consented=False; JSON True grants consent
+            rb_false = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Consent False Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": False,
+                },
+            )
+            assert rb_false.status_code == 201 and rb_false.json()["binding"]["consentGranted"] is False
+
+            rb_true = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Consent True Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                },
+            )
+            assert rb_true.status_code == 201 and rb_true.json()["binding"]["consentGranted"] is True
+            bid = rb_true.json()["binding"]["id"]
+
+            rw = client.post(
+                "/v1/watches",
+                headers=headers,
+                json={"timezoneId": "UTC", "localHour": 12, "localMinute": 0, "maxOccurrences": 5},
+            )
+            assert rw.status_code == 201
+            wid = rw.json()["watchId"]
+
+            # Watch Trigger with invalid bool fields -> 422 & 0 slots & 0 intents & 0 hits
+            bad_watch_payloads: list[dict[str, Any]] = [
+                {"allConsentedBindings": "false", "dispatch": "false", "title": "Bad1"},
+                {"bindingId": bid, "dryRun": "false", "title": "Bad2"},
+                {"bindingId": bid, "dispatch": "true", "title": "Bad3"},
+                {"bindingId": bid, "dryRun": 1, "title": "Bad4"},
+                {"bindingId": bid, "dryRun": None, "title": "Bad5"},
+                {"bindingId": bid, "allConsentedBindings": 0, "title": "Bad6"},
+            ]
+            for payload in bad_watch_payloads:
+                rw_bad = client.post(f"/v1/watches/{wid}/trigger", headers=headers, json=payload)
+                assert rw_bad.status_code == 422, (payload, rw_bad.text)
+            assert dbs["owner"].all("SELECT status FROM agent.automation_watch_slots WHERE watch_id=%s", (wid,)) == []
+            assert dbs["owner"].all("SELECT id FROM agent.notification_intents WHERE binding_id=%s", (bid,)) == []
+
+            # Manual notification & dispatch invalid bool/intentIds -> 422 & 0 writes & 0 hits
+            for bad_bool in ("false", "true", 0, 1, None, [], {}):
+                assert (
+                    client.post(
+                        "/v1/notifications",
+                        headers=headers,
+                        json={"bindingId": bid, "title": "T", "summaryText": "S", "dryRun": bad_bool},
+                    ).status_code
+                    == 422
+                )
+                assert (
+                    client.post(
+                        "/v1/notifications",
+                        headers=headers,
+                        json={"bindingId": bid, "title": "T", "summaryText": "S", "dispatch": bad_bool},
+                    ).status_code
+                    == 422
+                )
+                assert (
+                    client.post("/v1/notifications/dispatch", headers=headers, json={"dryRun": bad_bool}).status_code
+                    == 422
+                )
+            for bad_ids in (None, "not-list", [123], ["not-uuid"]):
+                assert (
+                    client.post(
+                        "/v1/notifications/dispatch", headers=headers, json={"dryRun": False, "intentIds": bad_ids}
+                    ).status_code
+                    == 422
+                )
+            assert dbs["owner"].all("SELECT id FROM agent.notification_intents WHERE binding_id=%s", (bid,)) == []
+            assert hits == []
+
+            # Explicit JSON booleans false/false enqueue without dispatching
+            r_valid_false = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "toctou-a",
+                    "title": "TOCTOU A",
+                    "summaryText": "Queued A",
+                    "dryRun": False,
+                    "dispatch": False,
+                },
+            )
+            assert r_valid_false.status_code == 201 and r_valid_false.json()["dispatch"] is None
+            a_id = r_valid_false.json()["notification"]["id"]
+            assert hits == []
+
+            # 2. P1-2: Preview captures [A]; B added before confirm; dispatch with intentIds=[A] sends ONLY A!
+            r_prev = client.post("/v1/notifications/dispatch", headers=headers, json={"dryRun": True})
+            assert r_prev.status_code == 200
+            approved_ids = [it["intentId"] for it in r_prev.json()["preview"]["items"]]
+            assert approved_ids == [a_id]
+
+            r_b = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "toctou-b",
+                    "title": "TOCTOU B",
+                    "summaryText": "Added after preview",
+                    "dryRun": False,
+                    "dispatch": False,
+                },
+            )
+            assert r_b.status_code == 201
+            b_id = r_b.json()["notification"]["id"]
+
+            r_exec = client.post(
+                "/v1/notifications/dispatch",
+                headers=headers,
+                json={"dryRun": False, "intentIds": approved_ids},
+            )
+            assert r_exec.status_code == 200
+            assert r_exec.json()["counts"]["PROVIDER_ACCEPTED"] == 1
+            assert [h["title"] for h in hits] == ["TOCTOU A"]
+            b_row = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (b_id,))
+            assert b_row is not None and b_row["status"] == "QUEUED"
+
+            # Re-dispatching already delivered [A] sends 0 times
+            r_dup = client.post(
+                "/v1/notifications/dispatch", headers=headers, json={"dryRun": False, "intentIds": [a_id]}
+            )
+            assert r_dup.status_code == 200 and r_dup.json()["counts"]["claimed"] == 0
+            assert [h["title"] for h in hits] == ["TOCTOU A"]
+
+            # Cross-owner / cross-workspace intentId passed by user_b MUST claim 0 and expose nothing
+            user_b = admin.add_user(pg.owner, tenant["tenantId"])
+            headers_b = {"Authorization": f"Bearer {user_b['token']}"}
+            r_cross = client.post(
+                "/v1/notifications/dispatch",
+                headers=headers_b,
+                json={"dryRun": False, "intentIds": [b_id]},
+            )
+            assert r_cross.status_code == 200 and r_cross.json()["counts"]["claimed"] == 0
+            b_row2 = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (b_id,))
+            assert b_row2 is not None and b_row2["status"] == "QUEUED"
+
+            # Revoke consent for B, then dispatch [B] -> SUPPRESSED, 0 sends
+            assert (
+                client.post(
+                    f"/v1/notifications/bindings/{bid}/consent", headers=headers, json={"granted": False}
+                ).status_code
+                == 200
+            )
+            r_rev_disp = client.post(
+                "/v1/notifications/dispatch", headers=headers, json={"dryRun": False, "intentIds": [b_id]}
+            )
+            assert r_rev_disp.status_code == 200 and r_rev_disp.json()["counts"]["claimed"] == 0
+            assert [h["title"] for h in hits] == ["TOCTOU A"]
+            b_row3 = dbs["owner"].one("SELECT status FROM agent.notification_intents WHERE id=%s", (b_id,))
+            assert b_row3 is not None and b_row3["status"] == "SUPPRESSED"
+
+            # Mid-flight consent revocation after claim is blocked pre-send in _verify_claim_lease_active
+            assert (
+                client.post(
+                    f"/v1/notifications/bindings/{bid}/consent", headers=headers, json={"granted": True}
+                ).status_code
+                == 200
+            )
+            r_c = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "toctou-c",
+                    "title": "TOCTOU C",
+                    "summaryText": "Mid-flight revoke",
+                    "dryRun": False,
+                    "dispatch": False,
+                },
+            )
+            c_id = r_c.json()["notification"]["id"]
+            worker = notifications.NotificationDeliveryWorker(
+                dbs["api"], notify_ring, egress_proxy="", allow_private_addrs=frozenset({"127.0.0.1"})
+            )
+            c_claims = worker._claim_batch(batch=1, tenant_filter=tenant["tenantId"], intent_ids=[c_id])
+            assert len(c_claims) == 1
+            assert client.delete(f"/v1/notifications/bindings/{bid}", headers=headers).status_code == 200
+            assert _run(worker.deliver_claim(c_claims[0])) == "LEASE_LOST"
+            assert [h["title"] for h in hits] == ["TOCTOU A"]
+
+            # 3. P2-1: Watch Dry-Run and live trigger match Quiet Hours across DST & timezones regardless of slotUtc
+            rb_ny = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "NY Quiet DST",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/ny"},
+                    "consentGranted": True,
+                    "quietStartHour": 22,
+                    "quietEndHour": 7,
+                    "timezoneId": "America/New_York",
+                },
+            )
+            assert rb_ny.status_code == 201
+            ny_bid = rb_ny.json()["binding"]["id"]
+
+            rb_tokyo = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "Tokyo Quiet",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/tokyo"},
+                    "consentGranted": True,
+                    "quietStartHour": 23,
+                    "quietEndHour": 6,
+                    "timezoneId": "Asia/Tokyo",
+                },
+            )
+            assert rb_tokyo.status_code == 201
+            tk_bid = rb_tokyo.json()["binding"]["id"]
+
+            # Case A: During NY Summer EDT night (2026-07-15T03:00Z == 23:00 EDT), daytime future slotUtc still defers identically!
+            ny_summer_night = dt.datetime(2026, 7, 15, 3, 0, 0, tzinfo=dt.UTC)
+            monkeypatch.setattr(notifications, "utcnow", lambda: ny_summer_night)
+            daytime_future_slot = "2027-01-10T17:00:00Z"
+            d_ny = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": daytime_future_slot, "bindingId": ny_bid, "dryRun": True},
+            )
+            assert d_ny.status_code == 200
+            expected_defer = d_ny.json()["preview"]["recipients"][0]["wouldDeferUntil"]
+            assert expected_defer == "2026-07-15T11:00:00+00:00"  # 07:00 EDT == 11:00 UTC
+
+            l_ny = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": daytime_future_slot, "bindingId": ny_bid, "dryRun": False},
+            )
+            assert l_ny.status_code == 200 and l_ny.json()["claimed"] is True
+            nq_ny = l_ny.json()["queuedNotifications"][0]
+            assert nq_ny["status"] == "DEFERRED_QUIET_HOURS"
+            assert nq_ny["notBeforeAt"] == expected_defer
+
+            # Case B: NY fall-back DST transition day (2026-11-01T06:30Z == 01:30 EST after 02:00 fallback; 07:00 EST == 12:00 UTC)
+            ny_dst_fallback = dt.datetime(2026, 11, 1, 6, 30, 0, tzinfo=dt.UTC)
+            monkeypatch.setattr(notifications, "utcnow", lambda: ny_dst_fallback)
+            d_dst = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": "2026-05-01T15:00:00Z", "bindingId": ny_bid, "dryRun": True},
+            )
+            expected_dst_defer = d_dst.json()["preview"]["recipients"][0]["wouldDeferUntil"]
+            assert expected_dst_defer == "2026-11-01T12:00:00+00:00"
+            l_dst = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": "2026-05-01T15:00:00Z", "bindingId": ny_bid, "dryRun": False},
+            )
+            nq_dst = l_dst.json()["queuedNotifications"][0]
+            assert nq_dst["status"] == "DEFERRED_QUIET_HOURS"
+            assert nq_dst["notBeforeAt"] == expected_dst_defer
+
+            # Case C: Tokyo daytime execution (2026-11-17T03:00Z == 12:00 JST) with midnight slotUtc stays QUEUED immediately!
+            tk_daytime = dt.datetime(2026, 11, 17, 3, 0, 0, tzinfo=dt.UTC)
+            monkeypatch.setattr(notifications, "utcnow", lambda: tk_daytime)
+            d_tk = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": "2026-11-16T16:00:00Z", "bindingId": tk_bid, "dryRun": True},
+            )
+            assert d_tk.json()["preview"]["recipients"][0]["wouldDeferUntil"] is None
+            l_tk = client.post(
+                f"/v1/watches/{wid}/trigger",
+                headers=headers,
+                json={"slotUtc": "2026-11-16T16:00:00Z", "bindingId": tk_bid, "dryRun": False},
+            )
+            nq_tk = l_tk.json()["queuedNotifications"][0]
+            assert nq_tk["status"] == "QUEUED"
+            assert nq_tk["notBeforeAt"] == tk_daytime.isoformat()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_web_ui_dispatch_toctou_snapshot_and_cancel_zero_send(
+    memory_dbs: dict[str, Database], memory_tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-2 UI E2E: Previewing Pending Outbox with [A], adding [B] while ConfirmDialog is open,
+    and confirming sends ONLY [A] while leaving [B] QUEUED; canceling sends 0 live dispatch requests."""
+    dbs = memory_dbs
+    tenant = memory_tenant
+    from playwright.async_api import async_playwright
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dist_dir = repo_root / "web" / "dist"
+    assert (dist_dir / "index.html").is_file()
+
+    hook_hits: list[dict[str, Any]] = []
+
+    class _ToctouHook(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            hook_hits.append(json.loads(self.rfile.read(n).decode("utf-8")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"ui-toctou-ok"}')
+
+    wh_srv = ThreadingHTTPServer(("127.0.0.1", 0), _ToctouHook)
+    threading.Thread(target=wh_srv.serve_forever, daemon=True).start()
+    wh_port = wh_srv.server_address[1]
+
+    tlog_path = tmp_path / "ui_toctou_tomb.jsonl"
+    memory_tombstones.TombstoneLog(tlog_path, integrity_key=b"t" * 32).initialize()
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_LOG", str(tlog_path))
+    monkeypatch.setenv("AIAGENT_MEMORY_TOMBSTONE_HMAC_KEY", (b"t" * 32).hex())
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", "")
+    notify_ring = KeyRing.single(b"T" * 32, key_id="ui-toctou-key")
+    app = create_app(
+        dbs["api"],
+        storage_key_ring=KeyRing.single(b"U" * 32, key_id="ui-st-key"),
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+        web_dist_dir=dist_dir,
+    )
+
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+    with TestClient(app) as cli:
+        b_id = cli.post(
+            "/v1/notifications/bindings",
+            headers=headers,
+            json={
+                "channel": "webhook",
+                "label": "TOCTOU UI Hook",
+                "destination": {"url": f"http://127.0.0.1:{wh_port}/hook"},
+                "consentGranted": True,
+            },
+        ).json()["binding"]["id"]
+        a_id = cli.post(
+            "/v1/notifications",
+            headers=headers,
+            json={
+                "bindingId": b_id,
+                "semanticEventKey": "ui-toctou-a",
+                "title": "Snapshot A",
+                "summaryText": "Should dispatch when confirmed",
+                "dispatch": False,
+            },
+        ).json()["notification"]["id"]
+
+    api_port, uv_srv, uv_th, uv_sock = _start_uvicorn_thread(app)
+    base_url = f"http://127.0.0.1:{api_port}"
+
+    async def _drive() -> None:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto(base_url, wait_until="networkidle")
+                await page.get_by_label("APIトークン").fill(tenant["token"])
+                await page.get_by_role("button", name="セッション開始").click()
+                await page.get_by_text("AUTHENTICATED").wait_for(timeout=10000)
+                await page.get_by_test_id("tab-automation").click()
+
+                # 1. Open Dispatch preview showing Snapshot A -> Cancel sends 0 live dispatches & 0 HTTP
+                live_dispatches: list[str] = []
+
+                async def _watch_dispatch(route: Any) -> None:
+                    raw_body = route.request.post_data or ""
+                    if '"dryRun":false' in raw_body or '"dryRun": false' in raw_body:
+                        live_dispatches.append(raw_body)
+                    await route.continue_()
+
+                await page.route("**/v1/notifications/dispatch", _watch_dispatch)
+                await page.get_by_role("button", name="保留 Outbox 配送").click()
+                dlg = page.get_by_test_id("confirm-dialog")
+                await dlg.wait_for(timeout=10000)
+                await dlg.get_by_text("Snapshot A").wait_for(timeout=10000)
+                await page.get_by_test_id("confirm-dialog-cancel").click()
+                assert live_dispatches == [] and hook_hits == []
+
+                # 2. Re-open preview showing ONLY Snapshot A, inject Queued B mid-dialog, then Confirm -> sends ONLY A!
+                await page.get_by_role("button", name="保留 Outbox 配送").click()
+                await dlg.wait_for(timeout=10000)
+                await dlg.get_by_text("1 件").first.wait_for(timeout=10000)
+
+                import urllib.request
+
+                def _post_late_b() -> str:
+                    req = urllib.request.Request(
+                        f"{base_url}/v1/notifications",
+                        data=json.dumps(
+                            {
+                                "bindingId": b_id,
+                                "semanticEventKey": "ui-toctou-b",
+                                "title": "Late Added B",
+                                "summaryText": "Must remain QUEUED",
+                                "dispatch": False,
+                            }
+                        ).encode("utf-8"),
+                        headers={**headers, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        return str(json.loads(resp.read().decode("utf-8"))["notification"]["id"])
+
+                b_notif_id = await asyncio.to_thread(_post_late_b)
+
+                await page.get_by_test_id("confirm-dialog-confirm").click()
+                await page.get_by_test_id(f"notification-{a_id}").wait_for(timeout=10000)
+                await (
+                    page.get_by_test_id(f"notification-{a_id}")
+                    .get_by_text("配信先サーバー受理済み（ユーザー未確認）")
+                    .wait_for(timeout=10000)
+                )
+                assert len(live_dispatches) == 1
+                assert json.loads(live_dispatches[0])["intentIds"] == [a_id]
+                assert [h["title"] for h in hook_hits] == ["Snapshot A"]
+
+                # Late Added B is now visible in UI list and still QUEUED (not dispatched!)
+                await (
+                    page.get_by_test_id(f"notification-{b_notif_id}")
+                    .get_by_text("送信待機中 (QUEUED)")
+                    .wait_for(timeout=10000)
+                )
+                await page.unroute("**/v1/notifications/dispatch")
+            finally:
+                await context.close()
+                await browser.close()
+
+    try:
+        _run(_drive())
+    finally:
+        uv_srv.should_exit = True
+        uv_th.join(timeout=5)
+        uv_sock.close()
+        wh_srv.shutdown()
+        wh_srv.server_close()

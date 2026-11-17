@@ -418,6 +418,16 @@ def _campaign_http_error(exc: Rejected) -> HTTPException:
     return HTTPException(422, detail={"error": code})
 
 
+def _strict_optional_bool(body: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    """Strictly parse optional JSON boolean flags; reject strings ('false'), ints (0/1), null, lists, etc. as 422."""
+    if key not in body:
+        return default
+    val = body[key]
+    if type(val) is not bool:
+        raise HTTPException(422, detail={"error": f"INVALID_BOOLEAN_{key.upper()}"})
+    return val
+
+
 def create_app(
     db: Database | None = None,
     *,
@@ -1901,7 +1911,8 @@ def create_app(
         if not isinstance(body, dict):
             raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
         slot_iso = body.get("slotUtc")
-        if slot_iso is not None:
+        eval_now = notifications.utcnow()
+        if "slotUtc" in body:
             if not isinstance(slot_iso, str) or not slot_iso.strip():
                 raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"})
             try:
@@ -1911,7 +1922,7 @@ def create_app(
             except ValueError:
                 raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"}) from None
         else:
-            slot_dt = datetime.now(UTC)
+            slot_dt = eval_now
 
         raw_ev = body.get("evidenceUrls")
         if raw_ev is not None and not isinstance(raw_ev, list):
@@ -1920,15 +1931,17 @@ def create_app(
         title = str(body.get("title") or f"Watch {watch_id} triggered").strip()
         summary = str(body.get("summaryText") or f"Watch observation slot {slot_dt.isoformat()}").strip()
         priority = str(body.get("priority") or "standard")
-        dry_run = bool(body.get("dryRun", False))
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        dispatch_now = _strict_optional_bool(body, "dispatch", default=False)
+        all_consented = _strict_optional_bool(body, "allConsentedBindings", default=False)
 
-        raw_bids = body.get("bindingIds")
         explicit_bindings: list[str] = []
-        if body.get("bindingId") is not None:
+        if "bindingId" in body:
             if not isinstance(body.get("bindingId"), str) or not is_uuid7(str(body["bindingId"]).strip()):
                 raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
             explicit_bindings.append(str(body["bindingId"]).strip())
-        if raw_bids is not None:
+        if "bindingIds" in body:
+            raw_bids = body["bindingIds"]
             if not isinstance(raw_bids, list):
                 raise HTTPException(422, detail={"error": "INVALID_BINDING_IDS"})
             for item in raw_bids:
@@ -1937,7 +1950,6 @@ def create_app(
                 bid_s = item.strip()
                 if bid_s not in explicit_bindings:
                     explicit_bindings.append(bid_s)
-        all_consented = bool(body.get("allConsentedBindings", False))
         if not explicit_bindings and not all_consented:
             raise HTTPException(422, detail={"error": "BINDING_SELECTION_REQUIRED"})
 
@@ -1962,7 +1974,7 @@ def create_app(
                     binding_ids=explicit_bindings or None,
                     all_consented_bindings=all_consented,
                     priority=priority,
-                    now_utc=slot_dt,
+                    now_utc=eval_now,
                 )
                 return {
                     "schemaVersion": "1.0",
@@ -2036,6 +2048,7 @@ def create_app(
                         summary_text=summary,
                         evidence_urls=evidence_urls,
                         observed_at=slot_dt,
+                        now_utc=eval_now,
                         priority=priority,
                     )
                     queued.append(intent)
@@ -2053,7 +2066,7 @@ def create_app(
                 }
 
         res = await asyncio.to_thread(op)
-        if res["claimed"] and body.get("dispatch"):
+        if res["claimed"] and dispatch_now:
             intent_ids = [str(q["id"]) for q in res["queuedNotifications"]]
             res["dispatch"] = await _notify_worker().run_once(
                 tenant_id=s.tenant_id,
@@ -2096,6 +2109,7 @@ def create_app(
         if not isinstance(body, dict) or not isinstance(body.get("destination"), dict):
             raise HTTPException(422, detail={"error": "INVALID_BINDING_REQUEST"})
         dest_raw = {str(k): str(v) for k, v in body["destination"].items()}
+        consent_granted = _strict_optional_bool(body, "consentGranted", default=False)
         try:
             raw_qs = body.get("quietStartHour")
             raw_qe = body.get("quietEndHour")
@@ -2115,7 +2129,7 @@ def create_app(
             channel=str(body.get("channel") or ""),
             label=str(body.get("label") or ""),
             destination=dest_raw,
-            consent_granted=bool(body.get("consentGranted", False)),
+            consent_granted=consent_granted,
             quiet_start_hour=quiet_start,
             quiet_end_hour=quiet_end,
             timezone_id=str(body.get("timezoneId") or "UTC"),
@@ -2209,9 +2223,11 @@ def create_app(
                     observed_dt = observed_dt.replace(tzinfo=UTC)
             except ValueError:
                 raise HTTPException(422, detail={"error": "INVALID_OBSERVED_AT"}) from None
-        dry_run = bool(body.get("dryRun", False))
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        dispatch_now = _strict_optional_bool(body, "dispatch", default=False)
         binding_id = str(body["bindingId"]).strip()
         priority = str(body.get("priority") or "standard")
+        eval_now = notifications.utcnow()
 
         if dry_run:
             title_val = str(body.get("title") or "").strip()
@@ -2226,7 +2242,7 @@ def create_app(
                 workspace_id=s.workspace_id,
                 binding_ids=[binding_id],
                 priority=priority,
-                now_utc=observed_dt,
+                now_utc=eval_now,
             )
             return {
                 "schemaVersion": "1.0",
@@ -2251,6 +2267,7 @@ def create_app(
                     summary_text=str(body.get("summaryText") or ""),
                     evidence_urls=[str(u) for u in (raw_ev or []) if isinstance(u, str)],
                     observed_at=observed_dt,
+                    now_utc=eval_now,
                     priority=priority,
                     delivery_purpose=str(body.get("deliveryPurpose") or "alert"),
                 )
@@ -2264,7 +2281,7 @@ def create_app(
                 intent_ids=[str(created["id"])],
                 batch=1,
             )
-            if body.get("dispatch")
+            if dispatch_now
             else None
         )
         return {"schemaVersion": "1.0", "dryRun": False, "notification": created, "dispatch": dispatch_res}
@@ -2280,8 +2297,24 @@ def create_app(
             raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
         if not isinstance(body, dict):
             raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        explicit_intent_ids: list[str] | None = None
+        if "intentIds" in body:
+            raw_ids = body["intentIds"]
+            if not isinstance(raw_ids, list):
+                raise HTTPException(422, detail={"error": "INVALID_INTENT_IDS"})
+            seen_ids: set[str] = set()
+            parsed_ids: list[str] = []
+            for raw_id in raw_ids:
+                if not isinstance(raw_id, str) or not is_uuid7(raw_id.strip()):
+                    raise HTTPException(422, detail={"error": "INVALID_INTENT_IDS"})
+                clean_id = raw_id.strip()
+                if clean_id not in seen_ids:
+                    seen_ids.add(clean_id)
+                    parsed_ids.append(clean_id)
+            explicit_intent_ids = parsed_ids
         bounded = max(1, min(limit, 50))
-        if bool(body.get("dryRun", False)):
+        if dry_run:
             preview = await asyncio.to_thread(
                 notifications.preview_pending_dispatch,
                 get_db(),
@@ -2291,11 +2324,13 @@ def create_app(
                 limit=bounded,
             )
             return {"schemaVersion": "1.0", "dryRun": True, "preview": preview, "counts": None}
+        eff_batch = max(1, len(explicit_intent_ids)) if explicit_intent_ids is not None else bounded
         counts = await _notify_worker().run_once(
             tenant_id=s.tenant_id,
             owner_user_id=s.user_id,
             workspace_id=s.workspace_id,
-            batch=bounded,
+            intent_ids=explicit_intent_ids,
+            batch=eff_batch,
         )
         return {"schemaVersion": "1.0", "dryRun": False, "counts": counts}
 

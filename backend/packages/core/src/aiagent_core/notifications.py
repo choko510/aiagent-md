@@ -44,6 +44,12 @@ LEASE_SECONDS = 30.0
 _BOT_TOKEN_RE = re.compile(r"^[0-9]{4,16}:[A-Za-z0-9_-]{16,128}$")
 _CHAT_ID_RE = re.compile(r"^-?[0-9A-Za-z_]{1,64}$")
 
+
+def utcnow() -> datetime:
+    """Single clock hook for current execution-time Quiet Hours evaluation."""
+    return datetime.now(UTC)
+
+
 DirectSendFn = Callable[[str, str, dict[str, str], bytes], Awaitable[tuple[int, str]]]
 
 
@@ -471,7 +477,7 @@ def enqueue_notification_tx(
     assert inc_row is not None
     incarnation = int(inc_row["restore_incarnation"])
 
-    effective_now = now_utc or datetime.now(UTC)
+    effective_now = now_utc or utcnow()
     effective_obs = observed_at or effective_now
     safe_urls = [str(u).strip()[:1024] for u in (evidence_urls or []) if str(u).strip()][:16]
 
@@ -642,7 +648,7 @@ def preview_notification_dry_run(
     """Read-only preview of notification delivery targets, consent, and quiet-hours without any DB mutation or send."""
     if priority not in ("critical", "standard", "low"):
         raise NotificationError("INVALID_PRIORITY")
-    effective_now = now_utc or datetime.now(UTC)
+    effective_now = now_utc or utcnow()
     with db.tx(tenant=tenant_id) as c:
         if binding_ids:
             rows = c.execute(
@@ -1003,47 +1009,84 @@ class NotificationDeliveryWorker:
         return claims
 
     def _verify_claim_lease_active(self, claim: NotificationClaim) -> bool:
-        """Verify ownership, lease_epoch, SENDING status, and non-expired lease immediately before network send."""
+        """Re-verify owner/workspace scope, consent/version, status, lease_epoch, and non-expired lease before wire send."""
         with self._db.tx(tenant=claim.tenant_id) as c:
             row = c.execute(
-                "SELECT status, lease_epoch, lease_owner_ref,"
+                "SELECT owner_user_id, workspace_id, binding_id, binding_version, consent_version,"
+                " status, lease_epoch, lease_owner_ref,"
                 " (lease_until IS NOT NULL AND lease_until > now()) AS lease_valid"
                 " FROM agent.notification_intents WHERE tenant_id=%s AND id=%s FOR UPDATE",
                 (claim.tenant_id, claim.intent_id),
             ).fetchone()
+            b = (
+                c.execute(
+                    "SELECT binding_version, consent_granted, consent_version, opted_out_at, revoked_at"
+                    " FROM agent.notification_bindings WHERE tenant_id=%s AND id=%s FOR SHARE",
+                    (claim.tenant_id, claim.binding_id),
+                ).fetchone()
+                if row is not None
+                else None
+            )
+            valid_scope_and_consent = (
+                row is not None
+                and str(row["owner_user_id"]) == claim.owner_user_id
+                and str(row["workspace_id"]) == claim.workspace_id
+                and b is not None
+                and bool(b["consent_granted"])
+                and b["opted_out_at"] is None
+                and b["revoked_at"] is None
+                and int(b["binding_version"]) == int(row["binding_version"])
+                and int(b["consent_version"]) == int(row["consent_version"])
+                and control.scope_active(c, claim.tenant_id, claim.owner_user_id, claim.workspace_id)
+            )
             if (
                 row is not None
+                and valid_scope_and_consent
                 and str(row["status"]) == "SENDING"
                 and int(row["lease_epoch"]) == claim.lease_epoch
                 and str(row["lease_owner_ref"] or "") == self._owner
                 and bool(row["lease_valid"])
             ):
                 return True
-            reason = (
-                "CLAIM_LEASE_EXPIRED_PRE_SEND"
-                if row is not None and str(row["status"]) == "SENDING" and not bool(row["lease_valid"])
-                else f"CLAIM_STALE_{row['status'] if row is not None else 'MISSING'}"
-            )
+            if not valid_scope_and_consent:
+                reason = "CONSENT_OR_SCOPE_INVALID_PRE_SEND"
+            elif row is not None and str(row["status"]) == "SENDING" and not bool(row["lease_valid"]):
+                reason = "CLAIM_LEASE_EXPIRED_PRE_SEND"
+            else:
+                reason = f"CLAIM_STALE_{row['status'] if row is not None else 'MISSING'}"
             c.execute(
                 "UPDATE agent.notification_attempts"
                 " SET disposition='TRANSPORT_REJECTED', error_code=%s, finished_at=now()"
                 " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s AND disposition='NOT_STARTED'",
                 (reason, claim.tenant_id, claim.intent_id, claim.attempt_no),
             )
-            # Only if our exact lease was still SENDING and we stopped BEFORE transmitting bytes on the wire,
-            # return intent cleanly to QUEUED instead of falsely stranding an unsent item as DELIVERY_UNKNOWN.
             if (
                 row is not None
                 and str(row["status"]) == "SENDING"
                 and int(row["lease_epoch"]) == claim.lease_epoch
                 and str(row["lease_owner_ref"] or "") == self._owner
             ):
-                c.execute(
-                    "UPDATE agent.notification_intents"
-                    " SET status='QUEUED', last_error_code=%s, lease_until=NULL, next_attempt_at=now(), updated_at=now()"
-                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
-                    (reason, claim.tenant_id, claim.intent_id, claim.lease_epoch),
-                )
+                if not valid_scope_and_consent:
+                    c.execute(
+                        "UPDATE agent.notification_intents"
+                        " SET status='SUPPRESSED', last_error_code=%s, lease_until=NULL, updated_at=now()"
+                        " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
+                        (reason, claim.tenant_id, claim.intent_id, claim.lease_epoch),
+                    )
+                    c.execute(
+                        "UPDATE agent.outbox_messages"
+                        " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code='SUPPRESSED'"
+                        " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
+                        (claim.tenant_id, f"notify:{claim.intent_id}"),
+                    )
+                else:
+                    # Proven pre-send lease expiry: return cleanly to QUEUED instead of stranding as DELIVERY_UNKNOWN.
+                    c.execute(
+                        "UPDATE agent.notification_intents"
+                        " SET status='QUEUED', last_error_code=%s, lease_until=NULL, next_attempt_at=now(), updated_at=now()"
+                        " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
+                        (reason, claim.tenant_id, claim.intent_id, claim.lease_epoch),
+                    )
             return False
 
     def _finish_attempt(

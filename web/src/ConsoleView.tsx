@@ -1079,6 +1079,7 @@ export default function ConsoleView() {
                 setStatusMsg("現在、配送待ちの保留 Outbox 通知はありません (0 件)。");
                 return true;
               }
+              const approvedIntentIds = preview.items.map((it) => it.intentId);
               const detailRows: Array<{ label: string; value: string }> = [
                 { label: "対象件数", value: `${preview.pendingCount} 件` },
                 ...preview.items.slice(0, 8).map((it, idx) => ({
@@ -1092,19 +1093,36 @@ export default function ConsoleView() {
               return askConfirmation(
                 {
                   title: "保留 Outbox 一括配送の確認",
-                  summary: `保留中の外部通知 ${preview.pendingCount} 件を以下の宛先へ一括送信します。`,
+                  summary: `保留中の外部通知 ${preview.pendingCount} 件を以下の宛先へ一括送信します（プレビュー後に追加された通知は対象外です）。`,
                   details: detailRows,
                   warning: "実送信後は外部サーバーへの通知取り消しができません。対象と宛先を確認してください。",
                   confirmLabel: `${preview.pendingCount} 件を実際に送信する`,
                 },
                 () =>
-                  runAction("保留中の通知 Outbox を配送しました。", async () => {
-                    await apiFetch("/v1/notifications/dispatch", {
-                      method: "POST",
-                      body: JSON.stringify({ dryRun: false }),
+                  (async () => {
+                    let outCounts: { claimed?: number; SUPPRESSED?: number } | undefined;
+                    const ok = await runAction("保留中の通知 Outbox を配送しました。", async () => {
+                      const out = await apiFetch<{ counts?: { claimed?: number; SUPPRESSED?: number } }>(
+                        "/v1/notifications/dispatch",
+                        {
+                          method: "POST",
+                          body: JSON.stringify({ dryRun: false, intentIds: approvedIntentIds }),
+                        },
+                      );
+                      outCounts = out.counts;
+                      await refreshWorkspace();
                     });
-                    await refreshWorkspace();
-                  }),
+                    if (
+                      ok &&
+                      outCounts &&
+                      ((outCounts.claimed ?? 0) < approvedIntentIds.length || (outCounts.SUPPRESSED ?? 0) > 0)
+                    ) {
+                      setStatusMsg(
+                        `保留中の通知 Outbox を配送しました（対象 ${approvedIntentIds.length} 件中 送信試行 ${outCounts.claimed ?? 0} 件・状態変化によるスキップ/抑止あり）。`,
+                      );
+                    }
+                    return ok;
+                  })(),
               );
             }}
             onMarkRead={(notificationId) =>
