@@ -458,6 +458,8 @@ class Supervisor:
         deadline: float,
         heartbeat_seconds: float,
         revoked: asyncio.Event,
+        prepared_output_fd: int | None = None,
+        source_cwd: bool = False,
     ) -> AsyncIterator[tuple[dict[str, Any], int, bytes]]:
         """Private prototype: capture/sign only after this Supervisor reports clean exit.
 
@@ -467,7 +469,7 @@ class Supervisor:
         from aiagent_development.code_intelligence.artifact_capture import capture_scip
 
         from .capture_signing import sign_capture, validate_capture_binding
-        from .projected_output import projected_output
+        from .projected_output import projected_output, validate_projected_output
 
         g = verify(self.grant_key, token, argv, cwd_rel)
         if g.execution_binding_version != 1 or self.cell_uid is None:
@@ -476,9 +478,14 @@ class Supervisor:
         if not math.isfinite(deadline) or not time.monotonic() < deadline <= time.monotonic() + 300:
             raise GrantError("CAPTURE_DEADLINE")
         assert g.execution_id is not None
-        with projected_output(
-            output_parent, g, cell_uid=self.cell_uid, cell_gid=self.cell_gid or self.cell_uid
-        ) as output_fd:
+        cell_gid = self.cell_gid if self.cell_gid is not None else self.cell_uid
+        output = (
+            projected_output(output_parent, g, cell_uid=self.cell_uid, cell_gid=cell_gid)
+            if prepared_output_fd is None
+            else contextlib.nullcontext(prepared_output_fd)
+        )
+        with output as output_fd:
+            validate_projected_output(output_parent, g, output_fd, cell_uid=self.cell_uid, cell_gid=cell_gid)
             output_path = output_parent / g.execution_id
             result = await self._execute(
                 token,
@@ -487,6 +494,7 @@ class Supervisor:
                 source_fd=source_fd,
                 output_fd=output_fd,
                 output_path=output_path,
+                source_cwd=source_cwd,
                 revoked=revoked,
                 heartbeat_seconds=heartbeat_seconds,
             )

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -20,7 +22,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from aiagent_development.code_intelligence.artifact_capture import capture_scip
 from aiagent_development.code_intelligence.git_proof import build_git_tree_proof
 from aiagent_development.code_intelligence.git_reader import GitSnapshot
 from aiagent_development.code_intelligence.indexer_recipe import python_scip_argv
@@ -35,7 +36,7 @@ from aiagent_development.code_intelligence.scip_navigation import (
     SourceProvenance,
     load_index,
 )
-from aiagent_domain import uuid7
+from aiagent_domain import canonical_json, sha256_hex, uuid7
 from aiagent_sandbox.grant import Grant, sign
 from aiagent_sandbox.projected_output import projected_output
 from aiagent_sandbox.supervisor import Limits, Supervisor
@@ -141,6 +142,18 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                 assert "DENIED" in denied["stdout"] and "CROSS_TASK_READ" not in denied["stdout"]
                 for attempt in range(2):
                     execution = uuid7()
+                    attempt_id = uuid.uuid4().hex
+                    binding = {
+                        "execution": execution,
+                        "attempt": attempt_id,
+                        "intent": "intent",
+                        "tenant": "tenant",
+                        "owner": "owner",
+                        "task": "task",
+                        "run": "run",
+                        "goal_revision": 1,
+                        "lease_epoch": 1,
+                    }
                     provisional = Grant(
                         uuid.uuid4().hex,
                         "tenant",
@@ -153,69 +166,73 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                         40000,
                         8 * 1024**3,
                         int(time.time()) + 60,
-                        attempt_id=uuid.uuid4().hex,
+                        attempt_id=attempt_id,
                         attempt_binding_version=1,
                         execution_binding_version=1,
                         execution_id=execution,
-                        execution_binding_sha256=hashlib.sha256(wire).hexdigest(),
+                        execution_binding_sha256=sha256_hex(binding),
                     )
                     with projected_output(output_parent, provisional, cell_uid=20001, cell_gid=20001) as output_fd:
                         argv = list(python_scip_argv(fd, output_fd))
                         token = sign(b"g" * 32, replace(provisional, argv=tuple(argv)))
-                        before = resource.getrusage(resource.RUSAGE_CHILDREN)
-                        result = asyncio.run(
-                            supervisor._execute(
+
+                        async def run_indexer():
+                            async with supervisor._execute_and_capture(
                                 token,
                                 argv,
                                 ".",
                                 source_fd=fd,
-                                output_fd=output_fd,
-                                output_path=output_parent / execution,
+                                output_parent=output_parent,
+                                prepared_output_fd=output_fd,
                                 source_cwd=True,
+                                binding=binding,
+                                receipt_key=b"r" * 32,
+                                private_parent=capture_parent,
+                                deadline=time.monotonic() + 60,
                                 heartbeat_seconds=10,
-                            )
-                        )
+                                revoked=asyncio.Event(),
+                            ) as (result, captured_fd, proof):
+                                return result, os.read(captured_fd, 4 * 1024 * 1024 + 1), proof
+
+                        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                        result, index, capture_proof = asyncio.run(run_indexer())
                         after = resource.getrusage(resource.RUSAGE_CHILDREN)
-                        if result.get("exitCode") != 0:
-                            print("fixture diagnostic:", result.get("stderr"))
-                        assert result["status"] == "EXITED" and result["exitCode"] == 0, (
-                            result["status"],
-                            result.get("exitCode"),
-                            result.get("stderr"),
+                        assert result["status"] == "EXITED" and result["exitCode"] == 0
+                        assert not result["timedOut"] and not result["truncated"]
+                        envelope = json.loads(capture_proof)
+                        expected = hmac.new(
+                            b"r" * 32, canonical_json(envelope["payload"]).encode(), hashlib.sha256
+                        ).hexdigest()
+                        assert hmac.compare_digest(envelope["mac"], expected)
+                        digest = hashlib.sha256(index).hexdigest()
+                        assert envelope["payload"]["execution"] == execution
+                        assert envelope["payload"]["artifact_sha256"] == digest
+                        manifest = IndexManifest(
+                            snapshot.snapshot.identity,
+                            snapshot.tree,
+                            digest,
+                            "scip-python",
+                            "0.6.8",
+                            0,
+                            sources,
                         )
-                        assert not result["timedOut"] and not result["truncated"], result
-                        with capture_scip(
-                            output_fd, capture_parent, expected_uid=20001, deadline=time.monotonic() + 10
-                        ) as artifact:
-                            index = os.read(artifact.fd, artifact.byte_length + 1)
-                            assert hashlib.sha256(index).hexdigest() == artifact.sha256
-                            manifest = IndexManifest(
-                                snapshot.snapshot.identity,
-                                snapshot.tree,
-                                artifact.sha256,
-                                "scip-python",
-                                "0.6.8",
-                                0,
-                                sources,
-                            )
-                            started = time.monotonic()
-                            loaded = load_index(snapshot, manifest, index)
-                            consumer_ms = (time.monotonic() - started) * 1000
-                            assert (
-                                loaded.status in (IndexStatus.PARTIAL, IndexStatus.VALIDATED)
-                                and loaded.graph is not None
-                            ), loaded
-                            symbol = "scip-python python dev13-workspace 1.0 library/greet()."
-                            assert loaded.graph.definitions(symbol)[0].path == "library.py"
-                            assert {item.path for item in loaded.graph.references(symbol)} == {"main.py"}
-                            assert loaded.graph.provenance_trust == "UNVERIFIED_INDEXER_ORIGIN"
-                            print(
-                                f"fixture attempt={attempt + 1} wall_ms={result['wallMs']} "
-                                f"cpu_s={(after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime):.3f} "
-                                f"child_peak_rss_kib={after.ru_maxrss} artifact_bytes={artifact.byte_length} "
-                                f"consumer_ms={consumer_ms:.1f} sources={len(projection.files)} "
-                                f"occurrences={len(loaded.graph.locations)} status={loaded.status}"
-                            )
+                        started = time.monotonic()
+                        loaded = load_index(snapshot, manifest, index)
+                        consumer_ms = (time.monotonic() - started) * 1000
+                        assert (
+                            loaded.status in (IndexStatus.PARTIAL, IndexStatus.VALIDATED) and loaded.graph is not None
+                        ), loaded
+                        symbol = "scip-python python dev13-workspace 1.0 library/greet()."
+                        assert loaded.graph.definitions(symbol)[0].path == "library.py"
+                        assert {item.path for item in loaded.graph.references(symbol)} == {"main.py"}
+                        assert loaded.graph.provenance_trust == "UNVERIFIED_INDEXER_ORIGIN"
+                        print(
+                            f"fixture attempt={attempt + 1} wall_ms={result['wallMs']} "
+                            f"cpu_s={(after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime):.3f} "
+                            f"child_peak_rss_kib={after.ru_maxrss} artifact_bytes={len(index)} "
+                            f"consumer_ms={consumer_ms:.1f} sources={len(projection.files)} "
+                            f"occurrences={len(loaded.graph.locations)} status={loaded.status}"
+                        )
                     assert not list(output_parent.iterdir())
             assert parent.stat().st_mode & 0o777 == 0o700 and parent.stat().st_gid == original_gid
             for item in projection.files:

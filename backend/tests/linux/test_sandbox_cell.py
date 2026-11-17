@@ -879,7 +879,7 @@ def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
     if os.geteuid() != 0:
         pytest.skip("projected output requires privileged Supervisor")
     from aiagent_sandbox.grant import verify
-    from aiagent_sandbox.projected_output import projected_output
+    from aiagent_sandbox.projected_output import projected_output, validate_projected_output
 
     parent = tmp_path / "output-parent"
     parent.mkdir(mode=0o700)
@@ -887,11 +887,18 @@ def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
     g = verify(KEY, grant(argv, projected=True), argv, ".")
     with projected_output(parent, g, cell_uid=20001, cell_gid=20001) as fd:
         assert os.fstat(fd).st_uid == 20001
+        validate_projected_output(parent, g, fd, cell_uid=20001, cell_gid=20001)
+        from dataclasses import replace
+
+        with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_INVALID"):
+            validate_projected_output(parent, replace(g, execution_id=uuid7()), fd, cell_uid=20001, cell_gid=20001)
         with pytest.raises(FileExistsError):
             with projected_output(parent, g, cell_uid=20001, cell_gid=20001):
                 pytest.fail("duplicate output accepted")
         child = os.open("index.scip", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         os.close(child)
+        with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_INVALID"):
+            validate_projected_output(parent, g, fd, cell_uid=20001, cell_gid=20001)
     assert not list(parent.iterdir())
 
 
