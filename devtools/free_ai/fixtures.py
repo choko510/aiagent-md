@@ -135,12 +135,13 @@ def _numbered_code(code: str) -> str:
     return "\n".join(f"{number}: {line}" for number, line in enumerate(code.splitlines(), 1))
 
 
-def _review_prompt(code: str) -> str:
+def _review_prompt(code: str, specification: str | None = None) -> str:
     numbered = _numbered_code(code)
+    spec_block = "" if specification is None else f"Specification: {specification}\n\n"
     return (
         "Review the following synthetic Python code. Each line is prefixed with its line "
         "number.\n\n"
-        f"{numbered}\n\n"
+        f"{spec_block}{numbered}\n\n"
         "Report every real defect. Reply with ONLY a JSON object, no prose and no markdown "
         "fences, in exactly this shape:\n"
         '{"findings":[{"line":<line number>,"kind":"<kind>","severity":"<severity>"}]}\n\n'
@@ -171,7 +172,7 @@ REVIEW_03_PROMPT = _review_prompt(REVIEW_03_CODE)
 
 REVIEW_04_CODE = """def allowed(age):
     return age > 18"""
-REVIEW_04_PROMPT = _review_prompt(REVIEW_04_CODE)
+REVIEW_04_PROMPT = _review_prompt(REVIEW_04_CODE, "Only people aged 18 or older are allowed.")
 
 REVIEW_05_CODE = """import sqlite3
 
@@ -187,7 +188,11 @@ REVIEW_06_CODE = """def increment(counter):
 
 def withdraw(balance, amount):
     return balance - amount"""
-REVIEW_06_PROMPT = _review_prompt(REVIEW_06_CODE)
+REVIEW_06_PROMPT = _review_prompt(
+    REVIEW_06_CODE,
+    "increment must be thread-safe, and withdraw must reject non-positive amounts and "
+    "amounts greater than the balance.",
+)
 
 REVIEW_07_CODE = """def withdraw(balance, amount):
     return balance - amount
@@ -197,7 +202,10 @@ def load(conn, user_id):
     headers = {"Authorization": "Bearer synthetic-token"}
     print(headers)
     return row"""
-REVIEW_07_PROMPT = _review_prompt(REVIEW_07_CODE)
+REVIEW_07_PROMPT = _review_prompt(
+    REVIEW_07_CODE,
+    "withdraw must reject non-positive amounts and amounts greater than the balance.",
+)
 
 REVIEW_08_CODE = """def load(conn, user_id):
     if user_id <= 0:
