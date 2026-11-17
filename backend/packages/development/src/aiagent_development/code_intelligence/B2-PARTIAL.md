@@ -327,3 +327,11 @@ Projected execution now requires a finite 0.1–10 second watchdog window;
 it cannot start through the private hook without one. Generic sandbox.exec is
 unchanged. There is still no production orchestration or authenticated Source
 Broker, and Supervisor process-death cleanup is not yet guaranteed.
+
+Projected executions now request a parent-death SIGKILL in the Supervisor
+launcher and PID-namespace child, using a pidfd to detect the fork/prctl race.
+A projected-only seccomp rule prevents the child from clearing or weakening
+that signal. Docker tests kill the Supervisor after the child starts and verify
+that the synthetic child cannot create its later marker. This is defense in
+depth, not a cgroup-empty proof: privileged/set-ID exec semantics, VM restart,
+orphan staging cleanup and production kernel isolation remain unverified.

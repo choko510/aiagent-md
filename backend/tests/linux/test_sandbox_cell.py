@@ -645,3 +645,68 @@ def test_projected_execution_rejects_invalid_heartbeat(tmp_path: Path, invalid: 
             run(s._execute(grant(argv, projected=True), argv, ".", source_fd=fd, heartbeat_seconds=invalid))
     finally:
         os.close(fd)
+
+
+def test_projected_child_dies_when_supervisor_is_killed(tmp_path: Path) -> None:
+    """A real supervised synthetic child must not outlive its killed Supervisor."""
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    import subprocess
+
+    source = tmp_path / "parent-death-source"
+    source.mkdir()
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = tmp_path / "parent-death-cells"
+    script = """
+import asyncio, os, sys, time, uuid
+from pathlib import Path
+from aiagent_domain import uuid7
+from aiagent_sandbox.grant import Grant, sign
+from aiagent_sandbox.supervisor import Supervisor
+root=Path(sys.argv[1]); source_fd=int(sys.argv[2]); key=b"k"*32
+s=Supervisor(root,key,require_netns=False,cell_uid=20001,cell_gid=20001)
+code="from pathlib import Path; import time; Path('started').write_text('1'); time.sleep(2); Path('survived').write_text('1')"
+argv=[sys.executable,"-c",code]
+g=Grant(uuid.uuid4().hex,"t1","task1","run","intent",1,tuple(argv),".",10000,536870912,int(time.time())+60,
+        attempt_id=uuid.uuid4().hex,attempt_binding_version=1,execution_binding_version=1,
+        execution_id=uuid7(),execution_binding_sha256="a"*64)
+asyncio.run(s._execute(sign(key,g),argv,".",source_fd=source_fd,heartbeat_seconds=10))
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(root), str(source_fd)],
+        pass_fds=(source_fd,),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )  # noqa: S603
+    try:
+        start = root / "t1" / "task1" / "started"
+        end = time.monotonic() + 8
+        while not start.exists() and proc.poll() is None and time.monotonic() < end:
+            time.sleep(0.02)
+        assert start.exists(), "projected child did not start"
+        proc.kill()
+        proc.wait(timeout=5)
+        time.sleep(2.5)
+        assert not (root / "t1" / "task1" / "survived").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        os.close(source_fd)
+
+
+def test_projected_child_cannot_clear_parent_death_signal(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "source-pdeath"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    code = "import ctypes; c=ctypes.CDLL(None,use_errno=True); r=c.prctl(1,0,0,0,0); print(r,ctypes.get_errno())"
+    argv = [sys.executable, "-c", code]
+    try:
+        result = run(s._execute(grant(argv, projected=True), argv, ".", source_fd=fd, heartbeat_seconds=10))
+        assert result["status"] == "EXITED" and result["exitCode"] == 0, result
+        assert result["stdout"].strip() == "-1 1"
+    finally:
+        os.close(fd)

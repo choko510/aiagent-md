@@ -93,7 +93,7 @@ class _SockFProg(ctypes.Structure):
     _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
 
 
-def block_cross_task_process_access() -> None:
+def block_cross_task_process_access(*, preserve_parent_death: bool = False) -> None:
     """Seccomp-BPF filter inherited across exec: deny same-UID process inspection.
 
     Dumpability is reset on execve of ordinary binaries, so PR_SET_DUMPABLE=0
@@ -104,9 +104,11 @@ def block_cross_task_process_access() -> None:
     if machine == "x86_64":
         arch = 0xC000003E  # AUDIT_ARCH_X86_64
         blocked = (101, 310, 311, 312, 438, 303, 304)
+        prctl_number = 157
     elif machine == "aarch64":
         arch = 0xC00000B7  # AUDIT_ARCH_AARCH64
         blocked = (117, 270, 271, 272, 438, 264, 265)
+        prctl_number = 167
     else:
         raise OSError("unsupported seccomp architecture")
 
@@ -124,6 +126,20 @@ def block_cross_task_process_access() -> None:
             (0x45, 0, 1, 0x40000000),  # BPF_JSET x32 bit -> KILL
             (0x06, 0, 0, 0x80000000),
         ]
+    if preserve_parent_death:
+        # Permit PR_SET_PDEATHSIG only with SIGKILL; an untrusted child must
+        # not clear or weaken the projected launcher's parent-death signal.
+        prog.extend(
+            [
+                (0x15, 0, 5, prctl_number),
+                (0x20, 0, 0, 16),
+                (0x15, 0, 3, 1),
+                (0x20, 0, 0, 24),
+                (0x15, 1, 0, 9),
+                (0x06, 0, 0, 0x00050000 | errno.EPERM),
+                (0x20, 0, 0, 0),
+            ]
+        )
     for number in blocked:
         prog.extend(
             [

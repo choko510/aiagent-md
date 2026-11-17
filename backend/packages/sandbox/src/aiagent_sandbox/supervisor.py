@@ -67,6 +67,44 @@ os._exit(125)
 """
 
 
+# Projected runs additionally fail closed on Supervisor/launcher death. pidfd
+# closes the fork-to-prctl race for PID 1, whose external parent is invisible
+# through getppid() inside its PID namespace.
+_PROJECTED_PID_NAMESPACE_EXEC = """
+import ctypes
+import os
+import select
+import signal
+import sys
+
+try:
+    parent_fd = os.pidfd_open(os.getpid(), 0)
+    pid = os.fork()
+except (OSError, AttributeError):
+    os._exit(125)
+if pid == 0:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        os._exit(125)
+    poller = select.poll()
+    poller.register(parent_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    if poller.poll(0):
+        os._exit(125)
+    os.close(parent_fd)
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError:
+        os._exit(127)
+os.close(parent_fd)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status):
+    os._exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(125)
+"""
+
+
 async def _bounded_output(proc: asyncio.subprocess.Process, wall_seconds: float) -> tuple[bytes, bytes, bool, bool]:
     """Drain both pipes concurrently with bounded retention; kill on overflow or timeout."""
     assert proc.stdout is not None and proc.stderr is not None
@@ -217,6 +255,7 @@ class Supervisor:
         lim = self.limits
         require_netns = self.require_netns
         uid, gid = self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid
+        expected_parent = os.getpid()
 
         def fn() -> None:
             os.setsid()  # new session + process group: the whole tree is killable
@@ -249,9 +288,15 @@ class Supervisor:
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
                 disable_dumpability()  # defense in depth; execve resets this alone
-                block_cross_task_process_access()  # inherited by execve and child processes
+                block_cross_task_process_access(preserve_parent_death=source_fd is not None)
             except OSError:
                 os._exit(98)
+            if source_fd is not None:
+                import ctypes
+
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != expected_parent:
+                    os._exit(98)
 
         return fn
 
@@ -323,7 +368,7 @@ class Supervisor:
                 "-I",
                 "-S",
                 "-c",
-                _PID_NAMESPACE_EXEC,
+                _PID_NAMESPACE_EXEC if source_fd is None else _PROJECTED_PID_NAMESPACE_EXEC,
                 *argv,
                 cwd=str(cwd),
                 env=env,
