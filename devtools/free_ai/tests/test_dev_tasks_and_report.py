@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import socket
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
@@ -547,7 +548,17 @@ def test_report_accepts_valid_legacy_records() -> None:
         http_status=200,
         cost_reported_usd=0.0,
     )
-    for record in (jev, alias):
+    refused = _record(
+        provider_id="pollinations_legacy",
+        model_requested="openai-fast",
+        fixture_id="jp_hello",
+        model_observed=None,
+        status="SAFETY_BLOCKED",
+        reason_code="LEGACY_DISABLED",
+        http_status=None,
+        cost_reported_usd=None,
+    )
+    for record in (jev, alias, refused):
         validated = runner._validated_record(json.dumps(record))
         assert validated["provider_id"] == record["provider_id"]
 
@@ -582,6 +593,20 @@ _SEMANTIC_INVALID = [
     _record(status="REMOTE_ERROR", reason_code="REMOTE_FAILURE", http_status=200),
     _record(status="CONTENT_MISMATCH", reason_code="OUTPUT_MISMATCH", model_observed=None),
     _record(status="FORMAT_MISMATCH", reason_code="INVALID_JSON", cost_reported_usd=0.25),
+    _record(
+        status="UNVERIFIED_TERMS",
+        reason_code="LEGACY_DISABLED",
+        http_status=None,
+        model_observed=None,
+        cost_reported_usd=None,
+    ),
+    _record(
+        status="SAFETY_BLOCKED",
+        reason_code="LEGACY_DISABLED",
+        http_status=None,
+        model_observed=None,
+        cost_reported_usd=None,
+    ),
 ]
 
 
@@ -642,3 +667,110 @@ def test_report_accepts_valid_transport_failure_shapes(
     code, out = _run_report(monkeypatch, tmp_path, json.dumps(record) + "\n", capsys)
     assert code == 0
     assert json.loads(out)["records"] == 1
+
+
+def _write_quota(path: Path, provider: str, *, last_utc_epoch: float, local_day: str, day_count: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "providers": {
+                    provider: {
+                        "last_utc_epoch": last_utc_epoch,
+                        "local_day": local_day,
+                        "day_count": day_count,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _probe_argv(*extra: str, provider: str, fixture: str) -> list[str]:
+    return [
+        "probe",
+        "--provider",
+        provider,
+        "--fixture",
+        fixture,
+        "--ack-synthetic-only",
+        "--ack-external-request",
+        *extra,
+    ]
+
+
+def test_e2e_second_probe_quota_rejection_is_counted_as_local_skip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=_chat_text("INDEX_OUT_OF_RANGE"),
+        ),
+    )
+    argv = _probe_argv(provider="kilo", fixture="dev_t01")
+
+    assert runner.main(argv) == 0
+    first = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert first["status"] == "PASS"
+
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    _write_quota(
+        runs / "quota.json",
+        "kilo",
+        last_utc_epoch=time.time() - 1000,
+        local_day=day,
+        day_count=16,
+    )
+    assert runner.main(argv) == 2
+    second = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert second["status"] == "RATE_LIMITED"
+    assert second["reason_code"] == "RATE_LIMIT"
+    assert second["http_status"] is None
+    assert len(requests) == 1
+
+    log_lines = (runs / "probes.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 2
+    assert all(list(json.loads(line)) == list(runner.RECORD_FIELDS) for line in log_lines)
+
+    assert runner.main(["report"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    kilo = report["providers"]["kilo"]
+    assert kilo["attempts"] == 2
+    assert kilo["evaluated"] == 1
+    assert kilo["pass"] == 1
+    assert kilo["communication_failures"] == 0
+    assert kilo["local_preflight_skips"] == 1
+    assert kilo["pass_rate"] == 1.0
+
+
+def test_e2e_legacy_refusal_is_counted_as_local_skip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(monkeypatch, lambda _request: httpx.Response(200))
+    argv = _probe_argv("--allow-legacy", provider="jev_legacy", fixture="refund_noul")
+
+    for _ in range(2):
+        assert runner.main(argv) == 2
+        record = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert record["status"] == "UNVERIFIED_TERMS"
+        assert record["reason_code"] == "LEGACY_DISABLED"
+    assert requests == []
+
+    log_lines = (runs / "probes.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 2
+
+    assert runner.main(["report"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    jev = report["providers"]["jev_legacy"]
+    assert jev["attempts"] == 2
+    assert jev["evaluated"] == 0
+    assert jev["communication_failures"] == 0
+    assert jev["local_preflight_skips"] == 2
+    assert jev["pass_rate"] is None

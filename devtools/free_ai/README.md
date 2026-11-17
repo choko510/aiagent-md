@@ -83,11 +83,17 @@ response-stage `SAFETY_BLOCKED`). Results rejected before any send (`UNVERIFIED_
 `LOCAL_INPUT_INVALID`, local quota `/` held lock, local legacy refusal) are counted as
 `local_preflight_skips` and are never part of the quality denominator.
 
+Local refusals that happen before any socket is opened (quota interval or daily cap,
+disabled legacy service, held run lock, provider/fixture mismatch) are written to the same
+13-field log without sending anything, so `report` can account for them as
+`local_preflight_skips`. A log write failure still fails closed with exit `5`.
+
 Records are validated for meaning as well as shape: `PASS` requires HTTP 200, no positive
 cost and, for Kilo/OVH, the exact requested model (legacy aliases stay exempt);
 `MODEL_DRIFT` requires a different observed model; `UNEXPECTED_BILLING` requires a
 positive cost; status/reason pairs, provider/fixture pairs, catalog model ids and
 HTTP/status pairings are checked against what the lab can actually produce.
+`LEGACY_DISABLED` and `UNVERIFIED_TERMS` are only accepted for the two legacy providers.
 
 The log is limited to 1 MiB and 5000 lines. A missing or empty file is an empty report;
 malformed JSON, duplicate keys, `NaN`/`Infinity`, unexpected or missing fields, wrong

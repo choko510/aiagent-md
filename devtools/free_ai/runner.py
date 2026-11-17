@@ -410,6 +410,13 @@ def _validate_record_semantics(
     model_observed = record.get("model_observed")
     official = provider_id in OFFICIAL_CHAT_PROVIDERS
 
+    # Legacy refusal codes only exist for the two disabled legacy services. A record
+    # claiming otherwise cannot have been produced by this lab.
+    if reason == "LEGACY_DISABLED" and not spec.is_legacy:
+        fail()
+    if status == "UNVERIFIED_TERMS" and not spec.is_legacy:
+        fail()
+
     if status == "PASS":
         if http_status != 200:
             fail()
@@ -815,6 +822,9 @@ def _reserve_slot(spec: ProviderSpec) -> LocalDecision:
 def _append_probe(record: ProbeRecord) -> None:
     line = json.dumps(record.as_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
+        # A rejected preflight may run before the run lock ever created ``.runs``.
+        # Creating the directory here keeps local refusals observable without sending.
+        RUNS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(str(LOG_FILE), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         try:
             os.write(fd, (line + "\n").encode("utf-8"))
@@ -856,30 +866,38 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         )
         return ProbeOutcome(record=record, exit_code=exit_code)
 
+    def logged(outcome_value: ProbeOutcome) -> ProbeOutcome:
+        """Persist a preflight decision; a write failure stays fail-closed."""
+        try:
+            _append_probe(outcome_value.record)
+        except QuotaStateError:
+            return outcome("SAFETY_BLOCKED", "INVALID_SCHEMA", EXIT_UNSAFE)
+        return outcome_value
+
     if fixture.fixture_id not in allowed_fixtures(spec):
-        return outcome("LOCAL_INPUT_INVALID", "INVALID_SCHEMA", EXIT_SKIPPED)
+        return logged(outcome("LOCAL_INPUT_INVALID", "INVALID_SCHEMA", EXIT_SKIPPED))
     if spec.is_legacy and (
         not cast("bool", args.allow_legacy) or not LEGACY_ANONYMOUS_ALLOWED.get(spec.provider_id, False)
     ):
         # The anonymous terms of both legacy services could not be confirmed on
         # CATALOG_CHECKED_ON, so nothing is sent even with --allow-legacy.
-        return outcome("UNVERIFIED_TERMS", "LEGACY_DISABLED", EXIT_SKIPPED)
+        return logged(outcome("UNVERIFIED_TERMS", "LEGACY_DISABLED", EXIT_SKIPPED))
     try:
         validate_spec(spec)
         payload = build_payload(spec, fixture.fixture_id)
         encode_body(payload)
     except LocalInputError as exc:
-        return outcome("LOCAL_INPUT_INVALID", exc.reason_code, EXIT_UNSAFE)
+        return logged(outcome("LOCAL_INPUT_INVALID", exc.reason_code, EXIT_UNSAFE))
 
     try:
         with _exclusive_run():
             if _reserve_slot(spec) != "RESERVED":
-                return outcome("RATE_LIMITED", "RATE_LIMIT", EXIT_SKIPPED)
+                return logged(outcome("RATE_LIMITED", "RATE_LIMIT", EXIT_SKIPPED))
             result = asyncio.run(post_json(spec, fixture.fixture_id))
     except LockBusyError:
-        return outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE)
+        return logged(outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE))
     except QuotaStateError:
-        return outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE)
+        return logged(outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE))
 
     evaluation = _evaluate(spec, fixture, result)
     normalized = evaluation.normalized
