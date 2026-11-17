@@ -9,23 +9,36 @@ import hmac
 import json
 import os
 import re
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from http.cookies import CookieError, SimpleCookie
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 from urllib.parse import SplitResult, urlencode, urlsplit, urlunsplit
 
-from aiagent_core import commands, config, memory_tombstones, memory_writer
+from aiagent_automation.campaign import (
+    CampaignController,
+    CampaignPlan,
+    DenyUntrustedVerification,
+    Rejected,
+    StopPolicy,
+    SystemClock,
+)
+from aiagent_automation.pg_store import PostgresCampaignStore, PostgresQueueDispatch, PostgresWatchStore
+from aiagent_automation.watch import DailyWatch
+from aiagent_core import commands, config, memory_tombstones, memory_writer, notifications
 from aiagent_core.commands import CommandError, Scope
 from aiagent_core.db import Database
+from aiagent_core.egress_http import ForwardProxyError, send_via_forward_proxy
 from aiagent_core.logging import redact as redact_secrets
 from aiagent_core.migrate import check_compatible
 from aiagent_core.step4_gate import capability_snapshot
-from aiagent_domain import is_uuid7
+from aiagent_domain import is_uuid7, uuid7
 from aiagent_domain.canonical import sha256_bytes
 from aiagent_domain.generated import (
     ApprovalDecisionCommandV1,
@@ -36,8 +49,8 @@ from aiagent_domain.generated import (
     TaskSubmitCommandV1,
 )
 from aiagent_domain.rpcwire import RpcError
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 
@@ -296,10 +309,6 @@ def _matching_cookie_header(cookies: list[_CookieRecord], target_url: str) -> st
     return "; ".join(f"{c.name}={c.value}" for c in cookies if _cookie_matches_url(c, target_url))
 
 
-_CHUNK_HEX_RE = re.compile(rb"^[0-9a-fA-F]{1,16}$")
-_MAX_CHUNK_LINE_BYTES = 512
-_MAX_CHUNKS = 4096
-_CHUNK_READ_BLOCK = 8192
 _PASSWORD_INPUT_RE = re.compile(r"<input\b[^>]*\btype=[\"']?password\b", re.IGNORECASE)
 _CHALLENGE_MARKERS = (
     "g-recaptcha",
@@ -316,18 +325,37 @@ _AUTH_FAILURE_MARKERS = (
     "sign in failed",
     "incorrect password",
 )
+_SESSION_COOKIE = "aiagent_session"
+_SESSION_TTL_DEFAULT = 12 * 3600
 
 
-def _is_authenticated_proxy_denial(status_code: int, hmap: dict[str, str], permit: str) -> bool:
-    if status_code != 403 or hmap.get("x-aiagent-egress") != "denied" or not permit:
+def _same_origin_request(request: Request) -> bool:
+    """Reject cross-origin cookie-authenticated mutations by verifying Origin or Referer against Host."""
+    host_hdr = (request.headers.get("host") or "").strip().lower()
+    origin_raw = (request.headers.get("origin") or "").strip()
+    referer_raw = (request.headers.get("referer") or "").strip()
+    candidate = origin_raw or referer_raw
+    if not candidate:
+        return True
+    try:
+        cu = urlsplit(candidate)
+        c_scheme = cu.scheme.lower()
+        c_host = (cu.hostname or "").lower()
+        if not c_host or c_scheme not in ("http", "https"):
+            return False
+        c_port = cu.port or (443 if c_scheme == "https" else 80)
+    except ValueError:
         return False
-    proof = hmap.get("x-aiagent-egress-proof", "")
-    code_part, sep, mac_part = proof.partition(":")
-    if not sep or not code_part or not mac_part:
+    if not host_hdr:
         return False
-    key = sha256(permit.encode("utf-8")).digest()
-    expected = hmac.new(key, f"DENIED:{code_part}".encode(), sha256).hexdigest()
-    return hmac.compare_digest(mac_part, expected)
+    try:
+        hu = urlsplit(f"{request.url.scheme}://{host_hdr}")
+        h_scheme = hu.scheme.lower()
+        h_host = (hu.hostname or "").lower()
+        h_port = hu.port or (443 if h_scheme == "https" else 80)
+    except ValueError:
+        return False
+    return c_host == h_host and c_port == h_port
 
 
 def _takeover_authenticated_page(status_code: int, resp_text: str) -> bool:
@@ -354,155 +382,57 @@ async def _takeover_via_forward_proxy(
     timeout_s: float = 15.0,
 ) -> tuple[int, list[str], str]:
     """Send ONE forward-proxy HTTP/HTTPS request for Human Takeover using Aiagent human_takeover permit."""
-    import contextlib
-
-    pu = urlsplit(proxy_url)
-    if pu.scheme != "http" or not pu.hostname:
-        raise HTTPException(502, detail={"error": "INVALID_EGRESS_PROXY"})
-    lines = [
-        f"{method} {target_url} HTTP/1.1",
-        f"Host: {host_header}",
-        f"Proxy-Authorization: Aiagent human_takeover:{permit}",
-        "Connection: close",
-    ]
-    for k, v in headers.items():
-        if k.lower() not in ("host", "proxy-authorization", "connection", "content-length"):
-            lines.append(f"{k}: {v}")
-    if body is not None:
-        lines.append(f"Content-Length: {len(body)}")
-    raw = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
-    if body:
-        raw += body
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-
-    def rem_timeout() -> float:
-        rem = deadline - loop.time()
-        if rem <= 0:
-            raise TimeoutError("takeover proxy timeout")
-        return rem
-
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(pu.hostname, pu.port or 80), timeout=rem_timeout()
+        return await send_via_forward_proxy(
+            proxy_url,
+            identity="human_takeover",
+            permit=permit,
+            method=method,
+            target_url=target_url,
+            host_header=host_header,
+            headers=headers,
+            body=body,
+            timeout_s=timeout_s,
         )
-    except OSError:
-        raise HTTPException(502, detail={"error": "EGRESS_PROXY_UNREACHABLE"}) from None
+    except ForwardProxyError as exc:
+        if exc.code in ("EGRESS_PROXY_TIMEOUT", "PROXY_TIMEOUT"):
+            raise TimeoutError(exc.code) from None
+        err = "EGRESS_DENIED" if exc.http_status == 403 else exc.code
+        raise HTTPException(exc.http_status, detail={"error": err}) from None
 
-    try:
-        writer.write(raw)
-        await asyncio.wait_for(writer.drain(), timeout=rem_timeout())
-        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=rem_timeout())
-        head_lines = head[:-4].decode("latin-1").split("\r\n")
-        parts = head_lines[0].split(" ", 2)
-        if len(parts) < 2 or not parts[1].isdigit():
-            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-        status_code = int(parts[1])
-        set_cookies: list[str] = []
-        hmap: dict[str, str] = {}
-        for ln in head_lines[1:]:
-            if ":" in ln:
-                hk, _, hv = ln.partition(":")
-                kc, vc = hk.strip(), hv.strip()
-                hmap[kc.lower()] = vc
-                if kc.lower() == "set-cookie":
-                    set_cookies.append(vc)
-        if _is_authenticated_proxy_denial(status_code, hmap, permit):
-            raise HTTPException(403, detail={"error": "EGRESS_DENIED"})
-        chunks: list[bytes] = []
-        total = 0
-        cap = 524_288
-        if "chunked" in hmap.get("transfer-encoding", "").lower():
-            chunk_count = 0
-            saw_eof = False
-            while True:
-                chunk_count += 1
-                if chunk_count > _MAX_CHUNKS:
-                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-                try:
-                    sz_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_timeout())
-                except asyncio.LimitOverrunError:
-                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
-                except asyncio.IncompleteReadError:
-                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
-                if len(sz_line) > _MAX_CHUNK_LINE_BYTES:
-                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-                sz_hex = sz_line.strip().split(b";", 1)[0].strip()
-                if not _CHUNK_HEX_RE.fullmatch(sz_hex):
-                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-                clen = int(sz_hex, 16)
-                if clen == 0:
-                    while True:
-                        try:
-                            end_line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=rem_timeout())
-                        except asyncio.LimitOverrunError:
-                            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
-                        except asyncio.IncompleteReadError:
-                            raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
-                        if len(end_line) > _MAX_CHUNK_LINE_BYTES or not end_line.endswith(b"\r\n"):
-                            raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-                        if end_line == b"\r\n":
-                            break
-                    saw_eof = True
-                    break
-                if clen > cap - total:
-                    raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
-                remaining = clen
-                try:
-                    while remaining > 0:
-                        blk = await asyncio.wait_for(
-                            reader.readexactly(min(_CHUNK_READ_BLOCK, remaining)), timeout=rem_timeout()
-                        )
-                        chunks.append(blk)
-                        total += len(blk)
-                        remaining -= len(blk)
-                    crlf = await asyncio.wait_for(reader.readexactly(2), timeout=rem_timeout())
-                except asyncio.IncompleteReadError:
-                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"}) from None
-                if crlf != b"\r\n":
-                    raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-            if not saw_eof:
-                raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"})
-        elif hmap.get("content-length", "").strip():
-            cl_str = hmap["content-length"].strip()
-            if not cl_str.isdigit():
-                raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"})
-            expected = int(cl_str)
-            if expected > cap:
-                raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
-            while total < expected:
-                blk = await asyncio.wait_for(
-                    reader.read(min(_CHUNK_READ_BLOCK, expected - total)), timeout=rem_timeout()
-                )
-                if not blk:
-                    raise HTTPException(502, detail={"error": "INCOMPLETE_PROXY_RESPONSE"})
-                chunks.append(blk)
-                total += len(blk)
-        else:
-            while True:
-                blk = await asyncio.wait_for(reader.read(_CHUNK_READ_BLOCK), timeout=rem_timeout())
-                if not blk:
-                    break
-                if total + len(blk) > cap:
-                    raise HTTPException(502, detail={"error": "RESPONSE_TOO_LARGE"})
-                chunks.append(blk)
-                total += len(blk)
-        return status_code, set_cookies, b"".join(chunks).decode("utf-8", "replace")
-    except (HTTPException, TimeoutError):
-        raise
-    except (OSError, asyncio.IncompleteReadError, ValueError):
-        raise HTTPException(502, detail={"error": "INVALID_PROXY_RESPONSE"}) from None
-    finally:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+
+def _campaign_http_error(exc: Rejected) -> HTTPException:
+    code = str(exc)
+    if code == "CAMPAIGN_NOT_FOUND":
+        return HTTPException(404, detail={"error": code})
+    if code in (
+        "STALE_CONTROL_VERSION",
+        "CONTROL_COMMAND_CONFLICT",
+        "NOT_PAUSABLE",
+        "NOT_RESUMABLE",
+        "BLOCKED_RESUME",
+        "INVALID_APPROVAL_TRANSITION",
+        "CAMPAIGN_EXISTS",
+    ) or code.startswith("CAMPAIGN_"):
+        return HTTPException(409, detail={"error": code})
+    return HTTPException(422, detail={"error": code})
+
+
+def _strict_optional_bool(body: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    """Strictly parse optional JSON boolean flags; reject strings ('false'), ints (0/1), null, lists, etc. as 422."""
+    if key not in body:
+        return default
+    val = body[key]
+    if type(val) is not bool:
+        raise HTTPException(422, detail={"error": f"INVALID_BOOLEAN_{key.upper()}"})
+    return val
 
 
 def create_app(
     db: Database | None = None,
     *,
     storage_key_ring: Any = None,
+    notification_key_ring: Any = None,
     sentinel: Any = None,
     egress_proxy: str | None = None,
     allowed_web_hosts: frozenset[str] | None = None,
@@ -510,6 +440,11 @@ def create_app(
     takeover_verify_ssl: Any = True,
     takeover_http_fn: Callable[[str, str, dict[str, str], bytes | None], Awaitable[tuple[int, list[str], str]]]
     | None = None,
+    notify_resolver: Callable[[str, int], Awaitable[list[str]]] | None = None,
+    notify_verify_ssl: Any = True,
+    notify_allow_private: frozenset[str] = frozenset(),
+    notify_direct_send_fn: notifications.DirectSendFn | None = None,
+    web_dist_dir: Path | None = None,
 ) -> FastAPI:
     state: dict[str, Database] = {}
 
@@ -530,13 +465,30 @@ def create_app(
     def get_db() -> Database:
         return state["db"]
 
-    async def scope(authorization: Annotated[str | None, Header()] = None) -> Scope:
-        if not authorization or not authorization.startswith("Bearer ") or len(authorization) > 400:
+    async def scope(request: Request, authorization: Annotated[str | None, Header()] = None) -> Scope:
+        if authorization:
+            if not authorization.startswith("Bearer ") or len(authorization) > 400:
+                raise HTTPException(401, "unauthenticated")
+            h = sha256_bytes(authorization[7:].encode())
+            row = await asyncio.to_thread(get_db().one, "SELECT * FROM agent.resolve_api_token(%s)", (h,))
+            if row is None:
+                raise HTTPException(401, "unauthenticated")
+            return Scope(row["tenant_id"], row["user_id"], row["workspace_id"])
+
+        raw_cookie = request.cookies.get(_SESSION_COOKIE)
+        if not raw_cookie or len(raw_cookie) > 256:
             raise HTTPException(401, "unauthenticated")
-        h = sha256_bytes(authorization[7:].encode())
-        row = await asyncio.to_thread(get_db().one, "SELECT * FROM agent.resolve_api_token(%s)", (h,))
+        s_hash = sha256_bytes(raw_cookie.encode("utf-8"))
+        row = await asyncio.to_thread(get_db().one, "SELECT * FROM agent.resolve_web_session(%s)", (s_hash,))
         if row is None:
             raise HTTPException(401, "unauthenticated")
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            if not _same_origin_request(request):
+                raise HTTPException(403, detail={"error": "CSRF_ORIGIN_MISMATCH"})
+            csrf_hdr = (request.headers.get("x-csrf-token") or "").strip()
+            expected_csrf = str(row["csrf_token"])
+            if not csrf_hdr or not hmac.compare_digest(csrf_hdr, expected_csrf):
+                raise HTTPException(403, detail={"error": "CSRF_INVALID"})
         return Scope(row["tenant_id"], row["user_id"], row["workspace_id"])
 
     S = Annotated[Scope, Depends(scope)]
@@ -544,6 +496,10 @@ def create_app(
     @app.exception_handler(CommandError)
     async def _cmd(_: Request, e: CommandError) -> JSONResponse:
         return JSONResponse({"error": e.code}, status_code=e.http)
+
+    @app.exception_handler(notifications.NotificationError)
+    async def _notify_err(_: Request, e: notifications.NotificationError) -> JSONResponse:
+        return JSONResponse({"error": e.code}, status_code=e.http_status)
 
     @app.exception_handler(ValidationError)
     async def _val(_: Request, e: ValidationError) -> JSONResponse:
@@ -556,6 +512,125 @@ def create_app(
         if len(raw) > 64 * 1024:
             raise HTTPException(413, "too large")
         return model.model_validate_json(raw)
+
+    @app.post("/v1/auth/session", status_code=201)
+    async def create_web_session(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> JSONResponse:
+        if not _same_origin_request(request):
+            raise HTTPException(403, detail={"error": "CSRF_ORIGIN_MISMATCH"})
+        raw_body = await request.body()
+        if len(raw_body) > 4096:
+            raise HTTPException(413, "too large")
+        body_token = ""
+        ttl_s = _SESSION_TTL_DEFAULT
+        if raw_body:
+            try:
+                parsed = json.loads(raw_body)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+            if not isinstance(parsed, dict):
+                raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+            if isinstance(parsed.get("token"), str):
+                body_token = parsed["token"].strip()
+            if parsed.get("ttlSeconds") is not None:
+                try:
+                    ttl_s = int(parsed["ttlSeconds"])
+                except (TypeError, ValueError):
+                    raise HTTPException(422, detail={"error": "INVALID_TTL"}) from None
+                if not (60 <= ttl_s <= 604800):
+                    raise HTTPException(422, detail={"error": "INVALID_TTL"})
+        hdr_token = authorization[7:].strip() if authorization and authorization.startswith("Bearer ") else ""
+        token = body_token or hdr_token
+        if not token or len(token) > 380:
+            raise HTTPException(401, "unauthenticated")
+        token_sha = sha256_bytes(token.encode("utf-8"))
+        sess_id = uuid7()
+        sess_secret = secrets.token_urlsafe(32)
+        sess_sha = sha256_bytes(sess_secret.encode("utf-8"))
+        csrf_tok = secrets.token_urlsafe(32)
+
+        def create_row() -> dict[str, Any] | None:
+            return get_db().one(
+                "SELECT * FROM agent.create_web_session(%s,%s,%s,%s,%s)",
+                (token_sha, sess_id, sess_sha, csrf_tok, ttl_s),
+            )
+
+        row = await asyncio.to_thread(create_row)
+        if row is None:
+            raise HTTPException(401, "unauthenticated")
+        is_secure = request.url.scheme == "https" or config.profile() == "production"
+        resp = JSONResponse(
+            {
+                "schemaVersion": "1.0",
+                "authenticated": True,
+                "authMode": "session",
+                "tenantId": str(row["tenant_id"]),
+                "userId": str(row["user_id"]),
+                "workspaceId": str(row["workspace_id"]),
+                "csrfToken": str(row["csrf_token"]),
+                "expiresAt": row["expires_at"].isoformat(),
+            },
+            status_code=201,
+        )
+        resp.set_cookie(
+            key=_SESSION_COOKIE,
+            value=sess_secret,
+            httponly=True,
+            samesite="lax",
+            secure=is_secure,
+            path="/",
+            max_age=ttl_s,
+        )
+        return resp
+
+    @app.get("/v1/auth/session")
+    async def get_web_session(
+        request: Request, authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        if authorization and authorization.startswith("Bearer ") and len(authorization) <= 400:
+            h = sha256_bytes(authorization[7:].encode())
+            row = await asyncio.to_thread(get_db().one, "SELECT * FROM agent.resolve_api_token(%s)", (h,))
+            if row is None:
+                raise HTTPException(401, "unauthenticated")
+            return {
+                "schemaVersion": "1.0",
+                "authenticated": True,
+                "authMode": "bearer",
+                "tenantId": str(row["tenant_id"]),
+                "userId": str(row["user_id"]),
+                "workspaceId": str(row["workspace_id"]),
+                "csrfToken": None,
+            }
+        raw_cookie = request.cookies.get(_SESSION_COOKIE)
+        if not raw_cookie or len(raw_cookie) > 256:
+            raise HTTPException(401, "unauthenticated")
+        s_hash = sha256_bytes(raw_cookie.encode("utf-8"))
+        row = await asyncio.to_thread(get_db().one, "SELECT * FROM agent.resolve_web_session(%s)", (s_hash,))
+        if row is None:
+            raise HTTPException(401, "unauthenticated")
+        return {
+            "schemaVersion": "1.0",
+            "authenticated": True,
+            "authMode": "session",
+            "tenantId": str(row["tenant_id"]),
+            "userId": str(row["user_id"]),
+            "workspaceId": str(row["workspace_id"]),
+            "csrfToken": str(row["csrf_token"]),
+            "expiresAt": row["expires_at"].isoformat(),
+        }
+
+    @app.delete("/v1/auth/session")
+    async def delete_web_session(request: Request, s: S) -> Response:
+        del s
+        raw_cookie = request.cookies.get(_SESSION_COOKIE)
+        if raw_cookie and len(raw_cookie) <= 256:
+            s_hash = sha256_bytes(raw_cookie.encode("utf-8"))
+            await asyncio.to_thread(get_db().one, "SELECT agent.revoke_web_session(%s)", (s_hash,))
+        resp = JSONResponse({"schemaVersion": "1.0", "authenticated": False})
+        resp.delete_cookie(key=_SESSION_COOKIE, path="/")
+        return resp
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -886,9 +961,13 @@ def create_app(
         limit: int = 100,
         follow: bool = False,
         max_polls: int = 20,
+        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     ) -> StreamingResponse:
         bounded = max(1, min(limit, 500))
         poll_cap = max(1, min(max_polls, 60))
+        start_cursor = after_offset
+        if last_event_id and last_event_id.strip().isdigit():
+            start_cursor = max(start_cursor, int(last_event_id.strip()))
 
         def load_events(cursor: int) -> tuple[str, list[dict[str, Any]]]:
             with get_db().tx(tenant=s.tenant_id) as c:
@@ -916,10 +995,10 @@ def create_app(
                     for r in rows
                 ]
 
-        initial_state, initial_events = await asyncio.to_thread(load_events, after_offset)
+        initial_state, initial_events = await asyncio.to_thread(load_events, start_cursor)
 
         async def sse() -> AsyncIterator[str]:
-            cursor = after_offset
+            cursor = start_cursor
             state_code = initial_state
             batch = initial_events
             polls = 0
@@ -943,8 +1022,11 @@ def create_app(
             with get_db().tx(tenant=s.tenant_id) as c:
                 rows = c.execute(
                     "SELECT t.id, t.status_code, t.profile_code, t.goal_revision, t.active_run_id,"
-                    " t.created_at, t.updated_at, r.status_code AS run_state"
-                    " FROM agent.tasks t LEFT JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.id=t.active_run_id"
+                    " t.created_at, t.updated_at, r.status_code AS run_state, gr.goal_text"
+                    " FROM agent.tasks t"
+                    " LEFT JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.id=t.active_run_id"
+                    " LEFT JOIN agent.task_goal_revisions gr"
+                    "   ON gr.tenant_id=t.tenant_id AND gr.task_id=t.id AND gr.revision=t.goal_revision"
                     " WHERE t.tenant_id=%s AND t.owner_user_id=%s ORDER BY t.created_at DESC LIMIT %s",
                     (s.tenant_id, s.user_id, bounded),
                 ).fetchall()
@@ -954,6 +1036,7 @@ def create_app(
                         "state": str(r["status_code"]),
                         "profile": str(r["profile_code"]),
                         "goalRevision": str(r["goal_revision"]),
+                        "goalSummary": " ".join(redact_secrets(str(r["goal_text"] or "")).split())[:160],
                         "activeRunId": str(r["active_run_id"]) if r["active_run_id"] else None,
                         "runState": str(r["run_state"]) if r["run_state"] else None,
                         "createdAt": r["created_at"].isoformat(),
@@ -1535,7 +1618,7 @@ def create_app(
         def q() -> list[dict[str, Any]]:
             with get_db().tx(tenant=s.tenant_id) as c:
                 rows = c.execute(
-                    "SELECT watch_id, timezone_id, max_occurrences, revision, active, created_at"
+                    "SELECT watch_id, timezone_id, local_hour, local_minute, max_occurrences, revision, active, created_at"
                     " FROM agent.automation_watches"
                     " WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at DESC LIMIT %s",
                     (s.tenant_id, s.user_id, bounded),
@@ -1544,6 +1627,8 @@ def create_app(
                     {
                         "watchId": str(r["watch_id"]),
                         "timezoneId": str(r["timezone_id"]),
+                        "localHour": int(r.get("local_hour", 9)),
+                        "localMinute": int(r.get("local_minute", 0)),
                         "maxOccurrences": int(r["max_occurrences"]),
                         "revision": int(r["revision"]),
                         "active": bool(r["active"]),
@@ -1601,6 +1686,686 @@ def create_app(
                 yield f"id: {ev['seq']}\nevent: campaign.{str(ev.get('reason', 'event')).lower()}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(sse(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------ Automation Write APIs (Campaign / Watch)
+    def _campaign_controller(
+        s: Scope, *, profile: str = "default"
+    ) -> tuple[PostgresCampaignStore, PostgresQueueDispatch, CampaignController]:
+        store = PostgresCampaignStore(
+            get_db(), tenant_id=s.tenant_id, owner_user_id=s.user_id, workspace_id=s.workspace_id
+        )
+        queue = PostgresQueueDispatch(get_db(), owner_user_id=s.user_id, workspace_id=s.workspace_id, profile=profile)
+        ctrl = CampaignController(store, SystemClock(), queue, DenyUntrustedVerification())
+        return store, queue, ctrl
+
+    @app.post("/v1/campaigns", status_code=201)
+    async def create_campaign(request: Request, s: S) -> dict[str, Any]:
+        from datetime import timedelta
+
+        raw = await request.body()
+        if len(raw) > 32 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict) or not isinstance(body.get("goalText"), str) or not body["goalText"].strip():
+            raise HTTPException(422, detail={"error": "GOAL_TEXT_REQUIRED"})
+        goal_text = body["goalText"].strip()[:2000]
+        campaign_id = str(body.get("campaignId") or uuid7()).strip()
+        if not campaign_id or len(campaign_id) > 128:
+            raise HTTPException(422, detail={"error": "INVALID_CAMPAIGN_ID"})
+        profile_val = str(body.get("profile") or "default").strip().lower()
+        if profile_val not in ("default", "browser", "sandbox", "anthropic"):
+            raise HTTPException(422, detail={"error": "INVALID_PROFILE"})
+        try:
+            max_cycles = int(body.get("maxCycles", 5))
+            deadline_hours = int(body.get("deadlineHours", 24))
+            max_cost = int(body.get("maxCostMicroUsd", 1_000_000))
+            max_tokens = int(body.get("maxTokens", 50_000))
+            max_tools = int(body.get("maxToolCalls", 50))
+            cost_per = int(body.get("costPerCycle", 100_000))
+            tokens_per = int(body.get("tokensPerCycle", 4096))
+            tools_per = int(body.get("toolsPerCycle", 8))
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail={"error": "INVALID_PLAN_NUMBERS"}) from None
+        if not (1 <= max_cycles <= 100 and 1 <= deadline_hours <= 720):
+            raise HTTPException(422, detail={"error": "INVALID_PLAN_BOUNDS"})
+        first_item = str(body.get("firstWorkItemId") or "item-1").strip()[:120]
+        if not first_item:
+            raise HTTPException(422, detail={"error": "INVALID_WORK_ITEM"})
+        deadline_utc = (datetime.now(UTC) + timedelta(hours=deadline_hours)).isoformat().replace("+00:00", "Z")
+
+        def op() -> dict[str, Any]:
+            store, queue, ctrl = _campaign_controller(s, profile=profile_val)
+            try:
+                plan = CampaignPlan(
+                    campaign_id=campaign_id,
+                    tenant_id=s.tenant_id,
+                    goal_revision="1",
+                    policy=StopPolicy(
+                        max_cycles=max_cycles,
+                        deadline_utc=deadline_utc,
+                        max_cost_micro_usd=max_cost,
+                        max_tokens=max_tokens,
+                        max_tool_calls=max_tools,
+                    ),
+                    cost_per_cycle=cost_per,
+                    tokens_per_cycle=tokens_per,
+                    tools_per_cycle=tools_per,
+                    goal_text=goal_text,
+                )
+                ctrl.create(plan, first_item)
+                dispatched = ctrl.dispatch_pending(campaign_id)
+                camp_obj = store.read(campaign_id)
+                return {
+                    "schemaVersion": "1.0",
+                    "campaignId": campaign_id,
+                    "state": str(camp_obj.state),
+                    "controlVersion": camp_obj.control_version,
+                    "goalRevision": str(camp_obj.plan.goal_revision),
+                    "dispatched": dispatched,
+                    "createdRuns": queue.created_runs,
+                }
+            except Rejected as exc:
+                raise _campaign_http_error(exc) from None
+            except ValueError as exc:
+                raise HTTPException(422, detail={"error": str(exc)}) from None
+
+        return await asyncio.to_thread(op)
+
+    @app.post("/v1/campaigns/{campaign_id}/{action}")
+    async def control_campaign(campaign_id: str, action: str, request: Request, s: S) -> dict[str, Any]:
+        action_norm = action.strip().lower()
+        if action_norm not in ("pause", "resume", "stop", "revoke", "steer"):
+            raise HTTPException(404)
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict) or body.get("expectedControlVersion") is None:
+            raise HTTPException(422, detail={"error": "EXPECTED_CONTROL_VERSION_REQUIRED"})
+        try:
+            expected_cv = int(body["expectedControlVersion"])
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail={"error": "INVALID_CONTROL_VERSION"}) from None
+
+        def op() -> dict[str, Any]:
+            store, _, ctrl = _campaign_controller(s)
+            try:
+                if action_norm == "steer":
+                    new_rev = str(body.get("newGoalRevision") or "").strip()
+                    new_text = body.get("newGoalText")
+                    if new_text is not None and not isinstance(new_text, str):
+                        raise HTTPException(422, detail={"error": "INVALID_GOAL_TEXT"})
+                    cv = ctrl.steer(
+                        campaign_id,
+                        new_goal_revision=new_rev,
+                        expected_control_version=expected_cv,
+                        new_goal_text=new_text.strip()[:2000] if isinstance(new_text, str) else None,
+                    )
+                    dispatched = ctrl.dispatch_pending(campaign_id)
+                else:
+                    cmd_id = str(body["commandId"]).strip() if isinstance(body.get("commandId"), str) else None
+                    cv = ctrl.control(campaign_id, action_norm.upper(), expected_cv, cmd_id)
+                    dispatched = ctrl.dispatch_pending(campaign_id) if action_norm == "resume" else 0
+                camp_obj = store.read(campaign_id)
+                return {
+                    "schemaVersion": "1.0",
+                    "campaignId": campaign_id,
+                    "state": str(camp_obj.state),
+                    "controlVersion": cv,
+                    "goalRevision": str(camp_obj.plan.goal_revision),
+                    "dispatched": dispatched,
+                }
+            except Rejected as exc:
+                raise _campaign_http_error(exc) from None
+
+        return await asyncio.to_thread(op)
+
+    @app.post("/v1/watches", status_code=201)
+    async def create_watch(request: Request, s: S) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+        watch_id = str(body.get("watchId") or uuid7()).strip()
+        tz_id = str(body.get("timezoneId") or "UTC").strip()
+        start_utc = str(body.get("startUtc") or datetime.now(UTC).isoformat().replace("+00:00", "Z")).strip()
+        try:
+            max_occ = int(body.get("maxOccurrences", 5))
+            revision = int(body.get("revision", 1))
+            local_hour = int(body.get("localHour", 9))
+            local_minute = int(body.get("localMinute", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail={"error": "INVALID_WATCH_NUMBERS"}) from None
+
+        def op() -> dict[str, Any]:
+            try:
+                watch = DailyWatch(
+                    watch_id=watch_id,
+                    tenant_id=s.tenant_id,
+                    revision=revision,
+                    timezone_id=tz_id,
+                    local_hour=local_hour,
+                    local_minute=local_minute,
+                    start_utc=start_utc,
+                    max_occurrences=max_occ,
+                )
+                PostgresWatchStore(get_db(), owner_user_id=s.user_id, workspace_id=s.workspace_id).register(watch)
+                with get_db().tx(tenant=s.tenant_id) as c:
+                    c.execute(
+                        "UPDATE agent.automation_watches SET local_hour=%s, local_minute=%s, active=true"
+                        " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s",
+                        (watch.local_hour, watch.local_minute, s.tenant_id, watch.watch_id, s.user_id),
+                    )
+            except Rejected as exc:
+                raise HTTPException(409, detail={"error": str(exc)}) from None
+            except Exception as exc:
+                raise HTTPException(422, detail={"error": f"INVALID_WATCH:{type(exc).__name__}"}) from None
+            return {
+                "schemaVersion": "1.0",
+                "watchId": watch.watch_id,
+                "timezoneId": watch.timezone_id,
+                "localHour": watch.local_hour,
+                "localMinute": watch.local_minute,
+                "startUtc": watch.start_utc,
+                "maxOccurrences": watch.max_occurrences,
+                "revision": watch.revision,
+                "active": True,
+            }
+
+        return await asyncio.to_thread(op)
+
+    @app.delete("/v1/watches/{watch_id}")
+    async def deactivate_watch(watch_id: str, s: S) -> dict[str, Any]:
+        def op() -> dict[str, Any] | None:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "UPDATE agent.automation_watches SET active=false"
+                    " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s RETURNING watch_id",
+                    (s.tenant_id, watch_id, s.user_id),
+                ).fetchone()
+                return {"schemaVersion": "1.0", "watchId": str(row["watch_id"]), "active": False} if row else None
+
+        out = await asyncio.to_thread(op)
+        if out is None:
+            raise HTTPException(404)
+        return out
+
+    @app.post("/v1/watches/{watch_id}/trigger")
+    async def trigger_watch(watch_id: str, request: Request, s: S) -> dict[str, Any]:
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+        slot_iso = body.get("slotUtc")
+        eval_now = notifications.utcnow()
+        if "slotUtc" in body:
+            if not isinstance(slot_iso, str) or not slot_iso.strip():
+                raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"})
+            try:
+                slot_dt = datetime.fromisoformat(slot_iso.strip().replace("Z", "+00:00"))
+                if slot_dt.tzinfo is None:
+                    slot_dt = slot_dt.replace(tzinfo=UTC)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_SLOT_UTC"}) from None
+        else:
+            slot_dt = eval_now
+
+        raw_ev = body.get("evidenceUrls")
+        if raw_ev is not None and not isinstance(raw_ev, list):
+            raise HTTPException(422, detail={"error": "INVALID_EVIDENCE_URLS"})
+        evidence_urls = [str(u) for u in (raw_ev or []) if isinstance(u, str)]
+        title = str(body.get("title") or f"Watch {watch_id} triggered").strip()
+        summary = str(body.get("summaryText") or f"Watch observation slot {slot_dt.isoformat()}").strip()
+        priority = str(body.get("priority") or "standard")
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        dispatch_now = _strict_optional_bool(body, "dispatch", default=False)
+        all_consented = _strict_optional_bool(body, "allConsentedBindings", default=False)
+
+        explicit_bindings: list[str] = []
+        if "bindingId" in body:
+            if not isinstance(body.get("bindingId"), str) or not is_uuid7(str(body["bindingId"]).strip()):
+                raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+            explicit_bindings.append(str(body["bindingId"]).strip())
+        if "bindingIds" in body:
+            raw_bids = body["bindingIds"]
+            if not isinstance(raw_bids, list):
+                raise HTTPException(422, detail={"error": "INVALID_BINDING_IDS"})
+            for item in raw_bids:
+                if not isinstance(item, str) or not is_uuid7(item.strip()):
+                    raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+                bid_s = item.strip()
+                if bid_s not in explicit_bindings:
+                    explicit_bindings.append(bid_s)
+        if not explicit_bindings and not all_consented:
+            raise HTTPException(422, detail={"error": "BINDING_SELECTION_REQUIRED"})
+
+        if dry_run:
+
+            def dry_op() -> dict[str, Any]:
+                with get_db().tx(tenant=s.tenant_id) as c:
+                    wrow = c.execute(
+                        "SELECT active FROM agent.automation_watches"
+                        " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s",
+                        (s.tenant_id, watch_id, s.user_id),
+                    ).fetchone()
+                if wrow is None:
+                    raise HTTPException(404)
+                if not wrow["active"]:
+                    raise HTTPException(409, detail={"error": "WATCH_INACTIVE"})
+                preview = notifications.preview_notification_dry_run(
+                    get_db(),
+                    tenant_id=s.tenant_id,
+                    user_id=s.user_id,
+                    workspace_id=s.workspace_id,
+                    binding_ids=explicit_bindings or None,
+                    all_consented_bindings=all_consented,
+                    priority=priority,
+                    now_utc=eval_now,
+                )
+                return {
+                    "schemaVersion": "1.0",
+                    "watchId": watch_id,
+                    "dryRun": True,
+                    "claimed": False,
+                    "preview": preview,
+                    "queuedNotifications": [],
+                }
+
+            return await asyncio.to_thread(dry_op)
+
+        def op() -> dict[str, Any]:
+            wstore = PostgresWatchStore(get_db(), owner_user_id=s.user_id, workspace_id=s.workspace_id)
+            with get_db().tx(tenant=s.tenant_id) as c:
+                wrow = c.execute(
+                    "SELECT watch_id, timezone_id, local_hour, local_minute, start_utc, max_occurrences, revision, active"
+                    " FROM agent.automation_watches"
+                    " WHERE tenant_id=%s AND watch_id=%s AND owner_user_id=%s FOR UPDATE",
+                    (s.tenant_id, watch_id, s.user_id),
+                ).fetchone()
+                if wrow is None:
+                    raise HTTPException(404)
+                if not wrow["active"]:
+                    raise HTTPException(409, detail={"error": "WATCH_INACTIVE"})
+                watch = DailyWatch(
+                    watch_id=str(wrow["watch_id"]),
+                    tenant_id=s.tenant_id,
+                    revision=int(wrow["revision"]),
+                    timezone_id=str(wrow.get("timezone_id") or "UTC"),
+                    local_hour=int(wrow.get("local_hour", 9)),
+                    local_minute=int(wrow.get("local_minute", 0)),
+                    start_utc=wrow["start_utc"].isoformat().replace("+00:00", "Z"),
+                    max_occurrences=int(wrow["max_occurrences"]),
+                )
+                claimed = wstore.claim_bounded_tx(c, watch, slot_dt)
+                if not claimed:
+                    return {
+                        "schemaVersion": "1.0",
+                        "watchId": watch_id,
+                        "dryRun": False,
+                        "claimed": False,
+                        "queuedNotifications": [],
+                    }
+                if os.environ.get("AIAGENT_WATCH_FAULT") == "fail_after_claim":
+                    raise RuntimeError("simulated crash after watch claim inside tx")
+                target_bindings = list(explicit_bindings)
+                if not target_bindings and all_consented:
+                    brows = c.execute(
+                        "SELECT id FROM agent.notification_bindings"
+                        " WHERE tenant_id=%s AND owner_user_id=%s AND workspace_id=%s"
+                        " AND consent_granted=true AND opted_out_at IS NULL AND revoked_at IS NULL",
+                        (s.tenant_id, s.user_id, s.workspace_id),
+                    ).fetchall()
+                    target_bindings = [str(b["id"]) for b in brows]
+                if not target_bindings:
+                    raise notifications.NotificationError("NO_ACTIVE_BINDINGS", http_status=422)
+                queued: list[dict[str, Any]] = []
+                dedupe = f"watch:{s.tenant_id}:{watch_id}:r{watch.revision}:{slot_dt.isoformat()}"
+                for bid in target_bindings:
+                    intent = notifications.enqueue_notification_tx(
+                        c,
+                        tenant_id=s.tenant_id,
+                        user_id=s.user_id,
+                        workspace_id=s.workspace_id,
+                        binding_id=bid,
+                        semantic_event_key=f"watch:{watch_id}:r{watch.revision}:{slot_dt.isoformat()}",
+                        source_kind="watch",
+                        source_ref=watch_id,
+                        title=title,
+                        summary_text=summary,
+                        evidence_urls=evidence_urls,
+                        observed_at=slot_dt,
+                        now_utc=eval_now,
+                        priority=priority,
+                    )
+                    queued.append(intent)
+                c.execute(
+                    "UPDATE agent.automation_watch_slots SET status='SENT'"
+                    " WHERE tenant_id=%s AND dedupe_key=%s AND status='PENDING'",
+                    (s.tenant_id, dedupe),
+                )
+                return {
+                    "schemaVersion": "1.0",
+                    "watchId": watch_id,
+                    "dryRun": False,
+                    "claimed": True,
+                    "queuedNotifications": queued,
+                }
+
+        res = await asyncio.to_thread(op)
+        if res["claimed"] and dispatch_now:
+            intent_ids = [str(q["id"]) for q in res["queuedNotifications"]]
+            res["dispatch"] = await _notify_worker().run_once(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                intent_ids=intent_ids,
+                batch=max(1, len(intent_ids)),
+            )
+        return res
+
+    # ------------------------------------------------------------------ Notification Bindings & Outbox APIs
+    def _notify_worker() -> notifications.NotificationDeliveryWorker:
+        return notifications.NotificationDeliveryWorker(
+            get_db(),
+            notification_key_ring,
+            sentinel=sentinel,
+            egress_proxy=egress_proxy,
+            direct_send_fn=notify_direct_send_fn,
+            allow_private_addrs=notify_allow_private,
+            resolver=notify_resolver,
+            verify_ssl=notify_verify_ssl,
+        )
+
+    @app.get("/v1/notifications/bindings")
+    async def list_notification_bindings(s: S, limit: int = 50) -> dict[str, Any]:
+        items = await asyncio.to_thread(
+            notifications.list_bindings, get_db(), tenant_id=s.tenant_id, user_id=s.user_id, limit=limit
+        )
+        return {"schemaVersion": "1.0", "items": items}
+
+    @app.post("/v1/notifications/bindings", status_code=201)
+    async def create_notification_binding(request: Request, s: S) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict) or not isinstance(body.get("destination"), dict):
+            raise HTTPException(422, detail={"error": "INVALID_BINDING_REQUEST"})
+        dest_raw = {str(k): str(v) for k, v in body["destination"].items()}
+        consent_granted = _strict_optional_bool(body, "consentGranted", default=False)
+        try:
+            raw_qs = body.get("quietStartHour")
+            raw_qe = body.get("quietEndHour")
+            if isinstance(raw_qs, bool) or isinstance(raw_qe, bool):
+                raise ValueError("bool is not valid hour")
+            quiet_start = int(raw_qs) if raw_qs is not None else None
+            quiet_end = int(raw_qe) if raw_qe is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail={"error": "INVALID_QUIET_HOURS"}) from None
+        created = await asyncio.to_thread(
+            notifications.create_binding,
+            get_db(),
+            notification_key_ring,
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            workspace_id=s.workspace_id,
+            channel=str(body.get("channel") or ""),
+            label=str(body.get("label") or ""),
+            destination=dest_raw,
+            consent_granted=consent_granted,
+            quiet_start_hour=quiet_start,
+            quiet_end_hour=quiet_end,
+            timezone_id=str(body.get("timezoneId") or "UTC"),
+        )
+        return {"schemaVersion": "1.0", "binding": created}
+
+    @app.post("/v1/notifications/bindings/{binding_id}/consent")
+    async def update_notification_consent(binding_id: str, request: Request, s: S) -> dict[str, Any]:
+        if not is_uuid7(binding_id):
+            raise HTTPException(404)
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict) or not isinstance(body.get("granted"), bool):
+            raise HTTPException(422, detail={"error": "GRANTED_BOOLEAN_REQUIRED"})
+        updated = await asyncio.to_thread(
+            notifications.set_binding_consent,
+            get_db(),
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            binding_id=binding_id,
+            granted=bool(body["granted"]),
+        )
+        if updated is None:
+            raise HTTPException(404)
+        return {"schemaVersion": "1.0", "binding": updated}
+
+    @app.post("/v1/notifications/bindings/{binding_id}/opt-out")
+    async def opt_out_notification_binding(binding_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(binding_id):
+            raise HTTPException(404)
+        updated = await asyncio.to_thread(
+            notifications.opt_out_binding,
+            get_db(),
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            binding_id=binding_id,
+            revoke=False,
+        )
+        if updated is None:
+            raise HTTPException(404)
+        return {"schemaVersion": "1.0", "binding": updated}
+
+    @app.delete("/v1/notifications/bindings/{binding_id}")
+    async def revoke_notification_binding(binding_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(binding_id):
+            raise HTTPException(404)
+        updated = await asyncio.to_thread(
+            notifications.opt_out_binding,
+            get_db(),
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            binding_id=binding_id,
+            revoke=True,
+        )
+        if updated is None:
+            raise HTTPException(404)
+        return {"schemaVersion": "1.0", "binding": updated}
+
+    @app.get("/v1/notifications")
+    async def list_user_notifications(s: S, limit: int = 50) -> dict[str, Any]:
+        items = await asyncio.to_thread(
+            notifications.list_notifications, get_db(), tenant_id=s.tenant_id, user_id=s.user_id, limit=limit
+        )
+        return {"schemaVersion": "1.0", "items": items}
+
+    @app.post("/v1/notifications", status_code=201)
+    async def create_user_notification(request: Request, s: S) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 32 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict) or not is_uuid7(str(body.get("bindingId") or "")):
+            raise HTTPException(422, detail={"error": "INVALID_BINDING_ID"})
+        raw_ev = body.get("evidenceUrls")
+        if raw_ev is not None and not isinstance(raw_ev, list):
+            raise HTTPException(422, detail={"error": "INVALID_EVIDENCE_URLS"})
+        obs_raw = body.get("observedAt")
+        observed_dt: datetime | None = None
+        if obs_raw is not None:
+            if not isinstance(obs_raw, str) or not obs_raw.strip():
+                raise HTTPException(422, detail={"error": "INVALID_OBSERVED_AT"})
+            try:
+                observed_dt = datetime.fromisoformat(obs_raw.strip().replace("Z", "+00:00"))
+                if observed_dt.tzinfo is None:
+                    observed_dt = observed_dt.replace(tzinfo=UTC)
+            except ValueError:
+                raise HTTPException(422, detail={"error": "INVALID_OBSERVED_AT"}) from None
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        dispatch_now = _strict_optional_bool(body, "dispatch", default=False)
+        binding_id = str(body["bindingId"]).strip()
+        priority = str(body.get("priority") or "standard")
+        eval_now = notifications.utcnow()
+
+        if dry_run:
+            title_val = str(body.get("title") or "").strip()
+            summary_val = str(body.get("summaryText") or "").strip()
+            if not title_val or not summary_val:
+                raise HTTPException(422, detail={"error": "INVALID_NOTIFICATION_CONTENT"})
+            preview = await asyncio.to_thread(
+                notifications.preview_notification_dry_run,
+                get_db(),
+                tenant_id=s.tenant_id,
+                user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                binding_ids=[binding_id],
+                priority=priority,
+                now_utc=eval_now,
+            )
+            return {
+                "schemaVersion": "1.0",
+                "dryRun": True,
+                "preview": preview,
+                "notification": None,
+                "dispatch": None,
+            }
+
+        def tx_op() -> dict[str, Any]:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                return notifications.enqueue_notification_tx(
+                    c,
+                    tenant_id=s.tenant_id,
+                    user_id=s.user_id,
+                    workspace_id=s.workspace_id,
+                    binding_id=binding_id,
+                    semantic_event_key=str(body.get("semanticEventKey") or f"manual:{uuid7()}"),
+                    source_kind=str(body.get("sourceKind") or "system"),
+                    source_ref=str(body.get("sourceRef") or "manual"),
+                    title=str(body.get("title") or ""),
+                    summary_text=str(body.get("summaryText") or ""),
+                    evidence_urls=[str(u) for u in (raw_ev or []) if isinstance(u, str)],
+                    observed_at=observed_dt,
+                    now_utc=eval_now,
+                    priority=priority,
+                    delivery_purpose=str(body.get("deliveryPurpose") or "alert"),
+                )
+
+        created = await asyncio.to_thread(tx_op)
+        dispatch_res = (
+            await _notify_worker().run_once(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                intent_ids=[str(created["id"])],
+                batch=1,
+            )
+            if dispatch_now
+            else None
+        )
+        return {"schemaVersion": "1.0", "dryRun": False, "notification": created, "dispatch": dispatch_res}
+
+    @app.post("/v1/notifications/dispatch")
+    async def dispatch_user_notifications(request: Request, s: S, limit: int = 20) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 8 * 1024:
+            raise HTTPException(413, "too large")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(422, detail={"error": "INVALID_JSON"}) from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, detail={"error": "INVALID_REQUEST"})
+        dry_run = _strict_optional_bool(body, "dryRun", default=False)
+        explicit_intent_ids: list[str] | None = None
+        if "intentIds" in body:
+            raw_ids = body["intentIds"]
+            if not isinstance(raw_ids, list):
+                raise HTTPException(422, detail={"error": "INVALID_INTENT_IDS"})
+            seen_ids: set[str] = set()
+            parsed_ids: list[str] = []
+            for raw_id in raw_ids:
+                if not isinstance(raw_id, str) or not is_uuid7(raw_id.strip()):
+                    raise HTTPException(422, detail={"error": "INVALID_INTENT_IDS"})
+                clean_id = raw_id.strip()
+                if clean_id not in seen_ids:
+                    seen_ids.add(clean_id)
+                    parsed_ids.append(clean_id)
+            explicit_intent_ids = parsed_ids
+        bounded = max(1, min(limit, 50))
+        if dry_run:
+            preview = await asyncio.to_thread(
+                notifications.preview_pending_dispatch,
+                get_db(),
+                tenant_id=s.tenant_id,
+                user_id=s.user_id,
+                workspace_id=s.workspace_id,
+                limit=bounded,
+            )
+            return {"schemaVersion": "1.0", "dryRun": True, "preview": preview, "counts": None}
+        eff_batch = max(1, len(explicit_intent_ids)) if explicit_intent_ids is not None else bounded
+        counts = await _notify_worker().run_once(
+            tenant_id=s.tenant_id,
+            owner_user_id=s.user_id,
+            workspace_id=s.workspace_id,
+            intent_ids=explicit_intent_ids,
+            batch=eff_batch,
+        )
+        return {"schemaVersion": "1.0", "dryRun": False, "counts": counts}
+
+    @app.post("/v1/notifications/{notification_id}/read")
+    async def mark_user_notification_read(notification_id: str, s: S) -> dict[str, Any]:
+        if not is_uuid7(notification_id):
+            raise HTTPException(404)
+        updated = await asyncio.to_thread(
+            notifications.mark_notification_read,
+            get_db(),
+            tenant_id=s.tenant_id,
+            user_id=s.user_id,
+            notification_id=notification_id,
+        )
+        return {"schemaVersion": "1.0", "notification": updated}
+
+    # Optional same-origin built Web UI serving (for self-hosted console & real browser E2E)
+    resolved_dist = web_dist_dir or (
+        Path(os.environ["AIAGENT_WEB_DIST_DIR"]) if os.environ.get("AIAGENT_WEB_DIST_DIR") else None
+    )
+    if resolved_dist is not None:
+        dist_root = resolved_dist.resolve()
+        if (dist_root / "index.html").is_file():
+
+            @app.get("/", include_in_schema=False)
+            async def web_index() -> FileResponse:
+                return FileResponse(dist_root / "index.html")
+
+            @app.get("/assets/{asset_path:path}", include_in_schema=False)
+            async def web_assets(asset_path: str) -> FileResponse:
+                candidate = (dist_root / "assets" / asset_path).resolve()
+                assets_dir = (dist_root / "assets").resolve()
+                if not candidate.is_relative_to(assets_dir) or not candidate.is_file():
+                    raise HTTPException(404)
+                return FileResponse(candidate)
 
     return app
 

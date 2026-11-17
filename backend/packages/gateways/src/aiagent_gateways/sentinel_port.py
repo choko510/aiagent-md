@@ -115,3 +115,44 @@ class LocalSentinel:
                 body_sha256 if body_sha256 is not None else _EMPTY_BODY_SHA256,
             )
         )
+
+    def authorize_notification(
+        self,
+        tenant_id: str,
+        user_id: str,
+        workspace_id: str,
+        intent_id: str,
+        binding_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str = "POST",
+        *,
+        target_path: str = "/",
+        body_sha256: str | None = None,
+        attempt_id: str = "",
+        attempt_no: int = 0,
+        lease_epoch: int = 0,
+        lease_owner_ref: str = "",
+        send_token: str = "",
+    ) -> str:
+        return str(
+            self.s.authorize_notification(
+                tenant_id,
+                user_id,
+                workspace_id,
+                intent_id,
+                binding_id,
+                scheme,
+                host,
+                port,
+                method,
+                target_path,
+                body_sha256 if body_sha256 is not None else _EMPTY_BODY_SHA256,
+                attempt_id,
+                attempt_no,
+                lease_epoch,
+                lease_owner_ref,
+                send_token,
+            )
+        )

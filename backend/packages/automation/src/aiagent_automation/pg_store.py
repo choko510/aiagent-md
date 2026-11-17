@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import psycopg
 from aiagent_core.commands import create_task_tx
@@ -186,34 +186,38 @@ class PostgresWatchStore:
             if row is None:
                 raise Rejected("WATCH_OWNER_OR_REVISION_CONFLICT")
 
-    def claim_bounded(self, watch: DailyWatch, slot: datetime) -> bool:
+    def claim_bounded_tx(self, c: psycopg.Connection[Any], watch: DailyWatch, slot: datetime) -> bool:
+        """Atomically claim a bounded watch slot within an existing tenant-scoped DB transaction."""
         dedupe = f"watch:{watch.tenant_id}:{watch.watch_id}:r{watch.revision}:{slot.isoformat()}"
+        parent = c.execute(
+            "SELECT owner_user_id, revision, max_occurrences, active FROM agent.automation_watches"
+            " WHERE tenant_id=%s AND watch_id=%s FOR UPDATE",
+            (watch.tenant_id, watch.watch_id),
+        ).fetchone()
+        if (
+            parent is None
+            or not parent["active"]
+            or str(parent["owner_user_id"]) != self._owner_user_id
+            or int(parent["revision"]) != watch.revision
+        ):
+            return False
+        existing = c.execute(
+            "SELECT count(*) AS n FROM agent.automation_watch_slots WHERE tenant_id=%s AND watch_id=%s",
+            (watch.tenant_id, watch.watch_id),
+        ).fetchone()
+        assert existing is not None
+        if int(existing["n"]) >= int(parent["max_occurrences"]):
+            return False
+        cur = c.execute(
+            "INSERT INTO agent.automation_watch_slots(tenant_id, watch_id, slot_iso, dedupe_key, status)"
+            " VALUES (%s,%s,%s,%s,'PENDING') ON CONFLICT DO NOTHING",
+            (watch.tenant_id, watch.watch_id, slot.isoformat(), dedupe),
+        )
+        return cur.rowcount == 1
+
+    def claim_bounded(self, watch: DailyWatch, slot: datetime) -> bool:
         with self._db.tx(tenant=watch.tenant_id) as c:
-            parent = c.execute(
-                "SELECT owner_user_id, revision, max_occurrences, active FROM agent.automation_watches"
-                " WHERE tenant_id=%s AND watch_id=%s FOR UPDATE",
-                (watch.tenant_id, watch.watch_id),
-            ).fetchone()
-            if (
-                parent is None
-                or not parent["active"]
-                or str(parent["owner_user_id"]) != self._owner_user_id
-                or int(parent["revision"]) != watch.revision
-            ):
-                return False
-            existing = c.execute(
-                "SELECT count(*) AS n FROM agent.automation_watch_slots WHERE tenant_id=%s AND watch_id=%s",
-                (watch.tenant_id, watch.watch_id),
-            ).fetchone()
-            assert existing is not None
-            if int(existing["n"]) >= int(parent["max_occurrences"]):
-                return False
-            cur = c.execute(
-                "INSERT INTO agent.automation_watch_slots(tenant_id, watch_id, slot_iso, dedupe_key, status)"
-                " VALUES (%s,%s,%s,%s,'PENDING') ON CONFLICT DO NOTHING",
-                (watch.tenant_id, watch.watch_id, slot.isoformat(), dedupe),
-            )
-            return cur.rowcount == 1
+            return self.claim_bounded_tx(c, watch, slot)
 
     def pending(self, tenant_id: str) -> list[tuple[str, str, str, str]]:
         with self._db.tx(tenant=tenant_id) as c:
