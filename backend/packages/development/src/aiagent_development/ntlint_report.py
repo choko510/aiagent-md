@@ -101,18 +101,8 @@ def _reject_nonfinite(_: str) -> None:
     raise InvalidEvidence("nonfinite ntlint JSON number")
 
 
-def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected_sha: str) -> NtlintReport:
-    """Parse a verified Cell artifact; source_sha and expected_sha must originate from trusted owners.
 
-    Does not validate their authority, send data to Typesafe AI or run ntlint.
-    """
-    if (
-        not isinstance(source_sha, str) or not isinstance(expected_sha, str)
-        or not _SHA.fullmatch(source_sha) or source_sha != expected_sha
-    ):
-        raise InvalidEvidence("missing or stale trusted ntlint SHA")
-    if type(exit_code) is not int or exit_code not in (0, 1, 2):
-        raise InvalidEvidence("invalid ntlint exit code")
+def _decode_lines(output: str) -> tuple[list[NtlintFinding], dict[str, object]]:
     if not isinstance(output, str) or not output or len(output.encode("utf-8")) > 1_048_576:
         raise InvalidEvidence("empty or oversized ntlint output")
     lines = output.splitlines()
@@ -136,6 +126,22 @@ def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected
             raise InvalidEvidence("unknown ntlint JSONL record")
     if summary is None:
         raise InvalidEvidence("missing ntlint summary")
+
+    return findings, summary
+
+def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected_sha: str) -> NtlintReport:
+    """Parse a verified Cell artifact; source_sha and expected_sha must originate from trusted owners.
+
+    Does not validate their authority, send data to Typesafe AI or run ntlint.
+    """
+    if (
+        not isinstance(source_sha, str) or not isinstance(expected_sha, str)
+        or not _SHA.fullmatch(source_sha) or source_sha != expected_sha
+    ):
+        raise InvalidEvidence("missing or stale trusted ntlint SHA")
+    if type(exit_code) is not int or exit_code not in (0, 1, 2):
+        raise InvalidEvidence("invalid ntlint exit code")
+    findings, summary = _decode_lines(output)
 
     verdicts = _count(summary, "verdicts")
     reported = _count(summary, "reported")
