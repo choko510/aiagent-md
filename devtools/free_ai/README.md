@@ -119,9 +119,12 @@ authoritative signal. Local quota skips use `status=RATE_LIMITED` with
   float (for example a 309-digit integer) are a `FORMAT_MISMATCH`, not an exception, and
   no conversion error text is stored.
 - Response bodies are capped before a chunk is appended to the buffer. The request asks
-  for `Accept-Encoding: identity`; only `identity`, `gzip`, `deflate` and `br` responses
-  are accepted, `Content-Length` is validated, and the decoded size is capped, so a
-  compressed or mis-declared body cannot bypass the 131072-byte limit.
+  for `Accept-Encoding: identity`; only an absent or `identity` content encoding is
+  accepted. `gzip`, `deflate`, `br` and unknown encodings are `FORMAT_MISMATCH` and are
+  refused before a decoder starts, so a compression bomb never expands. `Content-Length`
+  is validated and the unencoded size is capped at 131072 bytes.
+- JSON that is nested too deeply aborts the parser with `RecursionError`; that is mapped
+  to `FORMAT_MISMATCH` / `INVALID_JSON` (exit 4) instead of escaping as a crash.
 
 ## Tests
 

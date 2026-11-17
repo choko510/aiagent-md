@@ -84,7 +84,9 @@ def decode_object(raw: bytes) -> dict[str, object]:
     try:
         text = raw.decode("utf-8")
         parsed = json.loads(text, object_pairs_hook=_pairs_without_duplicates, parse_constant=_reject_non_finite)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # An extremely deep document aborts the C scanner with RecursionError; that is a
+        # malformed response, not a local crash.
         raise ResponseFormatError("INVALID_JSON") from exc
     if not isinstance(parsed, dict):
         raise ResponseFormatError("INVALID_SCHEMA")

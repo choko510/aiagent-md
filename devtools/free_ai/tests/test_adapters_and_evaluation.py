@@ -511,3 +511,51 @@ def test_absurd_integer_cost_does_not_leak_the_conversion_error(
     log = (runs / "probes.jsonl").read_text(encoding="utf-8")
     assert "Overflow" not in log
     assert json.loads(log.splitlines()[0])["status"] == "FORMAT_MISMATCH"
+
+
+def _deep_document(depth: int = 20_000) -> bytes:
+    return ("[" * depth + "]" * depth).encode()
+
+
+def test_deeply_nested_json_is_a_format_mismatch_not_a_crash() -> None:
+    body = _deep_document()
+    assert len(body) < transport.MAX_RESPONSE_BYTES
+    with pytest.raises(adapters.ResponseFormatError) as deep:
+        adapters.decode_object(body)
+    assert deep.value.reason_code == "INVALID_JSON"
+
+    evaluation = _evaluate(_KILO, "jp_hello", body)
+    assert evaluation.status == "FORMAT_MISMATCH"
+    assert evaluation.reason_code == "INVALID_JSON"
+    assert evaluation.exit_code == 4
+    assert evaluation.normalized is None
+
+
+def test_deeply_nested_response_is_rejected_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    body = _deep_document()
+    _mock_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"content-type": "application/json"}, content=body),
+    )
+    code = runner.main(
+        [
+            "probe",
+            "--provider",
+            "kilo",
+            "--fixture",
+            "jp_hello",
+            "--ack-synthetic-only",
+            "--ack-external-request",
+        ]
+    )
+    printed = capsys.readouterr().out
+    assert code == 4
+    assert "FORMAT_MISMATCH" in printed
+    for forbidden in ("RecursionError", "maximum recursion", "Traceback"):
+        assert forbidden not in printed
+    log = (runs / "probes.jsonl").read_text(encoding="utf-8")
+    assert json.loads(log.splitlines()[0])["status"] == "FORMAT_MISMATCH"
+    assert "RecursionError" not in log

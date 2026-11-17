@@ -107,9 +107,9 @@ def _is_json_content_type(value: str | None) -> bool:
     return media_type == "application/json" or media_type.endswith("+json")
 
 
-#: Encodings a provider may legitimately return even though we asked for ``identity``.
-#: Anything else is refused instead of decompressed.
-ALLOWED_CONTENT_ENCODINGS: Final = frozenset({"", "identity", "gzip", "deflate", "br"})
+#: Only an unencoded body is accepted. ``gzip``/``deflate``/``br`` and unknown encodings
+#: are refused *before* any decoder is started, so a compression bomb never expands.
+ALLOWED_CONTENT_ENCODINGS: Final = frozenset({"", "identity"})
 
 
 def _is_allowed_content_encoding(value: str | None) -> bool:
@@ -190,7 +190,8 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
                             elapsed_ms=_elapsed_ms(started),
                         )
                     if not _is_allowed_content_encoding(response.headers.get("content-encoding")):
-                        # Never decompress an encoding we did not request.
+                        # Refuse compressed bodies before reading a single byte: no decoder
+                        # is constructed and no compression bomb can expand.
                         return TransportResult(
                             status="FORMAT_MISMATCH",
                             reason_code="INVALID_JSON",

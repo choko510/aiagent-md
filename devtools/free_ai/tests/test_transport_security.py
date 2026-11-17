@@ -7,7 +7,7 @@ import dataclasses
 import gzip
 import inspect
 import socket
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any, NoReturn
 
 import httpx
@@ -41,6 +41,24 @@ def _mock_transport(
 
     monkeypatch.setattr(transport, "_new_client", lambda: _REAL_NEW_CLIENT(httpx.MockTransport(recording)))
     return requests
+
+
+class _GuardedStream(httpx.AsyncByteStream):
+    """A response stream that records whether the transport started to read it."""
+
+    def __init__(self, payload: bytes = b"{}", *, raise_on_iterate: bool = True) -> None:
+        self._payload = payload
+        self._raise = raise_on_iterate
+        self.iterated = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.iterated = True
+        if self._raise:
+            raise AssertionError("a compressed body must not be decoded")
+        yield self._payload
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _json_ok(content: str = "こんにちは", model: str = "nvidia/nemotron-3.5-super-vl:free") -> httpx.Response:
@@ -242,35 +260,55 @@ def test_single_chunk_over_the_limit_is_rejected_before_copying(monkeypatch: pyt
     assert result.body is None
 
 
-def test_undecodable_content_encoding_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd", "compress", "GZIP"])
+def test_compressed_responses_are_refused_before_decoding(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
+    stream = _GuardedStream()
     _mock_transport(
         monkeypatch,
         lambda _request: httpx.Response(
             200,
-            headers={"content-type": "application/json", "content-encoding": "zstd"},
-            content=b"{}",
+            headers={"content-type": "application/json", "content-encoding": encoding},
+            stream=stream,
         ),
     )
     result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
     assert result.status == "FORMAT_MISMATCH"
     assert result.reason_code == "INVALID_JSON"
     assert result.body is None
+    assert stream.iterated is False
 
 
-def test_unrequested_content_encoding_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    # httpx has no decoder for "compress", so the allowlist is what refuses it.
+def test_identity_content_encoding_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = b'{"model":"nvidia/nemotron-3.5-super-vl:free","choices":[{"message":{"content":"4"}}]}'
     _mock_transport(
         monkeypatch,
         lambda _request: httpx.Response(
             200,
-            headers={"content-type": "application/json", "content-encoding": "compress"},
-            content=b"{}",
+            headers={"content-type": "application/json", "content-encoding": "identity"},
+            content=body,
+        ),
+    )
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.status == "OK"
+    assert result.body == body
+
+
+def test_compression_bomb_is_rejected_without_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    bomb = gzip.compress(b"\x00" * (transport.MAX_RESPONSE_BYTES * 4))
+    stream = _GuardedStream(bomb, raise_on_iterate=False)
+    _mock_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            stream=stream,
         ),
     )
     result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
     assert result.status == "FORMAT_MISMATCH"
     assert result.reason_code == "INVALID_JSON"
     assert result.body is None
+    assert stream.iterated is False
 
 
 def test_corrupt_encoded_body_is_a_format_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,22 +323,6 @@ def test_corrupt_encoded_body_is_a_format_mismatch(monkeypatch: pytest.MonkeyPat
     result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
     assert result.status == "FORMAT_MISMATCH"
     assert result.reason_code == "INVALID_JSON"
-    assert result.body is None
-
-
-def test_gzip_response_is_size_capped_after_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
-    compressed = gzip.compress(b"z" * (transport.MAX_RESPONSE_BYTES + 1))
-    _mock_transport(
-        monkeypatch,
-        lambda _request: httpx.Response(
-            200,
-            headers={"content-type": "application/json", "content-encoding": "gzip"},
-            content=compressed,
-        ),
-    )
-    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
-    assert result.status == "SAFETY_BLOCKED"
-    assert result.reason_code == "BODY_TOO_LARGE"
     assert result.body is None
 
 
