@@ -347,3 +347,13 @@ transfer, real completion transition, key provisioning, image attestation and
 revocation during capture/publication are still required. In particular, the
 existing Task workspace is shared and must not be considered a safe production
 Artifact origin merely because an output file was absent before execution.
+
+The sandbox now provides a private per-Execution output-directory primitive.
+It accepts only a validated projected Grant identity, creates an exclusive
+UUIDv7-named directory beneath a root-owned private parent without following
+symlinks, and removes it on normal context exit. Docker tests reject duplicate
+execution directories, forged traversal identifiers and symlinked parents.
+This primitive is not yet connected to Supervisor dispatch or Artifact capture;
+the current private capture prototype still uses a shared Task workspace and
+must remain disabled for production. Crash cleanup and authenticated broker
+ownership are still required.

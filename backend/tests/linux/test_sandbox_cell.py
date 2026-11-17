@@ -843,3 +843,46 @@ def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path
         os.close(source_fd)
         os.close(output_fd)
     assert not list(parent.iterdir())
+
+
+def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected output requires privileged Supervisor")
+    from aiagent_sandbox.grant import verify
+    from aiagent_sandbox.projected_output import projected_output
+
+    parent = tmp_path / "output-parent"
+    parent.mkdir(mode=0o700)
+    argv = ["/bin/true"]
+    g = verify(KEY, grant(argv, projected=True), argv, ".")
+    with projected_output(parent, g, cell_uid=20001, cell_gid=20001) as fd:
+        assert os.fstat(fd).st_uid == 20001
+        with pytest.raises(FileExistsError):
+            with projected_output(parent, g, cell_uid=20001, cell_gid=20001):
+                pytest.fail("duplicate output accepted")
+        child = os.open("index.scip", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        os.close(child)
+    assert not list(parent.iterdir())
+
+
+def test_projected_output_rejects_forged_identifier_and_symlink_parent(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected output requires privileged Supervisor")
+    from dataclasses import replace
+
+    from aiagent_sandbox.grant import verify
+    from aiagent_sandbox.projected_output import projected_output
+
+    parent = tmp_path / "private-output-parent"
+    parent.mkdir(mode=0o700)
+    alias = tmp_path / "parent-link"
+    alias.symlink_to(parent, target_is_directory=True)
+    argv = ["/bin/true"]
+    g = verify(KEY, grant(argv, projected=True), argv, ".")
+    with pytest.raises(GrantError, match="OUTPUT_BINDING_INVALID"):
+        with projected_output(parent, replace(g, execution_id="../escape"), cell_uid=20001, cell_gid=20001):
+            pytest.fail("path traversal accepted")
+    with pytest.raises(OSError):
+        with projected_output(alias, g, cell_uid=20001, cell_gid=20001):
+            pytest.fail("symlink accepted")
+    assert not list(parent.iterdir())
