@@ -3,6 +3,7 @@
 No execution, API call, shell access, provider key or release-gate mutation.
 Trusted owners must authenticate the artifact and supply its source SHA.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,6 +23,7 @@ Status = Literal["INCOMPLETE", "NO_TESTS", "REVIEW_REQUIRED", "NO_CANDIDATES"]
 @dataclass(frozen=True, slots=True)
 class NtlintFinding:
     """A candidate only, never an independently verified ReviewFinding."""
+
     rule_id: str
     file: str
     line: int
@@ -90,7 +92,10 @@ def _finding(d: dict[str, object]) -> NtlintFinding:
     if message not in ("candidate", "violation") or severity not in ("info", "warning", "error"):
         raise InvalidEvidence("unsupported ntlint finding type")
     return NtlintFinding(
-        rule, path, start, end,
+        rule,
+        path,
+        start,
+        end,
         cast(Literal["candidate", "violation"], message),
         cast(Literal["info", "warning", "error"], severity),
         _number(d, "value", 1.0),
@@ -99,7 +104,6 @@ def _finding(d: dict[str, object]) -> NtlintFinding:
 
 def _reject_nonfinite(_: str) -> None:
     raise InvalidEvidence("nonfinite ntlint JSON number")
-
 
 
 def _decode_lines(output: str) -> tuple[list[NtlintFinding], dict[str, object]]:
@@ -129,14 +133,17 @@ def _decode_lines(output: str) -> tuple[list[NtlintFinding], dict[str, object]]:
 
     return findings, summary
 
+
 def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected_sha: str) -> NtlintReport:
     """Parse a verified Cell artifact; source_sha and expected_sha must originate from trusted owners.
 
     Does not validate their authority, send data to Typesafe AI or run ntlint.
     """
     if (
-        not isinstance(source_sha, str) or not isinstance(expected_sha, str)
-        or not _SHA.fullmatch(source_sha) or source_sha != expected_sha
+        not isinstance(source_sha, str)
+        or not isinstance(expected_sha, str)
+        or not _SHA.fullmatch(source_sha)
+        or source_sha != expected_sha
     ):
         raise InvalidEvidence("missing or stale trusted ntlint SHA")
     if type(exit_code) is not int or exit_code not in (0, 1, 2):
@@ -154,13 +161,22 @@ def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected
     complete = summary.get("complete")
     if type(complete) is not bool:
         raise InvalidEvidence("missing ntlint completeness")
-    if (reported != len(findings) or candidates != sum(f.message_id == "candidate" for f in findings)
-            or reported > verdicts or missing + unsure > verdicts):
+    if (
+        reported != len(findings)
+        or candidates != sum(f.message_id == "candidate" for f in findings)
+        or reported > verdicts
+        or missing + unsure > verdicts
+    ):
         raise InvalidEvidence("inconsistent ntlint summary")
 
-    if (exit_code == 2 or not complete or missing or failures
-            or (exit_code == 1 and not any(f.message_id == "violation" for f in findings))
-            or (exit_code == 0 and any(f.message_id == "violation" for f in findings))):
+    if (
+        exit_code == 2
+        or not complete
+        or missing
+        or failures
+        or (exit_code == 1 and not any(f.message_id == "violation" for f in findings))
+        or (exit_code == 0 and any(f.message_id == "violation" for f in findings))
+    ):
         status: Status = "INCOMPLETE"
     elif verdicts == 0:
         status = "NO_TESTS"
@@ -168,4 +184,6 @@ def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected
         status = "REVIEW_REQUIRED"
     else:
         status = "NO_CANDIDATES"
-    return NtlintReport(\n        source_sha, exit_code, status, tuple(findings), verdicts, missing, unsure, failures, tokens, usd\n    )
+    return NtlintReport(
+        source_sha, exit_code, status, tuple(findings), verdicts, missing, unsure, failures, tokens, usd
+    )
