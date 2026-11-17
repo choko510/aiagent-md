@@ -676,3 +676,51 @@ def test_legacy_git_snapshot_cannot_claim_validated_artifact(dbs, verified_setup
             "SELECT count(*) AS n FROM agent.execution_artifacts WHERE tenant_id=%s", (claim.tenant_id,)
         )
         assert row is not None and row["n"] == 0
+
+
+def test_signed_capture_proof_is_bound_to_real_execution_row(dbs, verified_setup):
+    import hashlib
+    import hmac
+    import json
+
+    from aiagent_domain import canonical_json
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+
+    with finished_artifact_fixture(dbs, verified_setup) as (claim, prepared, _snapshot, _store, captured):
+        key = b"fixture-key-" + b"x" * 32
+        payload = {
+            "version": 1,
+            "tenant": claim.tenant_id,
+            "owner": claim.owner_user_id,
+            "task": claim.task_id,
+            "run": claim.run_id,
+            "goal": claim.goal_revision,
+            "lease": claim.lease_epoch,
+            "execution": prepared.id,
+            "attempt": prepared.attempt_id,
+            "binding_sha256": prepared.binding_sha256,
+            "artifact_sha256": captured.sha256,
+            "artifact_bytes": captured.byte_length,
+            "issued_at": int(time.time()),
+        }
+
+        def sign(value):
+            mac = hmac.new(key, canonical_json(value).encode("utf-8"), hashlib.sha256).hexdigest()
+            return json.dumps({"payload": value, "mac": mac}).encode()
+
+        verifier = HmacCaptureVerifier(dbs["tool_gateway"], key)
+        verifier.verify(claim, prepared.id, captured.sha256, captured.byte_length, sign(payload))
+        for field, value in (
+            ("attempt", uuid7()),
+            ("binding_sha256", "a" * 64),
+            ("tenant", uuid7()),
+            ("execution", uuid7()),
+            ("artifact_sha256", "b" * 64),
+            ("issued_at", 0),
+            ("version", True),
+        ):
+            with pytest.raises(ExecutionArtifactError, match="CAPTURE_PROOF_INVALID"):
+                verifier.verify(
+                    claim, prepared.id, captured.sha256, captured.byte_length, sign({**payload, field: value})
+                )
