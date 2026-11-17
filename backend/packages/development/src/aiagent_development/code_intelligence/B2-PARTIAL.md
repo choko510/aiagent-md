@@ -357,3 +357,7 @@ This primitive is not yet connected to Supervisor dispatch or Artifact capture;
 the current private capture prototype still uses a shared Task workspace and
 must remain disabled for production. Crash cleanup and authenticated broker
 ownership are still required.
+
+### Supervisor capture fixture update
+
+The private projected capture hook now creates or validates an exclusive output directory for the signed Execution ID and rejects replayed projected Executions after Supervisor restart. A privileged Docker test ran scip-python twice using a read-only Git projection, an Execution-specific output descriptor, Supervisor-signed capture and the B1 decoder. Both artifacts were 1,362 bytes with 11 occurrences and PARTIAL coverage; definition and cross-file reference queries succeeded. The signing key, Grant and binding in that fixture are test-only. This is not an authenticated Source/Artifact RPC, DB lifecycle integration, image attestation or a production Development workflow. Restart replay protection assumes one Supervisor owns the consumed-grant journal; cross-process journal coordination and crash-orphan cleanup remain open. A failed or interrupted execution must not be treated as a published Artifact.
