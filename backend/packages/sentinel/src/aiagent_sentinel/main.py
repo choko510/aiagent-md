@@ -71,9 +71,35 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
             raise RpcError("BAD_REQUEST") from None
         return {"permit": await asyncio.to_thread(s.authorize_human_takeover, *args)}
 
+    async def authorize_notification(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        try:
+            args = (
+                str(body["tenantId"]),
+                str(body["userId"]),
+                str(body["workspaceId"]),
+                str(body["intentId"]),
+                str(body["bindingId"]),
+                str(body["scheme"]),
+                str(body["host"]),
+                int(body["port"]),
+                str(body.get("method", "POST")),
+                str(body.get("targetPath", "/")),
+                str(body.get("bodySha256", "")),
+                str(body["attemptId"]),
+                int(body["attemptNo"]),
+                int(body["leaseEpoch"]),
+                str(body["leaseOwnerRef"]),
+                str(body["sendToken"]),
+            )
+        except Exception:
+            raise RpcError("BAD_REQUEST") from None
+        return {"permit": await asyncio.to_thread(s.authorize_notification, *args)}
+
     srv.register("sentinel.authorize", authorize, {"tool_gateway"})
     srv.register("sentinel.authorize_reconcile", authorize_reconcile, {"tool_gateway"})
     srv.register("sentinel.authorize_human_takeover", authorize_human_takeover, {"api"})
+    srv.register("sentinel.authorize_notification", authorize_notification, {"api"})
     return srv
 
 

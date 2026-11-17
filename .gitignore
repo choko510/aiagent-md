@@ -1,4 +1,6 @@
 deploy/compose/secrets/
 __pycache__/
 *.py[cod]
+web/dist/
+web/node_modules/
 

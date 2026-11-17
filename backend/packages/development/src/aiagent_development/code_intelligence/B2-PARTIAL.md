@@ -263,7 +263,7 @@ object IDs remain legacy collision-sensitive and are marked `LEGACY_SHA1`.
 
 ## Execution preparation and transactional Artifact storage
 
-Migration 0012 adds operator-provisioned repository bindings and recipe
+Migration 0013 adds operator-provisioned repository bindings and recipe
 approvals, verified Workspace snapshot metadata, and a distinct PREPARED
 Execution ID in the existing canonical PostgreSQL database. The Workspace
 operation independently verifies bounded Git object proof and source bytes,

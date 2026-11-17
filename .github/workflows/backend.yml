@@ -4,10 +4,10 @@ name: backend
 # and the Compose network-isolation gate. KVM two-VM topology tests are NOT run here (no /dev/kvm on hosted runners).
 on:
   pull_request:
-    paths: ['backend/**', 'contracts/**', 'web/src/api/generated/**', 'deploy/**', '.github/workflows/backend.yml']
+    paths: ['backend/**', 'contracts/**', 'web/**', 'deploy/**', '.github/workflows/backend.yml']
   push:
     branches: [main]
-    paths: ['backend/**', 'contracts/**', 'web/src/api/generated/**', 'deploy/**', '.github/workflows/backend.yml']
+    paths: ['backend/**', 'contracts/**', 'web/**', 'deploy/**', '.github/workflows/backend.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -53,6 +53,12 @@ jobs:
       AIAGENT_TEST_PG_URL: postgresql://postgres:ci@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build Web UI bundle for Playwright UI E2E
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
       - uses: astral-sh/setup-uv@v6
         with: {version: '0.12.3'}
       - run: uv sync --locked --python ${{ matrix.python }}
