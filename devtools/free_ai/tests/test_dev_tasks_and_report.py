@@ -477,3 +477,8 @@ def test_failed_probe_output_stays_out_of_the_report(
     assert "Allowed answers" not in out
     assert "INDEX_OUT_OF_RANGE" not in out
     assert (runs / "probes.jsonl").exists()
+    log = (runs / "probes.jsonl").read_text(encoding="utf-8")
+    assert "Allowed answers" not in log
+    assert "last_item" not in log
+    assert "INDEX_OUT_OF_RANGE" not in log
+    assert len(json.loads(log.splitlines()[0])) == 13
