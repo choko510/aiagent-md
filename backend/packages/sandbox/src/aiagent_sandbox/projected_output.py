@@ -83,8 +83,14 @@ def validate_projected_output(parent: Path, grant: Grant, fd: int, *, cell_uid: 
         named_fd = os.open(grant.execution_id, flags, dir_fd=root_fd)
         try:
             named, actual = os.fstat(named_fd), os.fstat(fd)
-            with os.scandir(fd) as entries:
-                has_entries = next(entries, None) is not None
+            # A duplicated descriptor shares the directory cursor with the caller.
+            # Open a fresh description so a pre-advanced cursor cannot hide entries.
+            scan_fd = os.open(".", flags, dir_fd=fd)
+            try:
+                with os.scandir(scan_fd) as entries:
+                    has_entries = next(entries, None) is not None
+            finally:
+                os.close(scan_fd)
             if (
                 (named.st_dev, named.st_ino) != (actual.st_dev, actual.st_ino)
                 or actual.st_uid != cell_uid
