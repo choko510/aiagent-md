@@ -97,3 +97,58 @@ async def relay_revocation(
         revoked_wait.cancel()
         stop_wait.cancel()
         await asyncio.gather(revoked_wait, stop_wait, return_exceptions=True)
+
+
+async def pulse_supervisor_authority(
+    db: Database,
+    claim: control.Claim,
+    endpoint: str,
+    rpc_key: bytes,
+    revoked: asyncio.Event,
+    stop: asyncio.Event,
+    ready: asyncio.Event,
+    *,
+    tenant_id: str,
+    execution_id: str,
+    attempt_id: str,
+    binding_sha256: str,
+    interval: float = 0.25,
+) -> None:
+    """Renew a Cell watchdog only after a fresh canonical Run authority check.
+
+    This bridge is internal and not wired to production dispatch. The caller
+    must establish the Execution binding and choose a Cell watchdog period
+    longer than the bounded poll/RPC time. Any failure sets revoked.
+    """
+    from aiagent_core.rpc import RpcClient
+
+    if tenant_id != claim.tenant_id or not 0.05 <= interval <= 1.0:
+        raise ValueError("invalid execution authority bridge")
+    while not stop.is_set() and not revoked.is_set():
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_check, db, claim), timeout=1.5)
+            response = await asyncio.wait_for(
+                RpcClient(endpoint, "tool_gateway", rpc_key, timeout_s=1).call(
+                    "exec.heartbeat",
+                    {
+                        "tenantId": tenant_id,
+                        "executionId": execution_id,
+                        "attemptId": attempt_id,
+                        "bindingSha256": binding_sha256,
+                    },
+                ),
+                timeout=1.5,
+            )
+            if response.get("renewed") is not True:
+                raise RuntimeError("Cell heartbeat not accepted")
+            ready.set()
+        except asyncio.CancelledError:
+            revoked.set()
+            raise
+        except Exception:
+            revoked.set()
+            return
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass

@@ -80,3 +80,57 @@ def test_relay_sends_scoped_cancel_and_reports_unknown(monkeypatch: pytest.Monke
             {"tenantId": "tenant", "executionId": "execution", "attemptId": "attempt", "bindingSha256": "a" * 64},
         )
     ]
+
+
+@pytest.mark.parametrize("authority_fails", [False, True])
+def test_pulse_occurs_only_after_authority_check(monkeypatch: pytest.MonkeyPatch, authority_fails: bool) -> None:
+    import aiagent_core.rpc
+
+    checks, calls = [], []
+
+    def check(*_args: object) -> None:
+        checks.append("checked")
+        if authority_fails:
+            raise OSError("unavailable")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def call(self, method, body):
+            assert checks and method == "exec.heartbeat"
+            calls.append(body)
+            return {"renewed": True}
+
+    monkeypatch.setattr(execution_watch, "_check", check)
+    monkeypatch.setattr(aiagent_core.rpc, "RpcClient", FakeClient)
+
+    async def exercise() -> None:
+        revoked, stop, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        claim = SimpleNamespace(tenant_id="t")
+        task = asyncio.create_task(
+            execution_watch.pulse_supervisor_authority(
+                SimpleNamespace(),
+                claim,
+                "unix:/unused",
+                b"k" * 32,
+                revoked,
+                stop,
+                ready,
+                tenant_id="t",
+                execution_id="e",
+                attempt_id="a",
+                binding_sha256="b" * 64,
+                interval=0.05,
+            )
+        )
+        if authority_fails:
+            await asyncio.wait_for(revoked.wait(), 5)
+            assert not ready.is_set() and not calls
+        else:
+            await asyncio.wait_for(ready.wait(), 5)
+            assert calls and not revoked.is_set()
+            stop.set()
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(exercise())

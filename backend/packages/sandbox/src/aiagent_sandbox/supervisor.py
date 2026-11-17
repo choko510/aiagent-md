@@ -150,6 +150,7 @@ class Supervisor:
     consumed_path: Path | None = None
     _consumed: set[str] = field(default_factory=set)
     _active: dict[str, tuple[str, str, str, asyncio.Event]] = field(default_factory=dict)
+    _heartbeats: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if sys.platform != "linux":
@@ -190,6 +191,25 @@ class Supervisor:
             return False
         active[3].set()
         return True
+
+    def renew_projected(self, tenant: str, execution: str, attempt: str, binding: str) -> bool:
+        active, heartbeat = self._active.get(execution), self._heartbeats.get(execution)
+        if active is None or active[:3] != (tenant, attempt, binding) or heartbeat is None or active[3].is_set():
+            return False
+        deadline, period = heartbeat
+        if time.monotonic() >= deadline:
+            active[3].set()
+            return False
+        self._heartbeats[execution] = (time.monotonic() + period, period)
+        return True
+
+    async def _watch_heartbeat(self, execution: str, revoked: asyncio.Event) -> None:
+        while not revoked.is_set():
+            heartbeat = self._heartbeats.get(execution)
+            if heartbeat is None or time.monotonic() >= heartbeat[0]:
+                revoked.set()
+                return
+            await asyncio.sleep(min(0.1, max(0.001, heartbeat[0] - time.monotonic())))
 
     def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
         import resource
@@ -247,6 +267,7 @@ class Supervisor:
         source_fd: int | None,
         output_fd: int | None = None,
         revoked: asyncio.Event | None = None,
+        heartbeat_seconds: float | None = None,
     ) -> dict[str, Any]:
         # source_fd is reserved for a future trusted projection broker. It is
         # deliberately not accepted from RPC and is not an authorization token.
@@ -258,6 +279,8 @@ class Supervisor:
                     raise GrantError("SOURCE_OWNER_MISMATCH")
             except OSError as exc:
                 raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
+        if heartbeat_seconds is not None and (source_fd is None or not 0.1 <= heartbeat_seconds <= 10):
+            raise GrantError("INVALID_HEARTBEAT")
         if output_fd is not None and (source_fd is None or output_fd == source_fd):
             raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         g = verify(self.grant_key, token, argv, cwd_rel)
@@ -273,6 +296,11 @@ class Supervisor:
                 raise GrantError("EXECUTION_ALREADY_ACTIVE")
             revoked = revoked or asyncio.Event()
             self._active[execution] = (g.tenant_id, g.attempt_id, g.execution_binding_sha256, revoked)
+        heartbeat_task: asyncio.Task[None] | None = None
+        if execution is not None and heartbeat_seconds is not None:
+            self._heartbeats[execution] = (time.monotonic() + heartbeat_seconds, heartbeat_seconds)
+            assert revoked is not None
+            heartbeat_task = asyncio.create_task(self._watch_heartbeat(execution, revoked))
         try:
             if revoked is not None and revoked.is_set():
                 return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
@@ -331,7 +359,11 @@ class Supervisor:
                 "truncated": truncated,
             }
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
             if source_fd is not None and execution is not None:
+                self._heartbeats.pop(execution, None)
                 self._active.pop(execution, None)
 
 
@@ -348,11 +380,11 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method not in ("exec.run", "exec.cancel"):
+            if caller != "tool_gateway" or method not in ("exec.run", "exec.cancel", "exec.heartbeat"):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                if method == "exec.cancel":
+                if method in ("exec.cancel", "exec.heartbeat"):
                     fields = (
                         body.get("tenantId"),
                         body.get("executionId"),
@@ -363,7 +395,11 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
                         isinstance(value, str) and 1 <= len(value) <= 128 for value in fields
                     ):
                         raise GrantError("MALFORMED")
-                    res = {"cancelled": sup.cancel_projected(*cast(tuple[str, str, str, str], fields))}
+                    scoped = cast(tuple[str, str, str, str], fields)
+                    if method == "exec.cancel":
+                        res = {"cancelled": sup.cancel_projected(*scoped)}
+                    else:
+                        res = {"renewed": sup.renew_projected(*scoped)}
                 else:
                     res = await sup.execute(
                         body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))

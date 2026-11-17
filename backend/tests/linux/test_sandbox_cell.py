@@ -521,8 +521,8 @@ def test_authenticated_rpc_cancel_rejects_wrong_key_and_scope(tmp_path: Path) ->
     key = b"r" * 32
     socket_path = tmp_path / "cancel.sock"
 
-    async def rpc(secret, body):
-        env = sign_request(secret, "tool_gateway", "exec.cancel", body)
+    async def rpc(secret, body, method="exec.cancel"):
+        env = sign_request(secret, "tool_gateway", method, body)
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
         try:
             writer.write(encode_frame(env))
@@ -541,7 +541,7 @@ def test_authenticated_rpc_cancel_rejects_wrong_key_and_scope(tmp_path: Path) ->
                 if socket_path.exists():
                     break
                 await asyncio.sleep(0.01)
-            task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd))
+            task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd, heartbeat_seconds=2))
             for _ in range(100):
                 if payload["execution_id"] in s._active:
                     break
@@ -556,6 +556,10 @@ def test_authenticated_rpc_cancel_rejects_wrong_key_and_scope(tmp_path: Path) ->
             assert rejected["code"] == "UNAUTHENTICATED"
             env, mismatched = await rpc(key, {**body, "tenantId": "other"})
             assert not verify_response(key, env["nonce"], mismatched)["data"]["cancelled"]
+            env, rejected_heartbeat = await rpc(key, {**body, "attemptId": "other"}, "exec.heartbeat")
+            assert not verify_response(key, env["nonce"], rejected_heartbeat)["data"]["renewed"]
+            env, heartbeat = await rpc(key, body, "exec.heartbeat")
+            assert verify_response(key, env["nonce"], heartbeat)["data"]["renewed"]
             env, accepted = await rpc(key, body)
             assert verify_response(key, env["nonce"], accepted)["data"]["cancelled"]
             result = await asyncio.wait_for(task, 5)
@@ -566,6 +570,36 @@ def test_authenticated_rpc_cancel_rejects_wrong_key_and_scope(tmp_path: Path) ->
                 await asyncio.gather(task, return_exceptions=True)
             server.cancel()
             await asyncio.gather(server, return_exceptions=True)
+
+    try:
+        run(exercise())
+    finally:
+        os.close(fd)
+
+
+def test_projected_heartbeat_loss_kills_process_and_cannot_be_revived(tmp_path: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "heartbeat-source"
+    source.mkdir()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    token = grant(argv, projected=True)
+    payload = token["grant"]
+
+    async def exercise():
+        task = asyncio.create_task(s._execute(token, argv, ".", source_fd=fd, heartbeat_seconds=0.5))
+        for _ in range(100):
+            if payload["execution_id"] in s._heartbeats:
+                break
+            await asyncio.sleep(0.01)
+        fields = ("t1", payload["execution_id"], payload["attempt_id"], payload["execution_binding_sha256"])
+        assert not s.renew_projected("other", *fields[1:])
+        assert s.renew_projected(*fields)
+        result = await asyncio.wait_for(task, 5)
+        assert result["status"] == "REVOKED" and "stdout" not in result
+        assert not s.renew_projected(*fields)
 
     try:
         run(exercise())
