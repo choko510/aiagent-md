@@ -336,8 +336,13 @@ class Sentinel:
         method: str = "POST",
         target_path: str = "/",
         body_sha256: str = _EMPTY_BODY_SHA256,
+        attempt_id: str = "",
+        attempt_no: int = 0,
+        lease_epoch: int = 0,
+        lease_owner_ref: str = "",
+        send_token: str = "",
     ) -> str:
-        """Issue single-use permit bound to a consented Notification intent, binding version, destination, path, and body."""
+        """Issue ONE single-use permit bound to a claimed SENDING attempt, active lease, path/body digest, and consent."""
         try:
             host = normalize_host(host)
         except EgressDenied as e:
@@ -354,35 +359,59 @@ class Sentinel:
             raise RpcError("BAD_REQUEST")
         if not isinstance(body_sha256, str) or not _SHA256_HEX_RE.fullmatch(body_sha256):
             raise RpcError("BAD_REQUEST")
+        if not attempt_id or attempt_no < 1 or lease_epoch < 1 or not lease_owner_ref or not send_token:
+            raise RpcError("NOTIFICATION_NOT_AUTHORIZED")
         dest = self.config.match(scheme, host, port)
         if dest is None or not dest.needs_permit or method not in dest.methods:
             raise RpcError("DESTINATION_NOT_ALLOWED")
+        path_sha256 = hashlib.sha256(target_path.encode("utf-8")).hexdigest()
+        nonce = secrets.token_hex(12)
+        expires = int(time.time()) + PERMIT_TTL_S
         with self.db.tx() as c:
             row = c.execute(
-                "SELECT i.id FROM agent.notification_intents i"
+                "UPDATE agent.notification_attempts a"
+                " SET permit_issued_at=now(), permit_nonce=%s"
+                " FROM agent.notification_intents i"
                 " JOIN agent.notification_bindings b ON b.tenant_id=i.tenant_id AND b.id=i.binding_id"
                 " JOIN agent.schema_control sc ON sc.singleton"
                 " JOIN agent.tenants tn ON tn.id=i.tenant_id"
                 " JOIN agent.tenant_memberships m ON m.tenant_id=tn.id AND m.user_id=%s"
                 " JOIN agent.users u ON u.id=m.user_id"
                 " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=%s AND w.owner_user_id=%s"
-                " WHERE i.tenant_id=%s AND i.id=%s AND i.binding_id=%s AND i.owner_user_id=%s AND i.workspace_id=%s"
-                " AND i.status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
+                " WHERE a.tenant_id=%s AND a.id=%s AND a.intent_id=%s AND a.binding_id=%s"
+                " AND a.attempt_no=%s AND a.send_token=%s AND a.claimed_lease_epoch=%s"
+                " AND a.disposition='NOT_STARTED'"
+                " AND a.permit_issued_at IS NULL AND a.permit_nonce IS NULL"
+                " AND a.request_path_sha256=%s AND a.request_body_sha256=%s"
+                " AND i.tenant_id=a.tenant_id AND i.id=a.intent_id AND i.binding_id=a.binding_id"
+                " AND i.owner_user_id=%s AND i.workspace_id=%s"
+                " AND i.status='SENDING' AND i.attempt_count=a.attempt_no"
+                " AND i.lease_epoch=a.claimed_lease_epoch AND i.lease_owner_ref=%s"
+                " AND i.lease_until IS NOT NULL AND i.lease_until > now()"
                 " AND i.restore_incarnation=sc.restore_incarnation"
                 " AND i.binding_version=b.binding_version AND i.consent_version=b.consent_version"
                 " AND b.owner_user_id=%s AND b.workspace_id=%s AND b.consent_granted=true"
                 " AND b.opted_out_at IS NULL AND b.revoked_at IS NULL"
                 " AND b.destination_scheme=%s AND b.destination_host=%s AND b.destination_port=%s"
-                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
+                " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL"
+                " RETURNING a.id",
                 (
+                    nonce,
                     user_id,
                     workspace_id,
                     user_id,
                     tenant_id,
+                    attempt_id,
                     intent_id,
                     binding_id,
+                    attempt_no,
+                    send_token,
+                    lease_epoch,
+                    path_sha256,
+                    body_sha256,
                     user_id,
                     workspace_id,
+                    lease_owner_ref,
                     user_id,
                     workspace_id,
                     scheme,
@@ -392,13 +421,13 @@ class Sentinel:
             ).fetchone()
             if row is None:
                 raise RpcError("NOTIFICATION_NOT_AUTHORIZED")
-        nonce = secrets.token_hex(12)
-        expires = int(time.time()) + PERMIT_TTL_S
         mac = _mac(
             self.key,
             "notification_delivery",
             tenant_id,
             intent_id,
+            attempt_no,
+            lease_epoch,
             nonce,
             scheme,
             host,
@@ -408,7 +437,7 @@ class Sentinel:
             body_sha256,
             expires,
         )
-        return f"nt.{tenant_id}.{intent_id}.{nonce}.{expires}.{mac}"
+        return f"nt.{tenant_id}.{intent_id}.{attempt_no}.{lease_epoch}.{nonce}.{expires}.{mac}"
 
     def verify_notification(
         self,
@@ -420,22 +449,28 @@ class Sentinel:
         target_path: str = "/",
         body_sha256: str = _EMPTY_BODY_SHA256,
     ) -> tuple[str, None]:
-        """Verify notification MAC, destination/path/body binding, consume nonce atomically, and revalidate consent."""
+        """Verify MAC, attempt/lease/path/body binding, consume single-use nonce, and revalidate SENDING + consent."""
         parts = token.split(".")
-        if len(parts) != 6 or parts[0] != "nt":
+        if len(parts) != 8 or parts[0] != "nt":
             raise EgressDenied("PERMIT_MALFORMED")
-        _, tenant, intent_id, nonce, expires_s, mac = parts
+        _, tenant, intent_id, attempt_no_s, lease_epoch_s, nonce, expires_s, mac = parts
         if not re.fullmatch(r"[0-9a-f]{24}", nonce):
             raise EgressDenied("PERMIT_MALFORMED")
         try:
+            attempt_no = int(attempt_no_s)
+            lease_epoch = int(lease_epoch_s)
             expires = int(expires_s)
         except ValueError:
             raise EgressDenied("PERMIT_MALFORMED") from None
+        if attempt_no < 1 or lease_epoch < 1:
+            raise EgressDenied("PERMIT_MALFORMED")
         good = _mac(
             self.key,
             "notification_delivery",
             tenant,
             intent_id,
+            attempt_no,
+            lease_epoch,
             nonce,
             scheme,
             host,
@@ -449,6 +484,7 @@ class Sentinel:
             raise EgressDenied("PERMIT_BINDING")
         if time.time() >= expires:
             raise EgressDenied("PERMIT_EXPIRED")
+        path_sha256 = hashlib.sha256(target_path.encode("utf-8")).hexdigest()
         with self.db.tx() as c:
             c.execute("DELETE FROM agent.notification_delivery_nonces WHERE expires_at < now() - interval '60 seconds'")
             clk = c.execute("SELECT to_timestamp(%s) > clock_timestamp() AS valid", (expires,)).fetchone()
@@ -464,6 +500,8 @@ class Sentinel:
         with self.db.tx() as c:
             row = c.execute(
                 "SELECT 1 FROM agent.notification_intents i"
+                " JOIN agent.notification_attempts a"
+                "   ON a.tenant_id=i.tenant_id AND a.intent_id=i.id AND a.attempt_no=i.attempt_count"
                 " JOIN agent.notification_bindings b ON b.tenant_id=i.tenant_id AND b.id=i.binding_id"
                 " JOIN agent.schema_control sc ON sc.singleton"
                 " JOIN agent.tenants tn ON tn.id=i.tenant_id"
@@ -471,13 +509,27 @@ class Sentinel:
                 " JOIN agent.users u ON u.id=m.user_id"
                 " JOIN agent.workspaces w ON w.tenant_id=tn.id AND w.id=i.workspace_id AND w.owner_user_id=i.owner_user_id"
                 " WHERE i.tenant_id=%s AND i.id=%s"
-                " AND i.status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
+                " AND i.status='SENDING' AND i.attempt_count=%s AND i.lease_epoch=%s"
+                " AND i.lease_until IS NOT NULL AND i.lease_until > now()"
+                " AND a.claimed_lease_epoch=i.lease_epoch AND a.disposition='NOT_STARTED'"
+                " AND a.permit_nonce=%s AND a.request_path_sha256=%s AND a.request_body_sha256=%s"
                 " AND i.restore_incarnation=sc.restore_incarnation"
                 " AND i.binding_version=b.binding_version AND i.consent_version=b.consent_version"
                 " AND b.consent_granted=true AND b.opted_out_at IS NULL AND b.revoked_at IS NULL"
                 " AND b.destination_scheme=%s AND b.destination_host=%s AND b.destination_port=%s"
                 " AND tn.disabled_at IS NULL AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL",
-                (tenant, intent_id, scheme, host, port),
+                (
+                    tenant,
+                    intent_id,
+                    attempt_no,
+                    lease_epoch,
+                    nonce,
+                    path_sha256,
+                    body_sha256,
+                    scheme,
+                    host,
+                    port,
+                ),
             ).fetchone()
         if row is None:
             raise EgressDenied("PERMIT_INVALID_AT_SEND")

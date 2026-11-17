@@ -86,6 +86,11 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
                 str(body.get("method", "POST")),
                 str(body.get("targetPath", "/")),
                 str(body.get("bodySha256", "")),
+                str(body["attemptId"]),
+                int(body["attemptNo"]),
+                int(body["leaseEpoch"]),
+                str(body["leaseOwnerRef"]),
+                str(body["sendToken"]),
             )
         except Exception:
             raise RpcError("BAD_REQUEST") from None
@@ -94,7 +99,7 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
     srv.register("sentinel.authorize", authorize, {"tool_gateway"})
     srv.register("sentinel.authorize_reconcile", authorize_reconcile, {"tool_gateway"})
     srv.register("sentinel.authorize_human_takeover", authorize_human_takeover, {"api"})
-    srv.register("sentinel.authorize_notification", authorize_notification, {"api", "tool_gateway"})
+    srv.register("sentinel.authorize_notification", authorize_notification, {"api"})
     return srv
 
 

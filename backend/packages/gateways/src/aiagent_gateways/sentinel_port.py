@@ -130,6 +130,11 @@ class LocalSentinel:
         *,
         target_path: str = "/",
         body_sha256: str | None = None,
+        attempt_id: str = "",
+        attempt_no: int = 0,
+        lease_epoch: int = 0,
+        lease_owner_ref: str = "",
+        send_token: str = "",
     ) -> str:
         return str(
             self.s.authorize_notification(
@@ -144,5 +149,10 @@ class LocalSentinel:
                 method,
                 target_path,
                 body_sha256 if body_sha256 is not None else _EMPTY_BODY_SHA256,
+                attempt_id,
+                attempt_no,
+                lease_epoch,
+                lease_owner_ref,
+                send_token,
             )
         )

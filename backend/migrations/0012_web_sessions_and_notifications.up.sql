@@ -185,6 +185,10 @@ CREATE TABLE agent.notification_attempts (
   attempt_no integer NOT NULL CHECK (attempt_no >= 1),
   send_token text NOT NULL CHECK (length(send_token) BETWEEN 8 AND 128),
   claimed_lease_epoch bigint NOT NULL CHECK (claimed_lease_epoch >= 1),
+  request_path_sha256 char(64) CHECK (request_path_sha256 IS NULL OR request_path_sha256 ~ '^[0-9a-f]{64}$'),
+  request_body_sha256 char(64) CHECK (request_body_sha256 IS NULL OR request_body_sha256 ~ '^[0-9a-f]{64}$'),
+  permit_issued_at timestamptz,
+  permit_nonce text UNIQUE CHECK (permit_nonce IS NULL OR permit_nonce ~ '^[0-9a-f]{24}$'),
   disposition text NOT NULL CHECK (
     disposition IN ('NOT_STARTED','TRANSPORT_REJECTED','PROVIDER_ACCEPTED','UNKNOWN','PERMANENT_FAILURE')
   ),
@@ -230,6 +234,11 @@ GRANT SELECT (
   binding_version, consent_granted, consent_version, opted_out_at, revoked_at
 ) ON agent.notification_bindings TO aiagent_sentinel;
 GRANT SELECT ON agent.notification_intents TO aiagent_sentinel;
+GRANT SELECT (
+  tenant_id, id, intent_id, binding_id, attempt_no, send_token, claimed_lease_epoch, disposition,
+  request_path_sha256, request_body_sha256, permit_issued_at, permit_nonce
+) ON agent.notification_attempts TO aiagent_sentinel;
+GRANT UPDATE (permit_issued_at, permit_nonce) ON agent.notification_attempts TO aiagent_sentinel;
 GRANT SELECT ON agent.notification_bindings, agent.notification_intents, agent.notification_attempts TO aiagent_ops;
 GRANT UPDATE (dispatched_at, relay_lease_epoch, relay_owner_ref, relay_lease_until, dispatch_attempts, next_attempt_at, last_error_code)
   ON agent.outbox_messages TO aiagent_api;

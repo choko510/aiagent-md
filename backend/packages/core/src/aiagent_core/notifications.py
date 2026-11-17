@@ -22,6 +22,7 @@ import os
 import re
 import socket
 import ssl
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import psycopg
 from aiagent_domain import sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -351,11 +353,15 @@ def list_bindings(db: Database, *, tenant_id: str, user_id: str, limit: int = 50
 
 def _suppress_pending_for_binding(c: Any, *, tenant_id: str, binding_id: str, reason: str) -> None:
     rows = c.execute(
-        "UPDATE agent.notification_intents"
+        "WITH target AS ("
+        "  SELECT id FROM agent.notification_intents"
+        "  WHERE tenant_id=%s AND binding_id=%s AND status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
+        "  ORDER BY id FOR UPDATE"
+        ")"
+        " UPDATE agent.notification_intents i"
         " SET status='SUPPRESSED', last_error_code=%s, lease_until=NULL, updated_at=now()"
-        " WHERE tenant_id=%s AND binding_id=%s AND status IN ('QUEUED','DEFERRED_QUIET_HOURS','SENDING')"
-        " RETURNING id",
-        (reason, tenant_id, binding_id),
+        " FROM target WHERE i.tenant_id=%s AND i.id=target.id RETURNING i.id",
+        (tenant_id, binding_id, reason, tenant_id),
     ).fetchall()
     for r in rows:
         iid = str(r["id"])
@@ -367,6 +373,18 @@ def _suppress_pending_for_binding(c: Any, *, tenant_id: str, binding_id: str, re
         )
 
 
+def _run_consent_tx(db: Database, tenant_id: str, fn: Callable[[Any], Any]) -> Any:
+    """Execute idempotent consent/opt-out TX; retry only on rolled-back PG deadlock, never fake success."""
+    for attempt in range(3):
+        try:
+            with db.tx(tenant=tenant_id) as c:
+                return fn(c)
+        except psycopg.errors.DeadlockDetected:
+            if attempt == 2:
+                raise
+            time.sleep(0.01 * (attempt + 1))
+
+
 def set_binding_consent(
     db: Database,
     *,
@@ -375,7 +393,7 @@ def set_binding_consent(
     binding_id: str,
     granted: bool,
 ) -> dict[str, Any] | None:
-    with db.tx(tenant=tenant_id) as c:
+    def _op(c: Any) -> dict[str, Any] | None:
         if granted:
             row = c.execute(
                 "UPDATE agent.notification_bindings"
@@ -396,6 +414,9 @@ def set_binding_consent(
                 _suppress_pending_for_binding(c, tenant_id=tenant_id, binding_id=binding_id, reason="CONSENT_REVOKED")
         return _format_binding_row(row) if row is not None else None
 
+    out: dict[str, Any] | None = _run_consent_tx(db, tenant_id, _op)
+    return out
+
 
 def opt_out_binding(
     db: Database,
@@ -405,7 +426,7 @@ def opt_out_binding(
     binding_id: str,
     revoke: bool = False,
 ) -> dict[str, Any] | None:
-    with db.tx(tenant=tenant_id) as c:
+    def _op(c: Any) -> dict[str, Any] | None:
         if revoke:
             row = c.execute(
                 "UPDATE agent.notification_bindings"
@@ -430,6 +451,9 @@ def opt_out_binding(
                 reason="BINDING_REVOKED" if revoke else "OPTED_OUT",
             )
         return _format_binding_row(row) if row is not None else None
+
+    out: dict[str, Any] | None = _run_consent_tx(db, tenant_id, _op)
+    return out
 
 
 def enqueue_notification_tx(
@@ -776,8 +800,10 @@ class NotificationClaim:
     priority: str
     title: str
     summary_text: str
+    attempt_id: str
     attempt_no: int
     lease_epoch: int
+    lease_owner_ref: str
     send_token: str
 
 
@@ -895,19 +921,41 @@ class NotificationDeliveryWorker:
                 clauses.append("i.id = ANY(%s)")
                 params.append([str(x) for x in intent_ids])
             scan_limit = max(batch, 20)
-            params.append(scan_limit)
+            # Step 1 (Strict lock hierarchy: Binding -> Intent -> Attempt -> Outbox):
+            # Discover candidate bindings without locks, lock parent bindings FOR SHARE in deterministic order first,
+            # then lock child ready intents ONLY within those already-locked bindings.
+            cand_rows = c.execute(
+                "SELECT DISTINCT i.tenant_id, i.binding_id FROM agent.notification_intents i"
+                f" WHERE {' AND '.join(clauses)}"
+                " ORDER BY i.tenant_id, i.binding_id LIMIT %s",
+                (*params, scan_limit),
+            ).fetchall()
+            if not cand_rows:
+                return []
+            b_rows = c.execute(
+                "SELECT b.* FROM agent.notification_bindings b"
+                " JOIN unnest(%s::uuid[], %s::uuid[]) AS k(tid, bid) ON b.tenant_id=k.tid AND b.id=k.bid"
+                " ORDER BY b.tenant_id, b.id FOR SHARE OF b",
+                ([r["tenant_id"] for r in cand_rows], [r["binding_id"] for r in cand_rows]),
+            ).fetchall()
+            locked_bindings: dict[tuple[str, str], Row] = {(str(b["tenant_id"]), str(b["id"])): b for b in b_rows}
+            if not locked_bindings:
+                return []
 
             rows = c.execute(
                 "SELECT i.* FROM agent.notification_intents i"
-                f" WHERE {' AND '.join(clauses)}"
+                f" WHERE {' AND '.join(clauses)} AND i.binding_id = ANY(%s::uuid[])"
                 " ORDER BY i.next_attempt_at, i.id LIMIT %s FOR UPDATE OF i SKIP LOCKED",
-                tuple(params),
+                (*params, [str(r["binding_id"]) for r in cand_rows], scan_limit),
             ).fetchall()
             for r in rows:
                 if len(claims) >= batch:
                     break
                 tid = str(r["tenant_id"])
                 iid = str(r["id"])
+                b = locked_bindings.get((tid, str(r["binding_id"])))
+                if b is None:
+                    continue
                 if int(r["restore_incarnation"]) != inc:
                     c.execute(
                         "UPDATE agent.notification_intents SET status='SUPPRESSED', last_error_code='RESTORE_STALE',"
@@ -920,13 +968,8 @@ class NotificationDeliveryWorker:
                         (tid, f"notify:{iid}"),
                     )
                     continue
-                b = c.execute(
-                    "SELECT * FROM agent.notification_bindings WHERE tenant_id=%s AND id=%s FOR SHARE",
-                    (tid, r["binding_id"]),
-                ).fetchone()
                 valid_binding = (
-                    b is not None
-                    and bool(b["consent_granted"])
+                    bool(b["consent_granted"])
                     and b["opted_out_at"] is None
                     and b["revoked_at"] is None
                     and int(b["binding_version"]) == int(r["binding_version"])
@@ -945,7 +988,6 @@ class NotificationDeliveryWorker:
                         (tid, f"notify:{iid}"),
                     )
                     continue
-                assert b is not None
                 if str(r["priority"]) != "critical":
                     quiet_until = compute_quiet_until(
                         db_now,
@@ -964,6 +1006,7 @@ class NotificationDeliveryWorker:
                 new_attempt = int(r["attempt_count"]) + 1
                 new_lease = int(r["lease_epoch"]) + 1
                 send_token = uuid7()
+                attempt_id = uuid7()
                 c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status='SENDING', attempt_count=%s, lease_epoch=%s, lease_owner_ref=%s,"
@@ -975,7 +1018,7 @@ class NotificationDeliveryWorker:
                     "INSERT INTO agent.notification_attempts("
                     " tenant_id, id, intent_id, binding_id, attempt_no, send_token, claimed_lease_epoch, disposition)"
                     " VALUES (%s,%s,%s,%s,%s,%s,%s,'NOT_STARTED')",
-                    (tid, uuid7(), iid, str(r["binding_id"]), new_attempt, send_token, new_lease),
+                    (tid, attempt_id, iid, str(r["binding_id"]), new_attempt, send_token, new_lease),
                 )
                 claims.append(
                     NotificationClaim(
@@ -999,8 +1042,10 @@ class NotificationDeliveryWorker:
                         priority=str(r["priority"]),
                         title=str(r["title"]),
                         summary_text=str(r["summary_text"]),
+                        attempt_id=attempt_id,
                         attempt_no=new_attempt,
                         lease_epoch=new_lease,
+                        lease_owner_ref=self._owner,
                         send_token=send_token,
                     )
                 )
@@ -1008,9 +1053,20 @@ class NotificationDeliveryWorker:
                     break
         return claims
 
-    def _verify_claim_lease_active(self, claim: NotificationClaim) -> bool:
-        """Re-verify owner/workspace scope, consent/version, status, lease_epoch, and non-expired lease before wire send."""
+    def _verify_claim_lease_active(
+        self,
+        claim: NotificationClaim,
+        *,
+        bind_path_sha256: str | None = None,
+        bind_body_sha256: str | None = None,
+    ) -> bool:
+        """Enforce Binding -> Intent -> Attempt lock order, re-verify consent/lease, and optionally bind digests once."""
         with self._db.tx(tenant=claim.tenant_id) as c:
+            b = c.execute(
+                "SELECT binding_version, consent_granted, consent_version, opted_out_at, revoked_at"
+                " FROM agent.notification_bindings WHERE tenant_id=%s AND id=%s FOR SHARE",
+                (claim.tenant_id, claim.binding_id),
+            ).fetchone()
             row = c.execute(
                 "SELECT owner_user_id, workspace_id, binding_id, binding_version, consent_version,"
                 " status, lease_epoch, lease_owner_ref,"
@@ -1018,15 +1074,6 @@ class NotificationDeliveryWorker:
                 " FROM agent.notification_intents WHERE tenant_id=%s AND id=%s FOR UPDATE",
                 (claim.tenant_id, claim.intent_id),
             ).fetchone()
-            b = (
-                c.execute(
-                    "SELECT binding_version, consent_granted, consent_version, opted_out_at, revoked_at"
-                    " FROM agent.notification_bindings WHERE tenant_id=%s AND id=%s FOR SHARE",
-                    (claim.tenant_id, claim.binding_id),
-                ).fetchone()
-                if row is not None
-                else None
-            )
             valid_scope_and_consent = (
                 row is not None
                 and str(row["owner_user_id"]) == claim.owner_user_id
@@ -1039,14 +1086,32 @@ class NotificationDeliveryWorker:
                 and int(b["consent_version"]) == int(row["consent_version"])
                 and control.scope_active(c, claim.tenant_id, claim.owner_user_id, claim.workspace_id)
             )
-            if (
+            lease_active = (
                 row is not None
                 and valid_scope_and_consent
                 and str(row["status"]) == "SENDING"
                 and int(row["lease_epoch"]) == claim.lease_epoch
                 and str(row["lease_owner_ref"] or "") == self._owner
                 and bool(row["lease_valid"])
-            ):
+            )
+            if lease_active:
+                if bind_path_sha256 is not None and bind_body_sha256 is not None:
+                    bound = c.execute(
+                        "UPDATE agent.notification_attempts"
+                        " SET request_path_sha256=%s, request_body_sha256=%s"
+                        " WHERE tenant_id=%s AND id=%s AND intent_id=%s AND attempt_no=%s"
+                        " AND disposition='NOT_STARTED' AND request_path_sha256 IS NULL AND request_body_sha256 IS NULL"
+                        " RETURNING id",
+                        (
+                            bind_path_sha256,
+                            bind_body_sha256,
+                            claim.tenant_id,
+                            claim.attempt_id,
+                            claim.intent_id,
+                            claim.attempt_no,
+                        ),
+                    ).fetchone()
+                    return bound is not None
                 return True
             if not valid_scope_and_consent:
                 reason = "CONSENT_OR_SCOPE_INVALID_PRE_SEND"
@@ -1054,12 +1119,6 @@ class NotificationDeliveryWorker:
                 reason = "CLAIM_LEASE_EXPIRED_PRE_SEND"
             else:
                 reason = f"CLAIM_STALE_{row['status'] if row is not None else 'MISSING'}"
-            c.execute(
-                "UPDATE agent.notification_attempts"
-                " SET disposition='TRANSPORT_REJECTED', error_code=%s, finished_at=now()"
-                " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s AND disposition='NOT_STARTED'",
-                (reason, claim.tenant_id, claim.intent_id, claim.attempt_no),
-            )
             if (
                 row is not None
                 and str(row["status"]) == "SENDING"
@@ -1087,6 +1146,12 @@ class NotificationDeliveryWorker:
                         " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
                         (reason, claim.tenant_id, claim.intent_id, claim.lease_epoch),
                     )
+            c.execute(
+                "UPDATE agent.notification_attempts"
+                " SET disposition='TRANSPORT_REJECTED', error_code=%s, finished_at=now()"
+                " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s AND disposition='NOT_STARTED'",
+                (reason, claim.tenant_id, claim.intent_id, claim.attempt_no),
+            )
             return False
 
     def _finish_attempt(
@@ -1100,12 +1165,6 @@ class NotificationDeliveryWorker:
         retry_delay_s: int | None = None,
     ) -> None:
         with self._db.tx(tenant=claim.tenant_id) as c:
-            c.execute(
-                "UPDATE agent.notification_attempts"
-                " SET disposition=%s, provider_receipt_ref=%s, error_code=%s, finished_at=now()"
-                " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s",
-                (disposition, receipt_ref, error_code, claim.tenant_id, claim.intent_id, claim.attempt_no),
-            )
             if intent_status == "PROVIDER_ACCEPTED":
                 updated = c.execute(
                     "UPDATE agent.notification_intents"
@@ -1115,21 +1174,15 @@ class NotificationDeliveryWorker:
                     " RETURNING id",
                     (receipt_ref, claim.tenant_id, claim.intent_id, claim.lease_epoch),
                 ).fetchone()
-                if updated is not None:
-                    c.execute(
-                        "UPDATE agent.outbox_messages"
-                        " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=NULL"
-                        " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
-                        (claim.tenant_id, f"notify:{claim.intent_id}"),
-                    )
             elif intent_status == "QUEUED" and retry_delay_s is not None:
-                c.execute(
+                updated = c.execute(
                     "UPDATE agent.notification_intents"
                     " SET status='QUEUED', last_error_code=%s, lease_until=NULL,"
                     " next_attempt_at=now() + make_interval(secs => %s), updated_at=now()"
-                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'",
+                    " WHERE tenant_id=%s AND id=%s AND lease_epoch=%s AND status='SENDING'"
+                    " RETURNING id",
                     (error_code, retry_delay_s, claim.tenant_id, claim.intent_id, claim.lease_epoch),
-                )
+                ).fetchone()
             else:
                 updated = c.execute(
                     "UPDATE agent.notification_intents"
@@ -1138,13 +1191,23 @@ class NotificationDeliveryWorker:
                     " RETURNING id",
                     (intent_status, error_code, claim.tenant_id, claim.intent_id, claim.lease_epoch),
                 ).fetchone()
-                if updated is not None:
-                    c.execute(
-                        "UPDATE agent.outbox_messages"
-                        " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=%s"
-                        " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
-                        (error_code or intent_status, claim.tenant_id, f"notify:{claim.intent_id}"),
-                    )
+            c.execute(
+                "UPDATE agent.notification_attempts"
+                " SET disposition=%s, provider_receipt_ref=%s, error_code=%s, finished_at=now()"
+                " WHERE tenant_id=%s AND intent_id=%s AND attempt_no=%s",
+                (disposition, receipt_ref, error_code, claim.tenant_id, claim.intent_id, claim.attempt_no),
+            )
+            if updated is not None and intent_status != "QUEUED":
+                c.execute(
+                    "UPDATE agent.outbox_messages"
+                    " SET dispatched_at=now(), relay_lease_until=NULL, last_error_code=%s"
+                    " WHERE tenant_id=%s AND topic='notification' AND dedupe_key=%s AND dispatched_at IS NULL",
+                    (
+                        None if intent_status == "PROVIDER_ACCEPTED" else (error_code or intent_status),
+                        claim.tenant_id,
+                        f"notify:{claim.intent_id}",
+                    ),
+                )
 
     def _build_request(
         self, claim: NotificationClaim, send_token: str
@@ -1219,9 +1282,7 @@ class NotificationDeliveryWorker:
         sentinel = self._sentinel
         if sentinel is None:
             endpoint = os.environ.get("AIAGENT_SENTINEL_ENDPOINT")
-            key = config.secret("AIAGENT_API_SENTINEL_RPC_KEY", required=False) or config.secret(
-                "AIAGENT_TOOL_SENTINEL_CLIENT_KEY", required=False
-            )
+            key = config.secret("AIAGENT_API_SENTINEL_RPC_KEY", required=False)
             if endpoint and key is not None:
                 from .rpc import RpcClient
 
@@ -1243,6 +1304,11 @@ class NotificationDeliveryWorker:
                     "POST",
                     target_path=target_path,
                     body_sha256=body_sha256,
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
                 )
             )
         res = await sentinel.call(
@@ -1259,6 +1325,11 @@ class NotificationDeliveryWorker:
                 "method": "POST",
                 "targetPath": target_path,
                 "bodySha256": body_sha256,
+                "attemptId": claim.attempt_id,
+                "attemptNo": claim.attempt_no,
+                "leaseEpoch": claim.lease_epoch,
+                "leaseOwnerRef": claim.lease_owner_ref,
+                "sendToken": claim.send_token,
             },
         )
         return str(res["permit"])
@@ -1342,7 +1413,16 @@ class NotificationDeliveryWorker:
 
         u = urlsplit(target_url)
         target_path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        path_sha = hashlib.sha256(target_path.encode("utf-8")).hexdigest()
         body_sha = hashlib.sha256(body).hexdigest()
+
+        if not await asyncio.to_thread(
+            self._verify_claim_lease_active,
+            claim,
+            bind_path_sha256=path_sha,
+            bind_body_sha256=body_sha,
+        ):
+            return "LEASE_LOST"
 
         proxy_url = (
             self._egress_proxy if self._egress_proxy is not None else os.environ.get("AIAGENT_EGRESS_PROXY", "").strip()

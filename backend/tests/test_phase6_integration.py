@@ -2707,3 +2707,674 @@ def test_web_ui_dispatch_toctou_snapshot_and_cancel_zero_send(
         uv_sock.close()
         wh_srv.shutdown()
         wh_srv.server_close()
+
+
+def _start_sentinel_rpc_thread(
+    keys: dict[str, bytes], sentinel: Sentinel
+) -> tuple[int, asyncio.AbstractEventLoop, threading.Thread, Any]:
+    from aiagent_sentinel.main import build_server
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+    holder: dict[str, Any] = {}
+
+    def runner() -> None:
+        asyncio.set_event_loop(loop)
+
+        async def boot() -> None:
+            srv = build_server(keys, "tcp:127.0.0.1:0", sentinel)
+            await srv.start()
+            holder["srv"] = srv
+            holder["port"] = srv.port
+            ready.set()
+
+        loop.run_until_complete(boot())
+        loop.run_forever()
+        loop.run_until_complete(holder["srv"].close())
+        loop.close()
+
+    th = threading.Thread(target=runner, daemon=True)
+    th.start()
+    assert ready.wait(timeout=10), "sentinel rpc server failed to start"
+    return int(holder["port"]), loop, th, holder["srv"]
+
+
+def test_sentinel_notification_authority_isolation_and_single_permit_enforcement(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1: sentinel.authorize_notification enforces ACL={'api'}, SENDING+lease+digest bind, 1x permit issuance & send; no plaintext secrets in DB."""
+    import hashlib
+
+    from aiagent_core.egress_http import ForwardProxyError, send_via_forward_proxy
+    from aiagent_core.rpc import RpcClient
+    from aiagent_domain.rpcwire import RpcError
+
+    hook_hits: list[dict[str, Any]] = []
+    tg_hits: list[dict[str, Any]] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            if self.path == "/hook/wh-secret-token":
+                hook_hits.append({"body": json.loads(raw), "path": self.path})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"receiptId":"p1-wh-ok"}')
+                return
+            if self.path == "/bot123456:SECRET_TG_BOT_TOKEN/sendMessage":
+                tg_hits.append(json.loads(raw))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true,"result":{"message_id":77}}')
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    async def _resolve(host: str, port_num: int) -> list[str]:
+        del port_num
+        if host in ("hooks.notify.test", "tg.notify.test"):
+            return ["127.0.0.1"]
+        return []
+
+    ecfg = EgressConfig.from_json(
+        json.dumps(
+            {
+                "destinations": {
+                    "notify-wh": {
+                        "scheme": "http",
+                        "host": "hooks.notify.test",
+                        "port": srv_port,
+                        "methods": ["POST"],
+                        "allow_private": ["127.0.0.1"],
+                    },
+                    "notify-tg": {
+                        "scheme": "http",
+                        "host": "tg.notify.test",
+                        "port": srv_port,
+                        "methods": ["POST"],
+                        "allow_private": ["127.0.0.1"],
+                    },
+                }
+            }
+        ),
+        production=False,
+    )
+    sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
+    proxy_port, proxy_loop, proxy_thread, _ = _start_proxy_thread(sentinel, ecfg, _resolve)
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+
+    api_key = secrets.token_bytes(32)
+    tool_key = secrets.token_bytes(32)
+    rpc_port, rpc_loop, rpc_thread, _ = _start_sentinel_rpc_thread({"api": api_key, "tool_gateway": tool_key}, sentinel)
+    rpc_endpoint = f"tcp:127.0.0.1:{rpc_port}"
+    api_rpc = RpcClient(rpc_endpoint, "api", api_key)
+    tool_rpc = RpcClient(rpc_endpoint, "tool_gateway", tool_key)
+
+    def _auth_rpc(
+        rpc_cli: RpcClient,
+        *,
+        intent_id: str,
+        binding_id: str,
+        target_path: str,
+        body_sha256: str,
+        attempt_id: str,
+        attempt_no: int,
+        lease_epoch: int,
+        lease_owner_ref: str,
+        send_token: str,
+    ) -> str:
+        res = _run(
+            rpc_cli.call(
+                "sentinel.authorize_notification",
+                {
+                    "tenantId": tenant["tenantId"],
+                    "userId": tenant["userId"],
+                    "workspaceId": tenant["workspaceId"],
+                    "intentId": intent_id,
+                    "bindingId": binding_id,
+                    "scheme": "http",
+                    "host": "hooks.notify.test",
+                    "port": srv_port,
+                    "method": "POST",
+                    "targetPath": target_path,
+                    "bodySha256": body_sha256,
+                    "attemptId": attempt_id,
+                    "attemptNo": attempt_no,
+                    "leaseEpoch": lease_epoch,
+                    "leaseOwnerRef": lease_owner_ref,
+                    "sendToken": send_token,
+                },
+            )
+        )
+        return str(res["permit"])
+
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", proxy_url)
+    monkeypatch.setenv("AIAGENT_SENTINEL_ENDPOINT", rpc_endpoint)
+    monkeypatch.setenv("AIAGENT_API_SENTINEL_RPC_KEY", api_key.hex())
+
+    notify_ring = KeyRing.single(b"P" * 32, key_id="p1-notify-1")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy=proxy_url,
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        # 0. DB role isolation: tool_gateway cannot access notification tables/columns
+        with pytest.raises(InsufficientPrivilege):
+            dbs["tool_gateway"].one("SELECT permit_nonce FROM agent.notification_attempts LIMIT 1")
+        with pytest.raises(InsufficientPrivilege):
+            dbs["tool_gateway"].one("SELECT id FROM agent.notification_bindings LIMIT 1")
+
+        with TestClient(app) as client:
+            r_wh_b = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "P1 Secret Hook",
+                    "destination": {"url": f"http://hooks.notify.test:{srv_port}/hook/wh-secret-token"},
+                    "consentGranted": True,
+                    "timezoneId": "UTC",
+                },
+            )
+            assert r_wh_b.status_code == 201, r_wh_b.text
+            wh_id = r_wh_b.json()["binding"]["id"]
+
+            r_tg_b = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "telegram",
+                    "label": "P1 Secret Telegram",
+                    "destination": {
+                        "botToken": "123456:SECRET_TG_BOT_TOKEN",
+                        "chatId": "9999",
+                        "apiBaseUrl": f"http://tg.notify.test:{srv_port}",
+                    },
+                    "consentGranted": True,
+                    "timezoneId": "UTC",
+                },
+            )
+            assert r_tg_b.status_code == 201, r_tg_b.text
+            tg_id = r_tg_b.json()["binding"]["id"]
+
+            cur_hour = dt.datetime.now(dt.UTC).hour
+            r_qb = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "P1 Quiet Binding",
+                    "destination": {"url": f"http://hooks.notify.test:{srv_port}/hook/wh-secret-token"},
+                    "consentGranted": True,
+                    "quietStartHour": cur_hour,
+                    "quietEndHour": (cur_hour + 2) % 24,
+                    "timezoneId": "UTC",
+                },
+            )
+            assert r_qb.status_code == 201
+            qb_id = r_qb.json()["binding"]["id"]
+
+            r_q = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": wh_id,
+                    "semanticEventKey": "p1-queued",
+                    "title": "Queued P1",
+                    "summaryText": "Must be claimed before permit",
+                    "dispatch": False,
+                },
+            )
+            assert r_q.status_code == 201
+            q_id = r_q.json()["notification"]["id"]
+
+            r_def = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": qb_id,
+                    "semanticEventKey": "p1-deferred",
+                    "title": "Deferred P1",
+                    "summaryText": "Quiet deferred",
+                    "priority": "standard",
+                    "dispatch": True,
+                },
+            )
+            assert r_def.status_code == 201
+            def_id = r_def.json()["notification"]["id"]
+            assert r_def.json()["notification"]["status"] == "DEFERRED_QUIET_HOURS"
+
+            dummy_sha = hashlib.sha256(b'{"dummy":1}').hexdigest()
+
+            # 1. tool_gateway caller is strictly rejected by Sentinel RPC ACL
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    tool_rpc,
+                    intent_id=q_id,
+                    binding_id=wh_id,
+                    target_path="/hook/wh-secret-token",
+                    body_sha256=dummy_sha,
+                    attempt_id=uuid7(),
+                    attempt_no=1,
+                    lease_epoch=1,
+                    lease_owner_ref="fake-worker",
+                    send_token=secrets.token_hex(16),
+                )
+
+            # 2. API caller CANNOT mint permit for QUEUED or DEFERRED_QUIET_HOURS intent
+            for non_sending_id, non_sending_b in ((q_id, wh_id), (def_id, qb_id)):
+                with pytest.raises(RpcError):
+                    _auth_rpc(
+                        api_rpc,
+                        intent_id=non_sending_id,
+                        binding_id=non_sending_b,
+                        target_path="/hook/wh-secret-token",
+                        body_sha256=dummy_sha,
+                        attempt_id=uuid7(),
+                        attempt_no=1,
+                        lease_epoch=1,
+                        lease_owner_ref="fake-worker",
+                        send_token=secrets.token_hex(16),
+                    )
+            assert hook_hits == []
+
+            # 3. Claim -> SENDING attempt, bind digests, verify mismatch/replay rejection & single-use permit
+            worker = notifications.NotificationDeliveryWorker(dbs["api"], notify_ring, egress_proxy=proxy_url)
+            claims = worker._claim_batch(batch=1, tenant_filter=tenant["tenantId"], intent_ids=[q_id])
+            assert len(claims) == 1
+            claim = claims[0]
+
+            target_path = "/hook/wh-secret-token"
+            payload_bytes = json.dumps({"title": "Bound P1", "id": q_id}, separators=(",", ":")).encode("utf-8")
+            path_sha = hashlib.sha256(target_path.encode("utf-8")).hexdigest()
+            body_sha = hashlib.sha256(payload_bytes).hexdigest()
+
+            # Cannot mint permit before request digest is bound on the attempt
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    api_rpc,
+                    intent_id=claim.intent_id,
+                    binding_id=claim.binding_id,
+                    target_path=target_path,
+                    body_sha256=body_sha,
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
+                )
+
+            assert worker._verify_claim_lease_active(claim, bind_path_sha256=path_sha, bind_body_sha256=body_sha)
+
+            # Mismatched body digest / target path / lease epoch are rejected
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    api_rpc,
+                    intent_id=claim.intent_id,
+                    binding_id=claim.binding_id,
+                    target_path=target_path,
+                    body_sha256=hashlib.sha256(b"tampered").hexdigest(),
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
+                )
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    api_rpc,
+                    intent_id=claim.intent_id,
+                    binding_id=claim.binding_id,
+                    target_path="/hook/wrong-path",
+                    body_sha256=body_sha,
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
+                )
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    api_rpc,
+                    intent_id=claim.intent_id,
+                    binding_id=claim.binding_id,
+                    target_path=target_path,
+                    body_sha256=body_sha,
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch + 1,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
+                )
+
+            # Valid call mints ONE 8-part permit; calling authorize_notification a 2nd time for same attempt is rejected
+            permit = _auth_rpc(
+                api_rpc,
+                intent_id=claim.intent_id,
+                binding_id=claim.binding_id,
+                target_path=target_path,
+                body_sha256=body_sha,
+                attempt_id=claim.attempt_id,
+                attempt_no=claim.attempt_no,
+                lease_epoch=claim.lease_epoch,
+                lease_owner_ref=claim.lease_owner_ref,
+                send_token=claim.send_token,
+            )
+            parts = permit.split(".")
+            assert len(parts) == 8 and parts[0] == "nt"
+
+            with pytest.raises(RpcError):
+                _auth_rpc(
+                    api_rpc,
+                    intent_id=claim.intent_id,
+                    binding_id=claim.binding_id,
+                    target_path=target_path,
+                    body_sha256=body_sha,
+                    attempt_id=claim.attempt_id,
+                    attempt_no=claim.attempt_no,
+                    lease_epoch=claim.lease_epoch,
+                    lease_owner_ref=claim.lease_owner_ref,
+                    send_token=claim.send_token,
+                )
+
+            # Single-use forward proxy delivery succeeds once, replay fails 403
+            st1, _, _ = _run(
+                send_via_forward_proxy(
+                    proxy_url,
+                    identity="notification",
+                    permit=permit,
+                    method="POST",
+                    target_url=f"http://hooks.notify.test:{srv_port}{target_path}",
+                    host_header=f"hooks.notify.test:{srv_port}",
+                    headers={"Content-Type": "application/json"},
+                    body=payload_bytes,
+                )
+            )
+            assert st1 == 200
+            assert len(hook_hits) == 1
+
+            with pytest.raises(ForwardProxyError, match="PERMIT_INVALID_AT_SEND") as exc_replay:
+                _run(
+                    send_via_forward_proxy(
+                        proxy_url,
+                        identity="notification",
+                        permit=permit,
+                        method="POST",
+                        target_url=f"http://hooks.notify.test:{srv_port}{target_path}",
+                        host_header=f"hooks.notify.test:{srv_port}",
+                        headers={"Content-Type": "application/json"},
+                        body=payload_bytes,
+                    )
+                )
+            assert exc_replay.value.http_status == 403 and exc_replay.value.post_send is False
+            assert len(hook_hits) == 1
+
+            worker._finish_attempt(
+                claim,
+                disposition="PROVIDER_ACCEPTED",
+                intent_status="PROVIDER_ACCEPTED",
+                receipt_ref="p1-wh-ok",
+            )
+
+            # 4. Full Webhook + Telegram E2E delivery through API -> RpcSentinel -> EgressProxy
+            r_live_wh = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": wh_id,
+                    "semanticEventKey": "p1-live-wh",
+                    "title": "Live WH P1",
+                    "summaryText": "Through RPC Sentinel",
+                    "dispatch": True,
+                },
+            )
+            assert r_live_wh.status_code == 201 and r_live_wh.json()["dispatch"]["PROVIDER_ACCEPTED"] == 1
+            assert len(hook_hits) == 2
+
+            r_live_tg = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": tg_id,
+                    "semanticEventKey": "p1-live-tg",
+                    "title": "Live TG P1",
+                    "summaryText": "Through RPC Sentinel",
+                    "dispatch": True,
+                },
+            )
+            assert r_live_tg.status_code == 201 and r_live_tg.json()["dispatch"]["PROVIDER_ACCEPTED"] == 1
+            assert len(tg_hits) == 1
+
+            # Ensure ZERO plaintext webhook secret paths or Telegram botTokens exist in PostgreSQL tables
+            att_rows = dbs["owner"].all(
+                "SELECT row_to_json(a)::text AS j FROM agent.notification_attempts a WHERE tenant_id=%s",
+                (tenant["tenantId"],),
+            )
+            assert len(att_rows) >= 3
+            for row in att_rows:
+                txt = str(row["j"])
+                assert "SECRET_TG_BOT_TOKEN" not in txt
+                assert "wh-secret-token" not in txt
+
+            bnd_rows = dbs["owner"].all(
+                "SELECT (row_to_json(b)::jsonb - 'secret_ciphertext')::text AS j, secret_ciphertext FROM agent.notification_bindings b WHERE tenant_id=%s",
+                (tenant["tenantId"],),
+            )
+            for brow in bnd_rows:
+                assert "SECRET_TG_BOT_TOKEN" not in str(brow["j"])
+                assert "wh-secret-token" not in str(brow["j"])
+                assert b"SECRET_TG_BOT_TOKEN" not in bytes(brow["secret_ciphertext"])
+                assert b"wh-secret-token" not in bytes(brow["secret_ciphertext"])
+    finally:
+        rpc_loop.call_soon_threadsafe(rpc_loop.stop)
+        rpc_thread.join(timeout=5)
+        proxy_loop.call_soon_threadsafe(proxy_loop.stop)
+        proxy_thread.join(timeout=5)
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_concurrent_consent_revocation_and_worker_lock_order_no_deadlock(
+    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2: Lock hierarchy Binding -> Intent -> Attempt -> Outbox eliminates deadlocks and guarantees 0 post-revocation sends."""
+    del monkeypatch
+    post_revocation_hits: list[int] = []
+    all_hits: list[dict[str, Any]] = []
+    revoked_flag = threading.Event()
+    hit_lock = threading.Lock()
+
+    class _Receiver(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            with hit_lock:
+                all_hits.append(json.loads(raw))
+                if revoked_flag.is_set():
+                    post_revocation_hits.append(len(all_hits))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"receiptId":"p2-ok"}')
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Receiver)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_port = srv.server_address[1]
+
+    notify_ring = KeyRing.single(b"D" * 32, key_id="p2-lock-k1")
+    app = create_app(
+        dbs["api"],
+        notification_key_ring=notify_ring,
+        egress_proxy="",
+        notify_allow_private=frozenset({"127.0.0.1"}),
+    )
+    headers = {"Authorization": f"Bearer {tenant['token']}"}
+
+    try:
+        with TestClient(app) as client:
+            rb = client.post(
+                "/v1/notifications/bindings",
+                headers=headers,
+                json={
+                    "channel": "webhook",
+                    "label": "P2 Concurrent Hook",
+                    "destination": {"url": f"http://127.0.0.1:{srv_port}/hook"},
+                    "consentGranted": True,
+                    "timezoneId": "UTC",
+                },
+            )
+            assert rb.status_code == 201, rb.text
+            bid = rb.json()["binding"]["id"]
+
+            worker = notifications.NotificationDeliveryWorker(
+                dbs["api"],
+                notify_ring,
+                egress_proxy="",
+                allow_private_addrs=frozenset({"127.0.0.1"}),
+            )
+
+            # Part A: 10 barrier-synchronized races between worker batch claim+delivery and binding consent revocation
+            for rnd in range(10):
+                assert notifications.set_binding_consent(
+                    dbs["api"], tenant_id=tenant["tenantId"], user_id=tenant["userId"], binding_id=bid, granted=True
+                )
+                revoked_flag.clear()
+                intent_ids: list[str] = []
+                for idx in range(4):
+                    rn = client.post(
+                        "/v1/notifications",
+                        headers=headers,
+                        json={
+                            "bindingId": bid,
+                            "semanticEventKey": f"p2-race-{rnd}-{idx}",
+                            "title": f"Race {rnd}-{idx}",
+                            "summaryText": "Lock order race",
+                            "dispatch": False,
+                        },
+                    )
+                    assert rn.status_code == 201
+                    intent_ids.append(rn.json()["notification"]["id"])
+
+                barrier = threading.Barrier(2)
+                errors: list[BaseException] = []
+
+                def _worker_side() -> None:
+                    try:
+                        barrier.wait(timeout=5)
+                        _run(
+                            worker.run_once(
+                                tenant_id=tenant["tenantId"],
+                                owner_user_id=tenant["userId"],
+                                intent_ids=intent_ids,
+                                batch=4,
+                            )
+                        )
+                    except BaseException as exc:  # pragma: no cover
+                        errors.append(exc)
+
+                def _revoke_side() -> None:
+                    try:
+                        barrier.wait(timeout=5)
+                        if rnd % 2 == 0:
+                            res = notifications.set_binding_consent(
+                                dbs["api"],
+                                tenant_id=tenant["tenantId"],
+                                user_id=tenant["userId"],
+                                binding_id=bid,
+                                granted=False,
+                            )
+                        else:
+                            res = notifications.opt_out_binding(
+                                dbs["api"],
+                                tenant_id=tenant["tenantId"],
+                                user_id=tenant["userId"],
+                                binding_id=bid,
+                                revoke=False,
+                            )
+                        assert res is not None and res["consentGranted"] is False
+                    except BaseException as exc:  # pragma: no cover
+                        errors.append(exc)
+
+                t1 = threading.Thread(target=_worker_side)
+                t2 = threading.Thread(target=_revoke_side)
+                t1.start()
+                t2.start()
+                t1.join(timeout=15)
+                t2.join(timeout=15)
+                assert not t1.is_alive() and not t2.is_alive()
+                assert errors == [], f"Unexpected concurrent error/deadlock: {errors}"
+
+                # Every intent in this round must settle cleanly in SUPPRESSED or pre-revocation PROVIDER_ACCEPTED
+                rows = dbs["owner"].all(
+                    "SELECT id, status FROM agent.notification_intents WHERE id = ANY(%s)",
+                    (intent_ids,),
+                )
+                assert {r["status"] for r in rows} <= {"SUPPRESSED", "PROVIDER_ACCEPTED"}
+
+            # Part B: Deterministic pre-send race — claim BEFORE revoke, then race deliver_claim vs opt_out & late finish
+            assert notifications.set_binding_consent(
+                dbs["api"], tenant_id=tenant["tenantId"], user_id=tenant["userId"], binding_id=bid, granted=True
+            )
+            r_pre = client.post(
+                "/v1/notifications",
+                headers=headers,
+                json={
+                    "bindingId": bid,
+                    "semanticEventKey": "p2-presend-lock-check",
+                    "title": "PreSendLock",
+                    "summaryText": "Must be suppressed without HTTP send",
+                    "dispatch": False,
+                },
+            )
+            assert r_pre.status_code == 201
+            pre_id = r_pre.json()["notification"]["id"]
+            pre_claims = worker._claim_batch(batch=1, tenant_filter=tenant["tenantId"], intent_ids=[pre_id])
+            assert len(pre_claims) == 1
+
+            before_pre = len(all_hits)
+            revoked_flag.set()
+            opt_res = notifications.opt_out_binding(
+                dbs["api"],
+                tenant_id=tenant["tenantId"],
+                user_id=tenant["userId"],
+                binding_id=bid,
+                revoke=True,
+            )
+            assert opt_res is not None
+            outcome = _run(worker.deliver_claim(pre_claims[0]))
+            assert outcome == "LEASE_LOST"
+            assert len(all_hits) == before_pre
+            assert post_revocation_hits == []
+
+            # Delayed _finish_attempt ACK cannot resurrect SUPPRESSED intent back to PROVIDER_ACCEPTED
+            worker._finish_attempt(
+                pre_claims[0],
+                disposition="PROVIDER_ACCEPTED",
+                intent_status="PROVIDER_ACCEPTED",
+                receipt_ref="delayed-ack-ignored",
+            )
+            pre_row = dbs["owner"].one(
+                "SELECT status, provider_receipt_ref FROM agent.notification_intents WHERE id=%s",
+                (pre_id,),
+            )
+            assert pre_row is not None and pre_row["status"] == "SUPPRESSED"
+            assert pre_row["provider_receipt_ref"] is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
