@@ -58,14 +58,14 @@ def _record(v: object) -> dict[str, object]:
 
 def _count(record: dict[str, object], key: str) -> int:
     n = record.get(key)
-    if type(n) is not int or not 0 <= n <= 10_000_000:
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 10_000_000:
         raise InvalidEvidence(f"invalid ntlint count: {key}")
     return n
 
 
 def _number(record: dict[str, object], key: str, high: float) -> float:
     n = record.get(key)
-    if type(n) not in (int, float):
+    if not isinstance(n, (int, float)) or isinstance(n, bool):
         raise InvalidEvidence(f"invalid ntlint number: {key}")
     value = float(n)
     if not math.isfinite(value) or not 0 <= value <= high:
