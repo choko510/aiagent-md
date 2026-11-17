@@ -30,14 +30,14 @@ FixtureId = Literal[
     "dev_t04",
     "dev_t05",
     "dev_t06",
-    "review_01",
-    "review_02",
-    "review_03",
-    "review_04",
-    "review_05",
-    "review_06",
-    "review_07",
-    "review_08",
+    "review_r01",
+    "review_r02",
+    "review_r03",
+    "review_r04",
+    "review_r05",
+    "review_r06",
+    "review_r07",
+    "review_r08",
 ]
 
 #: Synthetic chat prompt 1. The expected answer is a single Japanese word.
@@ -125,10 +125,10 @@ DEV_T06_PROMPT = (
 DEV_T06_ALLOWED: tuple[str, ...] = ("BOUNDARY_BUG", "TYPE_ERROR", "NO_BUG")
 DEV_T06_EXPECTED = "BOUNDARY_BUG"
 
-# --- REVIEW-01..REVIEW-08: synthetic code-review tasks (chat providers only) -----------
+# --- REVIEW_R01..R08: synthetic code-review tasks (chat providers only) ----------------
 #
 # The code is fixed, synthetic and numbered. The model must answer with a strict JSON
-# object and nothing else. Ground truth lives in ``review_key.py`` only.
+# object and nothing else. Gold lives in ``review_key.py`` only.
 
 
 def _numbered_code(code: str) -> str:
@@ -144,85 +144,109 @@ def _review_prompt(code: str, specification: str | None = None) -> str:
         f"{spec_block}{numbered}\n\n"
         "Report every real defect. Reply with ONLY a JSON object, no prose and no markdown "
         "fences, in exactly this shape:\n"
-        '{"findings":[{"line":<line number>,"kind":"<kind>","severity":"<severity>"}]}\n\n'
-        "Allowed kinds: INDEX_OUT_OF_RANGE, SQL_INJECTION, SECRET_LOGGING, BOUNDARY_BUG, "
-        "RACE_CONDITION, MISSING_VALIDATION\n"
-        "Allowed severities: low, medium, high\n"
+        '{"findings":[{"line":<line number>,"rule_id":"<rule>","severity":"<severity>"}]}\n\n'
+        "Allowed rule_id values: INDEX_OUT_OF_RANGE, SECRET_LOGGING, SQL_INJECTION, "
+        "BOUNDARY_BUG, STALE_LEASE, UNSAFE_RETRY\n"
+        "Allowed severities: P1, P2, P3\n"
         'Use an empty list when the code has no defect: {"findings":[]}\n'
-        "Report each defect once and do not use any other keys."
+        "Report at most eight findings, each line must exist in the numbered code, and do "
+        "not use any other keys."
     )
 
 
-REVIEW_01_CODE = """def last_item(items):
-    return items[len(items)]"""
-REVIEW_01_PROMPT = _review_prompt(REVIEW_01_CODE)
+REVIEW_R01_CODE = """def take(items, index):
+    return items[len(items)]
 
-REVIEW_02_CODE = """def find_user(conn, name):
+def log_token(token):
+    print("token=" + token)"""
+REVIEW_R01_PROMPT = _review_prompt(REVIEW_R01_CODE)
+
+REVIEW_R02_CODE = """def find_user(conn, name):
     query = "SELECT * FROM users WHERE name = '" + name + "'"
-    print("Authorization: Bearer synthetic-token")
-    return conn.execute(query)"""
-REVIEW_02_PROMPT = _review_prompt(REVIEW_02_CODE)
+    return conn.execute(query)
 
-REVIEW_03_CODE = """from typing import Optional
-
-
-def last_item(items: list[str]) -> Optional[str]:
-    return items[-1] if items else None"""
-REVIEW_03_PROMPT = _review_prompt(REVIEW_03_CODE)
-
-REVIEW_04_CODE = """def allowed(age):
+def allowed(age):
     return age > 18"""
-REVIEW_04_PROMPT = _review_prompt(REVIEW_04_CODE, "Only people aged 18 or older are allowed.")
+REVIEW_R02_PROMPT = _review_prompt(REVIEW_R02_CODE, "Only people aged 18 or older are allowed.")
 
-REVIEW_05_CODE = """import sqlite3
-
-
-def find_user(conn: sqlite3.Connection, name: str):
-    return conn.execute("SELECT * FROM users WHERE name = ?", (name,))"""
-REVIEW_05_PROMPT = _review_prompt(REVIEW_05_CODE)
-
-REVIEW_06_CODE = """def increment(counter):
-    current = counter.value
-    counter.value = current + 1
-
-
-def withdraw(balance, amount):
-    return balance - amount"""
-REVIEW_06_PROMPT = _review_prompt(
-    REVIEW_06_CODE,
-    "increment must be thread-safe, and withdraw must reject non-positive amounts and "
-    "amounts greater than the balance.",
+REVIEW_R03_CODE = """def complete(run, worker_epoch):
+    run.commit(worker_epoch)
+    return "OK"
+def retry_unknown(send):
+    try:
+        return send()
+    except TimeoutError:
+        return send()"""
+REVIEW_R03_PROMPT = _review_prompt(
+    REVIEW_R03_CODE,
+    "A completion whose worker_epoch is older than run.lease_epoch must be rejected, and "
+    "a timed-out side-effecting send has an unknown outcome and must not be retried "
+    "automatically.",
 )
 
-REVIEW_07_CODE = """def withdraw(balance, amount):
-    return balance - amount
-def load(conn, user_id):
-    query = f"SELECT * FROM users WHERE id = {user_id}"
-    row = conn.execute(query).fetchone()
-    headers = {"Authorization": "Bearer synthetic-token"}
-    print(headers)
-    return row"""
-REVIEW_07_PROMPT = _review_prompt(
-    REVIEW_07_CODE,
-    "withdraw must reject non-positive amounts and amounts greater than the balance.",
+REVIEW_R04_CODE = """def last_item(items):
+    if not items:
+        return None
+    return items[-1]
+
+def log_status(status):
+    print("status=" + status)"""
+REVIEW_R04_PROMPT = _review_prompt(REVIEW_R04_CODE)
+
+REVIEW_R05_CODE = """import sqlite3
+
+def find_user(conn, name):
+    query = "SELECT * FROM users WHERE name = ?"
+    return conn.execute(query, (name,)).fetchone()
+
+def allowed(age):
+    return age >= 18"""
+REVIEW_R05_PROMPT = _review_prompt(REVIEW_R05_CODE)
+
+REVIEW_R06_CODE = """def complete(run, worker_epoch):
+    if worker_epoch < run.lease_epoch:
+        return "STALE"
+    run.committed = True
+    return "OK"
+def debug_headers(headers):
+    token = headers["Authorization"]
+    print(token)"""
+REVIEW_R06_PROMPT = _review_prompt(REVIEW_R06_CODE)
+
+REVIEW_R07_CODE = """def send_with_retry(send):
+    try:
+        return send()
+    except TimeoutError:
+        return send()"""
+REVIEW_R07_PROMPT = _review_prompt(
+    REVIEW_R07_CODE,
+    "send performs an external side effect; a timeout leaves the outcome unknown.",
 )
 
-REVIEW_08_CODE = """def load(conn, user_id):
-    if user_id <= 0:
-        raise ValueError("invalid user id")
-    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()"""
-REVIEW_08_PROMPT = _review_prompt(REVIEW_08_CODE)
+REVIEW_R08_CODE = """def complete(run, worker_epoch):
+    if worker_epoch < run.lease_epoch:
+        return "STALE"
+    run.committed = True
+    return "OK"
+
+def send_once(send):
+    try:
+        return send()
+    except TimeoutError:
+        return "UNKNOWN_OUTCOME"
+"""
+REVIEW_R08_PROMPT = _review_prompt(REVIEW_R08_CODE)
 
 #: Identifiers for the synthetic code-review tasks, in task order.
 REVIEW_FIXTURE_IDS: tuple[FixtureId, ...] = (
-    "review_01",
-    "review_02",
-    "review_03",
-    "review_04",
-    "review_05",
-    "review_06",
-    "review_07",
-    "review_08",
+    "review_r01",
+    "review_r02",
+    "review_r03",
+    "review_r04",
+    "review_r05",
+    "review_r06",
+    "review_r07",
+    "review_r08",
 )
 
 #: Identifiers for the synthetic development tasks, in task order.
@@ -253,6 +277,7 @@ class Fixture:
     allowed_answers: tuple[str, ...]
     description: str
     review_task: bool = False
+    review_line_count: int = 0
 
 
 _FIXTURES: tuple[Fixture, ...] = (
@@ -347,92 +372,100 @@ _FIXTURES: tuple[Fixture, ...] = (
         description="synthetic boundary condition classification",
     ),
     Fixture(
-        fixture_id="review_01",
+        fixture_id="review_r01",
         wire_kind="chat_completions",
-        prompt=REVIEW_01_PROMPT,
+        prompt=REVIEW_R01_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: one array-boundary defect",
+        description="code review: array boundary plus secret logging",
         review_task=True,
+        review_line_count=5,
     ),
     Fixture(
-        fixture_id="review_02",
+        fixture_id="review_r02",
         wire_kind="chat_completions",
-        prompt=REVIEW_02_PROMPT,
+        prompt=REVIEW_R02_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: SQL injection plus secret logging",
+        description="code review: SQL injection plus boundary condition",
         review_task=True,
+        review_line_count=6,
     ),
     Fixture(
-        fixture_id="review_03",
+        fixture_id="review_r03",
         wire_kind="chat_completions",
-        prompt=REVIEW_03_PROMPT,
+        prompt=REVIEW_R03_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: clean defensive implementation",
+        description="code review: stale lease plus unsafe retry",
         review_task=True,
+        review_line_count=8,
     ),
     Fixture(
-        fixture_id="review_04",
+        fixture_id="review_r04",
         wire_kind="chat_completions",
-        prompt=REVIEW_04_PROMPT,
+        prompt=REVIEW_R04_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: off-by-one boundary defect",
+        description="code review: clean code",
         review_task=True,
+        review_line_count=7,
     ),
     Fixture(
-        fixture_id="review_05",
+        fixture_id="review_r05",
         wire_kind="chat_completions",
-        prompt=REVIEW_05_PROMPT,
+        prompt=REVIEW_R05_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: clean parameterized query",
+        description="code review: clean parameterized query and boundary",
         review_task=True,
+        review_line_count=8,
     ),
     Fixture(
-        fixture_id="review_06",
+        fixture_id="review_r06",
         wire_kind="chat_completions",
-        prompt=REVIEW_06_PROMPT,
+        prompt=REVIEW_R06_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: race condition plus missing validation",
+        description="code review: secret logging",
         review_task=True,
+        review_line_count=8,
     ),
     Fixture(
-        fixture_id="review_07",
+        fixture_id="review_r07",
         wire_kind="chat_completions",
-        prompt=REVIEW_07_PROMPT,
+        prompt=REVIEW_R07_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: three defects across validation, SQL and logging",
+        description="code review: unsafe retry after unknown outcome",
         review_task=True,
+        review_line_count=5,
     ),
     Fixture(
-        fixture_id="review_08",
+        fixture_id="review_r08",
         wire_kind="chat_completions",
-        prompt=REVIEW_08_PROMPT,
+        prompt=REVIEW_R08_PROMPT,
         expected_text=None,
         noul_threshold=None,
         expected_answer=None,
         allowed_answers=(),
-        description="code review: clean validation and parameterized query",
+        description="code review: clean lease check and no automatic retry",
         review_task=True,
+        review_line_count=11,
     ),
 )
 

@@ -15,13 +15,12 @@ from typing import NoReturn, cast
 from . import ReasonCode
 from .review_key import (
     MAX_REVIEW_FINDINGS,
-    MAX_REVIEW_LINE,
     REVIEW_KEY,
-    REVIEW_KINDS,
-    REVIEW_SEVERITIES,
+    RULE_IDS,
+    SEVERITIES,
     Defect,
-    ReviewKind,
-    ReviewSeverity,
+    RuleId,
+    Severity,
 )
 
 MAX_REVIEW_CONTENT_CHARS = 4096
@@ -38,16 +37,16 @@ class ReviewFormatError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ReviewFinding:
-    """One model-reported defect; values are validated against closed sets."""
+    """One model-reported finding; values are validated against closed sets."""
 
     line: int
-    kind: ReviewKind
-    severity: ReviewSeverity
+    rule_id: RuleId
+    severity: Severity
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewScore:
-    """Deterministic TP/FP/FN outcome plus location, kind and severity agreement."""
+    """Deterministic TP/FP/FN outcome plus location, rule and severity agreement."""
 
     fixture_id: str
     tp: int
@@ -95,32 +94,33 @@ def _reject(reason_code: ReasonCode) -> NoReturn:
     raise ReviewFormatError(reason_code)
 
 
-def _parse_line(value: object) -> int:
+def _parse_line(value: object, max_line: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         _reject("INVALID_SCHEMA")
-    if not 1 <= value <= MAX_REVIEW_LINE:
+    if not 1 <= value <= max_line:
         _reject("INVALID_SCHEMA")
     return value
 
 
-def _parse_kind(value: object) -> ReviewKind:
-    if not isinstance(value, str) or value not in REVIEW_KINDS:
+def _parse_rule_id(value: object) -> RuleId:
+    if not isinstance(value, str) or value not in RULE_IDS:
         _reject("INVALID_SCHEMA")
-    return cast("ReviewKind", value)
+    return cast("RuleId", value)
 
 
-def _parse_severity(value: object) -> ReviewSeverity:
-    if not isinstance(value, str) or value not in REVIEW_SEVERITIES:
+def _parse_severity(value: object) -> Severity:
+    if not isinstance(value, str) or value not in SEVERITIES:
         _reject("INVALID_SCHEMA")
-    return cast("ReviewSeverity", value)
+    return cast("Severity", value)
 
 
-def parse_review_findings(text: str) -> tuple[ReviewFinding, ...]:
+def parse_review_findings(text: str, *, max_line: int) -> tuple[ReviewFinding, ...]:
     """Parse only the exact ``{"findings": [...]}`` object; no fences or prose.
 
-    Duplicate keys, ``NaN``/``Infinity``, excessive nesting, missing or extra keys,
-    wrong types, unknown kinds/severities, out-of-range lines and over-long lists are
-    all rejected as ``INVALID_JSON`` or ``INVALID_SCHEMA``.
+    ``max_line`` is the fixture's real numbered line count, so a finding cannot point
+    outside the code that was actually sent. Duplicate keys, ``NaN``/``Infinity``,
+    excessive nesting, missing or extra keys, wrong types, unknown enums and over-long
+    lists are all rejected as ``INVALID_JSON`` or ``INVALID_SCHEMA``.
     """
     if len(text) > MAX_REVIEW_CONTENT_CHARS:
         _reject("INVALID_SCHEMA")
@@ -140,12 +140,12 @@ def parse_review_findings(text: str) -> tuple[ReviewFinding, ...]:
         _reject("INVALID_SCHEMA")
     result: list[ReviewFinding] = []
     for item in findings:
-        if not isinstance(item, dict) or set(item) != {"line", "kind", "severity"}:
+        if not isinstance(item, dict) or set(item) != {"line", "rule_id", "severity"}:
             _reject("INVALID_SCHEMA")
         result.append(
             ReviewFinding(
-                line=_parse_line(item.get("line")),
-                kind=_parse_kind(item.get("kind")),
+                line=_parse_line(item.get("line"), max_line),
+                rule_id=_parse_rule_id(item.get("rule_id")),
                 severity=_parse_severity(item.get("severity")),
             )
         )
@@ -161,11 +161,11 @@ def _metrics(tp: int, fp: int, fn: int) -> tuple[float | None, float | None, flo
 
 
 def score_review(fixture_id: str, findings: tuple[ReviewFinding, ...]) -> ReviewScore:
-    """Match findings to the independent key by ``(line, kind)``.
+    """Match findings to the independent key by ``(line, rule_id)``.
 
-    The first finding matching an unmatched ground-truth defect is a true positive;
-    every other finding is a false positive. Severity is scored separately so that a
-    right location and kind with the wrong severity still counts as TP.
+    The first finding matching an unmatched gold defect is a true positive; every other
+    finding (including a duplicate of a matched one) is a false positive. Severity is
+    scored separately so a right location and rule with the wrong severity is still TP.
     """
     truth = REVIEW_KEY[fixture_id]
     unmatched: list[Defect] = list(truth)
@@ -177,7 +177,7 @@ def score_review(fixture_id: str, findings: tuple[ReviewFinding, ...]) -> Review
             (
                 index
                 for index, defect in enumerate(unmatched)
-                if defect.line == finding.line and defect.kind == finding.kind
+                if defect.line == finding.line and defect.rule_id == finding.rule_id
             ),
             None,
         )

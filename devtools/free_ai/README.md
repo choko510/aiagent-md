@@ -71,53 +71,88 @@ The prompt asks for exactly one identifier. Scoring is deterministic Python:
 
 ### Synthetic code-review tasks (STEP 3)
 
-Eight fixed tasks `review_01` … `review_08` ask a chat model to review numbered,
-synthetic Python code and reply with a strict JSON defect list. The code is a source
-constant in `fixtures.py`; the ground truth lives only in the separate
-`review_key.py`, which `fixtures.py` never imports, so the answer key cannot be sent.
+Eight fixed tasks `review_r01` … `review_r08` ask a chat model to review numbered,
+synthetic Python code and reply with a strict JSON finding list. The code is a source
+constant in `fixtures.py`; gold lives only in the separate `review_key.py`, which
+`fixtures.py` never imports, so the answer key cannot be sent or serialized into a prompt.
 
-| Fixture | Ground-truth defects | Clean code |
+| Fixture | Gold defects | Clean |
 |---|---|---|
-| `review_01` | 1 (array boundary) | no |
-| `review_02` | 2 (SQL injection, secret logging) | no |
-| `review_03` | 0 | yes |
-| `review_04` | 1 (boundary condition) | no |
-| `review_05` | 0 | yes |
-| `review_06` | 2 (race condition, missing validation) | no |
-| `review_07` | 3 (validation, SQL injection, secret logging) | no |
-| `review_08` | 0 | yes |
+| `review_r01` | (2, `INDEX_OUT_OF_RANGE`, P2), (5, `SECRET_LOGGING`, P1) | no |
+| `review_r02` | (2, `SQL_INJECTION`, P1), (6, `BOUNDARY_BUG`, P2) | no |
+| `review_r03` | (2, `STALE_LEASE`, P1), (8, `UNSAFE_RETRY`, P1) | no |
+| `review_r04` | none | yes |
+| `review_r05` | none | yes |
+| `review_r06` | (8, `SECRET_LOGGING`, P1) | no |
+| `review_r07` | (5, `UNSAFE_RETRY`, P1) | no |
+| `review_r08` | none | yes |
 
-The prompt asks for exactly one JSON object and nothing else:
+The gold total is 8 findings and there are 3 clean tasks. Rule ids are exactly
+`INDEX_OUT_OF_RANGE`, `SECRET_LOGGING`, `SQL_INJECTION`, `BOUNDARY_BUG`, `STALE_LEASE`
+and `UNSAFE_RETRY`; severities are exactly `P1`, `P2`, `P3`. The prompt asks for one JSON
+object and nothing else:
 
 ```json
-{"findings":[{"line":2,"kind":"SQL_INJECTION","severity":"high"}]}
+{"findings":[{"line":2,"rule_id":"INDEX_OUT_OF_RANGE","severity":"P2"}]}
 ```
 
-Allowed kinds are `INDEX_OUT_OF_RANGE`, `SQL_INJECTION`, `SECRET_LOGGING`,
-`BOUNDARY_BUG`, `RACE_CONDITION` and `MISSING_VALIDATION`; severities are `low`,
-`medium` and `high`. The parser accepts only that shape: no markdown fences, prose,
-trailing text, duplicate keys, `NaN`/`Infinity`, extra/missing keys, wrong types,
-unknown values, out-of-range line numbers or more than 20 findings. Anything else is
+The response is accepted only when it is exactly that shape: no markdown fences, prose,
+trailing text, duplicate JSON keys, `NaN`/`Infinity`, excessive nesting, extra or missing
+keys, wrong types, unknown rule ids/severities, more than 8 findings, or a line outside
+the fixture's real numbered line range (`1..review_line_count`). Anything else is
 `FORMAT_MISMATCH` and is never scored.
 
-Scoring is deterministic Python. A finding is a true positive when its `(line, kind)`
-matches an unmatched ground-truth defect; every other finding is a false positive, and
-each unmatched ground-truth defect is a false negative. Severity is scored separately,
-so a correct location and kind with the wrong severity is still a TP. `PASS` requires
-`fp == 0` and `fn == 0` (including an empty finding list for clean code);
-otherwise the probe is `CONTENT_MISMATCH`. Precision, recall and F1 use the usual
-formulas, and are `null` when the denominator is zero. A clean task with no findings is
-a `clean_pass`; any finding on clean code is a false positive.
+Scoring is deterministic Python:
 
-`review-report` reads only the fixed `devtools/free_ai/.runs/review_scores.jsonl`
-(no path argument, no directory scan, no network) and aggregates per provider: tasks,
-perfect tasks, clean tasks/passes, TP/FP/FN sums, precision, recall, F1, severity
-matches and severity accuracy. Each row has eleven fields
+- the first finding whose `(line, rule_id)` matches an unmatched gold defect is a TP;
+- every other finding, including a second identical finding, is a FP;
+- each unmatched gold defect is a FN;
+- severity is scored separately, so a correct location and rule with a wrong severity is
+  still a TP but not a severity match;
+- `PASS` requires `fp == 0` and `fn == 0` (including an empty finding list for clean code);
+  anything else is `CONTENT_MISMATCH`.
+
+`review-report` reads only the fixed `devtools/free_ai/.runs/review_scores.jsonl` (no
+path argument, no directory scan, no network). Each row has thirteen fields
 `schema_version, provider_id, model_requested, model_observed, fixture_id,
-observed_at_utc, status, tp, fp, fn, severity_matches`; it contains counts and catalog
-ids only, never code, a prompt, a model answer or reasoning. The file has the same
-1 MiB / 5000-line limits and the same constant `INVALID_LOG` / exit `5` failure mode as
-`report`. A parse failure is visible in `probes.jsonl` but has no score row.
+observed_at_utc, http_status, status, reason_code, tp, fp, fn, severity_matches`.
+`tp/fp/fn/severity_matches` are integers only for a scored row
+(`PASS`/`CONTENT_MISMATCH`) and `null` for every non-scored row. The row contains catalog
+ids, status and counts only — never code, a prompt, a model answer or reasoning. The file
+has the same 1 MiB / 5000-line limits and the same constant `INVALID_LOG` / exit `5`
+failure mode as `report`.
+
+Every review probe attempt is written to the review log, including local preflight
+refusals, format failures, model drift, billing/tool failures and communication failures.
+Per provider, `review-report` reports all of them so failures are not hidden:
+
+- `attempts`: every review-log row, including local refusals and non-scored outcomes.
+- `valid_scored_cases`: rows with a numeric score (`PASS`/`CONTENT_MISMATCH`).
+- `format_failures`, `model_drift`, `billing_or_tool_failures`,
+  `communication_failures`, `local_preflight_skips`: disjoint non-scored buckets.
+- `coverage`: `valid_scored_cases / attempts` (denominator includes local refusals,
+  format failures and communication failures; `null` when `attempts` is 0).
+- `tp/fp/fn`, `micro_precision`, `micro_recall`, `micro_f1`: sums and metrics over
+  `valid_scored_cases` only; format/communication/local outcomes never enter this
+  denominator. `false_discovery_rate = fp / (tp + fp)`.
+- `severity_correct` (`severity_matches`), `severity_total_tp` (= TP), and
+  `severity_accuracy = severity_correct / severity_total_tp`.
+- `case_exact_matches`: scored cases with no FP and no FN.
+- `clean_cases_scored`, `clean_cases_correct`, `clean_cases_flagged`, and
+  `clean_case_false_alarm_rate = flagged / scored_clean_cases`.
+- `fixtures_executed`: number of distinct review fixtures that reached the log.
+
+The existing `probes.jsonl` thirteen-field shape is unchanged. A review probe writes one
+probe row and one review row; a non-review probe writes only the probe row. The two
+appends are not atomic across the two files. If the probe append fails, nothing is
+written and the command exits `5`. If the probe append succeeds but the review append
+fails, the command also exits `5` and prints `SAFETY_BLOCKED / INVALID_SCHEMA`; the probe
+row exists, but no review row exists, so `review-report` cannot count that attempt as a
+success. Failed sends are never retried and corrupt logs are never repaired.
+
+Old STEP 2 review log rows (the former `review_01 … review_08` ids and the old
+`kind`/`high|medium|low` contract) are rejected as `INVALID_LOG`; they are not mixed with
+the new gold. Old STEP 1/2 non-review rows remain valid.
 
 ### `report`
 
