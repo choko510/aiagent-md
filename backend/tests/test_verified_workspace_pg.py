@@ -804,7 +804,7 @@ def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verif
     from aiagent_sandbox.capture_signing import sign_capture
     from aiagent_sandbox.grant import Grant
 
-    with finished_artifact_fixture(dbs, verified_setup) as (claim, prepared, snapshot, _store, captured):
+    with finished_artifact_fixture(dbs, verified_setup) as (claim, prepared, snapshot, store, captured):
         execution = dbs["owner"].one(
             "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
         )
@@ -846,6 +846,13 @@ def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verif
             size=captured.byte_length,
             deadline=time.monotonic() + 10,
         )
-        HmacCaptureVerifier(dbs["tool_gateway"], key).verify(
-            claim, prepared.id, captured.sha256, captured.byte_length, proof
-        )
+        verifier = HmacCaptureVerifier(dbs["tool_gateway"], key)
+        verifier.verify(claim, prepared.id, captured.sha256, captured.byte_length, proof)
+        # Actual signer -> actual Gateway verifier -> encrypted PostgreSQL publication.
+        # FINISHED, the Cell and SCIP validation are still fixture-only here.
+        store._capture = verifier
+        published = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
+        repeated = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
+        fetched, content = store.fetch(prepared.id, deadline=time.monotonic() + 10)
+        assert published == repeated == fetched
+        assert published.sha256 == captured.sha256 and content == b"synthetic-artifact\0"
