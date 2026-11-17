@@ -815,6 +815,34 @@ def test_real_run_cancellation_reaps_local_test_process(dbs, verified_setup):
     asyncio.run(exercise())
 
 
+def test_execution_start_race_allows_one_dispatch_reservation(dbs, verified_setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+
+    claim, prepared, _snapshot, _parent = prepared_execution_fixture(dbs, verified_setup)
+    lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"k" * 32))
+    barrier = Barrier(2)
+
+    def start(_):
+        barrier.wait(timeout=10)
+        try:
+            lifecycle.start(prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 20)
+            return "STARTED"
+        except ExecutionArtifactError:
+            return "DENIED"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(start, range(2))) == ["DENIED", "STARTED"]
+    row = dbs["owner"].one(
+        "SELECT state FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
+    )
+    assert row["state"] == "RUNNING"
+
+
 @pytest.mark.parametrize("cancel_before_finish", [False, True])
 def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verified_setup, cancel_before_finish):
     """Synthetic FINISHED transition; no real Cell transport is claimed."""
