@@ -335,3 +335,15 @@ that signal. Docker tests kill the Supervisor after the child starts and verify
 that the synthetic child cannot create its later marker. This is defense in
 depth, not a cgroup-empty proof: privileged/set-ID exec semantics, VM restart,
 orphan staging cleanup and production kernel isolation remain unverified.
+
+A private Supervisor prototype now validates the signed Execution binding before
+launch, requires a clean zero exit and no pre-existing `index.scip`, captures
+bytes through the bounded no-follow helper, and signs the exact digest/size with
+a separate receipt key. Docker tests exercise a real Supervisor and reject
+binding mismatch, stale pre-existing output and nonzero exit. Real DB tests
+exercise signer/verifier interoperability using a synthetic FINISHED state.
+This remains unexposed by RPC: per-Execution output isolation, authenticated
+transfer, real completion transition, key provisioning, image attestation and
+revocation during capture/publication are still required. In particular, the
+existing Task workspace is shared and must not be considered a safe production
+Artifact origin merely because an output file was absent before execution.

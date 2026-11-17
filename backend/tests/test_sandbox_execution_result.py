@@ -294,3 +294,92 @@ def test_execution_binding_is_signed_and_requires_complete_versioned_fields() ->
     invalid = Grant(*values, attempt_id="attempt", attempt_binding_version=1, execution_id=execution_id)
     with pytest.raises(GrantError, match="INVALID_EXECUTION_BINDING"):
         verify(key, sign(key, invalid), ["tool"], ".")
+
+
+def test_capture_signature_requires_signed_binding_and_exact_private_bytes(tmp_path) -> None:
+    import hashlib
+    import hmac
+    import json
+    import os
+    import time
+
+    from aiagent_development.code_intelligence.artifact_capture import capture_scip
+    from aiagent_domain import canonical_json, sha256_hex, uuid7
+    from aiagent_sandbox.capture_signing import sign_capture
+    from aiagent_sandbox.grant import Grant, GrantError
+
+    output = tmp_path / "output"
+    parent = tmp_path / "private"
+    output.mkdir()
+    parent.mkdir(mode=0o700)
+    data = b"synthetic artifact"
+    (output / "index.scip").write_bytes(data)
+    fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+    execution = uuid7()
+    binding = {
+        "execution": execution,
+        "attempt": "a",
+        "intent": "i",
+        "tenant": "t",
+        "owner": "o",
+        "task": "task",
+        "run": "run",
+        "goal_revision": 1,
+        "lease_epoch": 1,
+    }
+    grant = Grant(
+        "g",
+        "t",
+        "task",
+        "run",
+        "i",
+        1,
+        ("tool",),
+        ".",
+        1000,
+        1024,
+        int(time.time()) + 30,
+        attempt_id="a",
+        attempt_binding_version=1,
+        execution_binding_version=1,
+        execution_id=execution,
+        execution_binding_sha256=sha256_hex(binding),
+    )
+    key = b"k" * 32
+    try:
+        with capture_scip(fd, parent, expected_uid=os.geteuid(), deadline=time.monotonic() + 5) as captured:
+            proof = sign_capture(
+                key,
+                grant,
+                binding,
+                captured.fd,
+                expected_sha256=captured.sha256,
+                size=captured.byte_length,
+                deadline=time.monotonic() + 5,
+            )
+            envelope = json.loads(proof)
+            expected = hmac.new(key, canonical_json(envelope["payload"]).encode(), hashlib.sha256).hexdigest()
+            assert hmac.compare_digest(envelope["mac"], expected)
+            assert envelope["payload"]["artifact_sha256"] == hashlib.sha256(data).hexdigest()
+            with pytest.raises(GrantError, match="BINDING"):
+                sign_capture(
+                    key,
+                    grant,
+                    {**binding, "owner": "other"},
+                    captured.fd,
+                    expected_sha256=captured.sha256,
+                    size=captured.byte_length,
+                    deadline=time.monotonic() + 5,
+                )
+            with pytest.raises(GrantError, match="DIGEST"):
+                sign_capture(
+                    key,
+                    grant,
+                    binding,
+                    captured.fd,
+                    expected_sha256="0" * 64,
+                    size=captured.byte_length,
+                    deadline=time.monotonic() + 5,
+                )
+    finally:
+        os.close(fd)

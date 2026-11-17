@@ -17,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import signal
 import sys
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -414,6 +416,75 @@ class Supervisor:
             if source_fd is not None and execution is not None:
                 self._heartbeats.pop(execution, None)
                 self._active.pop(execution, None)
+
+    @contextlib.asynccontextmanager
+    async def _execute_and_capture(
+        self,
+        token: Any,
+        argv: list[str],
+        cwd_rel: str,
+        *,
+        source_fd: int,
+        output_fd: int,
+        binding: dict[str, Any],
+        receipt_key: bytes,
+        private_parent: Path,
+        deadline: float,
+        heartbeat_seconds: float,
+        revoked: asyncio.Event,
+    ) -> AsyncIterator[tuple[dict[str, Any], int, bytes]]:
+        """Private prototype: capture/sign only after this Supervisor reports clean exit.
+
+        This does not authenticate runtime image, transport or canonical authority;
+        no RPC endpoint exposes it, and final publication must recheck the DB.
+        """
+        from aiagent_development.code_intelligence.artifact_capture import capture_scip
+
+        from .capture_signing import sign_capture, validate_capture_binding
+
+        g = verify(self.grant_key, token, argv, cwd_rel)
+        if g.execution_binding_version != 1 or self.cell_uid is None:
+            raise GrantError("PROJECTED_BINDING_REQUIRED")
+        validate_capture_binding(receipt_key, g, binding)
+        if not math.isfinite(deadline) or not time.monotonic() < deadline <= time.monotonic() + 300:
+            raise GrantError("CAPTURE_DEADLINE")
+        try:
+            os.stat("index.scip", dir_fd=output_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise GrantError("CAPTURE_OUTPUT_PREEXISTS")
+        result = await self._execute(
+            token,
+            argv,
+            cwd_rel,
+            source_fd=source_fd,
+            output_fd=output_fd,
+            revoked=revoked,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+        if (
+            result.get("status") != "EXITED"
+            or type(result.get("exitCode")) is not int
+            or result.get("exitCode") != 0
+            or result.get("timedOut") is not False
+            or result.get("truncated") is not False
+            or revoked.is_set()
+        ):
+            raise GrantError("PROJECTED_EXECUTION_INCOMPLETE")
+        with capture_scip(output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline) as captured:
+            proof = sign_capture(
+                receipt_key,
+                g,
+                binding,
+                captured.fd,
+                expected_sha256=captured.sha256,
+                size=captured.byte_length,
+                deadline=deadline,
+            )
+            if revoked.is_set():
+                raise GrantError("PROJECTED_EXECUTION_REVOKED")
+            yield result, captured.fd, proof
 
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:

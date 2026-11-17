@@ -461,7 +461,7 @@ def _prepare_locked(
     return _prepared(row, snapshot, recipe)
 
 
-def _binding_digest(row: Row, snapshot: Row, recipe: Row) -> str:
+def _binding_payload(row: Row, snapshot: Row, recipe: Row) -> dict[str, object]:
     binding = {
         "version": "dev13-execution-binding-v1",
         "execution": str(row["id"]),
@@ -491,7 +491,11 @@ def _binding_digest(row: Row, snapshot: Row, recipe: Row) -> str:
         "image_digest": str(recipe["image_digest"]),
         "test_id": str(recipe["test_id"]) if recipe["test_id"] is not None else None,
     }
-    return sha256_hex(binding)
+    return binding
+
+
+def _binding_digest(row: Row, snapshot: Row, recipe: Row) -> str:
+    return sha256_hex(_binding_payload(row, snapshot, recipe))
 
 
 def _prepared(row: Row, snapshot: Row, recipe: Row) -> PreparedExecution:

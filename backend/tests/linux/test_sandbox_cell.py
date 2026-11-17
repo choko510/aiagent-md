@@ -710,3 +710,136 @@ def test_projected_child_cannot_clear_parent_death_signal(tmp_path: Path) -> Non
         assert result["stdout"].strip() == "-1 1"
     finally:
         os.close(fd)
+
+
+def test_projected_capture_signs_only_after_clean_supervisor_exit(tmp_path: Path) -> None:
+    """Synthetic Cell fixture: signed capture is not production VM attestation."""
+    if os.geteuid() != 0:
+        pytest.skip("projected execution requires privileged Supervisor")
+    import hashlib
+    import hmac
+    import json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "development" / "src"))
+    from aiagent_domain import canonical_json, sha256_hex
+
+    s = sup(tmp_path, netns=False)
+    source = tmp_path / "capture-source"
+    source.mkdir()
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    workspace, _ = s.workspace("t1", "task1", ".")
+    output_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent = tmp_path / "capture-private"
+    parent.mkdir(mode=0o700)
+    execution = uuid7()
+    attempt = uuid.uuid4().hex
+    binding = {
+        "execution": execution,
+        "attempt": attempt,
+        "intent": "intent1",
+        "tenant": "t1",
+        "owner": "fixture-owner",
+        "task": "task1",
+        "run": "run1",
+        "goal_revision": 1,
+        "lease_epoch": 3,
+    }
+    argv = [sys.executable, "-c", "from pathlib import Path; Path('index.scip').write_bytes(b'fixture')"]
+    g = Grant(
+        uuid.uuid4().hex,
+        "t1",
+        "task1",
+        "run1",
+        "intent1",
+        3,
+        tuple(argv),
+        ".",
+        5000,
+        256 * 1024 * 1024,
+        int(time.time()) + 60,
+        attempt_id=attempt,
+        attempt_binding_version=1,
+        execution_binding_version=1,
+        execution_id=execution,
+        execution_binding_sha256=sha256_hex(binding),
+    )
+    token = sign(KEY, g)
+
+    async def exercise():
+        with pytest.raises(GrantError, match="CAPTURE_BINDING_INVALID"):
+            async with s._execute_and_capture(
+                token,
+                argv,
+                ".",
+                source_fd=source_fd,
+                output_fd=output_fd,
+                binding={**binding, "intent": "other"},
+                receipt_key=b"r" * 32,
+                private_parent=parent,
+                deadline=time.monotonic() + 10,
+                heartbeat_seconds=10,
+                revoked=asyncio.Event(),
+            ):
+                pytest.fail("invalid binding started")
+        assert not (workspace / "index.scip").exists()
+        async with s._execute_and_capture(
+            token,
+            argv,
+            ".",
+            source_fd=source_fd,
+            output_fd=output_fd,
+            binding=binding,
+            receipt_key=b"r" * 32,
+            private_parent=parent,
+            deadline=time.monotonic() + 10,
+            heartbeat_seconds=10,
+            revoked=asyncio.Event(),
+        ) as (result, fd, proof):
+            assert result["exitCode"] == 0 and os.read(fd, 100) == b"fixture"
+            envelope = json.loads(proof)
+            assert envelope["payload"]["execution"] == execution
+            assert envelope["payload"]["artifact_sha256"] == hashlib.sha256(b"fixture").hexdigest()
+            expected = hmac.new(b"r" * 32, canonical_json(envelope["payload"]).encode(), hashlib.sha256).hexdigest()
+            assert hmac.compare_digest(expected, envelope["mac"])
+        with pytest.raises(GrantError, match="CAPTURE_OUTPUT_PREEXISTS"):
+            async with s._execute_and_capture(
+                token,
+                argv,
+                ".",
+                source_fd=source_fd,
+                output_fd=output_fd,
+                binding=binding,
+                receipt_key=b"r" * 32,
+                private_parent=parent,
+                deadline=time.monotonic() + 10,
+                heartbeat_seconds=10,
+                revoked=asyncio.Event(),
+            ):
+                pytest.fail("existing output accepted")
+        from dataclasses import replace
+
+        (workspace / "index.scip").unlink()
+        failed_argv = [sys.executable, "-c", "raise SystemExit(7)"]
+        failed_grant = replace(g, grant_id=uuid.uuid4().hex, argv=tuple(failed_argv))
+        with pytest.raises(GrantError, match="PROJECTED_EXECUTION_INCOMPLETE"):
+            async with s._execute_and_capture(
+                sign(KEY, failed_grant),
+                failed_argv,
+                ".",
+                source_fd=source_fd,
+                output_fd=output_fd,
+                binding=binding,
+                receipt_key=b"r" * 32,
+                private_parent=parent,
+                deadline=time.monotonic() + 10,
+                heartbeat_seconds=10,
+                revoked=asyncio.Event(),
+            ):
+                pytest.fail("failed execution signed")
+
+    try:
+        run(exercise())
+    finally:
+        os.close(source_fd)
+        os.close(output_fd)
+    assert not list(parent.iterdir())

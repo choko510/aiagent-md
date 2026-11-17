@@ -750,3 +750,102 @@ def test_real_run_cancel_sets_authority_watch_event(dbs, verified_setup):
         await asyncio.wait_for(watcher, timeout=5)
 
     asyncio.run(run_watch())
+
+
+def test_real_run_cancellation_reaps_local_test_process(dbs, verified_setup):
+    """DB + local synthetic child, not a remote Cell E2E."""
+    import asyncio
+    import sys
+
+    from aiagent_gateways.execution_watch import watch_run_authority
+    from aiagent_sandbox.supervisor import _run_with_revocation
+
+    claim, _binding, _manifest, _proof, _receipt, _wire, _parent = verified_setup
+    workspace = dbs["owner"].one(
+        "SELECT workspace_id FROM agent.tasks WHERE tenant_id=%s AND id=%s", (claim.tenant_id, claim.task_id)
+    )["workspace_id"]
+
+    async def exercise():
+        revoked, stop, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        watcher = asyncio.create_task(
+            watch_run_authority(dbs["tool_gateway"], claim, revoked, stop, ready, interval=0.05)
+        )
+        await asyncio.wait_for(ready.wait(), 5)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; print('partial',flush=True); time.sleep(30)",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        executing = asyncio.create_task(_run_with_revocation(proc, 20, revoked))
+        try:
+            await asyncio.to_thread(
+                commands.cancel, dbs["api"], Scope(claim.tenant_id, claim.owner_user_id, str(workspace)), claim.task_id
+            )
+            out, err, _timeout, _truncated, was_revoked = await asyncio.wait_for(executing, 5)
+            assert was_revoked and out == err == b"" and proc.returncode is not None
+        finally:
+            stop.set()
+            await asyncio.gather(watcher, return_exceptions=True)
+            if not executing.done():
+                executing.cancel()
+                await asyncio.gather(executing, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verified_setup):
+    """Synthetic FINISHED transition; no real Cell transport is claimed."""
+    from aiagent_development.workspace_authority import _binding_payload
+    from aiagent_domain import sha256_hex
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_sandbox.capture_signing import sign_capture
+    from aiagent_sandbox.grant import Grant
+
+    with finished_artifact_fixture(dbs, verified_setup) as (claim, prepared, snapshot, _store, captured):
+        execution = dbs["owner"].one(
+            "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
+        )
+        snap = dbs["owner"].one(
+            "SELECT * FROM agent.workspace_snapshot_attestations WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, snapshot.id),
+        )
+        recipe = dbs["owner"].one(
+            "SELECT * FROM agent.execution_recipe_approvals WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, prepared.recipe_id),
+        )
+        binding = _binding_payload(execution, snap, recipe)
+        assert sha256_hex(binding) == prepared.binding_sha256
+        grant = Grant(
+            "fixture",
+            claim.tenant_id,
+            claim.task_id,
+            claim.run_id,
+            prepared.intent_id,
+            claim.lease_epoch,
+            ("fixture",),
+            ".",
+            1000,
+            1024,
+            int(time.time()) + 30,
+            attempt_id=prepared.attempt_id,
+            attempt_binding_version=1,
+            execution_binding_version=1,
+            execution_id=prepared.id,
+            execution_binding_sha256=prepared.binding_sha256,
+        )
+        key = b"receipt-fixture-key" * 2
+        proof = sign_capture(
+            key,
+            grant,
+            binding,
+            captured.fd,
+            expected_sha256=captured.sha256,
+            size=captured.byte_length,
+            deadline=time.monotonic() + 10,
+        )
+        HmacCaptureVerifier(dbs["tool_gateway"], key).verify(
+            claim, prepared.id, captured.sha256, captured.byte_length, proof
+        )
