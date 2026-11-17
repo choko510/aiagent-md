@@ -22,6 +22,14 @@ backend/packages/development/src/aiagent_development/ntlint_report.py:
 - 返すのはrule / file / line / severity / scoreと実行集計のみ。非信頼のsubject・docs・任意テキストを構造化findingに転記しない。
 - subprocess、Node依存、外部API送信、データベース、Gateway、Runtime Cell、release gate、review receipt、CI設定は変更しない。
 
+### ntlint 0.1.1 JSONL形式の厳格な受入（2026-11-17レビュー対応）
+
+- finding 14フィールドとsummary 12フィールドを現行0.1.1の既定JSONL出力に合わせて固定する。重複JSONキー・未知キー・不足キーを拒否する。上流の形式が変わった場合にはversion pinとfixtureを同時更新する。
+- finding: type, ruleId, docs, severity, messageId, file, line, endLine, subject, subjectSource, value, at, margin, confidence。summary: type, verdicts, reported, candidates, unsure, missing, requests, inputTokens, usd, cached, failures, complete。
+- 集計分類は互いに排他的: reported + missing + unsure <= verdicts。閾値未満の診断は未報告のため等号を要求しない。candidates数は実際のcandidate finding数に一致させる。
+- requestsとcachedを含む全summary数値を型・範囲検査する。返さないfinding補助フィールドも形式検査するが、subject/docsは依然として戻り値へ含めない。検出結果はコード品質の確定判定ではない。
+- float変換時のOverflowError/ValueError、UnicodeのUTF-8変換失敗、重複キーはInvalidEvidenceで拒否する。Git SHAは既存のaiagent_development.contracts.require_sha()を使用して40桁と64桁を受理する。
+- SHA一致は認証済みArtifactである証明ではない。外部API実行・Cell経由の取り込みは未実装、既存DEV-07/14の合否Gateは変更しない。
 ## 将来の実行統合に必要な順序
 
 1. PR #110のDEV-13と共有する**認証済みsource+artifact broker**、実際のVM/Cell隔離、lease/Goal/policy/revoke連動の完成。SCIP indexerのB2は現時点PARTIALで、独自経路で迂回しない。
@@ -43,7 +51,7 @@ backend/packages/development/src/aiagent_development/ntlint_report.py:
 ## 既存オープンPRとの非干渉（2026-11-17）
 
 - #110 https://github.com/choko510/aiagent-md/pull/110 : DEV-13 SCIP実行系 (Draft)。factory/workflow/code_intelligence/sandbox/既存テストに一切触れない。Runtime Ownerの権限を先取りしない。
-- #111 https://github.com/choko510/aiagent-md/pull/111 : UI/Auth/通知 (Draft)。API/Web/DB/workflowsに触れず、現行UIの実装済み前提を置かない。
+- #111 https://github.com/choko510/aiagent-md/pull/111 : UI/Auth/通知 (Ready for review、2026-11-17確認)。API/Web/DB/workflowsに触れず、現行UIの実装済み前提を置かない。
 - 本PRはmain 69404bb2fd067d048b1735ca801fa0db9dc4006e から分岐し、**Draft / mergeしない**。両PRの将来の統合後はその新しいSHAで再検証する。
 
 受信Adapterだけでは、本番でのntlint実行、外部API安全性、全ソース検査や検出精度を実証しない。実行統合は上記権限を満たした後続PRで行う。
