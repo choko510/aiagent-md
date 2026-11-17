@@ -901,10 +901,24 @@ def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verif
             return
         lifecycle.finish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
         lifecycle.finish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
+        import hashlib
+        import hmac
+        import json
+
+        from aiagent_domain import canonical_json
+
+        alternate = json.loads(proof)
+        alternate["payload"]["issued_at"] -= 1
+        alternate["mac"] = hmac.new(key, canonical_json(alternate["payload"]).encode(), hashlib.sha256).hexdigest()
+        alternate_proof = json.dumps(alternate, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(ExecutionArtifactError, match="EXECUTION_FINISH_DENIED"):
+            lifecycle.finish(prepared.id, captured.fd, alternate_proof, deadline=time.monotonic() + 10)
         verifier.verify(claim, prepared.id, captured.sha256, captured.byte_length, proof)
         # Actual signer -> actual Gateway verifier -> encrypted PostgreSQL publication.
         # The Cell and SCIP validation are still fixture-only here.
         store._capture = verifier
+        with pytest.raises(ExecutionArtifactError, match="ARTIFACT_PUBLICATION_DENIED"):
+            store.publish(prepared.id, captured.fd, alternate_proof, deadline=time.monotonic() + 10)
         published = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
         repeated = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
         fetched, content = store.fetch(prepared.id, deadline=time.monotonic() + 10)
