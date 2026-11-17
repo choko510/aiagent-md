@@ -148,6 +148,9 @@ CREATE TABLE agent.execution_instances (
   binding_sha256 char(64) NOT NULL CHECK (binding_sha256 ~ '^[0-9a-f]{64}$'),
   lock_token smallint NOT NULL DEFAULT 0 CHECK (lock_token = 0),
   state text NOT NULL CHECK (state IN ('PREPARED', 'RUNNING', 'FINISHED', 'PUBLISHED', 'REVOKED', 'UNKNOWN')),
+  capture_sha256 char(64) CHECK (capture_sha256 IS NULL OR capture_sha256 ~ '^[0-9a-f]{64}$'),
+  capture_bytes integer CHECK (capture_bytes IS NULL OR capture_bytes BETWEEN 1 AND 4194304),
+  capture_proof_sha256 char(64) CHECK (capture_proof_sha256 IS NULL OR capture_proof_sha256 ~ '^[0-9a-f]{64}$'),
   artifact_sha256 char(64) CHECK (artifact_sha256 IS NULL OR artifact_sha256 ~ '^[0-9a-f]{64}$'),
   artifact_bytes integer CHECK (artifact_bytes IS NULL OR artifact_bytes BETWEEN 1 AND 4194304),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -159,6 +162,9 @@ CREATE TABLE agent.execution_instances (
   FOREIGN KEY (tenant_id, tool_attempt_id) REFERENCES agent.tool_attempts(tenant_id, id),
   FOREIGN KEY (tenant_id, workspace_id, snapshot_id) REFERENCES agent.workspace_snapshot_attestations(tenant_id, workspace_id, id),
   FOREIGN KEY (tenant_id, recipe_id) REFERENCES agent.execution_recipe_approvals(tenant_id, id),
+  CHECK ((capture_sha256 IS NULL) = (capture_bytes IS NULL)),
+  CHECK ((capture_sha256 IS NULL) = (capture_proof_sha256 IS NULL)),
+  CHECK (state NOT IN ('FINISHED','PUBLISHED') OR capture_sha256 IS NOT NULL),
   CHECK ((artifact_sha256 IS NULL) = (artifact_bytes IS NULL)),
   CHECK (id <> tool_attempt_id),
   CHECK ((state = 'PUBLISHED') = (artifact_sha256 IS NOT NULL))
@@ -167,7 +173,7 @@ CREATE TABLE agent.execution_instances (
 CREATE FUNCTION agent.execution_instance_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    IF NEW.state <> 'PREPARED' OR NEW.artifact_sha256 IS NOT NULL OR NEW.artifact_bytes IS NOT NULL THEN
+    IF NEW.state <> 'PREPARED' OR NEW.capture_sha256 IS NOT NULL OR NEW.artifact_sha256 IS NOT NULL OR NEW.artifact_bytes IS NOT NULL THEN
       RAISE EXCEPTION 'INVALID_EXECUTION_INSERT' USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
@@ -183,6 +189,9 @@ BEGIN
      OR (OLD.state = 'RUNNING' AND NEW.state NOT IN ('RUNNING','FINISHED','REVOKED','UNKNOWN'))
      OR (OLD.state = 'FINISHED' AND NEW.state NOT IN ('FINISHED','PUBLISHED','REVOKED','UNKNOWN'))
      OR (OLD.state IN ('PUBLISHED','REVOKED','UNKNOWN') AND NEW.state <> OLD.state)
+     OR (ROW(NEW.capture_sha256,NEW.capture_bytes,NEW.capture_proof_sha256) IS DISTINCT FROM
+             ROW(OLD.capture_sha256,OLD.capture_bytes,OLD.capture_proof_sha256)
+         AND NOT (OLD.state='RUNNING' AND NEW.state='FINISHED' AND OLD.capture_sha256 IS NULL))
      OR (OLD.state = 'PUBLISHED' AND ROW(NEW.artifact_sha256,NEW.artifact_bytes) IS DISTINCT FROM
                                      ROW(OLD.artifact_sha256,OLD.artifact_bytes))
   THEN
@@ -333,14 +342,51 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION agent.execution_artifact_lock(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid) FROM PUBLIC;
 
+-- These functions are callable only by the trusted Gateway owner. The Gateway
+-- must authenticate the Supervisor receipt before invoking finish.
+CREATE FUNCTION agent.execution_start(
+  p_tenant uuid, p_owner uuid, p_workspace uuid, p_task uuid, p_run uuid,
+  p_goal bigint, p_lease bigint, p_worker text, p_restore bigint, p_execution uuid, p_binding text
+) RETURNS void LANGUAGE plpgsql STRICT SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+DECLARE e agent.execution_instances%ROWTYPE;
+BEGIN
+  e := agent.execution_artifact_lock(p_tenant,p_owner,p_workspace,p_task,p_run,p_goal,p_lease,p_worker,p_restore,p_execution);
+  IF e.state <> 'PREPARED' OR e.binding_sha256 <> p_binding THEN
+    RAISE EXCEPTION 'EXECUTION_NOT_PREPARED' USING ERRCODE='check_violation';
+  END IF;
+  UPDATE agent.execution_instances SET state='RUNNING' WHERE tenant_id=p_tenant AND id=p_execution;
+END $$;
+REVOKE ALL ON FUNCTION agent.execution_start(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.execution_start(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text) TO aiagent_tool_gateway;
+
+CREATE FUNCTION agent.execution_finish(
+  p_tenant uuid, p_owner uuid, p_workspace uuid, p_task uuid, p_run uuid,
+  p_goal bigint, p_lease bigint, p_worker text, p_restore bigint, p_execution uuid,
+  p_binding text, p_sha text, p_length integer, p_proof_sha text
+) RETURNS void LANGUAGE plpgsql STRICT SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+DECLARE e agent.execution_instances%ROWTYPE;
+BEGIN
+  IF p_sha !~ '^[0-9a-f]{64}$' OR p_proof_sha !~ '^[0-9a-f]{64}$' OR p_length NOT BETWEEN 1 AND 4194304 THEN
+    RAISE EXCEPTION 'INVALID_CAPTURE' USING ERRCODE='check_violation';
+  END IF;
+  e := agent.execution_artifact_lock(p_tenant,p_owner,p_workspace,p_task,p_run,p_goal,p_lease,p_worker,p_restore,p_execution);
+  IF e.binding_sha256 <> p_binding THEN RAISE EXCEPTION 'EXECUTION_BINDING_STALE' USING ERRCODE='insufficient_privilege'; END IF;
+  IF e.state='FINISHED' AND e.capture_sha256=p_sha AND e.capture_bytes=p_length AND e.capture_proof_sha256=p_proof_sha THEN RETURN; END IF;
+  IF e.state <> 'RUNNING' THEN RAISE EXCEPTION 'EXECUTION_NOT_RUNNING' USING ERRCODE='check_violation'; END IF;
+  UPDATE agent.execution_instances SET state='FINISHED',capture_sha256=p_sha,capture_bytes=p_length,capture_proof_sha256=p_proof_sha
+    WHERE tenant_id=p_tenant AND id=p_execution;
+END $$;
+REVOKE ALL ON FUNCTION agent.execution_finish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text,text,integer,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.execution_finish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text,text,integer,text) TO aiagent_tool_gateway;
+
 CREATE FUNCTION agent.execution_artifact_publish(
   p_tenant uuid, p_owner uuid, p_workspace uuid, p_task uuid, p_run uuid,
   p_goal bigint, p_lease bigint, p_worker text, p_restore bigint, p_execution uuid,
-  p_artifact uuid, p_sha text, p_length integer, p_coverage text, p_key_id text, p_nonce bytea, p_ciphertext bytea, p_expires timestamptz
+  p_artifact uuid, p_sha text, p_length integer, p_coverage text, p_key_id text, p_nonce bytea, p_ciphertext bytea, p_expires timestamptz, p_proof_sha text
 ) RETURNS uuid LANGUAGE plpgsql STRICT SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
 DECLARE e agent.execution_instances%ROWTYPE; existing agent.execution_artifacts%ROWTYPE;
 BEGIN
-  IF p_sha !~ '^[0-9a-f]{64}$' OR p_length NOT BETWEEN 1 AND 4194304 OR p_coverage NOT IN ('VALIDATED','PARTIAL')
+  IF p_sha !~ '^[0-9a-f]{64}$' OR p_proof_sha !~ '^[0-9a-f]{64}$' OR p_length NOT BETWEEN 1 AND 4194304 OR p_coverage NOT IN ('VALIDATED','PARTIAL')
      OR p_key_id !~ '^[A-Za-z0-9._-]{1,64}$' OR octet_length(p_nonce) <> 12
      OR octet_length(p_ciphertext) <> p_length + 16 OR p_expires <= clock_timestamp()
      OR p_expires > clock_timestamp() + interval '30 days'
@@ -349,11 +395,15 @@ BEGIN
   IF e.state = 'PUBLISHED' THEN
     SELECT * INTO existing FROM agent.execution_artifacts WHERE tenant_id=p_tenant AND execution_id=p_execution;
     IF existing.id IS NOT NULL AND existing.plaintext_sha256=p_sha AND existing.byte_length=p_length AND existing.coverage=p_coverage
-       AND existing.revoked_at IS NULL AND existing.expires_at > clock_timestamp()
+       AND e.capture_proof_sha256=p_proof_sha AND existing.revoked_at IS NULL AND existing.expires_at > clock_timestamp()
     THEN RETURN existing.id; END IF;
     RAISE EXCEPTION 'ARTIFACT_CONFLICT' USING ERRCODE = 'check_violation';
   END IF;
   IF e.state <> 'FINISHED' THEN RAISE EXCEPTION 'EXECUTION_NOT_FINISHED' USING ERRCODE = 'check_violation'; END IF;
+  IF e.capture_sha256 IS DISTINCT FROM p_sha OR e.capture_bytes IS DISTINCT FROM p_length
+     OR e.capture_proof_sha256 IS DISTINCT FROM p_proof_sha THEN
+    RAISE EXCEPTION 'CAPTURE_MISMATCH' USING ERRCODE = 'check_violation';
+  END IF;
   IF p_coverage = 'VALIDATED' AND EXISTS (SELECT 1 FROM agent.workspace_snapshot_attestations s
     WHERE s.tenant_id=p_tenant AND s.id=e.snapshot_id AND s.hash_strength='LEGACY_SHA1')
   THEN RAISE EXCEPTION 'LEGACY_GIT_REQUIRES_PARTIAL' USING ERRCODE = 'check_violation'; END IF;
@@ -364,8 +414,8 @@ BEGIN
     WHERE tenant_id=p_tenant AND id=p_execution;
   RETURN p_artifact;
 END $$;
-REVOKE ALL ON FUNCTION agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz) TO aiagent_tool_gateway;
+REVOKE ALL ON FUNCTION agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz,text) TO aiagent_tool_gateway;
 
 CREATE FUNCTION agent.execution_artifact_fetch(
   p_tenant uuid, p_owner uuid, p_workspace uuid, p_task uuid, p_run uuid,

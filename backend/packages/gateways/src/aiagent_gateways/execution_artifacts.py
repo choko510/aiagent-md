@@ -206,7 +206,7 @@ class PostgresExecutionArtifactStore:
             with self._db.tx(tenant=self._claim.tenant_id) as c:
                 _db_deadline(c, deadline)
                 row = c.execute(
-                    "SELECT agent.execution_artifact_publish(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS id",
+                    "SELECT agent.execution_artifact_publish(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS id",
                     (
                         *self._scope_args(workspace, execution_id),
                         artifact_id,
@@ -217,6 +217,7 @@ class PostgresExecutionArtifactStore:
                         nonce,
                         ciphertext,
                         datetime.now(UTC) + self._ttl,
+                        hashlib.sha256(proof).hexdigest(),
                     ),
                 ).fetchone()
                 if row is None or row["id"] is None:

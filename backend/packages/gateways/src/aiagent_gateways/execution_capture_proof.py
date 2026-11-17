@@ -25,6 +25,21 @@ class HmacCaptureVerifier:
         self._db, self._key, self._max_age = db, key, max_age_seconds
 
     def verify(self, claim: control.Claim, execution_id: str, digest: str, size: int, proof: bytes) -> None:
+        self._verify(claim, execution_id, digest, size, proof, ("FINISHED", "PUBLISHED"))
+
+    def verify_running(self, claim: control.Claim, execution_id: str, digest: str, size: int, proof: bytes) -> str:
+        """Authenticate the receipt before a separately fenced FINISHED transition."""
+        return self._verify(claim, execution_id, digest, size, proof, ("RUNNING", "FINISHED"))
+
+    def _verify(
+        self,
+        claim: control.Claim,
+        execution_id: str,
+        digest: str,
+        size: int,
+        proof: bytes,
+        states: tuple[str, ...],
+    ) -> str:
         if not isinstance(proof, bytes) or not 1 <= len(proof) <= 16384:
             raise ExecutionArtifactError("CAPTURE_PROOF_INVALID")
         try:
@@ -88,8 +103,10 @@ class HmacCaptureVerifier:
             ).fetchone()
         if (
             row is None
-            or row["state"] not in ("FINISHED", "PUBLISHED")
+            or row["state"] not in states
             or str(row["tool_attempt_id"]) != payload["attempt"]
             or str(row["binding_sha256"]).strip() != payload["binding_sha256"]
         ):
             raise ExecutionArtifactError("CAPTURE_PROOF_INVALID")
+
+        return str(row["binding_sha256"]).strip()

@@ -1,5 +1,7 @@
+DROP FUNCTION IF EXISTS agent.execution_finish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text,text,integer,text);
+DROP FUNCTION IF EXISTS agent.execution_start(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,text);
 DROP FUNCTION IF EXISTS agent.execution_artifact_fetch(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid);
-DROP FUNCTION IF EXISTS agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz);
+DROP FUNCTION IF EXISTS agent.execution_artifact_publish(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid,uuid,text,integer,text,text,bytea,bytea,timestamptz,text);
 DROP FUNCTION IF EXISTS agent.execution_artifact_lock(uuid,uuid,uuid,uuid,uuid,bigint,bigint,text,bigint,uuid);
 DROP TABLE IF EXISTS agent.execution_artifacts;
 DROP TABLE IF EXISTS agent.execution_instances;

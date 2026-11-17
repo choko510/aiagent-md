@@ -457,21 +457,40 @@ def test_authority_change_during_proof_prevents_snapshot(dbs, verified_setup, mo
 
 
 @contextmanager
-def finished_artifact_fixture(dbs, verified_setup):
+def finished_artifact_fixture(dbs, verified_setup, *, running=False):
+    import hashlib
+
     from aiagent_development.code_intelligence.artifact_capture import capture_scip
     from aiagent_gateways.context_keys import KeyRing
     from aiagent_gateways.execution_artifacts import PostgresExecutionArtifactStore
 
     claim, prepared, snapshot, parent = prepared_execution_fixture(dbs, verified_setup)
-    with dbs["owner"].tx() as c:
-        c.execute(
-            "UPDATE agent.execution_instances SET state='RUNNING' WHERE tenant_id=%s AND id=%s",
-            (claim.tenant_id, prepared.id),
+    if running:
+        from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+        from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+
+        verifier = HmacCaptureVerifier(dbs["tool_gateway"], b"receipt-fixture-key" * 2)
+        ExecutionLifecycle(dbs["tool_gateway"], claim, verifier).start(
+            prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 10
         )
-        c.execute(
-            "UPDATE agent.execution_instances SET state='FINISHED' WHERE tenant_id=%s AND id=%s",
-            (claim.tenant_id, prepared.id),
-        )
+    else:
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.execution_instances SET state='RUNNING' WHERE tenant_id=%s AND id=%s",
+                (claim.tenant_id, prepared.id),
+            )
+            c.execute(
+                "UPDATE agent.execution_instances SET state='FINISHED',capture_sha256=%s,capture_bytes=%s,"
+                "capture_proof_sha256=%s WHERE tenant_id=%s AND id=%s",
+                (
+                    hashlib.sha256(b"synthetic-artifact\0").hexdigest(),
+                    len(b"synthetic-artifact\0"),
+                    hashlib.sha256(b"fake-cell-receipt").hexdigest(),
+                    claim.tenant_id,
+                    prepared.id,
+                ),
+            )
+
     output = parent.parent / "fixture-output"
     output.mkdir()
     (output / "index.scip").write_bytes(b"synthetic-artifact\0")
@@ -796,15 +815,18 @@ def test_real_run_cancellation_reaps_local_test_process(dbs, verified_setup):
     asyncio.run(exercise())
 
 
-def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verified_setup):
+@pytest.mark.parametrize("cancel_before_finish", [False, True])
+def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verified_setup, cancel_before_finish):
     """Synthetic FINISHED transition; no real Cell transport is claimed."""
     from aiagent_development.workspace_authority import _binding_payload
     from aiagent_domain import sha256_hex
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
     from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
     from aiagent_sandbox.capture_signing import sign_capture
     from aiagent_sandbox.grant import Grant
 
-    with finished_artifact_fixture(dbs, verified_setup) as (claim, prepared, snapshot, store, captured):
+    with finished_artifact_fixture(dbs, verified_setup, running=True) as (claim, prepared, snapshot, store, captured):
         execution = dbs["owner"].one(
             "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
         )
@@ -847,9 +869,41 @@ def test_real_capture_signer_interoperates_with_canonical_db_verifier(dbs, verif
             deadline=time.monotonic() + 10,
         )
         verifier = HmacCaptureVerifier(dbs["tool_gateway"], key)
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, verifier)
+        with pytest.raises(ExecutionArtifactError, match="EXECUTION_START_DENIED"):
+            lifecycle.start(prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 10)
+        with pytest.raises(ExecutionArtifactError, match="CAPTURE_PROOF_INVALID"):
+            lifecycle.finish(prepared.id, captured.fd, b"{}", deadline=time.monotonic() + 10)
+        with pytest.raises(control.FencedOut):
+            ExecutionLifecycle(dbs["tool_gateway"], replace(claim, lease_epoch=claim.lease_epoch + 1), verifier).finish(
+                prepared.id, captured.fd, proof, deadline=time.monotonic() + 10
+            )
+        if cancel_before_finish:
+            original = verifier.verify_running
+
+            def cancel_after_verification(*args):
+                result = original(*args)
+                dbs["owner"].one(
+                    "UPDATE agent.runs SET cancel_requested=true,status_code='CANCELLING' "
+                    "WHERE tenant_id=%s AND id=%s RETURNING id",
+                    (claim.tenant_id, claim.run_id),
+                )
+                return result
+
+            verifier.verify_running = cancel_after_verification
+            with pytest.raises((ExecutionArtifactError, control.Cancelled)):
+                lifecycle.finish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
+            row = dbs["owner"].one(
+                "SELECT state FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
+                (claim.tenant_id, prepared.id),
+            )
+            assert row["state"] == "RUNNING"
+            return
+        lifecycle.finish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
+        lifecycle.finish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
         verifier.verify(claim, prepared.id, captured.sha256, captured.byte_length, proof)
         # Actual signer -> actual Gateway verifier -> encrypted PostgreSQL publication.
-        # FINISHED, the Cell and SCIP validation are still fixture-only here.
+        # The Cell and SCIP validation are still fixture-only here.
         store._capture = verifier
         published = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
         repeated = store.publish(prepared.id, captured.fd, proof, deadline=time.monotonic() + 10)
