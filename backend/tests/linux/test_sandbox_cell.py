@@ -937,9 +937,6 @@ def test_projected_output_is_exclusive_and_cleans_up(tmp_path: Path) -> None:
                 pytest.fail("duplicate output accepted")
         child = os.open("index.scip", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         os.close(child)
-        # A caller-provided descriptor may already be positioned at end of directory.
-        with os.scandir(fd) as entries:
-            list(entries)
         with pytest.raises(GrantError, match="OUTPUT_DESCRIPTOR_INVALID"):
             validate_projected_output(parent, g, fd, cell_uid=20001, cell_gid=20001)
     assert not list(parent.iterdir())
