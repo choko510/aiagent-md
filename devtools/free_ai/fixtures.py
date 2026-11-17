@@ -172,19 +172,19 @@ def allowed(age):
     return age > 18"""
 REVIEW_R02_PROMPT = _review_prompt(REVIEW_R02_CODE, "Only people aged 18 or older are allowed.")
 
-REVIEW_R03_CODE = """def complete(run, worker_epoch):
-    run.commit(worker_epoch)
-    return "OK"
-def retry_unknown(send):
+REVIEW_R03_CODE = """def commit_result(current_epoch, worker_epoch, store, result):
+    store.commit(result)
+
+def request_once(send):
     try:
         return send()
     except TimeoutError:
         return send()"""
 REVIEW_R03_PROMPT = _review_prompt(
     REVIEW_R03_CODE,
-    "A completion carries worker_epoch while run.lease_epoch is the current lease. "
-    "send performs an external side effect; when the connection times out, no response "
-    "is received.",
+    "A commit must only be accepted when current_epoch equals worker_epoch. send is a "
+    "side-effecting POST with no idempotency key; when it raises TimeoutError the "
+    "outcome is unknown.",
 )
 
 REVIEW_R04_CODE = """def last_item(items):

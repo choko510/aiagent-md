@@ -897,16 +897,38 @@ def test_r06_lease_check_is_correct_and_only_secret_logging_is_gold() -> None:
 
 def test_r03_has_unvalidated_commit_and_automatic_retry() -> None:
     code = _numbered("review_r03")
-    assert "run.commit(worker_epoch)" in code[2]
-    assert "lease_epoch" not in "\n".join(code.values())
+    assert "current_epoch" in code[1]
+    assert "worker_epoch" in code[1]
+    assert "store.commit(result)" in code[2]
+    assert "current_epoch" not in code[2]
+    assert "worker_epoch" not in code[2]
+    assert "==" not in code[2]
+    assert "!=" not in code[2]
     assert "except TimeoutError:" in code[7]
     assert code[8].strip() == "return send()"
     key = {defect.line: defect.rule_id for defect in REVIEW_KEY["review_r03"]}
     assert key == {2: "STALE_LEASE", 8: "UNSAFE_RETRY"}
     prompt = fixtures.require_fixture("review_r03").prompt
     assert prompt is not None
+    assert "current_epoch equals worker_epoch" in prompt
+    assert "no idempotency key" in prompt
+    assert "outcome is unknown" in prompt
     assert "must be rejected" not in prompt
     assert "must not be retried" not in prompt
+    assert "do not retry" not in prompt.lower()
+
+
+def test_r03_fixed_eight_line_snippet_is_exact() -> None:
+    expected = """def commit_result(current_epoch, worker_epoch, store, result):
+    store.commit(result)
+
+def request_once(send):
+    try:
+        return send()
+    except TimeoutError:
+        return send()"""
+    assert expected == fixtures.REVIEW_R03_CODE
+    assert len(fixtures.REVIEW_R03_CODE.splitlines()) == 8
 
 
 def test_r01_secret_premise_is_explicit() -> None:
@@ -927,7 +949,7 @@ _GOLD_LINE_SNIPPETS = {
     ("review_r01", 5): 'print("token=" + token)',
     ("review_r02", 2): "SELECT * FROM users WHERE name = ",
     ("review_r02", 6): "return age > 18",
-    ("review_r03", 2): "run.commit(worker_epoch)",
+    ("review_r03", 2): "store.commit(result)",
     ("review_r03", 8): "return send()",
     ("review_r06", 8): "print(token)",
     ("review_r07", 5): "return send()",
@@ -953,6 +975,7 @@ def test_clean_cases_have_no_defect_patterns() -> None:
         assert 'print("token=" + token)' not in text
         assert "print(token)" not in text
         assert "return age > 18" not in text
+        assert "store.commit(result)" not in text
         assert "run.commit(worker_epoch)" not in text
         except_lines = [line for line, value in code.items() if "except TimeoutError:" in value]
         for line in except_lines:
