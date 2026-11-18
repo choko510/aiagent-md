@@ -190,4 +190,6 @@ class MockSandbox:
             source_commit_sha=self.source_sha or request.project.base_sha,
             test_id=test_id,
             receipt_ref="mock-receipt:" + request.intent_ref,
+            timed_out=False,
+            truncated=False,
         )

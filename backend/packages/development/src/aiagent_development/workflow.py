@@ -101,6 +101,8 @@ class DevelopmentWorkflow:
         self._phase(c, Phase.PLANNED, Phase.EXECUTING, Phase.COMMITTED, Phase.REVIEWING)
         if request.project != c.scope or request.run != c.run or c.plan is None or request.plan_ref != c.plan.plan_ref:
             raise ScopeDenied("execution does not belong to this plan/fence")
+        if request.kind == "test" and request.test_id not in c.plan.required_tests:
+            raise ScopeDenied("test ID is not approved by the current plan")
         if c.phase in (Phase.PLANNED, Phase.EXECUTING) and request.kind == "test":
             raise StateConflict("test must be bound to an immutable committed SHA")
         if c.commit is not None and c.phase in (Phase.COMMITTED, Phase.REVIEWING):
@@ -114,6 +116,7 @@ class DevelopmentWorkflow:
             or receipt.intent_ref != request.intent_ref
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
+            or receipt.test_id != request.test_id
             or (receipt.executed and receipt.source_commit_sha is None)
             or (receipt.source_commit_sha is not None and receipt.source_commit_sha != target)
             or (
@@ -234,7 +237,12 @@ class DevelopmentWorkflow:
         if tested != required or len(c.tests) != len(required):
             return False
         if any(
-            not t.executed or t.exit_code != 0 or t.kind != "test" or t.source_commit_sha != c.commit.commit_sha
+            not t.executed
+            or t.exit_code != 0
+            or t.kind != "test"
+            or t.source_commit_sha != c.commit.commit_sha
+            or t.timed_out is not False
+            or t.truncated is not False
             for t in c.tests
         ):
             return False

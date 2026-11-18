@@ -163,6 +163,7 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
             ("pytest", "-q"),
             toolchain,
             f"intent:{c.round_number}:post:unit-1",
+            test_id="unit-1",
         )
         sandbox.results[req.intent_ref] = (True, 0, "unit-1")
         return (req,)

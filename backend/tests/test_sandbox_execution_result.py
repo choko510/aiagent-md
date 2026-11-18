@@ -167,11 +167,82 @@ def test_real_adapter_refuses_unattested_source_before_dispatch(kind: str) -> No
     db, gateway, claim = Mock(), Mock(), Mock()
     adapter = ToolGatewaySandboxAdapter(db, gateway, claim)
     scope = ProjectScope("t", "o", "p", "w", "org/repo", "branch", "a" * 40, "rev")
-    request = ExecutionRequest(scope, RunFence("t", "r", 1, 1, 1), "plan", kind, ("tool",), "a" * 64, "intent")
+    request = ExecutionRequest(
+        scope,
+        RunFence("t", "r", 1, 1, 1),
+        "plan",
+        kind,
+        ("tool",),
+        "a" * 64,
+        "intent",
+        test_id="unit" if kind == "test" else None,
+    )
     with pytest.raises(InvalidEvidence, match="verified workspace"):
         adapter.execute(request)
     db.tx.assert_not_called()
     gateway.submit.assert_not_called()
+
+
+def test_legacy_persisted_test_without_completion_flags_cannot_pass() -> None:
+    from aiagent_development.contracts import (
+        CommitEvidence,
+        Cycle,
+        ExecutionEvidence,
+        Phase,
+        ProjectScope,
+        ReviewVerdict,
+        RunFence,
+        TaskPlan,
+    )
+    from aiagent_development.pg_store import _deserialize_cycle, _serialize_cycle
+    from aiagent_development.workflow import DevelopmentWorkflow
+
+    scope = ProjectScope("tenant", "owner", "project", "workspace", "org/repo", "branch", "a" * 40, "1")
+    run = RunFence("task", "run", 1, 1, 1)
+    commit = CommitEvidence("a" * 40, "b" * 40, "c" * 64, "patch", "git-receipt")
+    evidence = ExecutionEvidence(
+        "test-intent",
+        run,
+        "test",
+        0,
+        True,
+        "d" * 64,
+        "e" * 64,
+        "",
+        "",
+        "b" * 40,
+        "unit",
+        "test-receipt",
+        timed_out=False,
+        truncated=False,
+    )
+    reviews = tuple(
+        ReviewVerdict(f"review-{role}", role, "b" * 40, True, f"receipt-{role}")
+        for role in ("functional", "security", "ui-e2e")
+    )
+    cycle = Cycle(
+        "cycle",
+        scope,
+        run,
+        Phase.CODE_READY,
+        "change",
+        plan=TaskPlan("plan", "change", ("unit",), 1),
+        commit=commit,
+        tests=(evidence,),
+        reviews=reviews,
+        execution_receipts=(evidence,),
+    )
+    assert DevelopmentWorkflow._gate(cycle, cycle.reviews)
+    serialized = _serialize_cycle(cycle)
+    for item in (*serialized["tests"], *serialized["execution_receipts"]):
+        item.pop("timed_out")
+        item.pop("truncated")
+    restored = _deserialize_cycle(serialized)
+    assert restored.tests[0].timed_out is None and restored.tests[0].truncated is None
+    assert not DevelopmentWorkflow._gate(restored, restored.reviews)
+    serialized["tests"][0]["exit_code"] = False
+    with pytest.raises(InvalidEvidence, match="invalid stored execution status"):
+        _deserialize_cycle(serialized)
 
 
 def test_multibyte_and_large_results_do_not_gain_false_completeness() -> None:

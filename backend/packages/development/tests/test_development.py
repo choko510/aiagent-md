@@ -67,9 +67,9 @@ def env(repo: tuple[Path, str]):
     return root, scope, run, auth, scm, sandbox, store, flow
 
 
-def _request(env, *, kind="build", intent="build-1", plan_ref="plan-1"):
+def _request(env, *, kind="build", intent="build-1", plan_ref="plan-1", test_id=None):
     _, scope, run, _, _, _, _, _ = env
-    return ExecutionRequest(scope, run, plan_ref, kind, ("pytest", "-q"), "a" * 64, intent)
+    return ExecutionRequest(scope, run, plan_ref, kind, ("pytest", "-q"), "a" * 64, intent, test_id=test_id)
 
 
 def _prepare(env, cycle="cycle-1", *, tests=("unit", "security")):
@@ -92,7 +92,7 @@ def _test(env, test_id, *, executed=True, exit_code=0, cycle="cycle-1"):
     _, scope, _, _, _, sandbox, _, flow = env
     intent = f"test-{test_id}"
     sandbox.results[intent] = (executed, exit_code if executed else None, test_id)
-    return flow.execute(scope, cycle, _request(env, kind="test", intent=intent))
+    return flow.execute(scope, cycle, _request(env, kind="test", intent=intent, test_id=test_id))
 
 
 def _review(env, role, *, passed=True, finding=None, sha=None):
@@ -256,6 +256,41 @@ def test_missing_required_test_never_ready(env):
     _review(env, "functional")
     _review(env, "security")
     assert _review(env, "ui-e2e").phase == Phase.REVIEWING
+
+
+def test_test_request_and_receipt_must_match_approved_test_id(env):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    with pytest.raises(ScopeDenied, match="explicit test ID"):
+        _request(env, kind="test", intent="missing-id")
+    before = len(sandbox.invocations)
+    with pytest.raises(ScopeDenied, match="not approved"):
+        flow.execute(scope, "cycle-1", _request(env, kind="test", intent="unapproved", test_id="unknown"))
+    assert len(sandbox.invocations) == before
+    sandbox.results["mismatched"] = (True, 0, "security")
+    with pytest.raises(InvalidEvidence, match="mismatches"):
+        flow.execute(scope, "cycle-1", _request(env, kind="test", intent="mismatched", test_id="unit"))
+    assert not flow._load(scope, "cycle-1").tests
+
+
+@pytest.mark.parametrize("timed_out,truncated", [(None, False), (False, None), (True, False), (False, True)])
+def test_incomplete_test_evidence_never_satisfies_review_gate(env, timed_out, truncated):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    original = sandbox.execute
+
+    def incomplete(request):
+        receipt = original(request)
+        return replace(receipt, timed_out=timed_out, truncated=truncated) if request.test_id == "unit" else receipt
+
+    sandbox.execute = incomplete
+    _test(env, "unit")
+    _test(env, "security")
+    _review(env, "functional")
+    _review(env, "security")
+    assert _review(env, "ui-e2e").phase != Phase.CODE_READY
+    with pytest.raises(StateConflict):
+        flow.assert_code_ready(scope, "cycle-1")
 
 
 def test_open_p0_p1_and_false_pass_rejected(env):

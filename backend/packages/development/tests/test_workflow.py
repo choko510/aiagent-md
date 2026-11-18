@@ -132,6 +132,8 @@ class FakeCell:
             self.git.head_sha,
             request.argv[-1] if is_test else None,
             f"cell-receipt-{self.execute_calls}",
+            False,
+            False,
         )
 
 
@@ -225,7 +227,14 @@ def run_tests(h, cycle_id="cycle-1", names=("unit", "security")):
             scope,
             cycle_id,
             ExecutionRequest(
-                scope, fence, f"plan-{cycle_id}", "test", ("fixture-test", test), TOOLCHAIN, f"test-{test}"
+                scope,
+                fence,
+                f"plan-{cycle_id}",
+                "test",
+                ("fixture-test", test),
+                TOOLCHAIN,
+                f"test-{test}",
+                test_id=test,
             ),
         )
 

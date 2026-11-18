@@ -141,12 +141,21 @@ class ExecutionRequest:
     argv: tuple[str, ...]
     toolchain_digest: str
     intent_ref: str
+    test_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("build", "test", "static-check") or not self.argv or not self.intent_ref:
             raise ScopeDenied("invalid scoped sandbox request")
         if any(not a or "\x00" in a for a in self.argv):
             raise ScopeDenied("invalid argv")
+        if (self.kind == "test") != (self.test_id is not None):
+            raise ScopeDenied("test requests require an explicit test ID")
+        if self.test_id is not None and (
+            not isinstance(self.test_id, str)
+            or not 1 <= len(self.test_id) <= 256
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in self.test_id)
+        ):
+            raise ScopeDenied("invalid test ID")
         require_digest(self.toolchain_digest)
 
 
@@ -165,10 +174,14 @@ class ExecutionEvidence:
     test_id: str | None = None
     # Required: this is the actual dispatch claim; not a self-reported LLM fence.
     receipt_ref: str = ""
+    timed_out: bool | None = None
+    truncated: bool | None = None
 
     def __post_init__(self) -> None:
         require_digest(self.artifact_sha256)
         require_digest(self.toolchain_digest)
+        if type(self.executed) is not bool or (self.exit_code is not None and type(self.exit_code) is not int):
+            raise InvalidEvidence("invalid execution status")
         if self.source_commit_sha is not None:
             require_sha(self.source_commit_sha)
         if len(self.stdout.encode()) > 4096 or len(self.stderr.encode()) > 4096:
@@ -179,6 +192,8 @@ class ExecutionEvidence:
             raise InvalidEvidence("executed receipt needs exit code")
         if not self.executed and self.exit_code is not None:
             raise InvalidEvidence("unexecuted receipt cannot report exit code")
+        if any(value is not None and type(value) is not bool for value in (self.timed_out, self.truncated)):
+            raise InvalidEvidence("invalid execution completion flags")
 
 
 @dataclass(frozen=True)

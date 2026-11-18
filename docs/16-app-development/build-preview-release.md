@@ -36,6 +36,14 @@ Secrets/Signing Brokerは鍵を決してCell/Model/traceへ露出させず、署
 
 ## Build manifest / tests
 Build Manifest: projectId, sourceSha, imageDigest, dependencyLockDigest, testReceipts, artifactSha256, toolchainInfo, previewRef, signedStatus。 
+
+**Draft implementation compatibility (DEV-REQ-07/08/12, SC-28/29):** a test
+request must name the exact planned Test ID, and its execution receipt must
+match that ID. Timeout and output-truncation outcomes must be explicit false
+before a receipt can satisfy the review gate. Older stored receipts without
+these flags remain readable but are ineligible for a PASS until re-executed.
+This contract hardening does not by itself implement a production command
+executor or attest an image.
 - DEV-BLD-T01 pinned toolchain offline buildと再現、hash mismatch reject。
 - DEV-BLD-T02 scriptsがhost/secret/Internet/Dockerへ到達不可。
 - DEV-BLD-T03 WebSocket/HMR/HTTPが許可したpreview routeのみ動作。
