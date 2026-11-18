@@ -44,6 +44,31 @@ TransportStatus = Literal[
     "LOCAL_INPUT_INVALID",
 ]
 
+TimeoutKind = Literal[
+    "CONNECT_TIMEOUT",
+    "READ_TIMEOUT",
+    "WRITE_TIMEOUT",
+    "POOL_TIMEOUT",
+    "OVERALL_TIMEOUT",
+    "OTHER_TIMEOUT",
+]
+
+TimeoutPhase = Literal[
+    "BEFORE_HEADERS",
+    "HEADERS_RECEIVED",
+    "BODY_RECEIVING",
+    "UNKNOWN",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class TimeoutDiagnostic:
+    """Safe, internal facts about one timeout; never includes provider text."""
+
+    timeout_kind: TimeoutKind
+    timeout_phase: TimeoutPhase
+    body_chunk_received: bool
+
 
 class LocalInputError(ValueError):
     """The request body could not be encoded safely; nothing was sent."""
@@ -63,6 +88,7 @@ class TransportResult:
     body: bytes | None = None
     elapsed_ms: int | None = None
     unknown_outcome: bool = False
+    timeout_diagnostic: TimeoutDiagnostic | None = None
 
 
 def encode_body(body: dict[str, object]) -> bytes:
@@ -98,6 +124,38 @@ def _new_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.Asyn
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _classify_timeout(exc: httpx.TimeoutException) -> TimeoutKind:
+    """Classify only the exception type; never retain its message."""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "CONNECT_TIMEOUT"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "READ_TIMEOUT"
+    if isinstance(exc, httpx.WriteTimeout):
+        return "WRITE_TIMEOUT"
+    if isinstance(exc, httpx.PoolTimeout):
+        return "POOL_TIMEOUT"
+    return "OTHER_TIMEOUT"
+
+
+def _timeout_result(
+    started: float,
+    kind: TimeoutKind,
+    phase: TimeoutPhase,
+    body_chunk_received: bool,
+) -> TransportResult:
+    return TransportResult(
+        status="TIMEOUT",
+        reason_code="UNKNOWN_OUTCOME",
+        elapsed_ms=_elapsed_ms(started),
+        unknown_outcome=True,
+        timeout_diagnostic=TimeoutDiagnostic(
+            timeout_kind=kind,
+            timeout_phase=phase,
+            body_chunk_received=body_chunk_received,
+        ),
+    )
 
 
 def _is_json_content_type(value: str | None) -> bool:
@@ -167,11 +225,14 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
         "User-Agent": USER_AGENT,
     }
     started = time.monotonic()
+    phase: TimeoutPhase = "BEFORE_HEADERS"
+    body_chunk_received = False
     try:
         async with asyncio.timeout(OVERALL_TIMEOUT_SECONDS):
             client = _new_client()
             async with client:
                 async with client.stream("POST", spec.endpoint, content=encoded, headers=headers) as response:
+                    phase = "HEADERS_RECEIVED"
                     http_status = response.status_code
                     if 300 <= http_status < 400:
                         return TransportResult(
@@ -224,6 +285,7 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
                                 elapsed_ms=_elapsed_ms(started),
                             )
                     received = bytearray()
+                    phase = "BODY_RECEIVING"
                     async for chunk in response.aiter_bytes():
                         # Check the decoded size *before* appending so an oversized chunk
                         # is never copied, stored or parsed.
@@ -235,6 +297,8 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
                                 elapsed_ms=_elapsed_ms(started),
                             )
                         received.extend(chunk)
+                        if chunk:
+                            body_chunk_received = True
                     return TransportResult(
                         status="OK",
                         reason_code="OK",
@@ -243,19 +307,10 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
                         elapsed_ms=_elapsed_ms(started),
                     )
     except TimeoutError:
-        return TransportResult(
-            status="TIMEOUT",
-            reason_code="UNKNOWN_OUTCOME",
-            elapsed_ms=_elapsed_ms(started),
-            unknown_outcome=True,
-        )
-    except httpx.TimeoutException:
-        return TransportResult(
-            status="TIMEOUT",
-            reason_code="UNKNOWN_OUTCOME",
-            elapsed_ms=_elapsed_ms(started),
-            unknown_outcome=True,
-        )
+        # asyncio.timeout() raises the built-in TimeoutError; this is the overall cap.
+        return _timeout_result(started, "OVERALL_TIMEOUT", phase, body_chunk_received)
+    except httpx.TimeoutException as exc:
+        return _timeout_result(started, _classify_timeout(exc), phase, body_chunk_received)
     except httpx.DecodingError:
         # A corrupt or unsupported encoding is a response-format problem, not a retry.
         return TransportResult(
@@ -276,6 +331,9 @@ __all__ = [
     "MAX_REQUEST_BYTES",
     "MAX_RESPONSE_BYTES",
     "LocalInputError",
+    "TimeoutDiagnostic",
+    "TimeoutKind",
+    "TimeoutPhase",
     "TransportResult",
     "TransportStatus",
     "encode_body",

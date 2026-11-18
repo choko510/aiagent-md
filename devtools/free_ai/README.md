@@ -201,11 +201,38 @@ unavailable / 429 / 5xx / network / timeout, `4` HTTP 200 with a bad schema, con
 mismatch, model drift, tool output or non-zero reported cost, `5` local safety
 invariant (redirect, unexpected host, oversized body, held lock, corrupt quota).
 
-Exactly one JSON line is printed per probe. It has the thirteen fields
+Exactly one JSON line is printed to stdout per probe. It has the thirteen fields
 `schema_version, provider_id, model_requested, model_observed, fixture_id,
 observed_at_utc, http_status, status, reason_code, elapsed_ms, input_tokens,
 output_tokens, cost_reported_usd`. Prompts, response bodies, reasoning, headers,
 credentials and exception messages are never printed or logged.
+
+### Timeout diagnostics (stderr only)
+
+When a probe ends in `TIMEOUT / UNKNOWN_OUTCOME`, the CLI also prints one diagnostic
+JSON line to stderr. It is never added to `probes.jsonl` or `review_scores.jsonl`, and no
+diagnostic log file is created:
+
+```json
+{"event":"FREE_AI_TIMEOUT_DIAGNOSTIC","timeout_kind":"READ_TIMEOUT","timeout_phase":"BEFORE_HEADERS","body_chunk_received":false,"provider_id":"kilo","fixture_id":"review_r08","observed_at_utc":"2026-11-18T14:04:36Z"}
+```
+
+`timeout_kind` is one of `CONNECT_TIMEOUT`, `READ_TIMEOUT`, `WRITE_TIMEOUT`,
+`POOL_TIMEOUT`, `OVERALL_TIMEOUT` or `OTHER_TIMEOUT`. `timeout_phase` is
+`BEFORE_HEADERS` before an HTTP response object is available, `HEADERS_RECEIVED` after
+headers are available but before body iteration starts, `BODY_RECEIVING` after body
+iteration starts, or `UNKNOWN`. `BODY_RECEIVING` means the body-read stage was entered;
+`body_chunk_received` says whether at least one non-empty body chunk had arrived.
+
+A `ReadTimeout` can occur while waiting for headers or while reading the body; the phase
+distinguishes those observed stages. `OVERALL_TIMEOUT` is the separate 25-second
+`asyncio.timeout()` cap. The 15-second read timeout and 25-second overall timeout are
+unchanged. These diagnostics do not prove model-side inference or queue time, and a
+timeout is still `UNKNOWN_OUTCOME`: the request may have reached the provider, so the
+slot is consumed and the probe is never retried. Diagnostic fields are fixed enums,
+validated catalog/fixture identifiers, a timestamp and a boolean; exception messages,
+headers, bodies, URLs and credentials are never included. If stderr cannot be written,
+the probe result and exit code are unchanged.
 
 ## Data that leaves the machine
 

@@ -15,6 +15,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ from .review import ReviewFormatError, ReviewScore, parse_review_findings, score
 from .review_key import MAX_REVIEW_FINDINGS, REVIEW_KEY, truth_count
 from .transport import (
     LocalInputError,
+    TimeoutDiagnostic,
     TransportResult,
     encode_body,
     post_json,
@@ -152,6 +154,7 @@ class ProbeOutcome:
 
     record: ProbeRecord
     exit_code: int
+    timeout_diagnostic: TimeoutDiagnostic | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +166,7 @@ class Evaluation:
     exit_code: int
     normalized: NormalizedResponse | None
     review_score: ReviewScore | None = None
+    timeout_diagnostic: TimeoutDiagnostic | None = None
 
 
 @dataclass(slots=True)
@@ -251,6 +255,7 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
             reason_code=result.reason_code,
             exit_code=STATUS_EXIT[cast("ProbeStatus", result.status)],
             normalized=None,
+            timeout_diagnostic=result.timeout_diagnostic,
         )
     if result.body is None:
         return Evaluation(
@@ -1302,6 +1307,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         cost_reported_usd: float | None = None,
+        timeout_diagnostic: TimeoutDiagnostic | None = None,
     ) -> ProbeOutcome:
         record = _make_record(
             spec=spec,
@@ -1316,7 +1322,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
             output_tokens=output_tokens,
             cost_reported_usd=cost_reported_usd,
         )
-        return ProbeOutcome(record=record, exit_code=exit_code)
+        return ProbeOutcome(record=record, exit_code=exit_code, timeout_diagnostic=timeout_diagnostic)
 
     def logged(outcome_value: ProbeOutcome) -> ProbeOutcome:
         """Persist a preflight decision; a write failure stays fail-closed."""
@@ -1371,6 +1377,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         input_tokens=None if normalized is None else normalized.input_tokens,
         output_tokens=None if normalized is None else normalized.output_tokens,
         cost_reported_usd=None if normalized is None else normalized.cost_reported_usd,
+        timeout_diagnostic=evaluation.timeout_diagnostic,
     )
     try:
         _append_probe(outcome_value.record)
@@ -1452,6 +1459,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _emit_timeout_diagnostic(outcome: ProbeOutcome) -> None:
+    """Emit fixed, non-sensitive timeout facts to stderr; never affect the probe result."""
+    diagnostic = outcome.timeout_diagnostic
+    if diagnostic is None:
+        return
+    record = outcome.record
+    payload = {
+        "event": "FREE_AI_TIMEOUT_DIAGNOSTIC",
+        "timeout_kind": diagnostic.timeout_kind,
+        "timeout_phase": diagnostic.timeout_phase,
+        "body_chunk_received": diagnostic.body_chunk_received,
+        "provider_id": record.provider_id,
+        "fixture_id": record.fixture_id,
+        "observed_at_utc": record.observed_at_utc,
+    }
+    try:
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Diagnostics are optional: a closed or absent stderr must not hide the probe
+        # record or turn a timeout into a success / retry.
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Exit codes: 0 pass, 2 skip, 3 unavailable, 4 bad response, 5 unsafe."""
     parser = _build_parser()
@@ -1476,6 +1507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Never print an exception message, a URL or a body: only a safe constant.
         probe_outcome = _fallback_outcome(args, "INVALID_SCHEMA")
     print(json.dumps(probe_outcome.record.as_dict(), ensure_ascii=False, separators=(",", ":")))
+    _emit_timeout_diagnostic(probe_outcome)
     return probe_outcome.exit_code
 
 
