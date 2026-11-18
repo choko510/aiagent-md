@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import shutil
 import subprocess
 import time
@@ -18,6 +19,8 @@ from aiagent_development.code_intelligence.git_proof import (
 )
 from aiagent_development.code_intelligence.models import Coverage, Identity, ReadError
 from aiagent_development.code_intelligence.projection import ProjectionManifest, prepare_projection
+from aiagent_development.code_intelligence.projection_stage import stage_git_projection
+from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 
 
 def proof_fixture(tmp_path: Path):
@@ -33,8 +36,52 @@ def test_actual_git_proof_matches_committed_tree_and_projection(tmp_path: Path) 
     check = verify_git_tree_proof(proof, manifest, reader.snapshot.identity, deadline=time.monotonic() + 10)
     assert check.commit == reader.snapshot.identity.commit and check.tree == reader.tree
     assert check.tree_count == 2 and check.entry_count == 5 and check.projected_files == 2
+    assert check.excluded_files == 2
     assert check.object_hash == "sha1" and check.collision_resistance == "LEGACY_SHA1"
     assert b"hidden" not in proof.commit and all(b"hidden" not in tree.data for tree in proof.trees)
+
+
+def test_complete_source_requirement_is_proved_from_git_tree(tmp_path: Path) -> None:
+    reader, manifest, proof = proof_fixture(tmp_path)
+    encoder = ProjectionEncoder(reader, manifest)
+    wire = b"".join(encoder.chunks())
+    assert encoder.receipt is not None
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    # Removing advisory issues cannot hide excluded Git blobs from the proof.
+    with pytest.raises(ReadError, match="complete source projection unavailable"):
+        with stage_git_projection(
+            parent,
+            io.BytesIO(wire),
+            replace(manifest, issues=()),
+            encoder.receipt,
+            proof,
+            reader.snapshot.identity,
+            deadline=time.monotonic() + 10,
+            require_complete=True,
+        ):
+            pytest.fail("incomplete source accepted")
+    assert not list(parent.iterdir())
+    complete_root = tmp_path / "complete"
+    complete_root.mkdir()
+    complete_reader = open_reader(make_repo(complete_root, {"a.py": b"value = 1\n"}))
+    complete_manifest = prepare_projection(complete_reader, complete_reader.snapshot.identity, complete_reader.tree)
+    complete_proof = build_git_tree_proof(complete_reader)
+    complete_encoder = ProjectionEncoder(complete_reader, complete_manifest)
+    complete_wire = b"".join(complete_encoder.chunks())
+    assert complete_encoder.receipt is not None
+    with stage_git_projection(
+        parent,
+        io.BytesIO(complete_wire),
+        complete_manifest,
+        complete_encoder.receipt,
+        complete_proof,
+        complete_reader.snapshot.identity,
+        deadline=time.monotonic() + 10,
+        require_complete=True,
+    ) as staged:
+        assert staged.check.excluded_files == 0
+    assert not list(parent.iterdir())
 
 
 def test_git_proof_rejects_scope_commit_tree_and_projection_mismatch(tmp_path: Path) -> None:

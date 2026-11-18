@@ -287,8 +287,11 @@ def stage_git_projection(
     *,
     deadline: float,
     active: Callable[[], bool] = lambda: True,
+    require_complete: bool = False,
 ) -> Iterator[GitStagedProjection]:
     """Verify object relationships and expose hash strength; caller owns authorization."""
     check = verify_git_tree_proof(proof, manifest, expected_identity, deadline=deadline, active=active)
+    if require_complete and check.excluded_files:
+        raise ReadError("complete source projection unavailable")
     with stage_projection(trusted_parent, stream, manifest, receipt, deadline=deadline, active=active) as root_fd:
         yield GitStagedProjection(root_fd, check)

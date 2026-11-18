@@ -50,6 +50,7 @@ class GitTreeCheck:
     projected_files: int
     object_hash: str
     collision_resistance: str
+    excluded_files: int = 0
 
 
 def _object_oid(kind: str, content: bytes, oid_length: int) -> str:
@@ -171,12 +172,13 @@ def _validated_objects(
 
 def _walk_proof(
     objects: dict[str, bytes], root: str, oid_length: int, deadline: float, active: Callable[[], bool]
-) -> tuple[dict[str, str], int, set[str]]:
+) -> tuple[dict[str, str], int, set[str], int]:
     pending = [(root, "", 0)]
     visited: set[str] = set()
     all_paths: set[str] = set()
     selected: dict[str, str] = {}
     entry_count = 0
+    excluded_files = 0
     while pending:
         if time.monotonic() > deadline or not active():
             raise ReadError("Git tree proof deadline exceeded")
@@ -200,7 +202,9 @@ def _walk_proof(
                 pending.append((child, path, depth + 1))
             elif projection_path_selected(path):
                 selected[path] = child
-    return selected, entry_count, visited
+            else:
+                excluded_files += 1
+    return selected, entry_count, visited, excluded_files
 
 
 def verify_git_tree_proof(
@@ -216,7 +220,9 @@ def verify_git_tree_proof(
     if not active():
         raise ReadError("Git proof authority revoked")
     objects = _validated_objects(proof, manifest, expected_identity, deadline, active)
-    selected, count, visited = _walk_proof(objects, manifest.tree, len(expected_identity.commit), deadline, active)
+    selected, count, visited, excluded_files = _walk_proof(
+        objects, manifest.tree, len(expected_identity.commit), deadline, active
+    )
     if not active():
         raise ReadError("Git proof authority revoked")
     if visited != objects.keys():
@@ -227,5 +233,12 @@ def verify_git_tree_proof(
     algorithm = "sha1" if len(expected_identity.commit) == 40 else "sha256"
     collision_resistance = "LEGACY_SHA1" if algorithm == "sha1" else "SHA256"
     return GitTreeCheck(
-        expected_identity.commit, manifest.tree, len(visited), count, len(selected), algorithm, collision_resistance
+        expected_identity.commit,
+        manifest.tree,
+        len(visited),
+        count,
+        len(selected),
+        algorithm,
+        collision_resistance,
+        excluded_files,
     )

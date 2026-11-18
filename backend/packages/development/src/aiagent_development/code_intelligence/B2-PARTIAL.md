@@ -492,6 +492,10 @@ receipt. Timeout and truncation flags are tri-state: older stored receipts with
 unknown flags remain readable but cannot satisfy the test PASS gate. This is a
 deliberate fail-closed compatibility change, not proof of generic command
 execution; the production command adapter remains disabled.
+For a future command executor, the Git proof now records excluded blob count
+and the server-selected `require_complete` staging policy rejects projections
+that omit any tracked file. This check does not prove source content is free of
+secrets and does not enable command execution by itself.
 
 The source broker bounds concurrent reservations to eight sessions and 256 MiB
 of encoded source; staging can temporarily require additional space for the

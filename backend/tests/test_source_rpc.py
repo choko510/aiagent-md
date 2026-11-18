@@ -39,7 +39,8 @@ async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp
     run("config", "user.name", "Test")
     run("config", "user.email", "test@example.invalid")
     (repo / "a.py").write_bytes(b"value = 42\n")
-    run("add", "a.py")
+    (repo / "config.json").write_bytes(b"{}\n")
+    run("add", ".")
     run("commit", "-m", "test")
     identity = Identity("tenant", "owner", "repository", "revision", run("rev-parse", "HEAD").decode().strip())
     snapshot = GitSnapshot(AuthorizedSnapshot(identity, repo), Path(git))
@@ -105,6 +106,19 @@ async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp
         )
         assert seen == [b"value = 42\n"]
         assert not list(parent.iterdir())
+        complete = replace(session, session_id="complete-required", require_complete=True)
+        sessions.register(complete)
+        with pytest.raises(RuntimeError, match="rejected"):
+            await send_source(
+                f"unix:{socket}",
+                key,
+                complete.session_id,
+                key,
+                complete.transfer_binding(),
+                chunks,
+                deadline=complete.deadline,
+            )
+        assert len(seen) == 1 and not list(parent.iterdir())
         with pytest.raises((RuntimeError, ConnectionError, asyncio.IncompleteReadError)):
             await send_source(
                 f"unix:{socket}",

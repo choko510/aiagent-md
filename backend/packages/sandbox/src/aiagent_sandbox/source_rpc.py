@@ -112,6 +112,10 @@ class ArtifactTransfer:
     deadline: float
 
 
+StagedCallback = Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]
+Registration = tuple[Callable[[], bool], StagedCallback] | tuple[Callable[[], bool], StagedCallback, bool]
+
+
 @dataclass(frozen=True)
 class SourceSession:
     session_id: str
@@ -126,7 +130,8 @@ class SourceSession:
     identity: Identity = field(repr=False)
     deadline: float
     active: Callable[[], bool]
-    on_staged: Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]
+    on_staged: StagedCallback
+    require_complete: bool = False
 
     def transfer_binding(self) -> bytes:
         return source_binding(
@@ -148,11 +153,7 @@ class SourceSessions:
         parent: Path,
         *,
         ticket_key: bytes | None = None,
-        registration_factory: Callable[
-            [dict[str, Any]],
-            tuple[Callable[[], bool], Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]],
-        ]
-        | None = None,
+        registration_factory: Callable[[dict[str, Any]], Registration] | None = None,
     ) -> None:
         self.parent = parent
         self._ticket_key = ticket_key
@@ -212,7 +213,11 @@ class SourceSessions:
         manifest = ProjectionManifest(identity, p["tree"], tuple(entries), total, Coverage.PARTIAL, ())
         if projection_manifest_digest(manifest) != p["manifest_sha256"]:
             raise ValueError("source manifest mismatch")
-        active, staged = self._registration_factory(p)
+        registration = self._registration_factory(p)
+        active, staged = registration[:2]
+        require_complete = registration[2] if len(registration) == 3 else False
+        if type(require_complete) is not bool:
+            raise ValueError("invalid source policy")
         register_allowed = active.registration_allowed if isinstance(active, SourceAuthority) else active
         if not register_allowed():
             raise ValueError("source authority unavailable")
@@ -231,6 +236,7 @@ class SourceSessions:
             time.monotonic() + max(0, p["expires_at"] - time.time()),
             active,
             staged,
+            require_complete,
         )
         # Both fences are persisted before acceptance. An interrupted registration
         # loses availability rather than permitting a second execution.
@@ -260,6 +266,7 @@ class SourceSessions:
             or len(self._pending) >= 1024
             or len(self._used) >= 100000
             or len(session.key) < 32
+            or type(session.require_complete) is not bool
             or type(session.receipt.byte_length) is not int
             or not 1 <= session.receipt.byte_length <= MAX_SOURCE
             or len(self._reserved) >= 8
@@ -398,6 +405,7 @@ class SourceSessions:
                 session.identity,
                 deadline=session.deadline,
                 active=active,
+                require_complete=session.require_complete,
             )
             worker = asyncio.create_task(asyncio.to_thread(stage.__enter__))
             try:
