@@ -427,6 +427,8 @@ def test_fa_t32_production_code_contains_no_lab_wiring() -> None:
         "--proxy",
         "--execute-generated-code",
         "--fallback-to-paid",
+        "--timeout",
+        "--read-timeout",
     ],
 )
 def test_fa_t33_forbidden_flags_are_rejected(
