@@ -26,7 +26,7 @@ from aiagent_sandbox.supervisor import serve
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Unix socket and POSIX staging required")
 
 
-async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp_path: Path) -> None:
+async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp_path: Path, monkeypatch) -> None:
     git = shutil.which("git")
     assert git
     repo = tmp_path / "repo"
@@ -145,6 +145,45 @@ async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp
             await writer.wait_closed()
             assert len(seen) == 1
             assert not list(parent.iterdir())
+        # A slow verifier must not block the event loop or outlive revocation.
+        import threading
+        from contextlib import contextmanager
+
+        from aiagent_development.code_intelligence.models import ReadError
+        from aiagent_sandbox import source_rpc
+
+        verifying = threading.Event()
+        live = [True]
+
+        @contextmanager
+        def slow_verifier(*args, **kwargs):
+            verifying.set()
+            while kwargs["active"]():
+                time.sleep(0.005)
+            raise ReadError("revoked during verification")
+            yield  # pragma: no cover
+
+        with monkeypatch.context() as patch:
+            patch.setattr(source_rpc, "stage_git_projection", slow_verifier)
+            candidate = replace(session, session_id="revoke-verification", active=lambda: live[0])
+            sessions.register(candidate)
+            client = asyncio.create_task(
+                send_source(
+                    f"unix:{socket}",
+                    key,
+                    candidate.session_id,
+                    key,
+                    candidate.transfer_binding(),
+                    chunks,
+                    deadline=candidate.deadline,
+                )
+            )
+            assert await asyncio.to_thread(verifying.wait, 3)
+            live[0] = False
+            with pytest.raises(RuntimeError, match="rejected"):
+                await asyncio.wait_for(client, timeout=3)
+            assert not list(parent.iterdir())
+
         entered, cleaned = asyncio.Event(), asyncio.Event()
 
         async def waiting(fd: int) -> None:

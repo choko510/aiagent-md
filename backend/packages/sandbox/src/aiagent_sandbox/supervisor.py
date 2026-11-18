@@ -575,15 +575,19 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                 "exec.cancel",
                 "exec.heartbeat",
                 "source.receive",
+                "source.register",
             ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                if method == "source.receive":
+                if method in ("source.receive", "source.register"):
                     if source_sessions is None:
                         raise GrantError("SOURCE_BROKER_UNAVAILABLE")
                     try:
-                        res = await source_sessions.receive(body, r)
+                        if method == "source.register":
+                            res = source_sessions.register_authorized(body, sup._consume)
+                        else:
+                            res = await source_sessions.receive(body, r)
                     except Exception as exc:
                         raise GrantError("SOURCE_TRANSFER_REJECTED") from exc
                 elif method in ("exec.cancel", "exec.heartbeat"):

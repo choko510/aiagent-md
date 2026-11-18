@@ -368,10 +368,8 @@ An opt-in, process-local session registry now connects the existing authenticate
 Supervisor RPC and binary frame receiver to Git-proof staging over a Unix socket.
 The test checks the staged file and rejection of replay, wrong transfer key,
 wrong binding, revoked authority callback, trailing bytes and truncated frames.
-The session registry is **not** enabled by the Supervisor entry point. Its test
-registration is not canonical DB authority, is not durable across restart, and
-cannot be used to admit execution. The current synchronous staging and callback
-also block the event loop and are not an execution or revocation mechanism.
+The session registry is **not** enabled by the Supervisor entry point. Test
+registration alone is not canonical DB authority and cannot admit execution.
 Production work must provide independently authenticated cross-VM registration
 bound to canonical RUNNING authority, durable replay protection, deadline and
 revocation throughout staging, and a safe asynchronous handoff to the existing
@@ -386,3 +384,24 @@ Grant, binding, and keys are test-only: the Gateway does not yet authorize or
 dispatch this path. Normal Supervisor startup still disables source sessions.
 On graceful server shutdown active RPC handlers are cancelled and awaited before
 the server closes; crash and cross-VM reconciliation remain unimplemented.
+
+The trusted Gateway can now atomically transition a prepared Execution to
+RUNNING and issue one short-lived source ticket in PostgreSQL migration 0014.
+The ticket commits to the canonical Execution/Attempt/Snapshot/Recipe, Run and
+Lease, source digest and manifest. An authenticated `source.register` RPC can
+validate that ticket, metadata and a Supervisor-owned authority callback, then
+persist session and execution replay fences in the Supervisor journal. The
+registration is opt-in and unavailable without a server-configured authority
+factory; the normal entry point does not configure one. The PostgreSQL/socket
+test uses a test-only authority callback, so it does not establish a live remote
+lease or production dispatch. A lost issuance or registration reply remains
+ambiguous and must not be retried as a new execution. The internal
+`register_issued_source` wrapper attempts to mark an uncertain registration
+UNKNOWN even after lease expiry; if PostgreSQL is unavailable this mark cannot be
+confirmed and the existing RUNNING reservation still forbids another issuance.
+Crash reconciliation is not implemented. Source Git verification
+and staging now run in a worker with cooperative revocation checks, while the
+verified directory remains alive across an asynchronous consumer. Arbitrary
+proof/manifest metadata must fit the existing 4 MiB control frame; support for
+larger Git proofs is not yet implemented. Artifact transport, production
+watchdog wiring, recovery and atomic publication integration remain open.

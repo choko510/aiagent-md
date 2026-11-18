@@ -9,25 +9,30 @@ by the supervisor entry point.
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import base64
 import inspect
-import json
 import os
 import stat
 import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aiagent_development.code_intelligence.git_proof import GitTreeProof
-from aiagent_development.code_intelligence.models import Identity
-from aiagent_development.code_intelligence.projection import ProjectionManifest
+from aiagent_development.code_intelligence.git_proof import GitTreeProof, TreeObject
+from aiagent_development.code_intelligence.models import Coverage, Identity
+from aiagent_development.code_intelligence.projection import (
+    ProjectionFile,
+    ProjectionManifest,
+    projection_manifest_digest,
+)
 from aiagent_development.code_intelligence.projection_stage import _open_trusted_parent, stage_git_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
 
 from .binary_transfer import receive_async
+from .source_ticket import source_binding, source_transfer_key, verify_source_ticket
 
 
 @dataclass(frozen=True)
@@ -47,27 +52,104 @@ class SourceSession:
     on_staged: Callable[[int], Awaitable[None] | None]
 
     def transfer_binding(self) -> bytes:
-        payload = {
-            "version": "dev13-source-session-v1",
-            "session": self.session_id,
-            "direction": "gateway-to-supervisor",
-            "execution": self.execution_id,
-            "attempt": self.attempt_id,
-            "binding": self.binding_sha256,
-            "snapshot": self.snapshot_id,
-            "size": self.receipt.byte_length,
-            "sha256": self.receipt.sha256,
-        }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).digest()
+        return source_binding(
+            self.session_id,
+            self.execution_id,
+            self.attempt_id,
+            self.binding_sha256,
+            self.snapshot_id,
+            self.receipt.byte_length,
+            self.receipt.sha256,
+        )
 
 
 class SourceSessions:
     """One-shot in-memory staging sessions supplied by a trusted integration."""
 
-    def __init__(self, parent: Path) -> None:
+    def __init__(
+        self,
+        parent: Path,
+        *,
+        ticket_key: bytes | None = None,
+        registration_factory: Callable[
+            [dict[str, Any]], tuple[Callable[[], bool], Callable[[int], Awaitable[None] | None]]
+        ]
+        | None = None,
+    ) -> None:
         self.parent = parent
+        self._ticket_key = ticket_key
+        self._registration_factory = registration_factory
         self._pending: dict[str, SourceSession] = {}
         self._used: set[str] = set()
+
+    def register_authorized(self, body: dict[str, Any], consume: Callable[[str], None]) -> dict[str, str]:
+        """Register only a signed DB-issued ticket and a server-selected consumer.
+
+        The configured factory must supply a live, fail-closed authority bridge.
+        Registration is unavailable without that integration; it is never supplied
+        by request data. The Supervisor journal provides a restart replay fence.
+        """
+        if (
+            self._ticket_key is None
+            or self._registration_factory is None
+            or set(body) != {"ticket", "files", "total_bytes", "commit_proof", "trees"}
+        ):
+            raise ValueError("source registration unavailable")
+        p = verify_source_ticket(self._ticket_key, body["ticket"])
+        files, trees, total = body["files"], body["trees"], body["total_bytes"]
+        if not isinstance(files, list) or len(files) > 10000 or not isinstance(trees, list) or len(trees) > 10000:
+            raise ValueError("invalid projection metadata")
+        if type(total) is not int or total < 0 or type(body["commit_proof"]) is not str:
+            raise ValueError("invalid projection metadata")
+        try:
+            entries = []
+            for f in files:
+                if not isinstance(f, dict) or set(f) != {"path", "blob_id", "sha256", "size"}:
+                    raise ValueError("invalid projection metadata")
+                if any(type(f[k]) is not str for k in ("path", "blob_id", "sha256")) or type(f["size"]) is not int:
+                    raise ValueError("invalid projection metadata")
+                entries.append(ProjectionFile(f["path"], f["blob_id"], f["sha256"], f["size"]))
+            objects = []
+            for tree in trees:
+                if not isinstance(tree, dict) or set(tree) != {"oid", "data"}:
+                    raise ValueError("invalid Git proof")
+                if type(tree["oid"]) is not str or type(tree["data"]) is not str:
+                    raise ValueError("invalid Git proof")
+                objects.append(TreeObject(tree["oid"], base64.b64decode(tree["data"], validate=True)))
+            proof = GitTreeProof(base64.b64decode(body["commit_proof"], validate=True), tuple(objects))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid source registration") from exc
+        identity = Identity(p["tenant"], p["owner"], p["repository_binding"], p["revision"], p["commit"])
+        manifest = ProjectionManifest(identity, p["tree"], tuple(entries), total, Coverage.PARTIAL, ())
+        if projection_manifest_digest(manifest) != p["manifest_sha256"]:
+            raise ValueError("source manifest mismatch")
+        active, staged = self._registration_factory(p)
+        if not active():
+            raise ValueError("source authority unavailable")
+        receipt = ProjectionStreamReceipt(p["source_sha256"], p["source_bytes"], len(entries))
+        session = SourceSession(
+            p["session"],
+            p["execution"],
+            p["attempt"],
+            p["binding_sha256"],
+            p["snapshot"],
+            source_transfer_key(self._ticket_key, p["session"]),
+            manifest,
+            receipt,
+            proof,
+            identity,
+            time.monotonic() + max(0, p["expires_at"] - time.time()),
+            active,
+            staged,
+        )
+        # Both fences are persisted before acceptance. An interrupted registration
+        # loses availability rather than permitting a second execution.
+        consume("source-session:" + p["session"])
+        consume("source-execution:" + p["execution"])
+        if not active():
+            raise ValueError("source authority revoked")
+        self.register(session)
+        return {"sessionId": session.session_id}
 
     def register(self, session: SourceSession) -> None:
         if (
@@ -126,7 +208,12 @@ class SourceSessions:
             if extra:
                 raise ValueError("extra source data")
             quarantine.seek(0)
-            with stage_git_projection(
+            stopped = threading.Event()
+
+            def active() -> bool:
+                return not stopped.is_set() and session.active()
+
+            stage = stage_git_projection(
                 self.parent,
                 quarantine,
                 session.manifest,
@@ -134,7 +221,23 @@ class SourceSessions:
                 session.proof,
                 session.identity,
                 deadline=session.deadline,
-            ) as staged:
+                active=active,
+            )
+            worker = asyncio.create_task(asyncio.to_thread(stage.__enter__))
+            try:
+                staged = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Do not close the quarantine while its worker still reads it.
+                # Cooperative checkpoints stop proof verification and staging.
+                stopped.set()
+                try:
+                    await worker
+                except Exception:
+                    pass
+                else:
+                    await asyncio.to_thread(stage.__exit__, None, None, None)
+                raise
+            try:
                 if not session.active() or time.monotonic() >= session.deadline:
                     raise ValueError("source session revoked")
                 result = session.on_staged(staged.root_fd)
@@ -142,4 +245,7 @@ class SourceSessions:
                     await result
                 if not session.active() or time.monotonic() >= session.deadline:
                     raise ValueError("source session revoked")
+            finally:
+                stopped.set()
+                await asyncio.to_thread(stage.__exit__, None, None, None)
         return {"staged": True}

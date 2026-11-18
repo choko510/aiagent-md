@@ -155,11 +155,15 @@ name = "aiagent-development"
 version = "0.1.0"
 source = { editable = "packages/development" }
 dependencies = [
+    { name = "aiagent-domain" },
     { name = "protobuf" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "protobuf", specifier = "==6.33.6" }]
+requires-dist = [
+    { name = "aiagent-domain", editable = "packages/domain" },
+    { name = "protobuf", specifier = "==6.33.6" },
+]
 
 [[package]]
 name = "aiagent-domain"

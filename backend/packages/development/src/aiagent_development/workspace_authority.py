@@ -22,7 +22,7 @@ from .code_intelligence.deadline import require_deadline
 from .code_intelligence.git_proof import GitTreeProof
 from .code_intelligence.indexer_recipe import python_scip_recipe_digest
 from .code_intelligence.models import Identity, ReadError
-from .code_intelligence.projection import ProjectionManifest
+from .code_intelligence.projection import ProjectionManifest, projection_manifest_digest
 from .code_intelligence.projection_stage import stage_git_projection
 from .code_intelligence.projection_stream import ProjectionStreamReceipt
 from .contracts import InvalidEvidence, ScopeDenied, StaleReference
@@ -39,25 +39,6 @@ class SnapshotRef:
     manifest_sha256: str
     source_sha256: str
     hash_strength: str
-
-
-def projection_manifest_digest(manifest: ProjectionManifest) -> str:
-    """SHA-256 of canonical manifest metadata, distinct from the source wire digest."""
-    return sha256_hex(
-        {
-            "version": "dev13-source-manifest-v1",
-            "identity": {
-                "tenant": manifest.identity.tenant_id,
-                "owner": manifest.identity.owner_id,
-                "binding": manifest.identity.binding_id,
-                "revision": manifest.identity.revision,
-                "commit": manifest.identity.commit,
-            },
-            "tree": manifest.tree,
-            "files": [{"path": f.path, "blob": f.blob_id, "sha256": f.sha256, "size": f.size} for f in manifest.files],
-            "total_bytes": manifest.total_bytes,
-        }
-    )
 
 
 def approved_recipe_digest(

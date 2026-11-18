@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from aiagent_domain import sha256_hex
+
 from .git_reader import GitSnapshot
 from .models import Coverage, Identity, ReadError
 from .paths import display_path
@@ -32,6 +34,25 @@ class ProjectionManifest:
     total_bytes: int
     coverage: Coverage
     issues: tuple[str, ...]
+
+
+def projection_manifest_digest(manifest: ProjectionManifest) -> str:
+    """Digest the canonical source identity and selected files."""
+    return sha256_hex(
+        {
+            "version": "dev13-source-manifest-v1",
+            "identity": {
+                "tenant": manifest.identity.tenant_id,
+                "owner": manifest.identity.owner_id,
+                "binding": manifest.identity.binding_id,
+                "revision": manifest.identity.revision,
+                "commit": manifest.identity.commit,
+            },
+            "tree": manifest.tree,
+            "files": [{"path": f.path, "blob": f.blob_id, "sha256": f.sha256, "size": f.size} for f in manifest.files],
+            "total_bytes": manifest.total_bytes,
+        }
+    )
 
 
 def projection_path_selected(path: str) -> bool:

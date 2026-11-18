@@ -16,7 +16,7 @@ import shutil
 import stat
 import struct
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,10 +34,13 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class _WireReader:
-    def __init__(self, stream: BinaryIO, expected: ProjectionStreamReceipt, deadline: float) -> None:
+    def __init__(
+        self, stream: BinaryIO, expected: ProjectionStreamReceipt, deadline: float, active: Callable[[], bool]
+    ) -> None:
         self.stream = stream
         self.remaining = expected.byte_length
         self.deadline = deadline
+        self.active = active
         self.digest = hashlib.sha256()
 
     def read(self, length: int) -> bytes:
@@ -45,10 +48,10 @@ class _WireReader:
             raise ReadError("invalid projection frame length")
         result = bytearray()
         while len(result) < length:
-            if time.monotonic() > self.deadline:
+            if time.monotonic() > self.deadline or not self.active():
                 raise ReadError("projection receive deadline exceeded")
             block = self.stream.read(length - len(result))
-            if time.monotonic() > self.deadline:
+            if time.monotonic() > self.deadline or not self.active():
                 raise ReadError("projection receive deadline exceeded")
             if not isinstance(block, bytes) or not block or len(block) > length - len(result):
                 raise ReadError("projection transfer incomplete")
@@ -192,6 +195,7 @@ def stage_projection(
     receipt: ProjectionStreamReceipt,
     *,
     deadline: float,
+    active: Callable[[], bool] = lambda: True,
 ) -> Iterator[int]:
     """Stage to a private POSIX directory and yield its open directory descriptor.
 
@@ -201,6 +205,8 @@ def stage_projection(
     separate kernel restriction must deny writes. No identities here authorize.
     """
     require_deadline(deadline)
+    if not active():
+        raise ReadError("projection authority revoked")
     if os.name != "posix" or not trusted_parent.is_absolute():
         raise ReadError("secure POSIX staging unavailable")
     prefix = _validate_manifest(manifest, receipt, deadline)
@@ -217,11 +223,11 @@ def stage_projection(
         root_fd = os.open(name, flags, dir_fd=parent_fd)
         try:
             os.fchmod(root_fd, 0o755)
-            wire = _WireReader(stream, receipt, deadline)
+            wire = _WireReader(stream, receipt, deadline, active)
             if wire.read(len(prefix)) != prefix:
                 raise ReadError("projection identity mismatch")
             _stage_files(root_fd, manifest, wire)
-            if time.monotonic() > deadline:
+            if time.monotonic() > deadline or not active():
                 raise ReadError("projection receive deadline exceeded")
             if wire.remaining or not hmac.compare_digest(wire.digest.hexdigest(), receipt.sha256):
                 raise ReadError("projection stream digest mismatch")
@@ -280,8 +286,9 @@ def stage_git_projection(
     expected_identity: Identity,
     *,
     deadline: float,
+    active: Callable[[], bool] = lambda: True,
 ) -> Iterator[GitStagedProjection]:
     """Verify object relationships and expose hash strength; caller owns authorization."""
-    check = verify_git_tree_proof(proof, manifest, expected_identity, deadline=deadline)
-    with stage_projection(trusted_parent, stream, manifest, receipt, deadline=deadline) as root_fd:
+    check = verify_git_tree_proof(proof, manifest, expected_identity, deadline=deadline, active=active)
+    with stage_projection(trusted_parent, stream, manifest, receipt, deadline=deadline, active=active) as root_fd:
         yield GitStagedProjection(root_fd, check)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .deadline import require_deadline
@@ -58,11 +59,13 @@ def _object_oid(kind: str, content: bytes, oid_length: int) -> str:
     return digest.hexdigest()
 
 
-def _tree_entries(data: bytes, oid_bytes: int, deadline: float) -> list[tuple[bytes, str, str]]:
+def _tree_entries(
+    data: bytes, oid_bytes: int, deadline: float, active: Callable[[], bool] = lambda: True
+) -> list[tuple[bytes, str, str]]:
     result: list[tuple[bytes, str, str]] = []
     offset = 0
     while offset < len(data):
-        if time.monotonic() > deadline or len(result) >= _MAX_ENTRIES:
+        if time.monotonic() > deadline or not active() or len(result) >= _MAX_ENTRIES:
             raise ReadError("Git tree proof budget exceeded")
         space = data.find(b" ", offset, min(offset + 8, len(data)))
         if space < 0:
@@ -125,7 +128,11 @@ def build_git_tree_proof(reader: GitSnapshot) -> GitTreeProof:
 
 
 def _validated_objects(
-    proof: GitTreeProof, manifest: ProjectionManifest, expected_identity: Identity, deadline: float
+    proof: GitTreeProof,
+    manifest: ProjectionManifest,
+    expected_identity: Identity,
+    deadline: float,
+    active: Callable[[], bool],
 ) -> dict[str, bytes]:
     commit_oid = expected_identity.commit
     if manifest.identity != expected_identity or not isinstance(commit_oid, str) or not _HEX.fullmatch(commit_oid):
@@ -145,7 +152,7 @@ def _validated_objects(
     objects: dict[str, bytes] = {}
     total = len(proof.commit)
     for tree in proof.trees:
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise ReadError("Git tree proof deadline exceeded")
         if (
             not isinstance(tree.oid, str)
@@ -163,7 +170,7 @@ def _validated_objects(
 
 
 def _walk_proof(
-    objects: dict[str, bytes], root: str, oid_length: int, deadline: float
+    objects: dict[str, bytes], root: str, oid_length: int, deadline: float, active: Callable[[], bool]
 ) -> tuple[dict[str, str], int, set[str]]:
     pending = [(root, "", 0)]
     visited: set[str] = set()
@@ -171,13 +178,13 @@ def _walk_proof(
     selected: dict[str, str] = {}
     entry_count = 0
     while pending:
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise ReadError("Git tree proof deadline exceeded")
         oid, prefix, depth = pending.pop()
         if depth > _MAX_DEPTH or oid not in objects:
             raise ReadError("incomplete Git tree proof")
         visited.add(oid)
-        for mode, name, child in _tree_entries(objects[oid], oid_length // 2, deadline):
+        for mode, name, child in _tree_entries(objects[oid], oid_length // 2, deadline, active):
             entry_count += 1
             if entry_count > _MAX_ENTRIES:
                 raise ReadError("Git tree proof entry limit exceeded")
@@ -197,12 +204,21 @@ def _walk_proof(
 
 
 def verify_git_tree_proof(
-    proof: GitTreeProof, manifest: ProjectionManifest, expected_identity: Identity, *, deadline: float
+    proof: GitTreeProof,
+    manifest: ProjectionManifest,
+    expected_identity: Identity,
+    *,
+    deadline: float,
+    active: Callable[[], bool] = lambda: True,
 ) -> GitTreeCheck:
     """Check a supplied proof against a caller-selected identity; caller owns authorization."""
     require_deadline(deadline)
-    objects = _validated_objects(proof, manifest, expected_identity, deadline)
-    selected, count, visited = _walk_proof(objects, manifest.tree, len(expected_identity.commit), deadline)
+    if not active():
+        raise ReadError("Git proof authority revoked")
+    objects = _validated_objects(proof, manifest, expected_identity, deadline, active)
+    selected, count, visited = _walk_proof(objects, manifest.tree, len(expected_identity.commit), deadline, active)
+    if not active():
+        raise ReadError("Git proof authority revoked")
     if visited != objects.keys():
         raise ReadError("unreferenced Git tree proof object")
     expected = {item.path: item.blob_id for item in manifest.files}
