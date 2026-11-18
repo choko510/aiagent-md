@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 import psycopg
 from aiagent_core import control
@@ -181,6 +181,59 @@ class PostgresExecutionArtifactStore:
             execution_id,
         )
 
+    def _decrypt_verified(
+        self,
+        workspace: str,
+        execution_id: str,
+        artifact_id: str,
+        digest: str,
+        size: int,
+        coverage: str,
+        key_id: str,
+        nonce: bytes,
+        ciphertext: bytes,
+        *,
+        deadline: float,
+    ) -> bytes:
+        _deadline(deadline)
+        if not 1 <= size <= _MAX_BYTES or coverage not in ("VALIDATED", "PARTIAL"):
+            raise ExecutionArtifactError("ARTIFACT_INTEGRITY")
+        try:
+            data = self._keys.cipher(key_id).decrypt(
+                nonce,
+                ciphertext,
+                _aad(self._claim, workspace, execution_id, artifact_id, digest, size, coverage, key_id),
+            )
+        except (InvalidTag, KeyError, ValueError) as exc:
+            raise ExecutionArtifactError("ARTIFACT_INTEGRITY") from exc
+        _deadline(deadline)
+        if len(data) != size or not hmac.compare_digest(hashlib.sha256(data).hexdigest(), digest):
+            raise ExecutionArtifactError("ARTIFACT_INTEGRITY")
+        return data
+
+    def verify_reconciled(self, row: dict[str, Any], *, deadline: float) -> None:
+        """Authenticate the scoped encrypted row returned by the reconciliation function."""
+        try:
+            workspace, execution_id, artifact_id = (
+                str(row[key]) for key in ("workspace_id", "execution_id", "artifact_id")
+            )
+            require_uuid7(execution_id, "execution id")
+            require_uuid7(artifact_id, "artifact id")
+            self._decrypt_verified(
+                workspace,
+                execution_id,
+                artifact_id,
+                str(row["plaintext_sha256"]).strip(),
+                int(row["byte_length"]),
+                str(row["coverage"]),
+                str(row["key_id"]),
+                bytes(row["nonce"]),
+                bytes(row["ciphertext"]),
+                deadline=deadline,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionArtifactError("ARTIFACT_INTEGRITY") from exc
+
     def publish(self, execution_id: str, capture_fd: int, proof: bytes, *, deadline: float) -> ExecutionArtifactRef:
         """Publish only a verified finished execution's captured bytes; no stdout is used."""
         _deadline(deadline)
@@ -244,15 +297,16 @@ class PostgresExecutionArtifactStore:
             raise ExecutionArtifactError("ARTIFACT_UNAVAILABLE")
         artifact_id, digest = str(row["id"]), str(row["plaintext_sha256"]).strip()
         size, coverage, key_id = int(row["byte_length"]), str(row["coverage"]), str(row["key_id"])
-        try:
-            data = self._keys.cipher(key_id).decrypt(
-                bytes(row["nonce"]),
-                bytes(row["ciphertext"]),
-                _aad(self._claim, workspace, execution_id, artifact_id, digest, size, coverage, key_id),
-            )
-        except (InvalidTag, KeyError, ValueError) as exc:
-            raise ExecutionArtifactError("ARTIFACT_INTEGRITY") from exc
-        _deadline(deadline)
-        if len(data) != size or not hmac.compare_digest(hashlib.sha256(data).hexdigest(), digest):
-            raise ExecutionArtifactError("ARTIFACT_INTEGRITY")
+        data = self._decrypt_verified(
+            workspace,
+            execution_id,
+            artifact_id,
+            digest,
+            size,
+            coverage,
+            key_id,
+            bytes(row["nonce"]),
+            bytes(row["ciphertext"]),
+            deadline=deadline,
+        )
         return ExecutionArtifactRef(artifact_id, execution_id, digest, size, coverage), data

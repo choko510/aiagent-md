@@ -19,10 +19,12 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -42,6 +44,7 @@ from .grant import GrantError, verify
 from .landlock import block_cross_task_process_access, disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
+log = logging.getLogger("aiagent.sandbox")
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWNET = 0x40000000
 CLONE_NEWPID = 0x20000000
@@ -540,19 +543,52 @@ class Supervisor:
                 or revoked.is_set()
             ):
                 raise GrantError("PROJECTED_EXECUTION_INCOMPLETE")
-            with capture_scip(output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline) as captured:
-                proof = sign_capture(
-                    receipt_key,
-                    g,
-                    binding,
-                    captured.fd,
-                    expected_sha256=captured.sha256,
-                    size=captured.byte_length,
-                    deadline=deadline,
-                )
+            stopped = threading.Event()
+
+            def active() -> bool:
+                return not stopped.is_set() and not revoked.is_set()
+
+            capture = capture_scip(
+                output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline, active=active
+            )
+
+            def take_capture() -> Any:
+                captured = capture.__enter__()
+                try:
+                    proof = sign_capture(
+                        receipt_key,
+                        g,
+                        binding,
+                        captured.fd,
+                        expected_sha256=captured.sha256,
+                        size=captured.byte_length,
+                        deadline=deadline,
+                        active=active,
+                    )
+                    return captured, proof
+                except BaseException:
+                    capture.__exit__(*sys.exc_info())
+                    raise
+
+            worker = asyncio.create_task(asyncio.to_thread(take_capture))
+            try:
+                captured, proof = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                stopped.set()
+                try:
+                    await worker
+                except Exception:
+                    pass
+                else:
+                    await asyncio.to_thread(capture.__exit__, None, None, None)
+                raise
+            try:
                 if revoked.is_set():
                     raise GrantError("PROJECTED_EXECUTION_REVOKED")
                 yield result, captured.fd, proof
+            finally:
+                stopped.set()
+                await asyncio.to_thread(capture.__exit__, None, None, None)
 
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, source_sessions: Any = None) -> None:
@@ -565,6 +601,7 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
             connections.add(task)
         method = ""
         body: dict[str, Any] = {}
+        claimed_source: Any = None
         try:
             n = decode_length(await r.readexactly(4))
             env = json.loads(await r.readexactly(n))
@@ -592,6 +629,12 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                     try:
                         if method == "source.register":
                             res = source_sessions.register_authorized(body, sup._consume)
+                            session_tag = hashlib.sha256(res["sessionId"].encode()).hexdigest()[:16]
+                            log.info(
+                                "source registered session=%s execution=%s",
+                                session_tag,
+                                body["ticket"]["payload"]["execution"],
+                            )
                         elif method == "source.heartbeat":
                             renewed = source_sessions.renew(body)
                             if renewed:
@@ -611,8 +654,11 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                                         body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]
                                     )
                             res = {"cancelled": cancelled}
+                            if cancelled:
+                                log.info("source session cancellation accepted")
                         else:
-                            res = await source_sessions.receive(body, r)
+                            claimed_source = source_sessions.claim(body)
+                            res = await source_sessions.receive(claimed_source, r)
                     except Exception as exc:
                         raise GrantError("SOURCE_TRANSFER_REJECTED") from exc
                 elif method in ("exec.cancel", "exec.heartbeat"):
@@ -681,18 +727,21 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                             if not draining.done():
                                 draining.cancel()
                                 await asyncio.gather(draining, return_exceptions=True)
+                    session_tag = hashlib.sha256(str(body.get("sessionId", "")).encode()).hexdigest()[:16]
+                    log.info("source artifact transferred session=%s", session_tag)
                     return
                 frame = {"type": "result", "data": res}
             except GrantError as e:
                 frame = {"type": "error", "code": f"GRANT_{e}"}
             w.write(encode_frame(sign_response(key, nonce, frame)))
             await w.drain()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never log request bodies, argv, keys, source, output or receipts.
+            log.warning("sandbox RPC failed: %s", type(exc).__name__)
         finally:
             w.close()
-            if method == "source.receive" and source_sessions is not None:
-                source_sessions.end(body.get("sessionId"))
+            if claimed_source is not None and source_sessions is not None:
+                source_sessions.end(claimed_source)
             if task is not None:
                 connections.discard(task)
 
@@ -722,20 +771,136 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
         await srv.wait_closed()
 
 
+def _configured_source_sessions(sup: Supervisor, rpc_key: bytes) -> Any:
+    """Load an explicitly provisioned source broker or leave it disabled.
+
+    This validates local configuration, not VM/image attestation or durable
+    storage. Those production gates remain the operator's responsibility.
+    """
+    mode = os.environ.get("AIAGENT_SANDBOX_SOURCE_MODE", "disabled")
+    if mode == "disabled":
+        return None
+    if mode != "enabled" or os.geteuid() != 0 or sup.cell_uid in (None, 0) or not sup.require_netns:
+        raise RuntimeError("source broker isolation unavailable")
+    import stat
+
+    from aiagent_development.code_intelligence.projection_stage import _open_trusted_parent
+
+    from .scip_execution import scip_registration_factory
+    from .source_rpc import SourceSessions
+
+    def checked_directory(path: Path, mode_bits: int, gid: int | None = None) -> None:
+        if not path.is_absolute() or any(part in (".", "..") for part in path.parts[1:]):
+            raise RuntimeError("source broker directory unavailable")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open("/", flags)
+        try:
+            for part in path.parts[1:]:
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+                ancestor = os.fstat(fd)
+                permissions = stat.S_IMODE(ancestor.st_mode)
+                if ancestor.st_uid != 0 or (permissions & 0o022 and not permissions & stat.S_ISVTX):
+                    raise RuntimeError("source broker directory unavailable")
+            info = os.fstat(fd)
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != mode_bits or (gid is not None and info.st_gid != gid):
+                raise RuntimeError("source broker directory unavailable")
+        finally:
+            os.close(fd)
+
+    def read_key(name: str) -> bytes:
+        path = Path(os.environ[name])
+        if not path.is_absolute():
+            raise RuntimeError("source broker key unavailable")
+        checked_directory(path.parent, 0o700)
+        parent_fd = _open_trusted_parent(path.parent)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
+                    or info.st_size > 4096
+                ):
+                    raise RuntimeError("source broker key unavailable")
+                raw = os.read(fd, 4097)
+                after = os.fstat(fd)
+                if len(raw) != info.st_size or (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    raise RuntimeError("source broker key unavailable")
+                value = bytes.fromhex(raw.decode("ascii").strip())
+                if len(value) < 32:
+                    raise RuntimeError("source broker key unavailable")
+                return value
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent_fd)
+
+    base = Path(os.environ["AIAGENT_SANDBOX_SOURCE_ROOT"])
+    gid = sup.cell_gid if sup.cell_gid is not None else sup.cell_uid
+    assert gid is not None
+    checked_directory(base, 0o710, gid)
+    source, output, capture = (base / name for name in ("source", "output", "capture"))
+    for path in (source, output, capture):
+        checked_directory(path, 0o700)
+    journal = Path(os.environ["AIAGENT_SANDBOX_REPLAY_JOURNAL"])
+    if not journal.is_absolute() or not journal.name:
+        raise RuntimeError("source replay journal unavailable")
+    checked_directory(journal.parent, 0o700)
+    ticket_key = read_key("AIAGENT_SANDBOX_SOURCE_TICKET_KEY_FILE")
+    capture_key = read_key("AIAGENT_SANDBOX_CAPTURE_KEY_FILE")
+    if (
+        read_key("AIAGENT_SANDBOX_GRANT_KEY_FILE") != sup.grant_key
+        or read_key("AIAGENT_SANDBOX_RPC_KEY_FILE") != rpc_key
+    ):
+        raise RuntimeError("source broker key unavailable")
+    if len({sup.grant_key, rpc_key, ticket_key, capture_key}) != 4:
+        raise RuntimeError("source broker keys must be distinct")
+    sup.consumed_path = journal
+    return SourceSessions(
+        source,
+        ticket_key=ticket_key,
+        registration_factory=scip_registration_factory(sup, source, output, capture, capture_key),
+    )
+
+
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     key_hex = Path(os.environ["AIAGENT_SANDBOX_GRANT_KEY_FILE"]).read_text().strip()
     rpc = Path(os.environ["AIAGENT_SANDBOX_RPC_KEY_FILE"]).read_text().strip()
     uid = os.environ.get("AIAGENT_SANDBOX_CELL_UID")
+    limits = Limits()
+    if os.environ.get("AIAGENT_SANDBOX_SOURCE_MODE", "disabled") == "enabled":
+        limits.memory_bytes = int(os.environ["AIAGENT_SANDBOX_MEMORY_LIMIT_BYTES"])
+        limits.cpu_s = int(os.environ["AIAGENT_SANDBOX_CPU_LIMIT_SECONDS"])
+        if not 512 * 1024**2 <= limits.memory_bytes <= 8 * 1024**3 or not 1 <= limits.cpu_s <= 300:
+            raise RuntimeError("invalid source broker limits")
     sup = Supervisor(
         Path(os.environ.get("AIAGENT_SANDBOX_ROOT", "/var/lib/aiagent/cells")),
         bytes.fromhex(key_hex),
+        limits=limits,
         require_netns=os.environ.get("AIAGENT_SANDBOX_REQUIRE_NETNS", "1") == "1",
         cell_uid=int(uid) if uid else None,
         cell_gid=int(uid) if uid else None,
     )
+    rpc_key = bytes.fromhex(rpc)
+    source_sessions = _configured_source_sessions(sup, rpc_key)
     asyncio.run(
         serve(
-            sup, {"tool_gateway": bytes.fromhex(rpc)}, os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000")
+            sup,
+            {"tool_gateway": rpc_key},
+            os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000"),
+            source_sessions=source_sessions,
         )
     )
 

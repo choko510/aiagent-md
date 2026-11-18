@@ -12,12 +12,16 @@ import json
 import os
 import stat
 import sys
+from pathlib import Path
+
+from aiagent_domain import sha256_hex
 
 _NODE = "/usr/local/bin/node"
 _INDEXER = "/usr/local/lib/scip-python/index.js"
 _ENVIRONMENT = "/usr/local/share/aiagent-scip-environment.json"
 _SOURCE = "<verified-source-descriptor-path>"
 _OUTPUT = "/proc/self/fd/{output_fd}/index.scip"
+PYTHON_SCIP_GRANT_ARGV = ("aiagent:dev13:scip-python:v1",)
 _TEMPLATE = (
     _NODE,
     "--openssl-config=/dev/null",
@@ -46,6 +50,121 @@ def python_scip_recipe_digest() -> str:
         "environment_sha256": hashlib.sha256(b"[]\n").hexdigest(),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
+def measure_python_scip_toolchain() -> str:  # noqa: PLR0915
+    """Measure the Node binary, SCIP package files and fixed environment.
+
+    This identifies locally visible bytes; it is not image attestation and does
+    not measure the kernel or dynamic libraries. The caller must supply a
+    read-only trusted image and compare the result with the approved recipe.
+    """
+
+    def check_directory(path: Path) -> None:
+        if not path.is_absolute() or any(part in (".", "..") for part in path.parts[1:]):
+            raise ValueError("invalid toolchain directory")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open("/", flags)
+        try:
+            for part in path.parts[1:]:
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+                if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
+                    raise ValueError("toolchain directory is writable")
+        finally:
+            os.close(fd)
+
+    def digest_file(path: Path, max_size: int) -> tuple[str, int]:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or not 0 <= before.st_size <= max_size
+                or not os.fstatvfs(fd).f_flag & os.ST_RDONLY
+            ):
+                raise ValueError("invalid toolchain file")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                block = os.read(fd, min(remaining, 1024 * 1024))
+                if not block:
+                    raise ValueError("incomplete toolchain file")
+                digest.update(block)
+                remaining -= len(block)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                raise ValueError("toolchain changed during measurement")
+            return digest.hexdigest(), before.st_size
+        finally:
+            os.close(fd)
+
+    root = Path(_INDEXER).parent
+    for parent in (Path(_NODE).parent, Path(_ENVIRONMENT).parent, root):
+        check_directory(parent)
+    node_sha, _ = digest_file(Path(_NODE), 256 * 1024 * 1024)
+    env_sha, env_size = digest_file(Path(_ENVIRONMENT), 1024)
+    if env_size != 3 or env_sha != hashlib.sha256(b"[]\n").hexdigest():
+        raise ValueError("indexer environment mismatch")
+    files: list[dict[str, object]] = []
+    total = 0
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, names, filenames in os.walk(root, followlinks=False, onerror=walk_error):
+        names.sort()
+        filenames.sort()
+        base = Path(directory)
+        if not os.statvfs(base).f_flag & os.ST_RDONLY:
+            raise ValueError("toolchain directory is writable")
+        if any(not stat.S_ISDIR(os.lstat(base / name).st_mode) for name in names):
+            raise ValueError("invalid toolchain directory")
+        for name in filenames:
+            path = base / name
+            sha, size = digest_file(path, 64 * 1024 * 1024)
+            total += size
+            if len(files) >= 10000 or total > 128 * 1024 * 1024:
+                raise ValueError("toolchain measurement budget exceeded")
+            files.append({"path": path.relative_to(root).as_posix(), "sha256": sha, "size": size})
+    if not files or not any(item["path"] == "index.js" for item in files):
+        raise ValueError("indexer package missing")
+    return sha256_hex(
+        {"version": "dev13-scip-toolchain-v1", "node_sha256": node_sha, "environment_sha256": env_sha, "files": files}
+    )
+
+
+def approved_recipe_digest(
+    *,
+    kind: str,
+    test_id: str | None,
+    plan_sha256: str,
+    request_sha256: str,
+    template_sha256: str,
+    toolchain_sha256: str,
+    image_digest: str,
+) -> str:
+    """Commit to the approved Tool request and immutable execution inputs."""
+    return sha256_hex(
+        {
+            "version": "dev13-approved-recipe-v1",
+            "kind": kind,
+            "test_id": test_id,
+            "plan_sha256": plan_sha256,
+            "request_sha256": request_sha256,
+            "template_sha256": template_sha256,
+            "toolchain_sha256": toolchain_sha256,
+            "image_digest": image_digest,
+            "environment_policy": "sandbox-scrubbed-environment-v1",
+        }
+    )
 
 
 def python_scip_argv(source_fd: int, output_fd: int) -> tuple[str, ...]:

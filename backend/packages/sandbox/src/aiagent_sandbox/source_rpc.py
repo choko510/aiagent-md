@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,7 @@ from aiagent_development.code_intelligence.projection import (
 from aiagent_development.code_intelligence.projection_stage import _open_trusted_parent, stage_git_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
 
-from .binary_transfer import receive_async
+from .binary_transfer import MAX_SOURCE, receive_async
 from .source_ticket import (
     artifact_binding,
     artifact_transfer_key,
@@ -99,15 +99,15 @@ class SourceAuthority:
 class CapturedArtifact:
     """Bounded bytes and receipt obtained from the Supervisor capture context."""
 
-    data: bytes
-    proof: bytes
+    data: bytes = field(repr=False)
+    proof: bytes = field(repr=False)
 
 
 @dataclass(frozen=True)
 class ArtifactTransfer:
     artifact: CapturedArtifact
-    key: bytes
-    binding: bytes
+    key: bytes = field(repr=False)
+    binding: bytes = field(repr=False)
     active: Callable[[], bool]
     deadline: float
 
@@ -119,11 +119,11 @@ class SourceSession:
     attempt_id: str
     binding_sha256: str
     snapshot_id: str
-    key: bytes
-    manifest: ProjectionManifest
+    key: bytes = field(repr=False)
+    manifest: ProjectionManifest = field(repr=False)
     receipt: ProjectionStreamReceipt
-    proof: GitTreeProof
-    identity: Identity
+    proof: GitTreeProof = field(repr=False)
+    identity: Identity = field(repr=False)
     deadline: float
     active: Callable[[], bool]
     on_staged: Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]
@@ -158,8 +158,9 @@ class SourceSessions:
         self._ticket_key = ticket_key
         self._registration_factory = registration_factory
         self._pending: dict[str, SourceSession] = {}
-        self._used: set[str] = set()
+        self._used: dict[str, float] = {}
         self._live: dict[str, SourceSession] = {}
+        self._reserved: dict[str, int] = {}
 
     def register_authorized(self, body: dict[str, Any], consume: Callable[[str], None]) -> dict[str, str]:
         """Register only a signed DB-issued ticket and a server-selected consumer.
@@ -168,13 +169,22 @@ class SourceSessions:
         Registration is unavailable without that integration; it is never supplied
         by request data. The Supervisor journal provides a restart replay fence.
         """
+        base_fields = {"ticket", "files", "total_bytes", "commit_proof", "trees"}
         if (
             self._ticket_key is None
             or self._registration_factory is None
-            or set(body) != {"ticket", "files", "total_bytes", "commit_proof", "trees"}
+            or set(body) not in (base_fields, base_fields | {"execution_binding", "grant"})
         ):
             raise ValueError("source registration unavailable")
         p = verify_source_ticket(self._ticket_key, body["ticket"])
+        if "execution_binding" in body:
+            from .scip_authority import verify_index_binding
+
+            if not isinstance(body["execution_binding"], dict) or not isinstance(body["grant"], dict):
+                raise ValueError("index authority unavailable")
+            verify_index_binding(p, body["execution_binding"])
+            p["_execution_binding"] = body["execution_binding"]
+            p["_grant"] = body["grant"]
         files, trees, total = body["files"], body["trees"], body["total_bytes"]
         if not isinstance(files, list) or len(files) > 10000 or not isinstance(trees, list) or len(trees) > 10000:
             raise ValueError("invalid projection metadata")
@@ -237,7 +247,11 @@ class SourceSessions:
             if now >= pending.deadline:
                 self._pending.pop(session_id, None)
                 self._live.pop(session_id, None)
-                self._used.add(session_id)
+                self._reserved.pop(session_id, None)
+                self._used[session_id] = pending.deadline
+        for session_id, expiry in tuple(self._used.items()):
+            if now >= expiry:
+                self._used.pop(session_id, None)
         if (
             not session.session_id
             or len(session.session_id) > 128
@@ -246,11 +260,16 @@ class SourceSessions:
             or len(self._pending) >= 1024
             or len(self._used) >= 100000
             or len(session.key) < 32
+            or type(session.receipt.byte_length) is not int
+            or not 1 <= session.receipt.byte_length <= MAX_SOURCE
+            or len(self._reserved) >= 8
+            or sum(self._reserved.values()) + session.receipt.byte_length > 256 * 1024 * 1024
             or not now < session.deadline <= now + 300
         ):
             raise ValueError("invalid source session")
         self._pending[session.session_id] = session
         self._live[session.session_id] = session
+        self._reserved[session.session_id] = session.receipt.byte_length
 
     def _scoped(self, body: dict[str, Any]) -> SourceSession | None:
         if set(body) != {"tenantId", "sessionId", "executionId", "attemptId", "bindingSha256"}:
@@ -277,7 +296,9 @@ class SourceSessions:
         if session is None or not isinstance(session.active, SourceAuthority):
             return False
         session.active.cancel()
-        self._pending.pop(session.session_id, None)
+        if self._pending.pop(session.session_id, None) is not None:
+            self._reserved.pop(session.session_id, None)
+        self._used[session.session_id] = session.deadline
         self._live.pop(session.session_id, None)
         return True
 
@@ -301,20 +322,27 @@ class SourceSessions:
             raise ValueError("source cancellation unavailable")
         return p["tenant"], p["execution"], p["attempt"], p["binding_sha256"]
 
-    def end(self, session_id: object) -> None:
-        if isinstance(session_id, str):
-            self._live.pop(session_id, None)
+    def end(self, session: SourceSession) -> None:
+        self._reserved.pop(session.session_id, None)
+        # The sender may still be validating the final frame when the receiver
+        # closes. Only the handler that claimed this session may release it.
+        asyncio.get_running_loop().call_later(2, self._live.pop, session.session_id, None)
 
-    async def receive(self, body: dict[str, Any], reader: asyncio.StreamReader) -> dict[str, Any] | ArtifactTransfer:
+    def claim(self, body: dict[str, Any]) -> SourceSession:
         if set(body) != {"sessionId"} or type(body["sessionId"]) is not str:
             raise ValueError("invalid source session")
         session_id = body["sessionId"]
         session = self._pending.pop(session_id, None)
         if session is None:
             raise ValueError("unknown source session")
-        self._used.add(session_id)
+        self._used[session_id] = session.deadline
         if not session.active():
+            self._reserved.pop(session_id, None)
+            self._live.pop(session_id, None)
             raise ValueError("source authority not renewed")
+        return session
+
+    async def receive(self, session: SourceSession, reader: asyncio.StreamReader) -> dict[str, Any] | ArtifactTransfer:
         parent_fd = _open_trusted_parent(self.parent)
         watcher = asyncio.create_task(session.active.watch()) if isinstance(session.active, SourceAuthority) else None
         try:

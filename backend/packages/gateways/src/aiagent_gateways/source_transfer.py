@@ -15,7 +15,7 @@ import os
 import stat
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -95,13 +95,25 @@ async def register_issued_source(
     proof: GitTreeProof,
     *,
     deadline: float,
+    execution_binding: dict[str, Any] | None = None,
+    grant: dict[str, Any] | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Register a scoped ticket and fence ambiguous outcomes in the canonical DB."""
     payload = verify_source_ticket(ticket_key, ticket)
     if payload["execution"] != prepared.id or payload["binding_sha256"] != prepared.binding_sha256:
         raise ValueError("source ticket execution mismatch")
     try:
-        return await register_source(endpoint, rpc_key, ticket_key, ticket, manifest, proof, deadline=deadline)
+        return await register_source(
+            endpoint,
+            rpc_key,
+            ticket_key,
+            ticket,
+            manifest,
+            proof,
+            deadline=deadline,
+            execution_binding=execution_binding,
+            grant=grant,
+        )
     except (Exception, asyncio.CancelledError) as exc:
         try:
             await asyncio.shield(
@@ -125,6 +137,8 @@ async def register_source(
     proof: GitTreeProof,
     *,
     deadline: float,
+    execution_binding: dict[str, Any] | None = None,
+    grant: dict[str, Any] | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Register a DB-issued ticket over authenticated RPC; callers enforce live authority."""
     p = verify_source_ticket(ticket_key, ticket)
@@ -135,11 +149,17 @@ async def register_source(
         "commit_proof": base64.b64encode(proof.commit).decode("ascii"),
         "trees": [{"oid": item.oid, "data": base64.b64encode(item.data).decode("ascii")} for item in proof.trees],
     }
+    if (execution_binding is None) != (grant is None):
+        raise ValueError("incomplete index grant")
+    if execution_binding is not None and grant is not None:
+        body["execution_binding"] = execution_binding
+        body["grant"] = grant
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("source deadline exceeded")
     result = await asyncio.wait_for(
-        RpcClient(endpoint, "tool_gateway", rpc_key).call("source.register", body), timeout=remaining
+        RpcClient(endpoint, "tool_gateway", rpc_key, timeout_s=min(5.0, remaining)).call("source.register", body),
+        timeout=min(10.0, remaining),
     )
     if result != {"sessionId": p["session"]}:
         raise RuntimeError("source registration rejected")
@@ -242,6 +262,32 @@ async def _read_active(reader: asyncio.StreamReader, size: int, deadline: float,
     return bytes(data)
 
 
+async def _open_active(
+    endpoint: str, rpc_key: bytes, deadline: float, active: Callable[[], bool]
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    opening = asyncio.create_task(RpcClient(endpoint, "tool_gateway", rpc_key)._open())
+    try:
+        while not opening.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not active():
+                raise TimeoutError("source authority expired")
+            try:
+                await asyncio.wait_for(asyncio.shield(opening), timeout=min(remaining, 0.1))
+            except TimeoutError:
+                continue
+        reader, writer = await opening
+        if time.monotonic() >= deadline or not active():
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            raise TimeoutError("source authority expired")
+        return reader, writer
+    finally:
+        if not opening.done():
+            opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
+
+
 @contextlib.asynccontextmanager
 async def send_source_for_capture(
     endpoint: str,
@@ -264,7 +310,7 @@ async def send_source_for_capture(
     remaining = deadline - time.monotonic()
     if remaining <= 0 or not active():
         raise TimeoutError("source authority expired")
-    reader, writer = await asyncio.wait_for(RpcClient(endpoint, "tool_gateway", rpc_key)._open(), timeout=remaining)
+    reader, writer = await _open_active(endpoint, rpc_key, deadline, active)
     parent_fd = -1
     try:
         parent_fd = _open_trusted_parent(private_parent)
@@ -351,6 +397,7 @@ async def capture_finish_publish(
     *,
     deadline: float,
     active: Callable[[], bool],
+    after_transfer: Callable[[], Awaitable[None]] | None = None,
 ) -> ExecutionArtifactRef:
     """Fence, validate and atomically publish the actual authenticated capture.
 
@@ -391,6 +438,8 @@ async def capture_finish_publish(
             deadline=deadline,
             active=active,
         ) as (fd, proof):
+            if after_transfer is not None:
+                await after_transfer()
             if not active():
                 raise RuntimeError("capture authority revoked")
             await _complete_db_call(lifecycle.finish, prepared.id, fd, proof, deadline=deadline)

@@ -20,7 +20,7 @@ from psycopg import Connection, errors
 
 from .code_intelligence.deadline import require_deadline
 from .code_intelligence.git_proof import GitTreeProof
-from .code_intelligence.indexer_recipe import python_scip_recipe_digest
+from .code_intelligence.indexer_recipe import approved_recipe_digest, python_scip_recipe_digest
 from .code_intelligence.models import Identity, ReadError
 from .code_intelligence.projection import ProjectionManifest, projection_manifest_digest
 from .code_intelligence.projection_stage import stage_git_projection
@@ -39,32 +39,6 @@ class SnapshotRef:
     manifest_sha256: str
     source_sha256: str
     hash_strength: str
-
-
-def approved_recipe_digest(
-    *,
-    kind: str,
-    test_id: str | None,
-    plan_sha256: str,
-    request_sha256: str,
-    template_sha256: str,
-    toolchain_sha256: str,
-    image_digest: str,
-) -> str:
-    """Commit to the approved exact Tool request and immutable execution policy inputs."""
-    return sha256_hex(
-        {
-            "version": "dev13-approved-recipe-v1",
-            "kind": kind,
-            "test_id": test_id,
-            "plan_sha256": plan_sha256,
-            "request_sha256": request_sha256,
-            "template_sha256": template_sha256,
-            "toolchain_sha256": toolchain_sha256,
-            "image_digest": image_digest,
-            "environment_policy": "sandbox-scrubbed-environment-v1",
-        }
-    )
 
 
 def _db_deadline(c: Connection[Row], deadline: float) -> None:

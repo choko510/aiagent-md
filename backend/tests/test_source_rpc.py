@@ -20,7 +20,7 @@ from aiagent_development.code_intelligence.projection_stream import ProjectionEn
 from aiagent_domain.rpcwire import decode_length, encode_frame, sign_request, verify_response
 from aiagent_gateways.source_transfer import send_source
 from aiagent_sandbox.binary_transfer import encode_chunks
-from aiagent_sandbox.source_rpc import SourceSession, SourceSessions
+from aiagent_sandbox.source_rpc import CapturedArtifact, SourceSession, SourceSessions
 from aiagent_sandbox.supervisor import serve
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Unix socket and POSIX staging required")
@@ -75,6 +75,16 @@ async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp
         lambda: True,
         inspect,
     )
+    assert "kkkkkkkk" not in repr(session)
+    assert "sensitive-output" not in repr(CapturedArtifact(b"sensitive-output", b"sensitive-receipt"))
+    quota = SourceSessions(parent)
+    large_receipt = replace(session.receipt, byte_length=128 * 1024 * 1024)
+    quota.register(replace(session, session_id="quota-1", receipt=large_receipt, deadline=time.monotonic() + 0.02))
+    quota.register(replace(session, session_id="quota-2", receipt=large_receipt))
+    with pytest.raises(ValueError, match="invalid source session"):
+        quota.register(replace(session, session_id="quota-3", receipt=large_receipt))
+    await asyncio.sleep(0.03)
+    quota.register(replace(session, session_id="quota-3", receipt=large_receipt))
     sessions = SourceSessions(parent)
     sessions.register(session)
     socket = tmp_path / "supervisor.sock"

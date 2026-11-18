@@ -179,6 +179,10 @@ jobs:
           docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined             --security-opt apparmor=unconfined -e AIAGENT_EXPECT_NETNS=1 -v "$PWD:/w" -w /w python:3.13-slim             sh -c "PYTHONPATH=/w/.linuxdeps:packages/domain/src:packages/sandbox/src               python -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux"
       - name: Generated code runs only in Docker cell (same-kernel RPC with grants; not KVM)
         run: uv run pytest -q -rA -p no:cacheprovider tests/test_cell_e2e.py
+      - name: Real SCIP source-to-publication integration (test-only Docker Cell)
+        run: |
+          uv run python packages/development/scripts/scip_cell_fixture/build_fixture.py
+          AIAGENT_SCIP_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_scip_production_e2e.py
       - name: Build images
         working-directory: .
         run: |

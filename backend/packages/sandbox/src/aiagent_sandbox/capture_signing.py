@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 import time
+from collections.abc import Callable
 from typing import Any
 
 from aiagent_domain import canonical_json, sha256_hex
@@ -47,7 +48,15 @@ def validate_capture_binding(key: bytes, grant: Grant, binding: dict[str, Any]) 
 
 
 def sign_capture(
-    key: bytes, grant: Grant, binding: dict[str, Any], fd: int, *, expected_sha256: str, size: int, deadline: float
+    key: bytes,
+    grant: Grant,
+    binding: dict[str, Any],
+    fd: int,
+    *,
+    expected_sha256: str,
+    size: int,
+    deadline: float,
+    active: Callable[[], bool] = lambda: True,
 ) -> bytes:
     """Bind a captured unlinked file to a previously signed canonical binding."""
     validate_capture_binding(key, grant, binding)
@@ -78,7 +87,7 @@ def sign_capture(
     digest = hashlib.sha256()
     offset = 0
     while offset < size:
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise GrantError("CAPTURE_DEADLINE")
         block = os.pread(fd, min(65536, size - offset), offset)
         if not block:
@@ -86,13 +95,18 @@ def sign_capture(
         digest.update(block)
         offset += len(block)
     after = os.fstat(fd)
-    if time.monotonic() > deadline or (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+    if (
+        time.monotonic() > deadline
+        or not active()
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    ):
         raise GrantError("CAPTURE_CHANGED")
     if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
         raise GrantError("CAPTURE_DIGEST_MISMATCH")

@@ -97,6 +97,29 @@ def test_capture_rejects_file_replacement(tmp_path: Path, monkeypatch: pytest.Mo
         os.close(output_fd)
 
 
+def test_capture_revocation_during_read_does_not_yield(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent, output_fd = directories(tmp_path)
+    (tmp_path / "output" / "index.scip").write_bytes(b"x" * 200000)
+    original_read = os.read
+    active = [True]
+
+    def revoke_after_read(fd: int, length: int) -> bytes:
+        result = original_read(fd, length)
+        active[0] = False
+        return result
+
+    monkeypatch.setattr(os, "read", revoke_after_read)
+    try:
+        with pytest.raises(ReadError):
+            with capture_scip(
+                output_fd, parent, expected_uid=os.geteuid(), deadline=time.monotonic() + 10, active=lambda: active[0]
+            ):
+                pytest.fail("revoked capture exposed")
+        assert not list(parent.iterdir())
+    finally:
+        os.close(output_fd)
+
+
 def test_captured_official_scip_fixture_revalidated_by_b1(repo: tuple[Path, str, Path], tmp_path: Path) -> None:
     root, _, _ = repo
     fixture = Path(__file__).parent / "fixtures" / "scip_python"

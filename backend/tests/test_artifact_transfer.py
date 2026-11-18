@@ -99,3 +99,40 @@ async def test_artifact_rpc_validates_complete_bounded_transfer(tmp_path: Path, 
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_revocation_cancels_stalled_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aiagent_core.rpc import RpcClient
+
+    entered, closed = asyncio.Event(), asyncio.Event()
+    live = [True]
+
+    async def stalled_open(_self):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(RpcClient, "_open", stalled_open)
+
+    async def receive() -> None:
+        async with send_source_for_capture(
+            "unix:/unused",
+            b"r" * 32,
+            "session",
+            b"s" * 32,
+            b"b" * 32,
+            [b"source"],
+            tmp_path,
+            deadline=time.monotonic() + 5,
+            active=lambda: live[0],
+        ):
+            pytest.fail("revoked connection exposed capture")
+
+    task = asyncio.create_task(receive())
+    await asyncio.wait_for(entered.wait(), 1)
+    live[0] = False
+    with pytest.raises(TimeoutError, match="authority expired"):
+        await asyncio.wait_for(task, 1)
+    assert closed.is_set()

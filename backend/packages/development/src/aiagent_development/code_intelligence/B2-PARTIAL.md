@@ -430,3 +430,78 @@ Supervisor lease are not yet installed by a production dispatcher, and the
 production callback must pass the lease's revocation event into execution and
 retain heartbeat monitoring through capture. None of these tests establishes
 full production recovery or a separate-kernel VM.
+
+### Fixed SCIP dispatch and canonical integration fixture
+
+An opt-in `AuthorizedScipExecutor` now passes a canonical Tool Attempt through
+snapshot/recipe preparation, atomic session issuance, authenticated remote
+registration, live DB-backed heartbeats, verified source staging, the fixed
+SCIP recipe, signed capture transfer, FINISHED and encrypted PUBLISHED. The
+Supervisor derives descriptor-specific arguments only after verifying a
+Gateway-signed fixed recipe marker and the full canonical binding. At startup
+the opt-in factory measures the Node binary, SCIP package files and fixed
+environment on read-only mounts and compares that digest to the approved
+toolchain. This measurement does not prove image authenticity, protection from
+privileged remounts, dynamic libraries or VM/kernel identity.
+
+The opt-in `test_scip_production_e2e.py` uses real PostgreSQL, ToolGateway,
+Supervisor in Docker, scip-python, authenticated brokers and B1 definition and
+reference lookup. It uses disposable keys and a Docker fixture image, with no
+manual source-session registration, synthetic FINISHED transition or mock
+capture receipt. Failure scenarios cover pre-registration cancellation and
+disconnect, a real Supervisor crash, Lease expiry, real running/capture
+cancellation, Artifact transfer interruption, pre-publication cancellation,
+temporary PostgreSQL denial, and real Gateway process death before and after
+publication. Concurrent reconciliation is exercised against the canonical DB.
+These tests do
+not prove separate-kernel isolation, production egress, attestation, or key
+provisioning. Fixture toolchain bytes are measured and the fixture's inspected
+Docker image ID is the recipe's test image digest; this is not attestation.
+The fixture runs the existing B1/GitSnapshot validator locally under the test
+profile. Per `SCIP.md` and `README.md`, those components require an externally
+isolated Cell in production; `SnapshotScipVerifier` therefore refuses the
+production profile. A production isolated validation and navigation service is
+still required before this E2E can be called production-ready.
+This exercises a Python subset of DEV-REQ-21 / DEV-CIN-T01..07 / SC-34; it does
+not establish the complete multi-language scenario or mark that scenario Verified.
+
+Default Supervisor startup keeps the source broker disabled. Explicitly enabling
+it requires root-owned private source/output/capture directories, a separate
+private replay-journal path, distinct protected Grant/RPC/ticket/capture keys,
+an unprivileged Cell UID, network namespaces, resource limits and a locally
+measured approved SCIP toolchain. These checks do not attest persistent storage,
+the VM boundary, image authenticity or production key provisioning. The
+standard Cell image is not a SCIP image; a separately provisioned image is
+required. The Gateway environment loader does not yet select the scoped SCIP
+executor for ordinary runs. Reconciliation confirms a lost reply only when the
+canonical database contains a PUBLISHED Artifact whose authenticated ciphertext
+can still be decrypted and verified. Unproven RUNNING or FINISHED executions
+are fenced UNKNOWN and never retried. There is no authoritative remote
+completion ledger or safe automatic resolution of orphaned resources. A durable
+Replay Journal must be shared by every Supervisor using the same authority keys;
+independent journals cannot prove cross-Supervisor exclusion and are not a
+supported production topology. `ToolGatewaySandboxAdapter`
+also remains fail-closed for build/test/static-check. Its current request/evidence
+contract describes those command types and has no index operation, while this
+slice produces a SCIP Artifact; treating an index as a test receipt would invent
+evidence. Generic approved command execution, authenticated command receipts
+and their Test ID binding are still required before enabling that adapter.
+The Draft Development request now requires an explicit planned Test ID for test
+commands. The workflow checks that ID before dispatch and requires a matching
+receipt. Timeout and truncation flags are tri-state: older stored receipts with
+unknown flags remain readable but cannot satisfy the test PASS gate. This is a
+deliberate fail-closed compatibility change, not proof of generic command
+execution; the production command adapter remains disabled.
+
+The source broker bounds concurrent reservations to eight sessions and 256 MiB
+of encoded source; staging can temporarily require additional space for the
+verified projection. Expired pending sessions release their reservations, and
+duplicate receive attempts cannot release another handler's lease or quota.
+The journal has a hard 64 MiB limit and fails closed when full; safe compaction,
+orphan cleanup and multi-VM journal coordination are not implemented. Ticket,
+Grant, RPC and capture keys are distinct and loaded from protected files at
+startup. Revoking or rotating them currently requires stopping admission and
+restarting the Supervisor with the same durable replay journal; live key reload
+is not supported. Artifact encryption uses the existing KeyRing: old keys must
+remain available for retained Artifacts, and missing or invalid keys make
+reconciliation stay UNKNOWN rather than asserting success.

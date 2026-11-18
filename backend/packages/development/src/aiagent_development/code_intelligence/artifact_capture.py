@@ -12,7 +12,7 @@ import os
 import secrets
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,21 +66,21 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
     ) == (after.st_dev, after.st_ino, after.st_size, after.st_uid, after.st_nlink, after.st_mtime_ns, after.st_ctime_ns)
 
 
-def _copy(source_fd: int, temp_fd: int, size: int, deadline: float) -> str:
+def _copy(source_fd: int, temp_fd: int, size: int, deadline: float, active: Callable[[], bool]) -> str:
     digest = hashlib.sha256()
     remaining = size
     while remaining:
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise ReadError("artifact capture deadline exceeded")
         data = os.read(source_fd, min(remaining, _CHUNK))
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise ReadError("artifact capture deadline exceeded")
         if not data:
             raise ReadError("artifact capture incomplete")
         digest.update(data)
         view = memoryview(data)
         while view:
-            if time.monotonic() > deadline:
+            if time.monotonic() > deadline or not active():
                 raise ReadError("artifact capture deadline exceeded")
             count = os.write(temp_fd, view)
             if count <= 0:
@@ -98,6 +98,7 @@ def capture_scip(
     expected_uid: int,
     deadline: float,
     max_bytes: int = _MAX_ARTIFACT,
+    active: Callable[[], bool] = lambda: True,
 ) -> Iterator[CapturedScip]:
     """Copy one regular, single-link SCIP file, without following paths or publishing it."""
     require_deadline(deadline)
@@ -105,7 +106,7 @@ def capture_scip(
         raise ReadError("secure artifact capture unavailable")
     if type(expected_uid) is not int or expected_uid < 0 or not 1 <= max_bytes <= _MAX_ARTIFACT:
         raise ValueError("invalid artifact capture limits")
-    if time.monotonic() > deadline:
+    if time.monotonic() > deadline or not active():
         raise ReadError("artifact capture deadline exceeded")
     if not stat.S_ISDIR(os.fstat(output_fd).st_mode):
         raise ReadError("invalid execution output directory")
@@ -127,10 +128,10 @@ def capture_scip(
         ):
             raise ReadError("invalid execution artifact")
         temp_fd, reader_fd = _private_temp(parent_fd)
-        digest = _copy(source_fd, temp_fd, before.st_size, deadline)
+        digest = _copy(source_fd, temp_fd, before.st_size, deadline, active)
         after = os.fstat(source_fd)
         named = os.stat("index.scip", dir_fd=output_fd, follow_symlinks=False)
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or not active():
             raise ReadError("artifact capture deadline exceeded")
         if not _same_file(before, after) or not _same_file(before, named):
             raise ReadError("artifact changed during capture")

@@ -36,6 +36,20 @@ container and passed to the child through a staged descriptor. Landlock does
 not grant the indexer access to `/w`. Docker shares the host kernel, and these
 test options are not production isolation or network-policy attestation.
 
+With a disposable PostgreSQL cluster available, the complete canonical test
+uses the same fixture image and the real Tool Gateway and broker code:
+
+```sh
+AIAGENT_TEST_PG_URL=postgresql://postgres:pw@127.0.0.1:55432/postgres \
+  AIAGENT_SCIP_E2E=1 uv run pytest -q tests/test_scip_production_e2e.py
+```
+
+The test inspects and runs the fixture image by immutable local image ID. Keys,
+operator approvals and source repository are disposable fixtures. The Docker
+Supervisor still shares the host kernel and does not attest a production image.
+The fixture exercises the normal Supervisor entry point with explicit source
+broker configuration; that broker is disabled unless explicitly configured.
+
 On 2026-11-17, local fixture image ID
 `sha256:f55bdb467b9004fe256482225ef553ec88dbab3b7c4a71e8462ea403c70689ae`
 produced a 1,362-byte index twice with 11 reported occurrences in two source

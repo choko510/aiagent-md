@@ -14,11 +14,12 @@ from datetime import UTC, datetime
 import psycopg
 from aiagent_core import control
 from aiagent_core.db import Database
+from aiagent_development.code_intelligence.indexer_recipe import python_scip_recipe_digest
 from aiagent_development.code_intelligence.models import Identity
 from aiagent_development.code_intelligence.projection import ProjectionManifest, projection_manifest_digest
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
-from aiagent_development.workspace_authority import PreparedExecution
-from aiagent_domain import require_uuid7, uuid7
+from aiagent_development.workspace_authority import PreparedExecution, _binding_payload
+from aiagent_domain import require_uuid7, sha256_hex, uuid7
 from aiagent_sandbox.source_ticket import sign_source_ticket
 
 from .execution_artifacts import ExecutionArtifactError, _db_deadline, _deadline, _read_private_fd
@@ -213,5 +214,39 @@ class ExecutionLifecycle:
                     "SELECT agent.execution_check_running(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (*self._scope(workspace, execution_id), binding_sha256),
                 )
+        except psycopg.Error as exc:
+            raise ExecutionArtifactError("EXECUTION_AUTHORITY_DENIED") from exc
+
+    def running_index_binding(self, prepared: PreparedExecution, *, deadline: float) -> dict[str, object]:
+        """Return the complete canonical binding only for an approved RUNNING SCIP recipe."""
+        _deadline(deadline)
+        workspace = self._workspace(deadline)
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                _db_deadline(c, deadline)
+                c.execute(
+                    "SELECT agent.execution_check_running(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (*self._scope(workspace, prepared.id), prepared.binding_sha256),
+                )
+                execution = c.execute(
+                    "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, prepared.id),
+                ).fetchone()
+                snapshot = c.execute(
+                    "SELECT * FROM agent.workspace_snapshot_attestations WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, prepared.snapshot_id),
+                ).fetchone()
+                recipe = c.execute(
+                    "SELECT * FROM agent.execution_recipe_approvals WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, prepared.recipe_id),
+                ).fetchone()
+                if execution is None or snapshot is None or recipe is None or recipe["kind"] != "index":
+                    raise ExecutionArtifactError("INDEX_RECIPE_DENIED")
+                if str(recipe["template_sha256"]).strip() != python_scip_recipe_digest():
+                    raise ExecutionArtifactError("INDEX_RECIPE_DENIED")
+                binding = _binding_payload(execution, snapshot, recipe)
+                if sha256_hex(binding) != prepared.binding_sha256:
+                    raise ExecutionArtifactError("INDEX_BINDING_DENIED")
+                return binding
         except psycopg.Error as exc:
             raise ExecutionArtifactError("EXECUTION_AUTHORITY_DENIED") from exc

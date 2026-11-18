@@ -368,6 +368,8 @@ def test_source_session_issuance_is_fenced_and_single_use(dbs, verified_setup):
         assert payload["execution"] == prepared.id and payload["attempt"] == prepared.attempt_id
         assert payload["snapshot"] == prepared.snapshot_id and payload["binding_sha256"] == prepared.binding_sha256
         assert payload["source_sha256"] == receipt.sha256
+        with pytest.raises(ExecutionArtifactError, match="INDEX_RECIPE_DENIED"):
+            lifecycle.running_index_binding(prepared, deadline=time.monotonic() + 10)
         with pytest.raises(ExecutionArtifactError, match="SOURCE_SESSION_DENIED"):
             lifecycle.issue_source_session(prepared, manifest, receipt, key, deadline=time.monotonic() + 10)
         with pytest.raises(ValueError):
@@ -479,6 +481,7 @@ def test_db_issued_source_ticket_registers_over_supervisor_rpc(dbs, verified_set
     from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
     from aiagent_gateways.source_transfer import register_source, send_source
     from aiagent_sandbox.source_rpc import SourceSessions
+    from aiagent_sandbox.source_ticket import sign_source_ticket
     from aiagent_sandbox.supervisor import Supervisor, serve
 
     _, _, manifest, proof, receipt, wire, parent = verified_setup
@@ -516,6 +519,10 @@ def test_db_issued_source_ticket_registers_over_supervisor_rpc(dbs, verified_set
                 if (tmp_path / "supervisor.sock").exists():
                     break
                 await asyncio.sleep(0.01)
+            old_key = b"x" * 32
+            old_ticket = sign_source_ticket(old_key, issued[0]["payload"])
+            with pytest.raises(RpcError):
+                await register_source(endpoint, rpc_key, old_key, old_ticket, manifest, proof, deadline=deadline)
             with pytest.raises(RpcError):
                 await register_source(endpoint, rpc_key, ticket_key, issued[0], manifest, proof, deadline=deadline)
             active[0] = True
@@ -791,6 +798,11 @@ def test_source_heartbeat_revokes_live_session_when_snapshot_changes(dbs, verifi
                     send_source(endpoint, rpc_key, sid, key, source_binding, [wire], deadline=deadline)
                 )
                 await asyncio.wait_for(staged.wait(), 5)
+                with pytest.raises((RuntimeError, ConnectionError, asyncio.IncompleteReadError)):
+                    await send_source(endpoint, rpc_key, sid, key, source_binding, [wire], deadline=deadline)
+                assert await RpcClient(endpoint, "tool_gateway", rpc_key).call("source.heartbeat", scope) == {
+                    "renewed": True
+                }
                 await asyncio.to_thread(
                     dbs["owner"].one,
                     "UPDATE agent.repository_bindings SET generation=generation+1,workspace_revision=workspace_revision+1,"

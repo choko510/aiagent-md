@@ -249,8 +249,19 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
 
     This is not canonical Authority, an Artifact broker, or a production E2E.
     """
-    from aiagent_gateways.source_transfer import send_source_for_capture
-    from aiagent_sandbox.source_rpc import CapturedArtifact, SourceSession, SourceSessions
+    from aiagent_core.rpc import RpcClient
+    from aiagent_development.code_intelligence.indexer_recipe import (
+        approved_recipe_digest,
+        measure_python_scip_toolchain,
+        python_scip_recipe_digest,
+    )
+    from aiagent_development.code_intelligence.projection import projection_manifest_digest
+    from aiagent_domain.rpcwire import RpcError
+    from aiagent_gateways.source_transfer import register_source, send_source_for_capture
+    from aiagent_sandbox.scip_authority import issue_index_grant
+    from aiagent_sandbox.scip_execution import scip_registration_factory
+    from aiagent_sandbox.source_rpc import SourceSessions
+    from aiagent_sandbox.source_ticket import sign_source_ticket
     from aiagent_sandbox.supervisor import serve
 
     git = shutil.which("git")
@@ -268,7 +279,7 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
     (repo / "main.py").write_bytes(b"from library import greet\nresult = greet('world')\n")
     git_run("add", ".")
     git_run("commit", "-m", "synthetic fixture")
-    identity = Identity("tenant", "owner", "fixture", "revision", git_run("rev-parse", "HEAD").decode().strip())
+    identity = Identity("tenant", "owner", "fixture", "1", git_run("rev-parse", "HEAD").decode().strip())
     snapshot = GitSnapshot(AuthorizedSnapshot(identity, repo), Path(git), GitLimits(total_seconds=180))
     manifest = prepare_projection(snapshot, identity, snapshot.tree)
     git_proof = build_git_tree_proof(snapshot)
@@ -292,7 +303,10 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
             cell_uid=20001,
             cell_gid=20001,
         )
-        execution, attempt = uuid7(), uuid.uuid4().hex
+        execution, attempt, session_id = uuid7(), uuid7(), uuid7()
+        snapshot_id, recipe_id = uuid7(), uuid7()
+        plan_sha, request_sha, toolchain_sha = "a" * 64, "b" * 64, measure_python_scip_toolchain()
+        image_digest = "sha256:" + "d" * 64
         binding = {
             "execution": execution,
             "attempt": attempt,
@@ -303,82 +317,168 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
             "run": "run",
             "goal_revision": 1,
             "lease_epoch": 1,
+            "snapshot": snapshot_id,
+            "recipe_id": recipe_id,
+            "repository_binding": identity.binding_id,
+            "workspace_revision": 1,
+            "commit": identity.commit,
+            "tree": manifest.tree,
+            "source_sha256": encoder.receipt.sha256,
+            "manifest_sha256": projection_manifest_digest(manifest),
+            "test_id": None,
+            "plan_sha256": plan_sha,
+            "request_sha256": request_sha,
+            "toolchain_sha256": toolchain_sha,
+            "image_digest": image_digest,
+            "recipe_sha256": approved_recipe_digest(
+                kind="index",
+                test_id=None,
+                plan_sha256=plan_sha,
+                request_sha256=request_sha,
+                template_sha256=python_scip_recipe_digest(),
+                toolchain_sha256=toolchain_sha,
+                image_digest=image_digest,
+            ),
         }
         results: list[tuple[bytes, bytes]] = []
-
-        async def staged(fd: int) -> CapturedArtifact:
-            provisional = Grant(
-                uuid.uuid4().hex,
-                "tenant",
-                "task",
-                "run",
-                "intent",
-                1,
-                (),
-                ".",
-                40000,
-                8 * 1024**3,
-                int(time.time()) + 60,
-                attempt_id=attempt,
-                attempt_binding_version=1,
-                execution_binding_version=1,
-                execution_id=execution,
-                execution_binding_sha256=sha256_hex(binding),
-            )
-            with cell_source_traversal(source_parent, cell_gid=20001):
-                with projected_output(output_parent, provisional, cell_uid=20001, cell_gid=20001) as output_fd:
-                    argv = list(python_scip_argv(fd, output_fd))
-                    token = sign(b"g" * 32, replace(provisional, argv=tuple(argv)))
-                    async with sup._execute_and_capture(
-                        token,
-                        argv,
-                        ".",
-                        source_fd=fd,
-                        output_parent=output_parent,
-                        prepared_output_fd=output_fd,
-                        source_cwd=True,
-                        binding=binding,
-                        receipt_key=b"r" * 32,
-                        private_parent=capture_parent,
-                        deadline=time.monotonic() + 60,
-                        heartbeat_seconds=10,
-                        revoked=asyncio.Event(),
-                    ) as (result, captured_fd, signed_receipt):
-                        assert result["status"] == "EXITED" and result["exitCode"] == 0
-                        return CapturedArtifact(os.read(captured_fd, 4 * 1024 * 1024 + 1), signed_receipt)
+        payload = {
+            "version": 1,
+            "direction": "gateway-to-supervisor",
+            "session": session_id,
+            "tenant": "tenant",
+            "owner": "owner",
+            "task": "task",
+            "run": "run",
+            "goal": 1,
+            "lease": 1,
+            "execution": execution,
+            "attempt": attempt,
+            "snapshot": snapshot_id,
+            "recipe": recipe_id,
+            "binding_sha256": sha256_hex(binding),
+            "repository_binding": identity.binding_id,
+            "revision": identity.revision,
+            "commit": identity.commit,
+            "tree": manifest.tree,
+            "manifest_sha256": projection_manifest_digest(manifest),
+            "source_sha256": encoder.receipt.sha256,
+            "source_bytes": encoder.receipt.byte_length,
+            "expires_at": int(time.time()) + 40,
+        }
+        ticket = sign_source_ticket(b"t" * 32, payload)
+        grant = issue_index_grant(b"t" * 32, b"g" * 32, ticket, binding)
 
         async def exercise() -> None:
             deadline = time.monotonic() + 60
-            session = SourceSession(
-                uuid.uuid4().hex,
-                execution,
-                attempt,
-                sha256_hex(binding),
-                "snapshot",
-                b"t" * 32,
-                manifest,
-                encoder.receipt,
-                git_proof,
-                identity,
-                deadline,
-                lambda: True,
-                staged,
+            sessions = SourceSessions(
+                source_parent,
+                ticket_key=b"t" * 32,
+                registration_factory=scip_registration_factory(
+                    sup,
+                    source_parent,
+                    output_parent,
+                    capture_parent,
+                    b"r" * 32,
+                    heartbeat_seconds=5,
+                ),
             )
-            sessions = SourceSessions(source_parent)
-            sessions.register(session)
             endpoint = f"unix:{root / 'supervisor.sock'}"
             task = asyncio.create_task(serve(sup, {"tool_gateway": b"k" * 32}, endpoint, source_sessions=sessions))
+            heartbeat = None
             try:
                 for _ in range(200):
                     if (root / "supervisor.sock").exists():
                         break
                     await asyncio.sleep(0.01)
+                with pytest.raises(RpcError):
+                    await register_source(
+                        endpoint,
+                        b"k" * 32,
+                        b"t" * 32,
+                        ticket,
+                        manifest,
+                        git_proof,
+                        deadline=deadline,
+                        execution_binding=binding,
+                        grant={**grant, "mac": "0" * 64},
+                    )
+                with pytest.raises(RpcError):
+                    await register_source(
+                        endpoint,
+                        b"k" * 32,
+                        b"t" * 32,
+                        ticket,
+                        manifest,
+                        git_proof,
+                        deadline=deadline,
+                        execution_binding={**binding, "toolchain_sha256": "f" * 64},
+                        grant=grant,
+                    )
+                wrong_toolchain = "f" * 64
+                wrong_binding = {
+                    **binding,
+                    "toolchain_sha256": wrong_toolchain,
+                    "recipe_sha256": approved_recipe_digest(
+                        kind="index",
+                        test_id=None,
+                        plan_sha256=plan_sha,
+                        request_sha256=request_sha,
+                        template_sha256=python_scip_recipe_digest(),
+                        toolchain_sha256=wrong_toolchain,
+                        image_digest=image_digest,
+                    ),
+                }
+                wrong_ticket = sign_source_ticket(
+                    b"t" * 32, {**payload, "session": uuid7(), "binding_sha256": sha256_hex(wrong_binding)}
+                )
+                wrong_grant = issue_index_grant(b"t" * 32, b"g" * 32, wrong_ticket, wrong_binding)
+                with pytest.raises(RpcError):
+                    await register_source(
+                        endpoint,
+                        b"k" * 32,
+                        b"t" * 32,
+                        wrong_ticket,
+                        manifest,
+                        git_proof,
+                        deadline=deadline,
+                        execution_binding=wrong_binding,
+                        grant=wrong_grant,
+                    )
+                sid, transfer_key, source_binding = await register_source(
+                    endpoint,
+                    b"k" * 32,
+                    b"t" * 32,
+                    ticket,
+                    manifest,
+                    git_proof,
+                    deadline=deadline,
+                    execution_binding=binding,
+                    grant=grant,
+                )
+                scope = {
+                    "tenantId": "tenant",
+                    "sessionId": sid,
+                    "executionId": execution,
+                    "attemptId": attempt,
+                    "bindingSha256": sha256_hex(binding),
+                }
+
+                async def pulse() -> None:
+                    while True:
+                        result = await RpcClient(endpoint, "tool_gateway", b"k" * 32).call("source.heartbeat", scope)
+                        if not result.get("renewed"):
+                            return
+                        await asyncio.sleep(0.1)
+
+                first = await RpcClient(endpoint, "tool_gateway", b"k" * 32).call("source.heartbeat", scope)
+                assert first == {"renewed": True}
+                heartbeat = asyncio.create_task(pulse())
                 async with send_source_for_capture(
                     endpoint,
                     b"k" * 32,
-                    session.session_id,
-                    session.key,
-                    session.transfer_binding(),
+                    sid,
+                    transfer_key,
+                    source_binding,
                     chunks,
                     gateway_parent,
                     deadline=deadline,
@@ -386,6 +486,9 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
                 ) as (artifact_fd, signed_receipt):
                     results.append((os.read(artifact_fd, 4 * 1024 * 1024 + 1), signed_receipt))
             finally:
+                if heartbeat is not None:
+                    heartbeat.cancel()
+                    await asyncio.gather(heartbeat, return_exceptions=True)
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
@@ -417,3 +520,42 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
             and not list(output_parent.iterdir())
             and not list(gateway_parent.iterdir())
         )
+
+
+def test_source_startup_rejects_unsafe_isolation_and_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aiagent_sandbox.supervisor import _configured_source_sessions
+
+    root = tmp_path / "source-root"
+    root.mkdir(mode=0o700)
+    os.chown(root, -1, 20001)
+    root.chmod(0o710)
+    for name in ("source", "output", "capture", "journal", "keys"):
+        (root / name).mkdir(mode=0o700)
+    key_paths = {}
+    for name, value in (("grant", b"g"), ("rpc", b"r"), ("ticket", b"t"), ("capture", b"c")):
+        path = root / "keys" / name
+        path.write_text((value * 32).hex())
+        path.chmod(0o400)
+        key_paths[name] = path
+    for name, value in {
+        "AIAGENT_SANDBOX_SOURCE_MODE": "enabled",
+        "AIAGENT_SANDBOX_SOURCE_ROOT": str(root),
+        "AIAGENT_SANDBOX_REPLAY_JOURNAL": str(root / "journal" / "consumed"),
+        "AIAGENT_SANDBOX_SOURCE_TICKET_KEY_FILE": str(key_paths["ticket"]),
+        "AIAGENT_SANDBOX_CAPTURE_KEY_FILE": str(key_paths["capture"]),
+        "AIAGENT_SANDBOX_GRANT_KEY_FILE": str(key_paths["grant"]),
+        "AIAGENT_SANDBOX_RPC_KEY_FILE": str(key_paths["rpc"]),
+    }.items():
+        monkeypatch.setenv(name, value)
+    sup = Supervisor(tmp_path / "cells-config", b"g" * 32, require_netns=False, cell_uid=20001, cell_gid=20001)
+    with pytest.raises(RuntimeError, match="isolation unavailable"):
+        _configured_source_sessions(sup, b"r" * 32)
+    sup.require_netns = True
+    key_paths["ticket"].chmod(0o644)
+    with pytest.raises(RuntimeError, match="key unavailable"):
+        _configured_source_sessions(sup, b"r" * 32)
+    key_paths["ticket"].chmod(0o400)
+    key_paths["capture"].chmod(0o600)
+    key_paths["capture"].write_text((b"t" * 32).hex())
+    with pytest.raises(RuntimeError, match="keys must be distinct"):
+        _configured_source_sessions(sup, b"r" * 32)
