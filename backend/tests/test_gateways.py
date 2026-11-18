@@ -173,13 +173,14 @@ def test_model_budget_exhaustion(dbs: dict[str, Database], claimed: control.Clai
 def test_token_estimate_includes_system_prompt_and_tool_schemas(claimed: control.Claim) -> None:
     from aiagent_domain.tools import packaged_nihongo_lite
     from aiagent_gateways.model_gateway import _estimate_request_tokens
+    from aiagent_gateways.providers import MAX_OUTPUT_TOKENS
 
     lite = packaged_nihongo_lite()
-    assert (
-        _estimate_request_tokens(mreq(claimed, system=lite)) - _estimate_request_tokens(mreq(claimed, system="s"))
-        >= len(lite.encode("utf-8")) // 4
-    )
+    lite_est = _estimate_request_tokens(mreq(claimed, system=lite))
+    assert lite_est - _estimate_request_tokens(mreq(claimed, system="s")) >= len(lite.encode("utf-8")) // 4
     assert _estimate_request_tokens(mreq(claimed, tools=[])) < _estimate_request_tokens(mreq(claimed))
+    minimal = mreq(claimed, system="", messages=[], tools=[])
+    assert _estimate_request_tokens(minimal) >= MAX_OUTPUT_TOKENS  # the output bound is always reserved
 
 
 def test_budget_boundary_reserves_the_whole_request(dbs: dict[str, Database], claimed: control.Claim) -> None:
