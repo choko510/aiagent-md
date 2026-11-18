@@ -226,13 +226,40 @@ iteration starts, or `UNKNOWN`. `BODY_RECEIVING` means the body-read stage was e
 
 A `ReadTimeout` can occur while waiting for headers or while reading the body; the phase
 distinguishes those observed stages. `OVERALL_TIMEOUT` is the separate 25-second
-`asyncio.timeout()` cap. The 15-second read timeout and 25-second overall timeout are
-unchanged. These diagnostics do not prove model-side inference or queue time, and a
-timeout is still `UNKNOWN_OUTCOME`: the request may have reached the provider, so the
-slot is consumed and the probe is never retried. Diagnostic fields are fixed enums,
-validated catalog/fixture identifiers, a timestamp and a boolean; exception messages,
-headers, bodies, URLs and credentials are never included. If stderr cannot be written,
-the probe result and exit code are unchanged.
+`asyncio.timeout()` cap. Kilo uses a **20-second read timeout** in this experiment; all
+other providers retain the previous 15-second read timeout. `connect`, `write` and
+`pool` remain 5 seconds for every provider, and the overall cap remains 25 seconds.
+These diagnostics do not prove model-side inference or queue time, and a timeout is
+still `UNKNOWN_OUTCOME`: the request may have reached the provider, so the slot is
+consumed and the probe is never retried. Diagnostic fields are fixed enums, validated
+catalog/fixture identifiers, a timestamp and a boolean; exception messages, headers,
+bodies, URLs and credentials are never included. If stderr cannot be written, the probe
+result and exit code are unchanged.
+
+### Kilo read-timeout experiment
+
+This repository now carries a deliberately limited experiment for the Kilo provider
+only. The motivation is the observed review history: `review_r04` and `review_r08`
+timed out at about 15.27 s before diagnostics existed, and `review_r02` timed out at
+15,230 ms with `READ_TIMEOUT / BEFORE_HEADERS / body_chunk_received=false`. Normal Kilo
+reviews that completed took about 8.2–10.9 s. The experimental hypothesis is narrow:
+Kilo may occasionally need more than 15 s but less than 20 s to return response headers.
+
+There is **no evidence yet** that 20 seconds fixes those timeouts. The change does not
+retry, does not fall back to another provider or paid model, does not change the local
+quota or 180-second interval, and does not make the timeout configurable from the CLI,
+fixtures or environment variables. Other providers keep 15 seconds. The 20-second read
+timeout is shorter than the unchanged 25-second overall cap, so the overall cap still
+bounds the complete request.
+
+No live experiment is performed by the change itself. A later, separately authorized
+run should send one unexecuted synthetic review fixture (`review_r06` or `review_r07`)
+once, capture the stdout record and the stderr timeout diagnostic, and stop on any
+abnormal status or timeout. A success between 15 and 20 seconds would support the
+hypothesis; a `READ_TIMEOUT` at about 20 seconds would suggest that a simple extension
+is insufficient; a 25-second `OVERALL_TIMEOUT` would mean the overall cap was reached.
+Because different fixtures also differ in content, such a run cannot by itself prove a
+causal effect of the timeout change.
 
 ## Data that leaves the machine
 
