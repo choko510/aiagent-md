@@ -15,7 +15,9 @@ Transport: authenticated frames (aiagent_domain.rpcwire) over vsock in productio
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -610,6 +612,48 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                     res = await sup.execute(
                         body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))
                     )
+                from .source_rpc import ArtifactTransfer
+
+                if isinstance(res, ArtifactTransfer):
+                    from .binary_transfer import MAX_CHUNK, encode_chunks
+
+                    if not res.active() or time.monotonic() >= res.deadline:
+                        raise GrantError("SOURCE_TRANSFER_REJECTED")
+                    artifact = res.artifact
+                    frame = {
+                        "type": "artifact",
+                        "data": {
+                            "size": len(artifact.data),
+                            "sha256": hashlib.sha256(artifact.data).hexdigest(),
+                            "proof": base64.b64encode(artifact.proof).decode("ascii"),
+                        },
+                    }
+                    w.write(encode_frame(sign_response(key, nonce, frame)))
+                    for block in encode_chunks(
+                        res.key,
+                        res.binding,
+                        (artifact.data[i : i + MAX_CHUNK] for i in range(0, len(artifact.data), MAX_CHUNK)),
+                    ):
+                        remaining = res.deadline - time.monotonic()
+                        if remaining <= 0 or not res.active():
+                            raise GrantError("SOURCE_TRANSFER_REJECTED")
+                        w.write(block)
+                        draining = asyncio.create_task(w.drain())
+                        try:
+                            while not draining.done():
+                                remaining = res.deadline - time.monotonic()
+                                if remaining <= 0 or not res.active():
+                                    raise GrantError("SOURCE_TRANSFER_REJECTED")
+                                try:
+                                    await asyncio.wait_for(asyncio.shield(draining), timeout=min(remaining, 0.1))
+                                except TimeoutError:
+                                    continue
+                            await draining
+                        finally:
+                            if not draining.done():
+                                draining.cancel()
+                                await asyncio.gather(draining, return_exceptions=True)
+                    return
                 frame = {"type": "result", "data": res}
             except GrantError as e:
                 frame = {"type": "error", "code": f"GRANT_{e}"}

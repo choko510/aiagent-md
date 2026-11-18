@@ -74,6 +74,20 @@ def source_binding(
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).digest()
 
 
+def artifact_transfer_key(source_key: bytes) -> bytes:
+    if len(source_key) < 32:
+        raise ValueError("invalid artifact transfer key")
+    return hmac.digest(source_key, b"dev13-artifact-transfer-v1\0", "sha256")
+
+
+def artifact_binding(source_session_binding: bytes, sha256: str, size: int) -> bytes:
+    if len(source_session_binding) != 32 or re.fullmatch(r"[0-9a-f]{64}", sha256) is None or not 1 <= size <= 4194304:
+        raise ValueError("invalid artifact transfer binding")
+    return hashlib.sha256(
+        b"dev13-artifact-binding-v1\0" + source_session_binding + bytes.fromhex(sha256) + size.to_bytes(8, "big")
+    ).digest()
+
+
 def verify_source_ticket(key: bytes, envelope: Any, *, now: float | None = None) -> dict[str, Any]:
     if len(key) < 32 or not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
         raise ValueError("invalid source ticket")

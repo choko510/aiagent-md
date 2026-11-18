@@ -322,7 +322,7 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
         (claim.tenant_id, prepared.id),
     )
     assert row is not None and row["state"] == (expected_state or ("RUNNING" if on_prepared else "PREPARED"))
-    assert row["artifact_sha256"] is None
+    assert (row["artifact_sha256"] is not None) == (expected_state == "PUBLISHED")
     import psycopg
 
     with pytest.raises(psycopg.errors.InsufficientPrivilege), dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
@@ -559,6 +559,155 @@ def test_db_issued_source_ticket_registers_over_supervisor_rpc(dbs, verified_set
             await asyncio.gather(server, return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Unix socket and POSIX descriptors")
+@pytest.mark.parametrize("tamper_receipt", [False, True])
+def test_fixture_capture_transfer_drives_fenced_db_publication(dbs, verified_setup, tmp_path, tamper_receipt):
+    """Synthetic capture and SCIP validator: exercises transport and real DB fences only."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from aiagent_development.code_intelligence.artifact_capture import capture_scip
+    from aiagent_development.workspace_authority import _binding_payload
+    from aiagent_gateways.context_keys import KeyRing
+    from aiagent_gateways.execution_artifacts import PostgresExecutionArtifactStore
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+    from aiagent_gateways.source_transfer import SourceCaptureUnknown, capture_finish_publish, register_issued_source
+    from aiagent_sandbox.capture_signing import sign_capture
+    from aiagent_sandbox.grant import Grant
+    from aiagent_sandbox.source_rpc import CapturedArtifact, SourceSessions
+    from aiagent_sandbox.supervisor import Supervisor, serve
+
+    _, _, manifest, proof, receipt, wire, parent = verified_setup
+    ticket_key, rpc_key, capture_key = b"t" * 32, b"r" * 32, b"c" * 32
+    artifact = b"synthetic-test-index"
+    outcome = []
+
+    def issue(claim, prepared, snapshot, _parent):
+        verifier = HmacCaptureVerifier(dbs["tool_gateway"], capture_key)
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, verifier)
+        ticket = lifecycle.issue_source_session(prepared, manifest, receipt, ticket_key, deadline=time.monotonic() + 30)
+        execution = dbs["owner"].one(
+            "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
+        )
+        snap = dbs["owner"].one(
+            "SELECT * FROM agent.workspace_snapshot_attestations WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, snapshot.id),
+        )
+        recipe = dbs["owner"].one(
+            "SELECT * FROM agent.execution_recipe_approvals WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, prepared.recipe_id),
+        )
+        binding = _binding_payload(execution, snap, recipe)
+        grant = Grant(
+            "fixture",
+            claim.tenant_id,
+            claim.task_id,
+            claim.run_id,
+            prepared.intent_id,
+            claim.lease_epoch,
+            ("fixture",),
+            ".",
+            1000,
+            1024,
+            int(time.time()) + 30,
+            attempt_id=prepared.attempt_id,
+            attempt_binding_version=1,
+            execution_binding_version=1,
+            execution_id=prepared.id,
+            execution_binding_sha256=prepared.binding_sha256,
+        )
+        output = tmp_path / "output-capture"
+        output.mkdir()
+        (output / "index.scip").write_bytes(artifact)
+        output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with capture_scip(output_fd, parent, expected_uid=os.geteuid(), deadline=time.monotonic() + 10) as captured:
+                signed = sign_capture(
+                    capture_key,
+                    grant,
+                    binding,
+                    captured.fd,
+                    expected_sha256=captured.sha256,
+                    size=captured.byte_length,
+                    deadline=time.monotonic() + 10,
+                )
+        finally:
+            os.close(output_fd)
+        if tamper_receipt:
+            signed = b"{}"
+
+        class FixtureValidator:
+            def verify(self, checked_claim, execution_id, content):
+                assert checked_claim == claim and execution_id == prepared.id and content == artifact
+                return "PARTIAL"
+
+        store = PostgresExecutionArtifactStore(
+            dbs["tool_gateway"], claim, KeyRing.single(b"k" * 32, "fixture"), capture=verifier, index=FixtureValidator()
+        )
+        gateway_parent = tmp_path / "gateway-capture"
+        gateway_parent.mkdir(mode=0o700)
+
+        async def exercise():
+            sup = Supervisor(tmp_path / "capture-supervisor", b"g" * 32, cell_uid=20001, cell_gid=20001)
+            sessions = SourceSessions(
+                parent,
+                ticket_key=ticket_key,
+                registration_factory=lambda _: (lambda: True, lambda fd: CapturedArtifact(artifact, signed)),
+            )
+            endpoint = f"unix:{tmp_path / 'capture.sock'}"
+            server = asyncio.create_task(serve(sup, {"tool_gateway": rpc_key}, endpoint, source_sessions=sessions))
+            deadline = time.monotonic() + 20
+            try:
+                for _ in range(100):
+                    if (tmp_path / "capture.sock").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                sid, key, source_binding = await register_issued_source(
+                    lifecycle, prepared, endpoint, rpc_key, ticket_key, ticket, manifest, proof, deadline=deadline
+                )
+
+                async def execute():
+                    return await capture_finish_publish(
+                        lifecycle,
+                        store,
+                        prepared,
+                        endpoint,
+                        rpc_key,
+                        ticket_key,
+                        ticket,
+                        sid,
+                        key,
+                        source_binding,
+                        [wire],
+                        gateway_parent,
+                        deadline=deadline,
+                        active=lambda: True,
+                    )
+
+                if tamper_receipt:
+                    with pytest.raises(SourceCaptureUnknown):
+                        await execute()
+                else:
+                    outcome.append(await execute())
+            finally:
+                server.cancel()
+                await asyncio.gather(server, return_exceptions=True)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(lambda: asyncio.run(exercise())).result(timeout=25)
+
+    expected = "UNKNOWN" if tamper_receipt else "PUBLISHED"
+    claim, prepared, _, _ = prepared_execution_fixture(dbs, verified_setup, on_prepared=issue, expected_state=expected)
+    row = dbs["owner"].one(
+        "SELECT state,artifact_sha256 FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
+        (claim.tenant_id, prepared.id),
+    )
+    assert row is not None and row["state"] == expected
+    assert bool(outcome) is not tamper_receipt
+    assert (row["artifact_sha256"] is None) is tamper_receipt
 
 
 def test_gateway_attempt_prepares_distinct_execution_only_with_approved_scope(dbs, verified_setup):

@@ -249,8 +249,8 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
 
     This is not canonical Authority, an Artifact broker, or a production E2E.
     """
-    from aiagent_gateways.source_transfer import send_source
-    from aiagent_sandbox.source_rpc import SourceSession, SourceSessions
+    from aiagent_gateways.source_transfer import send_source_for_capture
+    from aiagent_sandbox.source_rpc import CapturedArtifact, SourceSession, SourceSessions
     from aiagent_sandbox.supervisor import serve
 
     git = shutil.which("git")
@@ -281,7 +281,8 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
         os.chown(root, -1, 20001)
         root.chmod(0o710)
         source_parent, output_parent, capture_parent = (root / name for name in ("source", "output", "capture"))
-        for parent in (source_parent, output_parent, capture_parent):
+        gateway_parent = root / "gateway"
+        for parent in (source_parent, output_parent, capture_parent, gateway_parent):
             parent.mkdir(mode=0o700)
         sup = Supervisor(
             root / "cells",
@@ -305,7 +306,7 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
         }
         results: list[tuple[bytes, bytes]] = []
 
-        async def staged(fd: int) -> None:
+        async def staged(fd: int) -> CapturedArtifact:
             provisional = Grant(
                 uuid.uuid4().hex,
                 "tenant",
@@ -344,7 +345,7 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
                         revoked=asyncio.Event(),
                     ) as (result, captured_fd, signed_receipt):
                         assert result["status"] == "EXITED" and result["exitCode"] == 0
-                        results.append((os.read(captured_fd, 4 * 1024 * 1024 + 1), signed_receipt))
+                        return CapturedArtifact(os.read(captured_fd, 4 * 1024 * 1024 + 1), signed_receipt)
 
         async def exercise() -> None:
             deadline = time.monotonic() + 60
@@ -372,15 +373,18 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
                     if (root / "supervisor.sock").exists():
                         break
                     await asyncio.sleep(0.01)
-                await send_source(
+                async with send_source_for_capture(
                     endpoint,
                     b"k" * 32,
                     session.session_id,
                     session.key,
                     session.transfer_binding(),
                     chunks,
+                    gateway_parent,
                     deadline=deadline,
-                )
+                    active=lambda: True,
+                ) as (artifact_fd, signed_receipt):
+                    results.append((os.read(artifact_fd, 4 * 1024 * 1024 + 1), signed_receipt))
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -408,4 +412,8 @@ def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -
         symbol = "scip-python python dev13-workspace 1.0 library/greet()."
         assert loaded.graph.definitions(symbol)[0].path == "library.py"
         assert {item.path for item in loaded.graph.references(symbol)} == {"main.py"}
-        assert not list(source_parent.iterdir()) and not list(output_parent.iterdir())
+        assert (
+            not list(source_parent.iterdir())
+            and not list(output_parent.iterdir())
+            and not list(gateway_parent.iterdir())
+        )

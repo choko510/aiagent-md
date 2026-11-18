@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import os
 import stat
@@ -32,7 +33,30 @@ from aiagent_development.code_intelligence.projection_stage import _open_trusted
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
 
 from .binary_transfer import receive_async
-from .source_ticket import source_binding, source_transfer_key, verify_source_ticket
+from .source_ticket import (
+    artifact_binding,
+    artifact_transfer_key,
+    source_binding,
+    source_transfer_key,
+    verify_source_ticket,
+)
+
+
+@dataclass(frozen=True)
+class CapturedArtifact:
+    """Bounded bytes and receipt obtained from the Supervisor capture context."""
+
+    data: bytes
+    proof: bytes
+
+
+@dataclass(frozen=True)
+class ArtifactTransfer:
+    artifact: CapturedArtifact
+    key: bytes
+    binding: bytes
+    active: Callable[[], bool]
+    deadline: float
 
 
 @dataclass(frozen=True)
@@ -49,7 +73,7 @@ class SourceSession:
     identity: Identity
     deadline: float
     active: Callable[[], bool]
-    on_staged: Callable[[int], Awaitable[None] | None]
+    on_staged: Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]
 
     def transfer_binding(self) -> bytes:
         return source_binding(
@@ -72,7 +96,8 @@ class SourceSessions:
         *,
         ticket_key: bytes | None = None,
         registration_factory: Callable[
-            [dict[str, Any]], tuple[Callable[[], bool], Callable[[int], Awaitable[None] | None]]
+            [dict[str, Any]],
+            tuple[Callable[[], bool], Callable[[int], Awaitable[CapturedArtifact | None] | CapturedArtifact | None]],
         ]
         | None = None,
     ) -> None:
@@ -163,7 +188,7 @@ class SourceSessions:
             raise ValueError("invalid source session")
         self._pending[session.session_id] = session
 
-    async def receive(self, body: dict[str, Any], reader: asyncio.StreamReader) -> dict[str, Any]:
+    async def receive(self, body: dict[str, Any], reader: asyncio.StreamReader) -> dict[str, Any] | ArtifactTransfer:
         if set(body) != {"sessionId"} or type(body["sessionId"]) is not str:
             raise ValueError("invalid source session")
         session_id = body["sessionId"]
@@ -182,7 +207,7 @@ class SourceSessions:
 
     async def _receive_session(
         self, session: SourceSession, reader: asyncio.StreamReader, parent_fd: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | ArtifactTransfer:
         with tempfile.TemporaryFile(dir=f"/proc/self/fd/{parent_fd}") as quarantine:
             await receive_async(
                 reader,
@@ -242,9 +267,26 @@ class SourceSessions:
                     raise ValueError("source session revoked")
                 result = session.on_staged(staged.root_fd)
                 if inspect.isawaitable(result):
-                    await result
+                    result = await result
                 if not session.active() or time.monotonic() >= session.deadline:
                     raise ValueError("source session revoked")
+                if result is not None:
+                    if (
+                        not isinstance(result, CapturedArtifact)
+                        or not isinstance(result.data, bytes)
+                        or not 1 <= len(result.data) <= 4 * 1024 * 1024
+                        or not isinstance(result.proof, bytes)
+                        or not 1 <= len(result.proof) <= 16384
+                    ):
+                        raise ValueError("invalid artifact capture")
+                    digest = hashlib.sha256(result.data).hexdigest()
+                    return ArtifactTransfer(
+                        result,
+                        artifact_transfer_key(session.key),
+                        artifact_binding(session.transfer_binding(), digest, len(result.data)),
+                        session.active,
+                        session.deadline,
+                    )
             finally:
                 stopped.set()
                 await asyncio.to_thread(stage.__exit__, None, None, None)

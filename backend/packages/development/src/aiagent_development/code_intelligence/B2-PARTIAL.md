@@ -403,5 +403,19 @@ Crash reconciliation is not implemented. Source Git verification
 and staging now run in a worker with cooperative revocation checks, while the
 verified directory remains alive across an asynchronous consumer. Arbitrary
 proof/manifest metadata must fit the existing 4 MiB control frame; support for
-larger Git proofs is not yet implemented. Artifact transport, production
-watchdog wiring, recovery and atomic publication integration remain open.
+larger Git proofs is not yet implemented. Production watchdog wiring and
+crash recovery remain open.
+
+An opt-in capture response now uses the existing binary framing with a distinct
+artifact direction key and binding, a 4 MiB limit, signed RPC metadata and a
+private read-only receiving descriptor. An internal Gateway helper verifies the
+capture receipt through `ExecutionLifecycle.finish()` and calls the existing
+atomic publication store; ambiguous failures attempt to mark the execution
+UNKNOWN. Fault tests cover modified frames, truncated streams, trailing data,
+wrong binding, forged metadata, oversized output and revocation. A Docker test
+transfers an actual Supervisor/scip-python capture over this channel and reads
+it with B1. Separate PostgreSQL tests exercise transfer to FINISHED/PUBLISHED
+using a synthetic index and test-only validator. These are not a unified
+Production E2E: the production registration factory, live authority watchdog,
+approved recipe/Grant dispatcher, recovery and Development Adapter remain
+unconnected. The source-session callback is not an authorization mechanism.
