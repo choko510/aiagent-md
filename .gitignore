@@ -4,3 +4,4 @@ __pycache__/
 web/dist/
 web/node_modules/
 
+devtools/free_ai/.runs/

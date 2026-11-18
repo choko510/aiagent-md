@@ -1,0 +1,98 @@
+name: dev-free-ai-offline
+# Development-only lab: static checks plus fully offline tests. This workflow never
+# calls an anonymous AI endpoint and holds no credentials by design (SEC-12).
+on:
+  pull_request:
+    paths:
+      - 'devtools/free_ai/**'
+      - 'devtools/__init__.py'
+      - '.github/workflows/dev-free-ai-offline.yml'
+      - '.gitignore'
+  push:
+    branches: [main]
+    paths:
+      - 'devtools/free_ai/**'
+      - 'devtools/__init__.py'
+      - '.github/workflows/dev-free-ai-offline.yml'
+      - '.gitignore'
+permissions:
+  contents: read
+concurrency:
+  group: dev-free-ai-offline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - name: Sync the locked backend environment (Python 3.12)
+        run: cd backend && uv sync --locked --python 3.12
+      - name: Offline tests (httpx.MockTransport only; no sockets)
+        run: backend/.venv/bin/python -m pytest -q devtools/free_ai/tests
+      - run: backend/.venv/bin/ruff check --config backend/pyproject.toml devtools/free_ai
+      - run: backend/.venv/bin/ruff format --check --config backend/pyproject.toml devtools/free_ai
+      - run: backend/.venv/bin/mypy --config-file backend/pyproject.toml --strict devtools/free_ai
+      - name: Production isolation audit (AST, Dockerfile, git tracking)
+        run: |
+          backend/.venv/bin/python - <<'PY'
+          import ast
+          import pathlib
+          import subprocess
+          import sys
+
+          root = pathlib.Path(".")
+          sys.path.insert(0, ".")
+          from devtools.free_ai.catalog import catalog_specs
+
+          hosts = tuple(spec.endpoint_host for spec in catalog_specs())
+          failures = []
+
+          for path in (root / "backend" / "packages").rglob("*.py"):
+              if "__pycache__" in path.parts:
+                  continue
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              roots = set()
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      roots.update(alias.name.split(".")[0] for alias in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                      roots.add(node.module.split(".")[0])
+              if "devtools" in roots:
+                  failures.append(f"production import of devtools: {path}")
+
+          scan_roots = [root / "backend", root / "deploy"]
+          for base in scan_roots:
+              for path in base.rglob("*"):
+                  if not path.is_file() or ".venv" in path.parts or "__pycache__" in path.parts:
+                      continue
+                  text = path.read_text(encoding="utf-8", errors="ignore")
+                  for host in hosts:
+                      if host in text:
+                          failures.append(f"fixed lab endpoint in production tree: {path}")
+
+          dockerfile = (root / "deploy" / "docker" / "Dockerfile").read_text(encoding="utf-8")
+          if "devtools" in dockerfile or "free_ai" in dockerfile:
+              failures.append("Dockerfile copies or references devtools")
+
+          tracked = subprocess.run(
+              ["git", "ls-files", "devtools/free_ai/.runs"],
+              capture_output=True,
+              text=True,
+              check=False,
+          ).stdout.strip()
+          if tracked:
+              failures.append("devtools/free_ai/.runs is tracked by git")
+
+          if "devtools/free_ai/.runs/" not in (root / ".gitignore").read_text(encoding="utf-8"):
+              failures.append(".gitignore does not ignore devtools/free_ai/.runs/")
+
+          for failure in failures:
+              print(failure)
+          if failures:
+              sys.exit(1)
+          print("production isolation audit passed")
+          PY
