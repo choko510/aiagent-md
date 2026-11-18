@@ -5,7 +5,7 @@ import io
 import time
 
 import pytest
-from aiagent_sandbox.binary_transfer import TransferError, encode_chunk, receive_chunks
+from aiagent_sandbox.binary_transfer import TransferError, encode_chunk, encode_end, receive_chunks
 
 KEY = b"k" * 32
 BINDING = b"b" * 32
@@ -28,7 +28,9 @@ def receive(wire: bytes, payload: bytes, *, binding: bytes = BINDING, active: bo
 
 def test_authenticated_chunk_round_trip() -> None:
     chunks = [b"a" * 65536, b"hello"]
-    wire = b"".join(encode_chunk(KEY, BINDING, i, chunk) for i, chunk in enumerate(chunks))
+    wire = b"".join(encode_chunk(KEY, BINDING, i, chunk) for i, chunk in enumerate(chunks)) + encode_end(
+        KEY, BINDING, len(chunks)
+    )
     assert receive(wire, b"".join(chunks)) == b"".join(chunks)
 
 
@@ -41,7 +43,7 @@ def test_rejects_wrong_order_duplicate_and_disconnect() -> None:
 
 
 def test_rejects_tampering_scope_digest_and_revocation() -> None:
-    wire = encode_chunk(KEY, BINDING, 0, b"payload")
+    wire = encode_chunk(KEY, BINDING, 0, b"payload") + encode_end(KEY, BINDING, 1)
     for altered, payload, binding, active in (
         (wire[:-1] + bytes([wire[-1] ^ 1]), b"payload", BINDING, True),
         (wire, b"payload", b"x" * 32, True),
@@ -73,7 +75,7 @@ def test_async_transfer_and_deadline() -> None:
 
     async def exercise() -> None:
         reader = asyncio.StreamReader()
-        reader.feed_data(encode_chunk(KEY, BINDING, 0, b"source"))
+        reader.feed_data(encode_chunk(KEY, BINDING, 0, b"source") + encode_end(KEY, BINDING, 1))
         sink = io.BytesIO()
         await receive_async(
             reader,
@@ -99,3 +101,10 @@ def test_async_transfer_and_deadline() -> None:
             )
 
     asyncio.run(exercise())
+
+
+def test_missing_or_invalid_authenticated_end_is_rejected() -> None:
+    frame = encode_chunk(KEY, BINDING, 0, b"source")
+    for wire in (frame, frame + encode_end(KEY, BINDING, 2), frame + encode_end(KEY, b"x" * 32, 1)):
+        with pytest.raises(TransferError):
+            receive(wire, b"source")

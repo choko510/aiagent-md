@@ -37,6 +37,14 @@ def encode_chunk(key: bytes, binding: bytes, sequence: int, data: bytes) -> byte
     return header + data + _tag(key, binding, header, data)
 
 
+def encode_end(key: bytes, binding: bytes, sequence: int) -> bytes:
+    """Authenticate the end of a transfer after the final data frame."""
+    if len(key) < 32 or len(binding) != 32 or not 0 <= sequence < 2**64:
+        raise TransferError("invalid frame")
+    header = _HEADER.pack(sequence, 0)
+    return header + _tag(key, binding, header, b"")
+
+
 def _read_exact(stream: BinaryIO, size: int, deadline: float, active: Callable[[], bool]) -> bytes:
     result = bytearray()
     while len(result) < size:
@@ -96,6 +104,12 @@ def receive_chunks(
         digest.update(data)
         received += size
         sequence += 1
+    end_header = _read_exact(stream, _HEADER.size, deadline, active)
+    if _HEADER.unpack(end_header) != (sequence, 0):
+        raise TransferError("invalid transfer end")
+    end_tag = _read_exact(stream, _TAG_SIZE, deadline, active)
+    if not hmac.compare_digest(end_tag, _tag(key, binding, end_header, b"")):
+        raise TransferError("transfer end authentication failed")
     if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
         raise TransferError("transfer digest mismatch")
     if time.monotonic() >= deadline or not active():
@@ -103,8 +117,11 @@ def receive_chunks(
 
 
 def encode_chunks(key: bytes, binding: bytes, chunks: Iterable[bytes]) -> Iterable[bytes]:
-    for sequence, chunk in enumerate(chunks):
+    sequence = 0
+    for chunk in chunks:
         yield encode_chunk(key, binding, sequence, chunk)
+        sequence += 1
+    yield encode_end(key, binding, sequence)
 
 
 async def receive_async(
@@ -167,6 +184,12 @@ async def receive_async(
         digest.update(data)
         received += size
         sequence += 1
+    end_header = await read_exact(_HEADER.size)
+    if _HEADER.unpack(end_header) != (sequence, 0):
+        raise TransferError("invalid transfer end")
+    end_tag = await read_exact(_TAG_SIZE)
+    if not hmac.compare_digest(end_tag, _tag(key, binding, end_header, b"")):
+        raise TransferError("transfer end authentication failed")
     if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
         raise TransferError("transfer digest mismatch")
     if time.monotonic() >= deadline or not active():
