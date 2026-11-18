@@ -12,8 +12,9 @@ execution, billing, contracts, database and deployment are untouched.
 ## What it can and cannot do
 
 - `list` — print the frozen catalog (id, model, protocol, host, eligibility, evidence
-  class, live availability, reason). Live availability is `unverified` until a probe
-  was actually run in that environment; nothing is advertised as "available" or
+  class, live availability, reason). `list` always prints `unverified`/`NOT_PROBED` for
+  the official services and does not read past probe logs, so a previous probe is not
+  reported as current availability; nothing is advertised as "available" or
   "confirmed free".
 - `dry-run` — print each fixture id, its exact request-body byte count and destination.
   It reports `network_sent=0` and is **not** a budget or token estimate.
@@ -220,14 +221,23 @@ local quota file and metadata-only JSONL logs (`probes.jsonl` and, after a revie
 ignored (`trust_env=False`), redirects are refused, and the TLS certificate is always
 verified.
 
-## Usage terms reviewed on 2026-11-17 (catalog checked on 2026-11-17)
+## Usage terms reviewed on 2026-11-18 (catalog checked on 2026-11-18)
 
 | Service | Endpoint / model | Evidence | Notes |
 |---|---|---|---|
-| Kilo | `https://api.kilo.ai/api/gateway/chat/completions`, `nvidia/nemotron-3.5-super-vl:free` | official docs describe anonymous use and a per-IP hourly limit | model availability, trial data terms and `:free` pricing can change; never send personal data |
+| Kilo | `https://ai-gateway.kilo.ai/api/v1/chat/completions`, `nvidia/nemotron-3.5-super-vl:free` | official docs list `:free` models at zero cost, allow anonymous access to free models, and document a 200 requests/hour/IP limit; the Gateway endpoint is documented at `https://ai-gateway.kilo.ai/api/v1` | model availability, trial data terms and `:free` pricing can change; NVIDIA free endpoints are trial use and may log prompts/outputs for product improvement, so only synthetic fixtures may be sent |
 | OVHcloud | `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions`, `gpt-oss-120b` | official docs describe anonymous per-minute limits | this tool uses a stricter 65 s interval than the documented limit |
 | OpenCode Zen (`jev_legacy`) | `https://opencode.ai/zen/v1/systemone`, `jev-1.13-free` | user-observed legacy endpoint | current Console lists the model but gates use behind an API key; anonymous use is **not** confirmed, so the tool skips it |
 | Pollinations (`pollinations_legacy`) | `https://text.pollinations.ai/openai`, `openai-fast` | user-observed legacy endpoint | current `gen.pollinations.ai` requires an API key; the old anonymous alias may move or end, so the tool skips it |
+
+Kilo sources checked on 2026-11-18:
+<https://kilo.ai/docs/gateway/api-reference> (base URL
+`https://ai-gateway.kilo.ai/api/v1`), <https://kilo.ai/docs/gateway/authentication>
+(anonymous free-model access and 200 requests/hour/IP),
+<https://kilo.ai/docs/gateway/usage-and-billing> (`:free` models are zero cost), and
+<https://kilo.ai/docs/getting-started/using-kilo-for-free> (NVIDIA free-endpoint trial
+data terms). The Kilo endpoint was updated to the official Gateway URL on 2026-11-18;
+no live request has been made against that URL in this change.
 
 The catalog check is a snapshot, not a guarantee. `:free`, `cost: 0` or "anonymous" are
 not promises that future requests are free; this tool never switches to a paid model,
@@ -237,7 +247,8 @@ A `cost` reported by a provider is recorded as observed; `cost_reported_usd: nul
 "not reported", which is different from a verified zero charge.
 
 Single live observations from the implementation environment on 2026-11-17, kept only
-as point-in-time evidence: `kilo`/`jp_hello` returned HTTP 200 with the requested model
+as point-in-time evidence and made against the pre-update Kilo URL: `kilo`/`jp_hello`
+returned HTTP 200 with the requested model
 and no reported cost; `ovh`/`arithmetic_2plus2` timed out after about 16 s with an
 unknown outcome and no retry. Neither legacy service was contacted. These are single
 runs, not availability or pricing guarantees.

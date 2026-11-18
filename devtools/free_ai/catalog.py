@@ -20,7 +20,7 @@ Eligibility = Literal["ELIGIBLE", "EXPERIMENTAL_DISABLED"]
 EvidenceClass = Literal["official_anonymous", "user_observed_legacy"]
 
 #: Date on which the catalog values below were last reviewed against primary sources.
-CATALOG_CHECKED_ON = "2026-11-17"
+CATALOG_CHECKED_ON = "2026-11-18"
 
 
 class CatalogError(RuntimeError):
@@ -55,7 +55,7 @@ class ProviderSpec:
 _FROZEN_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         provider_id="kilo",
-        endpoint="https://api.kilo.ai/api/gateway/chat/completions",
+        endpoint="https://ai-gateway.kilo.ai/api/v1/chat/completions",
         model_id="nvidia/nemotron-3.5-super-vl:free",
         wire_kind="chat_completions",
         eligibility="ELIGIBLE",
