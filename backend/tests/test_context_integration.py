@@ -14,7 +14,7 @@ from aiagent_core import control, memory_writer
 from aiagent_core.db import Database
 from aiagent_core.rpc import RpcClient
 from aiagent_domain.rpcwire import RpcError
-from aiagent_domain.tools import packaged_nihongo_lite
+from aiagent_domain.tools import packaged_nihongo_full, packaged_nihongo_lite
 from aiagent_gateways.context_dispatch import ContextAdmission
 from aiagent_gateways.context_head import PostgresHeadPort
 from aiagent_gateways.context_memory import PostgresMemoryRepository
@@ -127,6 +127,8 @@ def test_memory_context_head_runtime_rpc_fake_provider(
         }
     )
     assert packaged_nihongo_lite() in sent.system
+    assert packaged_nihongo_full() in sent.system  # tool-free Context path still gets the Full rules
+    assert "This Context path exposes no tools" in sent.system
     assert payload not in sent.system
     assert attempt["request_identity"] == sent.identity()
     head = dbs["owner"].one(

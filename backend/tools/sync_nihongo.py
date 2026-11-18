@@ -8,7 +8,9 @@ excluded from the bundle entirely.
 
 `--update` is the maintainer path when bumping the pin. It fetches that exact commit's archive, verifies every file
 with the same digests, and only then replaces the destination (staged, then renamed). A failed download or a
-mismatched file leaves the existing bundle untouched.
+mismatched file leaves the existing bundle untouched. A crash between the two renames is recovered on the next
+install/verify from the leftover `.nihongo-backup-*` directory; the swap is rollback-safe, not a single atomic
+directory replacement.
 
 Upstream: https://github.com/AnIT012/nihongo (MIT). Lite = ALWAYS.md, Full = SKILL.md + references/.
 """
@@ -242,17 +244,45 @@ def verified_archive_files(archive: bytes) -> dict[str, bytes]:
     return files
 
 
+def recover_leftover_backup(destination: Path) -> None:
+    """Recover a crash between the backup rename and the staged rename.
+
+    The previous bundle is verified before it is restored or discarded, so an arbitrary leftover directory is never
+    trusted. An ambiguous set of backups without a destination is refused rather than guessed.
+    """
+    backups = sorted(destination.parent.glob(".nihongo-backup-*"))
+    if not backups:
+        return
+    if destination.exists():
+        try:
+            verify_tree(destination)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("destination is not the pinned nihongo bundle; refusing to discard its backup") from exc
+        for backup in backups:
+            shutil.rmtree(backup, ignore_errors=True)
+        return
+    if len(backups) > 1:
+        raise RuntimeError(f"ambiguous nihongo backups; manual recovery required: {backups}")
+    try:
+        verify_tree(backups[0])
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"leftover nihongo backup is not a verified bundle: {backups[0]}") from exc
+    backups[0].rename(destination)
+
+
 def install(files: dict[str, bytes], destination: Path) -> None:
     """Stage verified files, keep the old bundle until the swap succeeds, and roll back if the swap fails.
 
     A directory rename cannot replace a non-empty directory, so the old bundle is moved aside first. The window
     between that move and the staged rename is covered by a rollback: if the swap raises, the previous verified
-    bundle is restored. A leftover backup is kept for manual recovery rather than deleted.
+    bundle is restored. If the process dies in that window, the next install/verify restores the verified backup
+    before proceeding, so the destination is not left missing.
     """
     if set(files) != set(EXPECTED_FILES):
         raise ValueError("unverified skill bundle")
     for rel, data in files.items():
         verify_file(rel, data)
+    recover_leftover_backup(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=destination.parent))
     backup: Path | None = None
@@ -285,7 +315,7 @@ def install(files: dict[str, bytes], destination: Path) -> None:
 
 
 def update(destination: Path, fetch: Callable[[], bytes] = download_archive) -> dict[str, bytes]:
-    """Fetch, verify, then atomically install. A fetch or verification failure leaves the bundle untouched."""
+    """Fetch, verify, then install with rollback and crash recovery; a failure leaves the bundle untouched."""
     files = verified_archive_files(fetch())
     install(files, destination)
     return files
@@ -300,6 +330,7 @@ def main() -> None:
         help="fetch the pinned upstream commit and replace the bundle after verification (maintainer only)",
     )
     args = parser.parse_args()
+    recover_leftover_backup(args.destination)
     if args.update:
         files = update(args.destination)
         print(f"Verified and installed upstream nihongo {UPSTREAM_COMMIT} ({len(files)} files)")

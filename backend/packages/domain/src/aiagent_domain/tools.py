@@ -233,3 +233,18 @@ def packaged_nihongo_lite() -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise RuntimeError(f"packaged nihongo Lite is missing: {path}") from exc
+
+
+@lru_cache(maxsize=1)
+def packaged_nihongo_full() -> str:
+    """Trusted nihongo Full instructions (SKILL.md), used only on the tool-free Context inference path.
+
+    Ordinary inference reads Full on demand through the Tool Gateway's grounded `read_file`. The Context request
+    has no tools, so the fixed, hash-verified Full text is included as trusted style policy instead. Reference
+    files remain unavailable there; callers must not claim otherwise.
+    """
+    path = SKILLS_DIR / "nihongo" / "SKILL.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"packaged nihongo Full is missing: {path}") from exc

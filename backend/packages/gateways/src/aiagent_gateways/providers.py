@@ -39,6 +39,11 @@ class ProviderEvent:
     usage: dict[str, int] = field(default_factory=dict)
 
 
+# Maximum output tokens requested from a real provider. Budget reservations must cover this bound, not a smaller
+# arbitrary headroom, or a long answer can exceed the reserved amount.
+MAX_OUTPUT_TOKENS = 4096
+
+
 class ProviderError(Exception):
     def __init__(self, code: str, retryable: bool) -> None:
         super().__init__(code)
@@ -282,7 +287,7 @@ class AnthropicProvider:
     ) -> AsyncIterator[ProviderEvent]:
         body = {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": MAX_OUTPUT_TOKENS,
             "stream": True,
             "system": system,
             "messages": self._messages(messages),
