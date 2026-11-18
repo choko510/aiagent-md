@@ -170,6 +170,32 @@ def test_model_budget_exhaustion(dbs: dict[str, Database], claimed: control.Clai
     assert r["tokens_reserved"] == 0 and r["model_calls"] == 0
 
 
+def test_token_estimate_includes_system_prompt_and_tool_schemas(claimed: control.Claim) -> None:
+    from aiagent_domain.tools import packaged_nihongo_lite
+    from aiagent_gateways.model_gateway import _estimate_request_tokens
+
+    lite = packaged_nihongo_lite()
+    assert (
+        _estimate_request_tokens(mreq(claimed, system=lite)) - _estimate_request_tokens(mreq(claimed, system="s"))
+        >= len(lite.encode("utf-8")) // 4
+    )
+    assert _estimate_request_tokens(mreq(claimed, tools=[])) < _estimate_request_tokens(mreq(claimed))
+
+
+def test_budget_boundary_reserves_the_whole_request(dbs: dict[str, Database], claimed: control.Claim) -> None:
+    """The recorded budget decision must use the estimate that includes the (Lite-sized) system prompt."""
+    from aiagent_domain.tools import packaged_nihongo_lite
+    from aiagent_gateways.model_gateway import _estimate_request_tokens
+
+    request = mreq(claimed, system=packaged_nihongo_lite())
+    est = _estimate_request_tokens(request)
+    dbs["owner"].one("UPDATE agent.runs SET token_budget=%s WHERE id=%s RETURNING 1", (est - 1, claimed.run_id))
+    with pytest.raises(RpcError, match="BUDGET_EXHAUSTED"):
+        run(mgw(dbs).complete(request))
+    dbs["owner"].one("UPDATE agent.runs SET token_budget=%s WHERE id=%s RETURNING 1", (est, claimed.run_id))
+    assert run(mgw(dbs).complete(request))["message"]
+
+
 def test_replay_requires_fresh_admission(
     dbs: dict[str, Database], claimed: control.Claim, tenant: dict[str, str]
 ) -> None:

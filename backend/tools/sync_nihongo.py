@@ -243,13 +243,19 @@ def verified_archive_files(archive: bytes) -> dict[str, bytes]:
 
 
 def install(files: dict[str, bytes], destination: Path) -> None:
-    """Stage fully verified files first; an existing bundle is replaced only after every byte is validated."""
+    """Stage verified files, keep the old bundle until the swap succeeds, and roll back if the swap fails.
+
+    A directory rename cannot replace a non-empty directory, so the old bundle is moved aside first. The window
+    between that move and the staged rename is covered by a rollback: if the swap raises, the previous verified
+    bundle is restored. A leftover backup is kept for manual recovery rather than deleted.
+    """
     if set(files) != set(EXPECTED_FILES):
         raise ValueError("unverified skill bundle")
     for rel, data in files.items():
         verify_file(rel, data)
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=destination.parent))
+    backup: Path | None = None
     try:
         for rel, data in files.items():
             path = staging.joinpath(*_checked_relpath(rel).parts)
@@ -258,8 +264,21 @@ def install(files: dict[str, bytes], destination: Path) -> None:
         if destination.is_symlink():
             raise ValueError("refusing to replace a symlink")
         if destination.exists():
-            shutil.rmtree(destination)
-        staging.rename(destination)
+            backup = Path(tempfile.mkdtemp(prefix=".nihongo-backup-", dir=destination.parent))
+            backup.rmdir()
+            destination.rename(backup)
+        try:
+            staging.rename(destination)
+        except BaseException:
+            if backup is not None and not destination.exists():
+                try:
+                    backup.rename(destination)  # restore the previously verified bundle
+                except OSError:
+                    pass  # keep the backup on disk for manual recovery
+            raise
+        if backup is not None:
+            shutil.rmtree(backup)
+            backup = None
     finally:
         if staging.exists():
             shutil.rmtree(staging)

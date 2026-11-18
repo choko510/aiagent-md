@@ -216,7 +216,8 @@ class FakeModelProvider:
             for i in range(0, len(raw), 5):
                 yield ProviderEvent("tool_args", tool_id=tid, text=raw[i : i + 5])
             yield ProviderEvent("tool_end", tool_id=tid)
-        chars = sum(len(str(m.get("content", ""))) for m in msgs)
+        # A real provider bills the system prompt too; excluding it hid budget under-reservation in tests.
+        chars = len(system) + sum(len(str(m.get("content", ""))) for m in msgs)
         yield ProviderEvent("usage", usage={"input_tokens": chars // 4 + 1, "output_tokens": len(text) // 4 + 1})
         yield ProviderEvent("stop")
 

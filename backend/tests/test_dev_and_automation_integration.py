@@ -586,7 +586,7 @@ def test_campaign_goal_propagates_to_worker_deliverable(
             max_concurrent_cycles=1,
         ),
         cost_per_cycle=250,
-        tokens_per_cycle=6000,
+        tokens_per_cycle=20000,
         tools_per_cycle=7,
         goal_text="Campaign default goal",
         work_item_goals=(("item-notify", "Find the widget price and notify alice."),),
@@ -608,8 +608,8 @@ def test_campaign_goal_propagates_to_worker_deliverable(
     assert row is not None
     assert "Find the widget price and notify alice." in row["goal_text"]
     assert "work_item=item-notify" in row["goal_text"]
-    assert "tokens_budget=6000" in row["goal_text"]
-    assert row["token_budget"] == 6000 and row["max_tool_calls"] == 7
+    assert "tokens_budget=20000" in row["goal_text"]
+    assert row["token_budget"] == 20000 and row["max_tool_calls"] == 7
 
     # Real Worker executes the spawned Campaign child Task end-to-end
     r1 = stack.worker()

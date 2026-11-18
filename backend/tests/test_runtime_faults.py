@@ -456,6 +456,11 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
             3,
             "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
         ),
+        (
+            "nihongo fixture: READMEを更新してください。",
+            3,
+            "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
+        ),
         ("nihongo fixture: このコードとJSONは変更しないでください。", 0, "コードとJSONは変更していません。"),
         ("nihongo fixture: nihongoを使わないで通常回答してください。", 0, "指定に従って通常回答しました。"),
     ],

@@ -217,3 +217,19 @@ def packaged_skill_texts() -> tuple[str, ...]:
     if not SKILLS_DIR.is_dir():
         return ()
     return tuple(p.read_text(encoding="utf-8") for p in sorted(SKILLS_DIR.rglob("*.md")))
+
+
+@lru_cache(maxsize=1)
+def packaged_nihongo_lite() -> str:
+    """Trusted standard Japanese instructions (nihongo Lite), pinned and hash-verified at image build.
+
+    This is a reviewed product rule embedded in every main-inference system prompt (ordinary and Context paths),
+    not user-installed Skill data. It never grants tools, approvals, egress or policy authority, and it is never
+    downloaded during a Run. A missing file means the release artifact is broken; fail closed instead of silently
+    dropping the standard Japanese policy.
+    """
+    path = SKILLS_DIR / "nihongo" / "ALWAYS.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"packaged nihongo Lite is missing: {path}") from exc

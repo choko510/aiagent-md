@@ -8,6 +8,10 @@ Skillは**バージョン固定された、読み取り可能な作業手順パ�
 
 Skillの小さな名称/説明は発見用index、本文は要求時のみlow-trust dataとしてModelへ。大規模な一括prompt注入を禁止。Memory`procedural_hint`のテキストがSkillそのものに昇格することはない。ライブラリ固有のHookをそのままHarnessへ取り込まない。
 
+### 0.1 組み込み標準日本語Skill（nihongo）の例外扱い（2026-11-19追記、Draft）
+
+`AnIT012/nihongo` は、固定コミット（`e62ed520147c2f9b50cf93d46b9d0cecc9892565`）・全ファイルのGit blob SHA-1/SHA-256検証・人間レビューを前提にコードと同格で同梱する `built_in` Skillである。このLite（`ALWAYS.md`）だけは、通常推論とContext推論のSystem Promptに常時埋め込む製品ルールとして扱う。これはユーザー/サードパーティSkillの「本文は要求時のみlow-trust data」（§0、§5）を緩和するものではない。埋め込み対象は出所・内容・ハッシュを固定したレビュー済みbundled Liteに限定し、権限付与、Tool追加、承認省略、Egress変更を行わない。Full（`SKILL.md`/`references/`）は従来どおり読み取り専用のオンデマンドdataであり、上流`scripts/`は同梱・実行しない。上流更新はハッシュ一致だけでなく差分レビューを必須とし、Liteの埋め込みを変える場合は本節、`backend/tools/sync_nihongo.py` のpin、Runtime/ContextのSystem Promptテストを同時に更新する。
+
 ## 1. 目的・非目標 / シナリオ
 
 用途はEC/ホテル/X/API/一般Web調査に共通する再利用手順（「税込総額を比較する」「複数ソースと日付を照合する」）を可搬に保ち、ユーザーが選択・無効化・ロールバックできるようにすること。SC-01/03/04/05/06/07/08/09、SC-13（学習したread-onlyブラウザ操作は別Ownerの検証を通る）、SC-16（フィードバックからSkill候補作成は直接有効化しない）。
