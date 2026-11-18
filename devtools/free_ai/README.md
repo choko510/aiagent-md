@@ -2,9 +2,9 @@
 
 This directory is a **development-time experiment harness**, not a product feature.
 
-It sends three fixed synthetic fixtures to at most four fixed external AI endpoints so
-that the implementation agent can note whether an unauthenticated service currently
-answers with the expected schema. Nothing here is registered in the aiagent-md Model
+It sends fixed synthetic fixtures to at most four fixed external AI endpoints so that
+the implementation agent can note whether an unauthenticated service currently answers
+with the expected schema, and can compare deterministic task scores offline. Nothing here is registered in the aiagent-md Model
 Gateway, Agent Runtime, Sentinel, Web UI, public API, Docker image, release path or CI
 gate that ships the product. Production model selection, routing, fallback, tool
 execution, billing, contracts, database and deployment are untouched.
@@ -36,12 +36,15 @@ python -m devtools.free_ai probe \
   --provider kilo --fixture jp_hello \
   --ack-synthetic-only --ack-external-request
 python -m devtools.free_ai report
+python -m devtools.free_ai review-report
 ```
 
 `probe` accepts `--fixture jp_hello`, `--fixture arithmetic_2plus2` and the six
 synthetic development tasks `--fixture dev_t01` … `dev_t06` for the two official chat
-services (Kilo and OVHcloud). `--fixture refund_noul` is only valid for `jev_legacy`,
-and the `dev_*` tasks are never allowed on the legacy services. Legacy services
+services (Kilo and OVHcloud). It also accepts the eight review tasks
+`--fixture review_r01` … `review_r08` for the two official chat services.
+`--fixture refund_noul` is only valid for `jev_legacy`, and the `dev_*`/`review_*`
+tasks are never allowed on the legacy services. Legacy services
 additionally require `--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS`
 while their anonymous terms are unconfirmed (see below).
 
@@ -67,6 +70,93 @@ The prompt asks for exactly one identifier. Scoring is deterministic Python:
 - missing/unsafe/other model id, tool calls and non-zero reported cost keep their
   existing `FORMAT_MISMATCH` / `MODEL_DRIFT` / `UNEXPECTED_TOOL_OUTPUT` /
   `UNEXPECTED_BILLING` behaviour
+
+### Synthetic code-review tasks (STEP 3)
+
+Eight fixed tasks `review_r01` … `review_r08` ask a chat model to review numbered,
+synthetic Python code and reply with a strict JSON finding list. The code is a source
+constant in `fixtures.py`; gold lives only in the separate `review_key.py`, which
+`fixtures.py` never imports, so the answer key cannot be sent or serialized into a prompt.
+
+| Fixture | Gold defects | Clean |
+|---|---|---|
+| `review_r01` | (2, `INDEX_OUT_OF_RANGE`, P2), (5, `SECRET_LOGGING`, P1) | no |
+| `review_r02` | (2, `SQL_INJECTION`, P1), (6, `BOUNDARY_BUG`, P2) | no |
+| `review_r03` | (2, `STALE_LEASE`, P1), (8, `UNSAFE_RETRY`, P1) | no |
+| `review_r04` | none | yes |
+| `review_r05` | none | yes |
+| `review_r06` | (8, `SECRET_LOGGING`, P1) | no |
+| `review_r07` | (5, `UNSAFE_RETRY`, P1) | no |
+| `review_r08` | none | yes |
+
+The gold total is 8 findings and there are 3 clean tasks. Rule ids are exactly
+`INDEX_OUT_OF_RANGE`, `SECRET_LOGGING`, `SQL_INJECTION`, `BOUNDARY_BUG`, `STALE_LEASE`
+and `UNSAFE_RETRY`; severities are exactly `P1`, `P2`, `P3`. The prompt asks for one JSON
+object and nothing else:
+
+```json
+{"findings":[{"line":2,"rule_id":"INDEX_OUT_OF_RANGE","severity":"P2"}]}
+```
+
+The response is accepted only when it is exactly that shape: no markdown fences, prose,
+trailing text, duplicate JSON keys, `NaN`/`Infinity`, excessive nesting, extra or missing
+keys, wrong types, unknown rule ids/severities, more than 8 findings, or a line outside
+the fixture's real numbered line range (`1..review_line_count`). Anything else is
+`FORMAT_MISMATCH` and is never scored.
+
+Scoring is deterministic Python:
+
+- the first finding whose `(line, rule_id)` matches an unmatched gold defect is a TP;
+- every other finding, including a second identical finding, is a FP;
+- each unmatched gold defect is a FN;
+- severity is scored separately, so a correct location and rule with a wrong severity is
+  still a TP but not a severity match;
+- `PASS` requires `fp == 0` and `fn == 0` (including an empty finding list for clean code);
+  anything else is `CONTENT_MISMATCH`.
+
+`review-report` reads only the fixed `devtools/free_ai/.runs/review_scores.jsonl` (no
+path argument, no directory scan, no network). Each new row has fourteen fields
+`schema_version, provider_id, model_requested, model_observed, fixture_id,
+observed_at_utc, http_status, status, reason_code, tp, fp, fn, severity_matches,
+elapsed_ms`. `tp/fp/fn/severity_matches` are integers only for a scored row
+(`PASS`/`CONTENT_MISMATCH`) and `null` for every non-scored row; `elapsed_ms` is the
+observed wall time or `null`. Rows written before `elapsed_ms` was added (the same
+thirteen fields without it) remain readable with an unknown elapsed time. The row contains catalog
+ids, status and counts only — never code, a prompt, a model answer or reasoning. The file
+has the same 1 MiB / 5000-line limits and the same constant `INVALID_LOG` / exit `5`
+failure mode as `report`.
+
+Every review probe attempt is written to the review log, including local preflight
+refusals, format failures, model drift, billing/tool failures and communication failures.
+Per provider, `review-report` reports all of them so failures are not hidden:
+
+- `attempts`: every review-log row, including local refusals and non-scored outcomes.
+- `valid_scored_cases`: rows with a numeric score (`PASS`/`CONTENT_MISMATCH`).
+- `format_failures`, `model_drift`, `billing_or_tool_failures`,
+  `communication_failures`, `local_preflight_skips`: disjoint non-scored buckets.
+- `coverage`: `valid_scored_cases / attempts` (denominator includes local refusals,
+  format failures and communication failures; `null` when `attempts` is 0).
+- `tp/fp/fn`, `micro_precision`, `micro_recall`, `micro_f1`: sums and metrics over
+  `valid_scored_cases` only; format/communication/local outcomes never enter this
+  denominator. `false_discovery_rate = fp / (tp + fp)`.
+- `severity_correct` (`severity_matches`), `severity_total_tp` (= TP), and
+  `severity_accuracy = severity_correct / severity_total_tp`.
+- `case_exact_matches`: scored cases with no FP and no FN.
+- `clean_cases_scored`, `clean_cases_correct`, `clean_cases_flagged`, and
+  `clean_case_false_alarm_rate = flagged / scored_clean_cases`.
+- `fixtures_executed`: number of distinct review fixtures that reached the log.
+
+The existing `probes.jsonl` thirteen-field shape is unchanged. A review probe writes one
+probe row and one review row; a non-review probe writes only the probe row. The two
+appends are not atomic across the two files. If the probe append fails, nothing is
+written and the command exits `5`. If the probe append succeeds but the review append
+fails, the command also exits `5` and prints `SAFETY_BLOCKED / INVALID_SCHEMA`; the probe
+row exists, but no review row exists, so `review-report` cannot count that attempt as a
+success. Failed sends are never retried and corrupt logs are never repaired.
+
+Old review log rows from the earlier STEP 3 draft (the former `review_01 … review_08`
+ids and the old `kind`/`high|medium|low` contract) are rejected as `INVALID_LOG`; they
+are not mixed with the new gold. Old STEP 1/2 non-review rows remain valid.
 
 ### `report`
 
@@ -119,12 +209,14 @@ credentials and exception messages are never printed or logged.
 ## Data that leaves the machine
 
 Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, a
-synthetic refund sentence with a `noul` question, and the six synthetic development
-tasks (fixed code snippets or a fixed situation plus their allowed identifiers). No
+synthetic refund sentence with a `noul` question, the six synthetic development tasks
+(fixed code snippets or a fixed situation plus their allowed identifiers), and the eight
+synthetic code-review tasks (fixed numbered code plus the output format). The review
+answer key is never part of a payload. No
 private repository content, customer data, cookies, tokens or `.env` values can be
 attached. `devtools/free_ai/.runs/` holds a
-local quota file and a metadata-only JSONL log; it is git-ignored and is never created by
-`list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
+local quota file and metadata-only JSONL logs (`probes.jsonl` and, after a review task,
+`review_scores.jsonl`); it is git-ignored and is never created by `list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
 ignored (`trust_env=False`), redirects are refused, and the TLS certificate is always
 verified.
 

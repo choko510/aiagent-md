@@ -48,6 +48,7 @@ def _temp_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(runner, "QUOTA_FILE", runs / "quota.json")
     monkeypatch.setattr(runner, "LOCK_FILE", runs / "lock")
     monkeypatch.setattr(runner, "LOG_FILE", runs / "probes.jsonl")
+    monkeypatch.setattr(runner, "REVIEW_SCORE_LOG_FILE", runs / "review_scores.jsonl")
     return runs
 
 
@@ -193,7 +194,12 @@ def test_fixtures_are_exact_constants_and_wire_kind_restricted() -> None:
     ovh = catalog.require_spec("ovh")
     jev = catalog.require_spec("jev_legacy")
 
-    chat_fixtures = ("jp_hello", "arithmetic_2plus2", *fixtures.DEV_FIXTURE_IDS)
+    chat_fixtures = (
+        "jp_hello",
+        "arithmetic_2plus2",
+        *fixtures.DEV_FIXTURE_IDS,
+        *fixtures.REVIEW_FIXTURE_IDS,
+    )
     assert fixtures.allowed_fixtures(kilo) == chat_fixtures
     assert fixtures.allowed_fixtures(ovh) == chat_fixtures
     assert fixtures.allowed_fixtures(jev) == ("refund_noul",)

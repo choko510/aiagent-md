@@ -5,7 +5,10 @@ function that accepts free text, a file path, stdin, a repository or a user-supp
 prompt, so arbitrary data (source code, customer data, secrets) cannot reach a provider.
 
 The ``dev_*`` fixtures are synthetic, self-contained development tasks that ask a model
-for one identifier from a fixed list. They are evaluation aids, not product features.
+for one identifier from a fixed list. The ``review_*`` fixtures ask for a strict JSON
+defect list about similarly fixed synthetic code. They are evaluation aids, not product
+features. The ground-truth answer key lives in ``review_key.py`` and is never imported
+here, so it cannot be serialized into a prompt.
 """
 
 from __future__ import annotations
@@ -27,6 +30,14 @@ FixtureId = Literal[
     "dev_t04",
     "dev_t05",
     "dev_t06",
+    "review_r01",
+    "review_r02",
+    "review_r03",
+    "review_r04",
+    "review_r05",
+    "review_r06",
+    "review_r07",
+    "review_r08",
 ]
 
 #: Synthetic chat prompt 1. The expected answer is a single Japanese word.
@@ -114,6 +125,136 @@ DEV_T06_PROMPT = (
 DEV_T06_ALLOWED: tuple[str, ...] = ("BOUNDARY_BUG", "TYPE_ERROR", "NO_BUG")
 DEV_T06_EXPECTED = "BOUNDARY_BUG"
 
+# --- REVIEW_R01..R08: synthetic code-review tasks (chat providers only) ----------------
+#
+# The code is fixed, synthetic and numbered. The model must answer with a strict JSON
+# object and nothing else. Gold lives in ``review_key.py`` only.
+
+
+def _numbered_code(code: str) -> str:
+    return "\n".join(f"{number}: {line}" for number, line in enumerate(code.splitlines(), 1))
+
+
+def _review_prompt(code: str, specification: str | None = None) -> str:
+    numbered = _numbered_code(code)
+    spec_block = "" if specification is None else f"Specification: {specification}\n\n"
+    return (
+        "Review the following synthetic Python code. Each line is prefixed with its line "
+        "number.\n\n"
+        f"{spec_block}{numbered}\n\n"
+        "Report every real defect. Reply with ONLY a JSON object, no prose and no markdown "
+        "fences, in exactly this shape:\n"
+        '{"findings":[{"line":<line number>,"rule_id":"<rule>","severity":"<severity>"}]}\n\n'
+        "Allowed rule_id values: INDEX_OUT_OF_RANGE, SECRET_LOGGING, SQL_INJECTION, "
+        "BOUNDARY_BUG, STALE_LEASE, UNSAFE_RETRY\n"
+        "Allowed severities: P1, P2, P3\n"
+        'Use an empty list when the code has no defect: {"findings":[]}\n'
+        "Report at most eight findings, each line must exist in the numbered code, and do "
+        "not use any other keys."
+    )
+
+
+REVIEW_R01_CODE = """def take(items, index):
+    return items[len(items)]
+def log_request(headers):
+    token = headers["Authorization"]
+    print("token=" + token)"""
+REVIEW_R01_PROMPT = _review_prompt(
+    REVIEW_R01_CODE,
+    "stdout is shipped to a shared log, and incoming headers contain a secret Authorization token.",
+)
+
+REVIEW_R02_CODE = """def find_user(conn, name):
+    query = "SELECT * FROM users WHERE name = '" + name + "'"
+    return conn.execute(query)
+
+def allowed(age):
+    return age > 18"""
+REVIEW_R02_PROMPT = _review_prompt(REVIEW_R02_CODE, "Only people aged 18 or older are allowed.")
+
+REVIEW_R03_CODE = """def commit_result(current_epoch, worker_epoch, store, result):
+    store.commit(result)
+
+def request_once(send):
+    try:
+        return send()
+    except TimeoutError:
+        return send()"""
+REVIEW_R03_PROMPT = _review_prompt(
+    REVIEW_R03_CODE,
+    "A commit must only be accepted when current_epoch equals worker_epoch. send is a "
+    "side-effecting POST with no idempotency key; when it raises TimeoutError the "
+    "outcome is unknown.",
+)
+
+REVIEW_R04_CODE = """def last_item(items):
+    if not items:
+        return None
+    return items[-1]
+
+def log_status(status):
+    print("status=" + status)"""
+REVIEW_R04_PROMPT = _review_prompt(REVIEW_R04_CODE)
+
+REVIEW_R05_CODE = """import sqlite3
+
+def find_user(conn, name):
+    query = "SELECT * FROM users WHERE name = ?"
+    return conn.execute(query, (name,)).fetchone()
+
+def allowed(age):
+    return age >= 18"""
+REVIEW_R05_PROMPT = _review_prompt(REVIEW_R05_CODE)
+
+REVIEW_R06_CODE = """def complete(run, worker_epoch):
+    if worker_epoch != run.lease_epoch:
+        return "STALE"
+    run.committed = True
+    return "OK"
+def debug_headers(headers):
+    token = headers["Authorization"]
+    print(token)"""
+REVIEW_R06_PROMPT = _review_prompt(
+    REVIEW_R06_CODE,
+    "stdout is shipped to a shared log, and incoming headers contain a secret Authorization token.",
+)
+
+REVIEW_R07_CODE = """def send_with_retry(send):
+    try:
+        return send()
+    except TimeoutError:
+        return send()"""
+REVIEW_R07_PROMPT = _review_prompt(
+    REVIEW_R07_CODE,
+    "send performs an external side effect; a timeout leaves the outcome unknown.",
+)
+
+REVIEW_R08_CODE = """def complete(run, worker_epoch):
+    if worker_epoch != run.lease_epoch:
+        return "STALE"
+    run.committed = True
+    return "OK"
+
+def send_once(send):
+    try:
+        return send()
+    except TimeoutError:
+        return "UNKNOWN_OUTCOME"
+"""
+REVIEW_R08_PROMPT = _review_prompt(REVIEW_R08_CODE)
+
+#: Identifiers for the synthetic code-review tasks, in task order.
+REVIEW_FIXTURE_IDS: tuple[FixtureId, ...] = (
+    "review_r01",
+    "review_r02",
+    "review_r03",
+    "review_r04",
+    "review_r05",
+    "review_r06",
+    "review_r07",
+    "review_r08",
+)
+
 #: Identifiers for the synthetic development tasks, in task order.
 DEV_FIXTURE_IDS: tuple[FixtureId, ...] = (
     "dev_t01",
@@ -141,6 +282,8 @@ class Fixture:
     expected_answer: str | None
     allowed_answers: tuple[str, ...]
     description: str
+    review_task: bool = False
+    review_line_count: int = 0
 
 
 _FIXTURES: tuple[Fixture, ...] = (
@@ -234,6 +377,102 @@ _FIXTURES: tuple[Fixture, ...] = (
         allowed_answers=DEV_T06_ALLOWED,
         description="synthetic boundary condition classification",
     ),
+    Fixture(
+        fixture_id="review_r01",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R01_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: array boundary plus secret logging",
+        review_task=True,
+        review_line_count=5,
+    ),
+    Fixture(
+        fixture_id="review_r02",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R02_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: SQL injection plus boundary condition",
+        review_task=True,
+        review_line_count=6,
+    ),
+    Fixture(
+        fixture_id="review_r03",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R03_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: stale lease plus unsafe retry",
+        review_task=True,
+        review_line_count=8,
+    ),
+    Fixture(
+        fixture_id="review_r04",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R04_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean code",
+        review_task=True,
+        review_line_count=7,
+    ),
+    Fixture(
+        fixture_id="review_r05",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R05_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean parameterized query and boundary",
+        review_task=True,
+        review_line_count=8,
+    ),
+    Fixture(
+        fixture_id="review_r06",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R06_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: secret logging",
+        review_task=True,
+        review_line_count=8,
+    ),
+    Fixture(
+        fixture_id="review_r07",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R07_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: unsafe retry after unknown outcome",
+        review_task=True,
+        review_line_count=5,
+    ),
+    Fixture(
+        fixture_id="review_r08",
+        wire_kind="chat_completions",
+        prompt=REVIEW_R08_PROMPT,
+        expected_text=None,
+        noul_threshold=None,
+        expected_answer=None,
+        allowed_answers=(),
+        description="code review: clean lease check and no automatic retry",
+        review_task=True,
+        review_line_count=11,
+    ),
 )
 
 FIXTURES: Mapping[str, Fixture] = MappingProxyType({fixture.fixture_id: fixture for fixture in _FIXTURES})
@@ -243,6 +482,7 @@ ALL_FIXTURE_IDS: tuple[FixtureId, ...] = (
     "arithmetic_2plus2",
     "refund_noul",
     *DEV_FIXTURE_IDS,
+    *REVIEW_FIXTURE_IDS,
 )
 
 
@@ -269,7 +509,7 @@ def allowed_fixtures(spec: ProviderSpec) -> tuple[FixtureId, ...]:
         return ("refund_noul",)
     if spec.is_legacy:
         return ("jp_hello", "arithmetic_2plus2")
-    return ("jp_hello", "arithmetic_2plus2", *DEV_FIXTURE_IDS)
+    return ("jp_hello", "arithmetic_2plus2", *DEV_FIXTURE_IDS, *REVIEW_FIXTURE_IDS)
 
 
 def build_payload(spec: ProviderSpec, fixture_id: str) -> dict[str, object]:
