@@ -14,12 +14,13 @@ import contextlib
 import json
 import math
 import os
+import statistics
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, NoReturn, cast, get_args
 
 from . import ProbeStatus, ReasonCode
 from .adapters import (
@@ -33,6 +34,7 @@ from .catalog import (
     ALL_PROVIDER_IDS,
     CATALOG_CHECKED_ON,
     LEGACY_ANONYMOUS_ALLOWED,
+    PROVIDERS,
     ProviderSpec,
     catalog_specs,
     get_spec,
@@ -58,6 +60,9 @@ RUNS_DIR: Final = PACKAGE_DIR / ".runs"
 QUOTA_FILE: Final = RUNS_DIR / "quota.json"
 LOCK_FILE: Final = RUNS_DIR / "lock"
 LOG_FILE: Final = RUNS_DIR / "probes.jsonl"
+REPORT_LOG_PATH: Final = "devtools/free_ai/.runs/probes.jsonl"
+REPORT_MAX_BYTES: Final = 1_048_576
+REPORT_MAX_LINES: Final = 5_000
 
 SCHEMA_VERSION: Final = 1
 LAB_VERSION: Final = "0.1"
@@ -266,6 +271,18 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
     if fixture.fixture_id == "refund_noul":
         threshold = fixture.noul_threshold
         matched = normalized.noul is not None and threshold is not None and normalized.noul >= threshold
+    elif fixture.allowed_answers:
+        # The model must reply with exactly one allowed identifier; prose is never mined
+        # for an answer and partial matches never count.
+        answer = normalized.text.strip() if normalized.text is not None else ""
+        if answer not in fixture.allowed_answers:
+            return Evaluation(
+                status="FORMAT_MISMATCH",
+                reason_code="INVALID_SCHEMA",
+                exit_code=EXIT_RESPONSE_ISSUE,
+                normalized=normalized,
+            )
+        matched = answer == fixture.expected_answer
     else:
         expected = fixture.expected_text
         matched = expected is not None and normalized.text is not None and normalized.text.strip() == expected
@@ -278,6 +295,401 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
         )
     reason: ReasonCode = "OK" if normalized.cost_reported_usd is not None else "COST_UNKNOWN"
     return Evaluation(status="PASS", reason_code=reason, exit_code=EXIT_OK, normalized=normalized)
+
+
+RECORD_FIELDS: Final = (
+    "schema_version",
+    "provider_id",
+    "model_requested",
+    "model_observed",
+    "fixture_id",
+    "observed_at_utc",
+    "http_status",
+    "status",
+    "reason_code",
+    "elapsed_ms",
+    "input_tokens",
+    "output_tokens",
+    "cost_reported_usd",
+)
+
+EVALUATED_STATUSES: Final = frozenset(
+    {
+        "PASS",
+        "CONTENT_MISMATCH",
+        "FORMAT_MISMATCH",
+        "MODEL_DRIFT",
+        "UNEXPECTED_BILLING",
+        "UNEXPECTED_TOOL_OUTPUT",
+    }
+)
+PROBE_STATUSES: Final = frozenset(get_args(ProbeStatus))
+REASON_CODES: Final = frozenset(get_args(ReasonCode))
+
+#: Providers whose chat responses must report the exact requested model.
+OFFICIAL_CHAT_PROVIDERS: Final = frozenset({"kilo", "ovh"})
+ACCESS_RESTRICTED_HTTP: Final = frozenset({401, 402, 403, 404, 410})
+
+#: The only status/reason pairs this lab can produce. Anything else is a corrupt log.
+STATUS_REASONS: Final[dict[str, frozenset[str]]] = {
+    "PASS": frozenset({"OK", "COST_UNKNOWN"}),
+    "CONTENT_MISMATCH": frozenset({"OUTPUT_MISMATCH"}),
+    "FORMAT_MISMATCH": frozenset({"INVALID_JSON", "INVALID_SCHEMA"}),
+    "MODEL_DRIFT": frozenset({"MODEL_CHANGED"}),
+    "UNEXPECTED_BILLING": frozenset({"REMOTE_FAILURE"}),
+    "UNEXPECTED_TOOL_OUTPUT": frozenset({"PROHIBITED_TOOL"}),
+    "ACCESS_RESTRICTED": frozenset({"AUTH_REQUIRED"}),
+    "RATE_LIMITED": frozenset({"RATE_LIMIT"}),
+    "REMOTE_ERROR": frozenset({"REMOTE_FAILURE"}),
+    "NETWORK_ERROR": frozenset({"UNKNOWN_OUTCOME"}),
+    "TIMEOUT": frozenset({"UNKNOWN_OUTCOME"}),
+    "UNVERIFIED_TERMS": frozenset({"LEGACY_DISABLED"}),
+    "LOCAL_INPUT_INVALID": frozenset({"INVALID_SCHEMA", "BODY_TOO_LARGE"}),
+    "SAFETY_BLOCKED": frozenset(
+        {"UNEXPECTED_REDIRECT", "BODY_TOO_LARGE", "RATE_LIMIT", "LEGACY_DISABLED", "INVALID_SCHEMA"}
+    ),
+}
+
+#: Statuses that can only be produced after a request was actually attempted.
+COMMUNICATION_ATTEMPT_STATUSES: Final = frozenset({"NETWORK_ERROR", "TIMEOUT", "REMOTE_ERROR", "ACCESS_RESTRICTED"})
+
+
+class ReportError(RuntimeError):
+    """The local probe log is missing required structure or exceeds a fixed limit."""
+
+
+@dataclass(slots=True)
+class _ProviderTotals:
+    attempts: int = 0
+    evaluated: int = 0
+    pass_count: int = 0
+    content_mismatch: int = 0
+    format_mismatch: int = 0
+    model_drift: int = 0
+    other_failures: int = 0
+    communication_failures: int = 0
+    local_preflight_skips: int = 0
+    elapsed_ms: list[int] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    token_records: int = 0
+    cost_unreported: int = 0
+
+
+def _optional_count(record: Mapping[str, object], key: str) -> int | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ReportError("log record has an invalid count")
+    return value
+
+
+def _record_cost(record: Mapping[str, object]) -> float | None:
+    cost = record.get("cost_reported_usd")
+    if cost is None:
+        return None
+    return float(cast("int | float", cost))
+
+
+def _validate_record_semantics(
+    record: Mapping[str, object],
+    *,
+    spec: ProviderSpec,
+    status: str,
+    reason: str,
+) -> None:
+    """Reject records whose fields contradict the status this lab can actually produce."""
+
+    def fail() -> NoReturn:
+        raise ReportError("log record is semantically inconsistent")
+
+    provider_id = cast("str", record["provider_id"])
+    http_status = record.get("http_status")
+    cost = _record_cost(record)
+    model_observed = record.get("model_observed")
+    official = provider_id in OFFICIAL_CHAT_PROVIDERS
+
+    # Legacy refusal codes only exist for the two disabled legacy services. A record
+    # claiming otherwise cannot have been produced by this lab.
+    if reason == "LEGACY_DISABLED" and not spec.is_legacy:
+        fail()
+    if status == "UNVERIFIED_TERMS" and not spec.is_legacy:
+        fail()
+
+    if status == "PASS":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if (reason == "OK") != (cost is not None):
+            fail()
+        if official and model_observed != spec.model_id:
+            fail()
+    elif status == "CONTENT_MISMATCH":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if official and model_observed != spec.model_id:
+            fail()
+    elif status == "MODEL_DRIFT":
+        if not official or http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+        if model_observed is None or model_observed == spec.model_id:
+            fail()
+    elif status == "UNEXPECTED_BILLING":
+        if http_status != 200:
+            fail()
+        if cost is None or cost <= 0:
+            fail()
+    elif status == "UNEXPECTED_TOOL_OUTPUT":
+        if http_status != 200:
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+    elif status == "FORMAT_MISMATCH":
+        # A decoding failure can be recorded without an HTTP status.
+        if http_status not in (None, 200):
+            fail()
+        if cost is not None and cost > 0:
+            fail()
+    elif status == "ACCESS_RESTRICTED":
+        if http_status not in ACCESS_RESTRICTED_HTTP:
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status == "RATE_LIMITED":
+        # 429 means the provider was reached; no HTTP status means a local quota skip.
+        if http_status not in (None, 429):
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status == "REMOTE_ERROR":
+        if not isinstance(http_status, int) or isinstance(http_status, bool):
+            fail()
+        if http_status in {200, 429} or http_status in ACCESS_RESTRICTED_HTTP or 300 <= http_status < 400:
+            fail()
+        if cost is not None or model_observed is not None:
+            fail()
+    elif status in {"NETWORK_ERROR", "TIMEOUT", "UNVERIFIED_TERMS", "LOCAL_INPUT_INVALID"}:
+        if http_status is not None or cost is not None or model_observed is not None:
+            fail()
+    elif status == "SAFETY_BLOCKED":
+        if cost is not None or model_observed is not None:
+            fail()
+        if reason == "UNEXPECTED_REDIRECT":
+            if not isinstance(http_status, int) or isinstance(http_status, bool) or not 300 <= http_status < 400:
+                fail()
+        elif reason == "BODY_TOO_LARGE":
+            if http_status != 200:
+                fail()
+        elif http_status is not None:
+            fail()
+
+
+def _is_local_fixture_refusal(record: Mapping[str, object], status: object) -> bool:
+    """True only for the pre-send provider/fixture mismatch rejection.
+
+    ``_probe()`` records such a rejection before the legacy check, the quota
+    reservation or any socket, so the fixture cannot be in ``allowed_fixtures``.
+    Every other status must still use an allowed fixture.
+    """
+    return (
+        status == "LOCAL_INPUT_INVALID"
+        and record.get("reason_code") == "INVALID_SCHEMA"
+        and record.get("http_status") is None
+        and record.get("model_observed") is None
+        and record.get("elapsed_ms") is None
+        and record.get("input_tokens") is None
+        and record.get("output_tokens") is None
+        and record.get("cost_reported_usd") is None
+    )
+
+
+def _validated_record(line: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(
+            line,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=_reject_json_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ReportError("log record is not valid JSON") from exc
+    if not isinstance(parsed, dict) or set(parsed) != set(RECORD_FIELDS):
+        raise ReportError("log record has an unexpected shape")
+    if parsed.get("schema_version") != 1 or isinstance(parsed.get("schema_version"), bool):
+        raise ReportError("log record has an unsupported schema version")
+    provider_id = parsed.get("provider_id")
+    if not isinstance(provider_id, str) or provider_id not in PROVIDERS:
+        raise ReportError("log record names an unknown provider")
+    for key in ("model_requested", "fixture_id", "observed_at_utc", "status", "reason_code"):
+        if not isinstance(parsed.get(key), str):
+            raise ReportError("log record has a non-string field")
+    model_observed = parsed.get("model_observed")
+    if model_observed is not None and not isinstance(model_observed, str):
+        raise ReportError("log record has an invalid observed model")
+    http_status = parsed.get("http_status")
+    if http_status is not None and (
+        isinstance(http_status, bool) or not isinstance(http_status, int) or not 100 <= http_status <= 599
+    ):
+        raise ReportError("log record has an invalid HTTP status")
+    _optional_count(parsed, "elapsed_ms")
+    _optional_count(parsed, "input_tokens")
+    _optional_count(parsed, "output_tokens")
+    cost = parsed.get("cost_reported_usd")
+    if cost is not None:
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            raise ReportError("log record has an invalid cost")
+        try:
+            amount = float(cost)
+        except (OverflowError, ValueError):
+            raise ReportError("log record has an invalid cost") from None
+        if not math.isfinite(amount) or amount < 0:
+            raise ReportError("log record has an invalid cost")
+    status = parsed.get("status")
+    reason = parsed.get("reason_code")
+    if status not in PROBE_STATUSES:
+        raise ReportError("log record has an unknown status")
+    if reason not in REASON_CODES:
+        raise ReportError("log record has an unknown reason code")
+    spec = require_spec(provider_id)
+    if parsed.get("model_requested") != spec.model_id:
+        raise ReportError("log record does not match the frozen catalog model")
+    fixture_id = parsed.get("fixture_id")
+    if fixture_id not in FIXTURES:
+        raise ReportError("log record names an unknown fixture")
+    if fixture_id not in allowed_fixtures(spec) and not _is_local_fixture_refusal(parsed, status):
+        raise ReportError("log record pairs the provider with a disallowed fixture")
+    if reason not in STATUS_REASONS[cast("str", status)]:
+        raise ReportError("log record pairs an impossible status and reason code")
+    _validate_record_semantics(
+        parsed,
+        spec=spec,
+        status=cast("str", status),
+        reason=cast("str", reason),
+    )
+    return parsed
+
+
+def _read_report_records() -> list[dict[str, object]]:
+    """Read only the fixed local log, with a hard byte and line limit."""
+    try:
+        size = LOG_FILE.stat().st_size
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("probe log is unreadable") from exc
+    if size > REPORT_MAX_BYTES:
+        # Refuse before allocating a buffer for an oversized log.
+        raise ReportError("probe log is too large")
+    try:
+        raw = LOG_FILE.read_bytes()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ReportError("probe log is unreadable") from exc
+    if len(raw) > REPORT_MAX_BYTES:
+        raise ReportError("probe log is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReportError("probe log is not UTF-8") from exc
+    lines = text.splitlines()
+    if len(lines) > REPORT_MAX_LINES:
+        raise ReportError("probe log has too many lines")
+    records: list[dict[str, object]] = []
+    for line in lines:
+        if not line.strip():
+            raise ReportError("probe log has a blank line")
+        records.append(_validated_record(line))
+    return records
+
+
+def _provider_report(totals: _ProviderTotals) -> dict[str, object]:
+    pass_rate: float | None = None if totals.evaluated == 0 else round(totals.pass_count / totals.evaluated, 4)
+    median_elapsed: float | None = (
+        None if not totals.elapsed_ms else round(float(statistics.median(totals.elapsed_ms)), 3)
+    )
+    return {
+        "attempts": totals.attempts,
+        "evaluated": totals.evaluated,
+        "pass": totals.pass_count,
+        "content_mismatch": totals.content_mismatch,
+        "format_mismatch": totals.format_mismatch,
+        "model_drift": totals.model_drift,
+        "other_failures": totals.other_failures,
+        "pass_rate": pass_rate,
+        "communication_failures": totals.communication_failures,
+        "local_preflight_skips": totals.local_preflight_skips,
+        "median_elapsed_ms": median_elapsed,
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "token_records": totals.token_records,
+        "cost_unreported": totals.cost_unreported,
+    }
+
+
+def _build_report() -> dict[str, object]:
+    records = _read_report_records()
+    totals: dict[str, _ProviderTotals] = {provider_id: _ProviderTotals() for provider_id in ALL_PROVIDER_IDS}
+    for record in records:
+        provider_id = cast("str", record["provider_id"])
+        entry = totals[provider_id]
+        entry.attempts += 1
+        status = record["status"]
+        if status in EVALUATED_STATUSES:
+            entry.evaluated += 1
+            if status == "PASS":
+                entry.pass_count += 1
+            elif status == "CONTENT_MISMATCH":
+                entry.content_mismatch += 1
+            elif status == "FORMAT_MISMATCH":
+                entry.format_mismatch += 1
+            elif status == "MODEL_DRIFT":
+                entry.model_drift += 1
+            else:
+                entry.other_failures += 1
+        elif status in COMMUNICATION_ATTEMPT_STATUSES or record.get("http_status") is not None:
+            entry.communication_failures += 1
+        else:
+            entry.local_preflight_skips += 1
+        elapsed = _optional_count(record, "elapsed_ms")
+        if elapsed is not None:
+            entry.elapsed_ms.append(elapsed)
+        input_tokens = _optional_count(record, "input_tokens")
+        output_tokens = _optional_count(record, "output_tokens")
+        if input_tokens is not None or output_tokens is not None:
+            entry.token_records += 1
+        entry.input_tokens += 0 if input_tokens is None else input_tokens
+        entry.output_tokens += 0 if output_tokens is None else output_tokens
+        if record.get("cost_reported_usd") is None:
+            entry.cost_unreported += 1
+    return {
+        "schema_version": 1,
+        "log_path": REPORT_LOG_PATH,
+        "records": len(records),
+        "providers": {provider_id: _provider_report(entry) for provider_id, entry in totals.items()},
+    }
+
+
+def _invalid_report_output() -> str:
+    return '{"schema_version":1,"status":"INVALID_LOG","reason_code":"INVALID_SCHEMA"}'
+
+
+def _run_report() -> int:
+    try:
+        report = _build_report()
+    except ReportError:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    except Exception:
+        print(_invalid_report_output())
+        return EXIT_UNSAFE
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return EXIT_OK
 
 
 def _flock_exclusive(fd: int) -> None:
@@ -432,6 +844,9 @@ def _reserve_slot(spec: ProviderSpec) -> LocalDecision:
 def _append_probe(record: ProbeRecord) -> None:
     line = json.dumps(record.as_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
+        # A rejected preflight may run before the run lock ever created ``.runs``.
+        # Creating the directory here keeps local refusals observable without sending.
+        RUNS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(str(LOG_FILE), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         try:
             os.write(fd, (line + "\n").encode("utf-8"))
@@ -473,30 +888,38 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         )
         return ProbeOutcome(record=record, exit_code=exit_code)
 
+    def logged(outcome_value: ProbeOutcome) -> ProbeOutcome:
+        """Persist a preflight decision; a write failure stays fail-closed."""
+        try:
+            _append_probe(outcome_value.record)
+        except QuotaStateError:
+            return outcome("SAFETY_BLOCKED", "INVALID_SCHEMA", EXIT_UNSAFE)
+        return outcome_value
+
     if fixture.fixture_id not in allowed_fixtures(spec):
-        return outcome("LOCAL_INPUT_INVALID", "INVALID_SCHEMA", EXIT_SKIPPED)
+        return logged(outcome("LOCAL_INPUT_INVALID", "INVALID_SCHEMA", EXIT_SKIPPED))
     if spec.is_legacy and (
         not cast("bool", args.allow_legacy) or not LEGACY_ANONYMOUS_ALLOWED.get(spec.provider_id, False)
     ):
         # The anonymous terms of both legacy services could not be confirmed on
         # CATALOG_CHECKED_ON, so nothing is sent even with --allow-legacy.
-        return outcome("UNVERIFIED_TERMS", "LEGACY_DISABLED", EXIT_SKIPPED)
+        return logged(outcome("UNVERIFIED_TERMS", "LEGACY_DISABLED", EXIT_SKIPPED))
     try:
         validate_spec(spec)
         payload = build_payload(spec, fixture.fixture_id)
         encode_body(payload)
     except LocalInputError as exc:
-        return outcome("LOCAL_INPUT_INVALID", exc.reason_code, EXIT_UNSAFE)
+        return logged(outcome("LOCAL_INPUT_INVALID", exc.reason_code, EXIT_UNSAFE))
 
     try:
         with _exclusive_run():
             if _reserve_slot(spec) != "RESERVED":
-                return outcome("RATE_LIMITED", "RATE_LIMIT", EXIT_SKIPPED)
+                return logged(outcome("RATE_LIMITED", "RATE_LIMIT", EXIT_SKIPPED))
             result = asyncio.run(post_json(spec, fixture.fixture_id))
     except LockBusyError:
-        return outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE)
+        return logged(outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE))
     except QuotaStateError:
-        return outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE)
+        return logged(outcome("SAFETY_BLOCKED", "RATE_LIMIT", EXIT_UNSAFE))
 
     evaluation = _evaluate(spec, fixture, result)
     normalized = evaluation.normalized
@@ -572,6 +995,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("list", help="show the frozen catalog without any network access")
     subparsers.add_parser("dry-run", help="show fixture ids, payload sizes and destinations; send nothing")
+    subparsers.add_parser("report", help="aggregate the local probe log; no network access")
     probe = subparsers.add_parser("probe", help="send one fixed synthetic fixture to one provider")
     probe.add_argument("--provider", required=True, choices=list(ALL_PROVIDER_IDS))
     probe.add_argument("--fixture", required=True, choices=list(FIXTURES))
@@ -595,6 +1019,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "dry-run":
         _print_dry_run()
         return EXIT_OK
+    if command == "report":
+        return _run_report()
     try:
         probe_outcome = _probe(args)
     except Exception:

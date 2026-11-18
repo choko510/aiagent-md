@@ -35,12 +35,74 @@ python -m devtools.free_ai dry-run
 python -m devtools.free_ai probe \
   --provider kilo --fixture jp_hello \
   --ack-synthetic-only --ack-external-request
+python -m devtools.free_ai report
 ```
 
-`probe` also accepts `--fixture arithmetic_2plus2` for the two chat services, and
-`--fixture refund_noul` for `jev_legacy` only. Legacy services additionally require
-`--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS` while their anonymous
-terms are unconfirmed (see below).
+`probe` accepts `--fixture jp_hello`, `--fixture arithmetic_2plus2` and the six
+synthetic development tasks `--fixture dev_t01` … `dev_t06` for the two official chat
+services (Kilo and OVHcloud). `--fixture refund_noul` is only valid for `jev_legacy`,
+and the `dev_*` tasks are never allowed on the legacy services. Legacy services
+additionally require `--allow-legacy`; they are still skipped with `UNVERIFIED_TERMS`
+while their anonymous terms are unconfirmed (see below).
+
+### Synthetic development tasks (STEP 2)
+
+| Fixture | Task | Expected identifier | Allowed identifiers |
+|---|---|---|---|
+| `dev_t01` | array boundary defect | `INDEX_OUT_OF_RANGE` | `INDEX_OUT_OF_RANGE`, `TYPE_ERROR`, `NO_BUG` |
+| `dev_t02` | SQL injection | `SQL_INJECTION` | `SQL_INJECTION`, `MEMORY_LEAK`, `NO_BUG` |
+| `dev_t03` | unknown side-effect outcome | `DO_NOT_RETRY_AUTOMATICALLY` | `RETRY_IMMEDIATELY`, `DO_NOT_RETRY_AUTOMATICALLY` |
+| `dev_t04` | secret logging | `SECRET_LOGGING` | `SECRET_LOGGING`, `SQL_INJECTION`, `NO_BUG` |
+| `dev_t05` | stale `leaseEpoch` completion | `REJECT_STALE` | `COMMIT`, `REJECT_STALE` |
+| `dev_t06` | boundary condition | `BOUNDARY_BUG` | `BOUNDARY_BUG`, `TYPE_ERROR`, `NO_BUG` |
+
+Each task is a fixed constant in `fixtures.py` built from synthetic code or a synthetic
+situation; nothing is read from files, stdin, environment variables or the repository.
+The prompt asks for exactly one identifier. Scoring is deterministic Python:
+
+- exact identifier after trimming surrounding whitespace → `PASS`
+- an allowed identifier that is not the expected one → `CONTENT_MISMATCH`
+- any other text (prose, different casing, partial match, empty answer) →
+  `FORMAT_MISMATCH`; an answer is never extracted from an explanation
+- missing/unsafe/other model id, tool calls and non-zero reported cost keep their
+  existing `FORMAT_MISMATCH` / `MODEL_DRIFT` / `UNEXPECTED_TOOL_OUTPUT` /
+  `UNEXPECTED_BILLING` behaviour
+
+### `report`
+
+`report` reads only the fixed `devtools/free_ai/.runs/probes.jsonl` (no path argument, no
+directory scan, no network) and prints one JSON line aggregating per provider: attempts,
+evaluated responses, `PASS`, `CONTENT_MISMATCH`, `FORMAT_MISMATCH`, `MODEL_DRIFT`, other
+evaluated failures, pass rate over evaluated responses, `communication_failures`,
+`local_preflight_skips`, median `elapsed_ms`, observed token sums, and how many records
+had no reported cost. It never prints prompts, answers, reasoning or headers.
+
+`communication_failures` counts only outcomes where a request was actually attempted
+(`NETWORK_ERROR`, `TIMEOUT`, `REMOTE_ERROR`, `ACCESS_RESTRICTED`, HTTP 429, and a
+response-stage `SAFETY_BLOCKED`). Results rejected before any send (`UNVERIFIED_TERMS`,
+`LOCAL_INPUT_INVALID`, local quota `/` held lock, local legacy refusal) are counted as
+`local_preflight_skips` and are never part of the quality denominator.
+
+Local refusals that happen before any socket is opened (quota interval or daily cap,
+disabled legacy service, held run lock, provider/fixture mismatch) are written to the same
+13-field log without sending anything, so `report` can account for them as
+`local_preflight_skips`. A log write failure still fails closed with exit `5`.
+A provider/fixture mismatch is accepted as `LOCAL_INPUT_INVALID / INVALID_SCHEMA` only
+when every send-stage field is empty (`http_status`, model, elapsed, tokens and cost);
+`PASS`, content and all communication-stage results still require an allowed fixture, and
+an unknown fixture id is always rejected.
+
+Records are validated for meaning as well as shape: `PASS` requires HTTP 200, no positive
+cost and, for Kilo/OVH, the exact requested model (legacy aliases stay exempt);
+`MODEL_DRIFT` requires a different observed model; `UNEXPECTED_BILLING` requires a
+positive cost; status/reason pairs, provider/fixture pairs, catalog model ids and
+HTTP/status pairings are checked against what the lab can actually produce.
+`LEGACY_DISABLED` and `UNVERIFIED_TERMS` are only accepted for the two legacy providers.
+
+The log is limited to 1 MiB and 5000 lines. A missing or empty file is an empty report;
+malformed JSON, duplicate keys, `NaN`/`Infinity`, unexpected or missing fields, wrong
+types, unknown or impossible values, semantic contradictions or limit violations print a
+constant `INVALID_LOG` JSON line and exit `5`; no partial aggregate is printed as success.
 
 Exit codes: `0` fixture contract satisfied (never a production guarantee), `2` safe
 skip (missing acknowledgement, disabled legacy service, local quota), `3` provider
@@ -56,9 +118,11 @@ credentials and exception messages are never printed or logged.
 
 ## Data that leaves the machine
 
-Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, and a
-synthetic refund sentence with a `noul` question. No private repository content, customer
-data, cookies, tokens or `.env` values can be attached. `devtools/free_ai/.runs/` holds a
+Only the constants in `fixtures.py`: a one-word Japanese greeting, `2+2`, a
+synthetic refund sentence with a `noul` question, and the six synthetic development
+tasks (fixed code snippets or a fixed situation plus their allowed identifiers). No
+private repository content, customer data, cookies, tokens or `.env` values can be
+attached. `devtools/free_ai/.runs/` holds a
 local quota file and a metadata-only JSONL log; it is git-ignored and is never created by
 `list` or `dry-run`. Set `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` if you like — they are
 ignored (`trust_env=False`), redirects are refused, and the TLS certificate is always
