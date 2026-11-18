@@ -445,6 +445,11 @@ class OpenAIProvider:
             "stream_options": {"include_usage": True},
             "messages": self._messages(system, messages),
         }
+        # Bound output to the same value the budget reserves. o-series rejects `max_tokens`.
+        if model.startswith(("o1", "o3", "o4")):
+            body["max_completion_tokens"] = MAX_OUTPUT_TOKENS
+        else:
+            body["max_tokens"] = MAX_OUTPUT_TOKENS
         if tools:
             body["tools"] = [
                 {
@@ -613,7 +618,10 @@ class GeminiProvider:
     ) -> AsyncIterator[ProviderEvent]:
         del stream
         url = self.url_template.format(model=model)
-        body: dict[str, Any] = {"contents": self._contents(messages)}
+        body: dict[str, Any] = {
+            "contents": self._contents(messages),
+            "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS},
+        }
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         if tools:

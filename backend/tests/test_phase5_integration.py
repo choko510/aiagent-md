@@ -29,7 +29,7 @@ from aiagent_gateways.browser_executor import BrowserSessionExecutor
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed
 from aiagent_gateways.model_gateway import ModelGateway, Route, RouteBreaker, RouteRates, SealedModelRequest
-from aiagent_gateways.providers import GeminiProvider, OpenAIProvider, ProviderError, ProviderEvent
+from aiagent_gateways.providers import MAX_OUTPUT_TOKENS, GeminiProvider, OpenAIProvider, ProviderError, ProviderEvent
 from aiagent_gateways.sentinel_port import LocalSentinel
 from aiagent_gateways.tool_gateway import ToolGateway
 from aiagent_gateways.web_fetch import HttpFetchExecutor, SearchRouterExecutor, safe_http_get
@@ -244,6 +244,8 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
             "name": "search",
             "args": {"query": "laptop"},
         }
+        openai_req = next(r for r in seen_requests if r["path"] == "/v1/chat/completions")
+        assert openai_req["body"]["max_tokens"] == MAX_OUTPUT_TOKENS  # output is capped to the reserved bound
 
         out_gm = _run(
             gw.complete(
@@ -265,6 +267,7 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
         gemini_req = next(r for r in seen_requests if r["path"].startswith("/gemini/"))
         assert "gem-key-secret-456" not in gemini_req["path"]
         assert gemini_req["headers"].get("x-goog-api-key") == "gem-key-secret-456"
+        assert gemini_req["body"]["generationConfig"]["maxOutputTokens"] == MAX_OUTPUT_TOKENS
 
         with dbs["owner"].conn() as c:
             rec_oa = c.execute(
