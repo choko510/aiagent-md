@@ -98,6 +98,33 @@ def test_refused_and_malformed_results_are_distinct(
         asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
 
 
+@pytest.mark.parametrize("error_kind", ["NO_RESULT", "INTERNAL", "RESPONSE_AUTH"])
+def test_rpc_errors_do_not_claim_execution_was_refused(monkeypatch: pytest.MonkeyPatch, error_kind: str) -> None:
+    from aiagent_domain.rpcwire import RpcAuthError, RpcError
+
+    class Client:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def call(self, *args: object, **kwargs: object) -> dict[str, object]:
+            if error_kind == "RESPONSE_AUTH":
+                raise RpcAuthError(error_kind)
+            raise RpcError(error_kind)
+
+    monkeypatch.setattr(aiagent_core.rpc, "RpcClient", Client)
+    executor = SandboxCellExecutor("unix:/unused", b"r" * 32, b"g" * 32)
+    executor.context["key"] = {
+        "tenant_id": "t",
+        "task_id": "t",
+        "run_id": "r",
+        "intent_id": "i",
+        "lease_epoch": 1,
+        "attempt_id": "test-attempt",
+    }
+    with pytest.raises(ExecutorUnknown):
+        asyncio.run(executor.execute("key", {"argv": ["tool"], "cwdRelative": "."}, None))
+
+
 def test_gateway_clipping_marks_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     class Client:
         def __init__(self, *args: object, **kwargs: object) -> None:

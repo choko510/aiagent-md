@@ -227,7 +227,7 @@ class SandboxCellExecutor:
         import uuid
 
         from aiagent_core.rpc import RpcClient
-        from aiagent_domain.rpcwire import RpcError
+        from aiagent_domain.rpcwire import RpcAuthError, RpcError
         from aiagent_sandbox.grant import Grant, sign
 
         ctx = self.context.get(effect_key)
@@ -261,8 +261,9 @@ class SandboxCellExecutor:
             res = await client.call(
                 "exec.run", {"grant": sign(self.grant_key, g), "argv": args["argv"], "cwdRelative": args["cwdRelative"]}
             )
-        except RpcError as e:
-            raise ExecutorFailed(e.code) from e  # refused before execution (grant/auth)
+        except (RpcError, RpcAuthError) as e:
+            # An RPC failure alone does not establish whether the Cell executed.
+            raise ExecutorUnknown("sandbox RPC outcome unavailable") from e
         except ConnectionRefusedError as e:
             raise ExecutorFailed("cell unavailable") from e
         except (OSError, EOFError, TimeoutError) as e:
