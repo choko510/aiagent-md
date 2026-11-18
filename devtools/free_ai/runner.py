@@ -1477,9 +1477,10 @@ def _emit_timeout_diagnostic(outcome: ProbeOutcome) -> None:
     try:
         sys.stderr.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
         sys.stderr.flush()
-    except (AttributeError, OSError, TypeError, ValueError):
-        # Diagnostics are optional: a closed or absent stderr must not hide the probe
-        # record or turn a timeout into a success / retry.
+    except Exception:
+        # Diagnostics are optional: a closed, absent, or otherwise broken stderr must
+        # not hide the probe record or turn a timeout into a success / retry. This is a
+        # deliberately broad boundary for an optional side channel only.
         pass
 
 

@@ -545,10 +545,10 @@ def test_timeout_diagnostic_write_failure_does_not_change_probe(
 ) -> None:
     class BrokenStderr:
         def write(self, _text: str) -> int:
-            raise OSError("stderr is closed")
+            raise RuntimeError("stderr is broken")
 
         def flush(self) -> None:
-            raise OSError("stderr is closed")
+            raise RuntimeError("stderr is broken")
 
     _temp_runs(monkeypatch, tmp_path)
     _mock_transport(monkeypatch, _timeout_read)
