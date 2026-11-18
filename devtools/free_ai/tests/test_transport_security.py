@@ -62,6 +62,31 @@ class _GuardedStream(httpx.AsyncByteStream):
         return None
 
 
+class _TimeoutStream(httpx.AsyncByteStream):
+    """Yield zero or more chunks, then raise a selected timeout."""
+
+    def __init__(self, chunks: tuple[bytes, ...], error: Exception) -> None:
+        self._chunks = chunks
+        self._error = error
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+        raise self._error
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _SleepingStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.sleep(0.2)
+        yield b'{"ok":true}'
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _json_ok(content: str = "こんにちは", model: str = "nvidia/nemotron-3.5-super-vl:free") -> httpx.Response:
     return httpx.Response(
         200,
@@ -354,6 +379,105 @@ def test_corrupt_encoded_body_is_a_format_mismatch(monkeypatch: pytest.MonkeyPat
     assert result.status == "FORMAT_MISMATCH"
     assert result.reason_code == "INVALID_JSON"
     assert result.body is None
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_kind"),
+    [
+        (httpx.ConnectTimeout, "CONNECT_TIMEOUT"),
+        (httpx.ReadTimeout, "READ_TIMEOUT"),
+        (httpx.WriteTimeout, "WRITE_TIMEOUT"),
+        (httpx.PoolTimeout, "POOL_TIMEOUT"),
+        (httpx.TimeoutException, "OTHER_TIMEOUT"),
+    ],
+)
+def test_timeout_kind_is_classified_without_retaining_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[httpx.TimeoutException],
+    expected_kind: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error_type("provider secret must not be retained", request=request)
+
+    requests = _mock_transport(monkeypatch, handler)
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.status == "TIMEOUT"
+    assert result.reason_code == "UNKNOWN_OUTCOME"
+    assert result.http_status is None
+    assert result.unknown_outcome is True
+    assert result.timeout_diagnostic is not None
+    assert result.timeout_diagnostic.timeout_kind == expected_kind
+    assert result.timeout_diagnostic.timeout_phase == "BEFORE_HEADERS"
+    assert result.timeout_diagnostic.body_chunk_received is False
+    assert len(requests) == 1
+
+
+def test_read_timeout_before_headers_has_before_headers_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("provider secret must not be retained", request=request)
+
+    _mock_transport(monkeypatch, handler)
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.timeout_diagnostic is not None
+    assert result.timeout_diagnostic.timeout_kind == "READ_TIMEOUT"
+    assert result.timeout_diagnostic.timeout_phase == "BEFORE_HEADERS"
+    assert result.timeout_diagnostic.body_chunk_received is False
+
+
+def test_read_timeout_after_headers_before_body_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_TimeoutStream((), httpx.ReadTimeout("provider secret must not be retained", request=request)),
+        )
+
+    _mock_transport(monkeypatch, handler)
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.timeout_diagnostic is not None
+    assert result.timeout_diagnostic.timeout_kind == "READ_TIMEOUT"
+    assert result.timeout_diagnostic.timeout_phase == "BODY_RECEIVING"
+    assert result.timeout_diagnostic.body_chunk_received is False
+
+
+def test_read_timeout_after_a_body_chunk_marks_chunk_received(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_TimeoutStream(
+                (b'{"ok":',), httpx.ReadTimeout("provider secret must not be retained", request=request)
+            ),
+        )
+
+    _mock_transport(monkeypatch, handler)
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.timeout_diagnostic is not None
+    assert result.timeout_diagnostic.timeout_kind == "READ_TIMEOUT"
+    assert result.timeout_diagnostic.timeout_phase == "BODY_RECEIVING"
+    assert result.timeout_diagnostic.body_chunk_received is True
+
+
+def test_overall_timeout_is_distinct_from_httpx_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(transport, "OVERALL_TIMEOUT_SECONDS", 0.01)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_SleepingStream(),
+        )
+
+    requests = _mock_transport(monkeypatch, handler)
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.status == "TIMEOUT"
+    assert result.reason_code == "UNKNOWN_OUTCOME"
+    assert result.unknown_outcome is True
+    assert result.timeout_diagnostic is not None
+    assert result.timeout_diagnostic.timeout_kind == "OVERALL_TIMEOUT"
+    assert result.timeout_diagnostic.timeout_phase == "BODY_RECEIVING"
+    assert result.timeout_diagnostic.body_chunk_received is False
+    assert len(requests) == 1
 
 
 def test_fa_t14_transport_failures_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -477,6 +477,89 @@ def test_fa_t35_cli_subprocess_ignores_decoy_credentials(monkeypatch: pytest.Mon
     assert not (tmp_path / ".runs").exists()
 
 
+def _timeout_read(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("provider secret must not reach stderr", request=request)
+
+
+def _stderr_diagnostics(stderr: str) -> list[dict[str, object]]:
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    parsed = [json.loads(line) for line in lines]
+    assert all(isinstance(item, dict) for item in parsed)
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def test_timeout_diagnostic_is_stderr_only_and_preserves_both_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(monkeypatch, _timeout_read)
+    code = runner.main(_probe_argv(fixture="review_r08"))
+    captured = capsys.readouterr()
+    record = _last_record(captured.out)
+    assert code == 3
+    assert len(record) == 13
+    assert record["status"] == "TIMEOUT"
+    assert record["reason_code"] == "UNKNOWN_OUTCOME"
+    assert record["http_status"] is None
+    assert len(requests) == 1
+
+    diagnostics = _stderr_diagnostics(captured.err)
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["event"] == "FREE_AI_TIMEOUT_DIAGNOSTIC"
+    assert diagnostic["timeout_kind"] == "READ_TIMEOUT"
+    assert diagnostic["timeout_phase"] == "BEFORE_HEADERS"
+    assert diagnostic["body_chunk_received"] is False
+    assert diagnostic["provider_id"] == "kilo"
+    assert diagnostic["fixture_id"] == "review_r08"
+    assert "provider secret" not in captured.err
+    assert "ReadTimeout" not in captured.err
+    assert "ai-gateway" not in captured.err
+
+    probe_line = json.loads((runs / "probes.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert len(probe_line) == 13
+    review_line = json.loads((runs / "review_scores.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert list(review_line) == list(runner.REVIEW_RECORD_FIELDS)
+    assert review_line["status"] == "TIMEOUT"
+    assert review_line["tp"] is None
+    quota = json.loads((runs / "quota.json").read_text(encoding="utf-8"))
+    assert quota["providers"]["kilo"]["day_count"] == 1
+
+
+def test_local_refusal_has_no_timeout_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+    requests = _mock_transport(monkeypatch, lambda _request: _json_ok())
+    code = runner.main(_probe_argv(fixture="refund_noul"))
+    captured = capsys.readouterr()
+    record = _last_record(captured.out)
+    assert code == 2
+    assert record["status"] == "LOCAL_INPUT_INVALID"
+    assert requests == []
+    assert captured.err == ""
+
+
+def test_timeout_diagnostic_write_failure_does_not_change_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class BrokenStderr:
+        def write(self, _text: str) -> int:
+            raise RuntimeError("stderr is broken")
+
+        def flush(self) -> None:
+            raise RuntimeError("stderr is broken")
+
+    _temp_runs(monkeypatch, tmp_path)
+    _mock_transport(monkeypatch, _timeout_read)
+    monkeypatch.setattr(sys, "stderr", BrokenStderr())
+    code = runner.main(_probe_argv(fixture="review_r08"))
+    record = _last_record(capsys.readouterr().out)
+    assert code == 3
+    assert len(record) == 13
+    assert record["status"] == "TIMEOUT"
+
+
 def test_every_provider_stays_unavailable_until_probed() -> None:
     for spec in catalog.catalog_specs():
         assert spec.provider_id in catalog.PROVIDERS
