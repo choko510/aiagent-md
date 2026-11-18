@@ -242,3 +242,170 @@ def test_real_scip_indexer_runs_through_supervisor_on_staged_source(tmp_path: Pa
                 finally:
                     os.close(file_fd)
         assert not list(parent.iterdir())
+
+
+def test_source_rpc_to_real_supervisor_and_signed_scip_capture(tmp_path: Path) -> None:
+    """Exercise the real data path with test-only session registration and keys.
+
+    This is not canonical Authority, an Artifact broker, or a production E2E.
+    """
+    from aiagent_gateways.source_transfer import send_source
+    from aiagent_sandbox.source_rpc import SourceSession, SourceSessions
+    from aiagent_sandbox.supervisor import serve
+
+    git = shutil.which("git")
+    assert git
+    repo = tmp_path / "repo_rpc"
+    repo.mkdir()
+
+    def git_run(*args: str) -> bytes:
+        return subprocess.check_output([git, "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+    git_run("init")
+    git_run("config", "user.name", "Fixture")
+    git_run("config", "user.email", "fixture@example.invalid")
+    (repo / "library.py").write_bytes(b"def greet(name: str) -> str:\n    return 'hello ' + name\n")
+    (repo / "main.py").write_bytes(b"from library import greet\nresult = greet('world')\n")
+    git_run("add", ".")
+    git_run("commit", "-m", "synthetic fixture")
+    identity = Identity("tenant", "owner", "fixture", "revision", git_run("rev-parse", "HEAD").decode().strip())
+    snapshot = GitSnapshot(AuthorizedSnapshot(identity, repo), Path(git), GitLimits(total_seconds=180))
+    manifest = prepare_projection(snapshot, identity, snapshot.tree)
+    git_proof = build_git_tree_proof(snapshot)
+    encoder = ProjectionEncoder(snapshot, manifest)
+    chunks = list(encoder.chunks())
+    assert encoder.receipt is not None
+
+    with tempfile.TemporaryDirectory(prefix="codex-scip-rpc-", dir="/tmp") as accessible:
+        root = Path(accessible)
+        os.chown(root, -1, 20001)
+        root.chmod(0o710)
+        source_parent, output_parent, capture_parent = (root / name for name in ("source", "output", "capture"))
+        for parent in (source_parent, output_parent, capture_parent):
+            parent.mkdir(mode=0o700)
+        sup = Supervisor(
+            root / "cells",
+            b"g" * 32,
+            limits=Limits(cpu_s=60, memory_bytes=8 * 1024**3, nproc=64),
+            require_netns=True,
+            cell_uid=20001,
+            cell_gid=20001,
+        )
+        execution, attempt = uuid7(), uuid.uuid4().hex
+        binding = {
+            "execution": execution,
+            "attempt": attempt,
+            "intent": "intent",
+            "tenant": "tenant",
+            "owner": "owner",
+            "task": "task",
+            "run": "run",
+            "goal_revision": 1,
+            "lease_epoch": 1,
+        }
+        results: list[tuple[bytes, bytes]] = []
+
+        async def staged(fd: int) -> None:
+            provisional = Grant(
+                uuid.uuid4().hex,
+                "tenant",
+                "task",
+                "run",
+                "intent",
+                1,
+                (),
+                ".",
+                40000,
+                8 * 1024**3,
+                int(time.time()) + 60,
+                attempt_id=attempt,
+                attempt_binding_version=1,
+                execution_binding_version=1,
+                execution_id=execution,
+                execution_binding_sha256=sha256_hex(binding),
+            )
+            with cell_source_traversal(source_parent, cell_gid=20001):
+                with projected_output(output_parent, provisional, cell_uid=20001, cell_gid=20001) as output_fd:
+                    argv = list(python_scip_argv(fd, output_fd))
+                    token = sign(b"g" * 32, replace(provisional, argv=tuple(argv)))
+                    async with sup._execute_and_capture(
+                        token,
+                        argv,
+                        ".",
+                        source_fd=fd,
+                        output_parent=output_parent,
+                        prepared_output_fd=output_fd,
+                        source_cwd=True,
+                        binding=binding,
+                        receipt_key=b"r" * 32,
+                        private_parent=capture_parent,
+                        deadline=time.monotonic() + 60,
+                        heartbeat_seconds=10,
+                        revoked=asyncio.Event(),
+                    ) as (result, captured_fd, signed_receipt):
+                        assert result["status"] == "EXITED" and result["exitCode"] == 0
+                        results.append((os.read(captured_fd, 4 * 1024 * 1024 + 1), signed_receipt))
+
+        async def exercise() -> None:
+            deadline = time.monotonic() + 60
+            session = SourceSession(
+                uuid.uuid4().hex,
+                execution,
+                attempt,
+                sha256_hex(binding),
+                "snapshot",
+                b"t" * 32,
+                manifest,
+                encoder.receipt,
+                git_proof,
+                identity,
+                deadline,
+                lambda: True,
+                staged,
+            )
+            sessions = SourceSessions(source_parent)
+            sessions.register(session)
+            endpoint = f"unix:{root / 'supervisor.sock'}"
+            task = asyncio.create_task(serve(sup, {"tool_gateway": b"k" * 32}, endpoint, source_sessions=sessions))
+            try:
+                for _ in range(200):
+                    if (root / "supervisor.sock").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                await send_source(
+                    endpoint,
+                    b"k" * 32,
+                    session.session_id,
+                    session.key,
+                    session.transfer_binding(),
+                    chunks,
+                    deadline=deadline,
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(exercise())
+        assert len(results) == 1
+        index, signed_receipt = results[0]
+        envelope = json.loads(signed_receipt)
+        mac = hmac.new(b"r" * 32, canonical_json(envelope["payload"]).encode(), hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(envelope["mac"], mac)
+        assert envelope["payload"]["execution"] == execution
+        assert envelope["payload"]["artifact_sha256"] == hashlib.sha256(index).hexdigest()
+        assert 0 < len(index) <= 4 * 1024 * 1024
+        index_manifest = IndexManifest(
+            identity,
+            snapshot.tree,
+            hashlib.sha256(index).hexdigest(),
+            "scip-python",
+            "0.6.8",
+            0,
+            tuple(SourceProvenance(f.path, f.blob_id, f.sha256) for f in manifest.files),
+        )
+        loaded = load_index(snapshot, index_manifest, index)
+        assert loaded.status in (IndexStatus.PARTIAL, IndexStatus.VALIDATED) and loaded.graph is not None
+        symbol = "scip-python python dev13-workspace 1.0 library/greet()."
+        assert loaded.graph.definitions(symbol)[0].path == "library.py"
+        assert {item.path for item in loaded.graph.references(symbol)} == {"main.py"}
+        assert not list(source_parent.iterdir()) and not list(output_parent.iterdir())

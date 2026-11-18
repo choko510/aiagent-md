@@ -377,3 +377,12 @@ bound to canonical RUNNING authority, durable replay protection, deadline and
 revocation throughout staging, and a safe asynchronous handoff to the existing
 execution/capture path. Artifact transfer, atomic publication, recovery,
 Development Adapter and end-to-end DB/Supervisor/SCIP validation remain open.
+
+The source staging hook can now await an asynchronous consumer while keeping the
+verified directory descriptor and staging context open. An opt-in Docker test
+uses this hook to connect the real Supervisor RPC to a real `scip-python` run,
+signed capture, and B1 definition/reference lookup. Its session registration,
+Grant, binding, and keys are test-only: the Gateway does not yet authorize or
+dispatch this path. Normal Supervisor startup still disables source sessions.
+On graceful server shutdown active RPC handlers are cancelled and awaited before
+the server closes; crash and cross-VM reconciliation remain unimplemented.

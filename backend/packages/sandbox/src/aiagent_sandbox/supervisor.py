@@ -555,8 +555,12 @@ class Supervisor:
 
 async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, source_sessions: Any = None) -> None:
     nonces = NonceCache()
+    connections: set[asyncio.Task[Any]] = set()
 
     async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            connections.add(task)
         try:
             n = decode_length(await r.readexactly(4))
             env = json.loads(await r.readexactly(n))
@@ -611,6 +615,8 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
             pass
         finally:
             w.close()
+            if task is not None:
+                connections.discard(task)
 
     kind, _, rest = endpoint.partition(":")
     if kind == "vsock":
@@ -625,8 +631,17 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
     else:
         host, port = rest.rsplit(":", 1)
         srv = await asyncio.start_server(handle, host, int(port))
-    async with srv:
-        await srv.serve_forever()
+    try:
+        # serve_forever() waits for existing connections on cancellation in
+        # Python 3.12. Cancel handlers first so staged contexts can unwind.
+        await asyncio.Future[None]()
+    finally:
+        srv.close()
+        for connection in tuple(connections):
+            connection.cancel()
+        if connections:
+            await asyncio.gather(*tuple(connections), return_exceptions=True)
+        await srv.wait_closed()
 
 
 def main() -> None:

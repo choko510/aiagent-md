@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import stat
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,7 @@ class SourceSession:
     identity: Identity
     deadline: float
     active: Callable[[], bool]
-    on_staged: Callable[[int], None]
+    on_staged: Callable[[int], Awaitable[None] | None]
 
     def transfer_binding(self) -> bytes:
         payload = {
@@ -136,7 +137,9 @@ class SourceSessions:
             ) as staged:
                 if not session.active() or time.monotonic() >= session.deadline:
                     raise ValueError("source session revoked")
-                session.on_staged(staged.root_fd)
+                result = session.on_staged(staged.root_fd)
+                if inspect.isawaitable(result):
+                    await result
                 if not session.active() or time.monotonic() >= session.deadline:
                     raise ValueError("source session revoked")
         return {"staged": True}

@@ -145,6 +145,35 @@ async def test_authenticated_socket_stages_git_projection_and_rejects_replay(tmp
             await writer.wait_closed()
             assert len(seen) == 1
             assert not list(parent.iterdir())
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+
+        async def waiting(fd: int) -> None:
+            assert os.fstat(fd).st_ino
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        candidate = replace(session, session_id="shutdown", on_staged=waiting)
+        sessions.register(candidate)
+        client = asyncio.create_task(
+            send_source(
+                f"unix:{socket}",
+                key,
+                candidate.session_id,
+                key,
+                candidate.transfer_binding(),
+                chunks,
+                deadline=candidate.deadline,
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        server.cancel()
+        await asyncio.gather(server, return_exceptions=True)
+        await asyncio.gather(client, return_exceptions=True)
+        assert cleaned.is_set()
+        assert not list(parent.iterdir())
     finally:
         server.cancel()
         await asyncio.gather(server, return_exceptions=True)

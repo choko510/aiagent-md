@@ -25,7 +25,7 @@ docker run --rm --read-only --network none --cap-add SYS_ADMIN \
   --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --memory 2g --pids-limit 256 --tmpfs /tmp:exec,mode=1777,size=256m \
   -e AIAGENT_SCIP_FIXTURE=1 -e PYTHONDONTWRITEBYTECODE=1 \
-  -e PYTHONPATH=/w/packages/domain/src:/w/packages/sandbox/src:/w/packages/development/src \
+  -e PYTHONPATH=/w/packages/domain/src:/w/packages/core/src:/w/packages/gateways/src:/w/packages/sandbox/src:/w/packages/development/src \
   -v "$PWD:/w:ro" -w /w "$fixture_image" \
   python -m pytest -q -s --noconftest -p no:cacheprovider -c /dev/null tests/test_scip_supervisor_fixture.py
 ```
