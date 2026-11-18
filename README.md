@@ -27,13 +27,18 @@ Ubuntu / Docker 上で動作する **セルフホスト型の汎用パーソナ�
 
 Agent Runtime本体のOSSは**STEP 2の実測でDeepAgents Python＋LangGraphを選定**（ADR-038、NOT LOCKED）。Queueは自作PostgreSQL QueuePortを優先候補（ADR-039 PROVISIONAL）とし、適合試験は`conformance/agent_runtime/`。言語変更でTrusted/Untrusted VM、Sentinel、Tool Gateway、Credential Broker、Browser Worker、Trusted Egressの境界は変わりません。配置は [System Architecture §13.2](docs/00-foundation/system-architecture.md)、拘束規則は [Architecture Rules §E](docs/00-foundation/architecture-rules.md)、判断と移行監査台帳は [ADR-036〜040](docs/00-foundation/architecture-decisions.md)。既存仕様中の `ts` コードブロックは言語非依存の論理型記法です（実装はPydantic / 生成TS型）。
 
-### 日本語文章の標準推敲（yomiyasu）
+### 日本語文章の標準適用（nihongo）
 
-Agent Runtimeでは、日本語の説明文・技術文書・PR説明・メールなどの作成や推敲時に、[nanaism/yomiyasu](https://github.com/nanaism/yomiyasu) のSkillを**デフォルトで参照**します。ユーザーの明示的な不使用指定を優先し、コード・JSON・コマンド・引用文・短い通常会話を機械的に変更しません。数値、否定、条件、主体、断定度、根拠は保持します。
+Agent Runtimeは、日本語の返答からメール・お知らせ・ES・企画書・スライド・報告書・README・技術文書・UI文言まで、[AnIT012/nihongo](https://github.com/AnIT012/nihongo)（MIT）を**唯一の日本語Skill**として使います。固定コミットは [`e62ed52`（v2.3.1）](https://github.com/AnIT012/nihongo/commit/e62ed520147c2f9b50cf93d46b9d0cecc9892565) です。
 
-通常のソースチェックアウトには[簡易ガイド](backend/packages/domain/src/aiagent_domain/skills/yomiyasu/SKILL.md)を同梱し、**Dockerビルド時**に [固定コミット](https://github.com/nanaism/yomiyasu/commit/b9a69a3791dd7d3c063ed963bc4a408e515f6288) （v3.0.1）の公式Skill全体をダウンロードし、各ファイルのGit blob SHAを検証して置き換えます（[導入・更新用スクリプト](backend/tools/sync_yomiyasu.py)）。ビルド後のRunはネットワークからSkillを取得せず、読み取り専用で参照します。公式SkillはMITライセンスです。
+- **Lite（`ALWAYS.md`）**はSystem Promptにそのまま埋め込み、通常チャットを含む毎ターンに標準適用します。TurnごとのTool読み込みをせず、固定文なのでプロンプトキャッシュの対象になります。
+- **Full（`SKILL.md` + 必要な `references/*.md`）**は、人に出す文章や技術文書を作る・直す時だけ `read_file` で読みます。短い会話、コード、JSON、コマンド、引用文は変更しません。
+- 出力を別のLLMで再推敲するパスはありません。Context圧縮・Memory・Model Gateway・キャッシュの設計も変更しません。
+- ユーザーの明示的な不使用指定を優先し、数値・否定・条件・主体・識別子・専門用語・引用の意味を保持します。
 
-**現時点の境界:** 標準適用とは*モデルの推敲指示とSkill参照*を意味します。出力後に独立したLLM検査パスを強制するものではなく、Skill付属のPythonチェックはTrusted Runtime内で自動実行しません（実行したと虚偽表示しません）。将来スクリプト検査を有効化する場合は、既存のTool Gateway承認と隔離Cellを経由する必要があります。
+Skillは[読み取り専用のパッケージデータ](backend/packages/domain/src/aiagent_domain/skills/nihongo)として同梱します。**ビルド時**に [検証スクリプト](backend/tools/sync_nihongo.py) が23ファイルすべてのGit blob SHA-1とSHA-256を固定値と照合し、欠落・改ざん・余剰ファイル・symlinkがあればイメージのビルドを失敗させます。Run時のSkillダウンロードはなく、`--update`（メンテナ向け）だけが固定コミットを取得し、全ファイル検証後に原子的に置き換えます。上流には補助Pythonスクリプト（`scripts/`）がありますが、同梱せず、Trusted Runtimeでも実行しません。
+
+**現在の境界:** 標準適用はモデルへの指示とSkill参照であり、権限付与ではありません。Tool Gateway・Sentinel・承認フローは変わりません。出力後の独立したLLM検査や、Skillスクリプトの自動実行は行わず、「検査済み」と主張しません。
 
 ## 仕様のまとまり
 

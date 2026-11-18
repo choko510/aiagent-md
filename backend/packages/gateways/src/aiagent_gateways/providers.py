@@ -99,23 +99,40 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 return {"content": f"done:{after['send_message'].get('status')}"}
             return _call("send_message", to="bob", body="price=42")
         return {"content": "answer: goal revised, nothing sent"}
-    # Deterministic two-page skill read for the gateway/Agent runtime integration test.
+    # Deterministic nihongo fixture for the gateway/Agent runtime integration tests: chat uses only the embedded
+    # Lite, deliverables read the full SKILL.md, technical documents add one reference, and code/JSON stay untouched.
     # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
-    if "yomiyasu fixture" in first:
-        if "yomiyasuを使わない" in first:
+    if "nihongo fixture" in first:
+        if "nihongoを使わない" in first or "nihongo を使わない" in first:
             return {"content": "指定に従って通常回答しました。"}
-        pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
-        path = "/skills/yomiyasu/SKILL.md"
         if "read_file" not in tools:
             return {"content": "error: read_file not exposed"}
+        pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
+        deliverable = any(
+            key in first
+            for key in ("文章", "推敲", "メール", "お知らせ", "提案", "スライド", "議事録", "readme", "技術文書")
+        )
+        if not deliverable:
+            if "コード" in first or "json" in first:
+                return {"content": "コードとJSONは変更していません。"}
+            return {"content": "通常会話としてLiteのみで回答しました。"}
+        technical = "readme" in first or "技術文書" in first
+        path = "/skills/nihongo/SKILL.md"
         if not pages:
-            return _call("read_file", file_path=path, offset=0, limit=8)
+            return _call("read_file", file_path=path, offset=0, limit=100)
         if len(pages) == 1:
-            if not str(pages[0].get("content", "")).startswith("@@ lines "):
+            first_page = str(pages[0].get("content", ""))
+            if not first_page.startswith("@@ lines ") or "next offset 100" not in first_page:
                 return {"content": "error: first skill page rejected"}
-            return _call("read_file", file_path=path, offset=8, limit=1000)
+            return _call("read_file", file_path=path, offset=100, limit=1000)
         if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
             return {"content": "error: skill page rejected"}
+        if technical and len(pages) == 2:
+            return _call("read_file", file_path="/skills/nihongo/references/technical-writing.md", offset=0, limit=1000)
+        if technical and "# 技術文書" not in str(pages[2].get("content", "")):
+            return {"content": "error: technical reference rejected"}
+        if technical:
+            return {"content": "更新済み：技術文書の用語と手順を保って読みやすく整えました。"}
         return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):

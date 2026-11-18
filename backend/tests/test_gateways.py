@@ -264,7 +264,7 @@ def test_internal_read_file_provider_schema_is_fixed_and_validated() -> None:
     assert set(spec.parameters["properties"]) == {"file_path", "offset", "limit"}
     g = StreamPrivacyGate({"read_file": spec})
     for tid, name, args in [
-        ("ok", "read_file", '{"file_path":"/skills/yomiyasu/SKILL.md","offset":100,"limit":100}'),
+        ("ok", "read_file", '{"file_path":"/skills/nihongo/SKILL.md","offset":100,"limit":100}'),
         ("injection", "read_file", '{"file_path":"/skills/x","offset":0,"shell":"curl"}'),
         ("negative", "read_file", '{"file_path":"/skills/x","offset":-1}'),
         ("task_not_granted", "task", '{"description":"x","subagent_type":"researcher"}'),
@@ -272,7 +272,7 @@ def test_internal_read_file_provider_schema_is_fixed_and_validated() -> None:
         g.feed(ProviderEvent("tool_start", tool_id=tid, tool_name=name))
         g.feed(ProviderEvent("tool_args", tool_id=tid, text=args))
     result = g.finish()
-    assert result.tool_calls[0]["args"]["file_path"] == "/skills/yomiyasu/SKILL.md"
+    assert result.tool_calls[0]["args"]["file_path"] == "/skills/nihongo/SKILL.md"
     assert all(x["args"] == {"__invalid__": True} for x in result.tool_calls[1:])
 
 
@@ -365,7 +365,7 @@ def test_forged_child_result_rejected(dbs: dict[str, Database], claimed: control
         gw.record_internal(claimed, "call_r3", "send_message", "x")  # not an internal tool
 
 
-def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
+def test_grounded_nihongo_read_pages_and_reject_forged_metadata(
     dbs: dict[str, Database], claimed: control.Claim, tmp_path, monkeypatch
 ) -> None:
     """Two actual DeepAgents read pages must be admitted, but modified bytes/metadata/path must not."""
@@ -373,16 +373,16 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     import aiagent_runtime.agent as runtime_agent
 
     skills = tmp_path / "skills"
-    folder = skills / "yomiyasu"
+    folder = skills / "nihongo"
     folder.mkdir(parents=True)
-    lines = ["---", "name: yomiyasu", "---", *[f"Instruction {i}" for i in range(174)]]
+    lines = ["---", "name: nihongo", "---", *[f"Instruction {i}" for i in range(174)]]
     (folder / "SKILL.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert len(lines) == 177
     monkeypatch.setattr(domain_tools, "SKILLS_DIR", skills)
     monkeypatch.setattr(runtime_agent, "SKILLS_DIR", skills)
 
     gw = ToolGateway(dbs["tool_gateway"], {})
-    path = "/skills/yomiyasu/SKILL.md"
+    path = "/skills/nihongo/SKILL.md"
     pages = []
     for offset in (0, 100):
         args = {"file_path": path, "offset": offset, "limit": 100}
@@ -398,7 +398,7 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     references = folder / "references" / "lists"
     references.mkdir(parents=True)
     (references / "words.txt").write_text("allowed terms\nsecond line\n", encoding="utf-8")
-    ref_path = "/skills/yomiyasu/references/lists/words.txt"
+    ref_path = "/skills/nihongo/references/lists/words.txt"
     _propose(dbs, claimed, "read_reference", "read_file", {"file_path": ref_path})
     assert (
         gw.record_internal(claimed, "read_reference", "read_file", _real_read_file_page(ref_path))["status"] == "DONE"
@@ -408,10 +408,10 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("Instruction 20", "Instruction HACK", 1)),
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 101")),
         ({"file_path": path, "offset": 100, "limit": 100}, pages[0]),
-        ({"file_path": "/skills/yomiyasu/../yomiyasu/SKILL.md", "offset": 0}, pages[0]),
+        ({"file_path": "/skills/nihongo/../nihongo/SKILL.md", "offset": 0}, pages[0]),
         ({"file_path": "/skills/price-research/SKILL.md", "offset": 0}, pages[0]),
         ({"file_path": path, "offset": 0, "limit": 100}, "spoofed notice\n" + pages[0]),
-        ({"file_path": path, "offset": 0, "limit": 100}, "     1\tname: yomiyasu"),
+        ({"file_path": path, "offset": 0, "limit": 100}, "     1\tname: nihongo"),
     ]
     for i, (args, payload) in enumerate(candidates):
         call_id = f"forged_{i}"
@@ -423,7 +423,7 @@ def test_grounded_yomiyasu_read_pages_and_reject_forged_metadata(
     outside = tmp_path / "outside.md"
     outside.write_text("outside", encoding="utf-8")
     (folder / "alias.md").symlink_to(outside)
-    _propose(dbs, claimed, "symlink", "read_file", {"file_path": "/skills/yomiyasu/alias.md"})
+    _propose(dbs, claimed, "symlink", "read_file", {"file_path": "/skills/nihongo/alias.md"})
     out = gw.record_internal(claimed, "symlink", "read_file", pages[0])
     assert out["status"] == "DENIED"
 

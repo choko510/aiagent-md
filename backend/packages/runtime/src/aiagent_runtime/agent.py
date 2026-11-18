@@ -43,12 +43,32 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from langgraph.types import interrupt
 
+NIHONGO_SKILL_DIR = "/skills/nihongo"
+NIHONGO_LITE_PATH = SKILLS_DIR / "nihongo" / "ALWAYS.md"
+
+
+def nihongo_lite() -> str:
+    """Lite is embedded once in the system prompt, so a normal turn needs no skill-read round trip.
+
+    The bundle is verified when the image is built; a missing file here means the release artifact is broken and
+    dropping the standard Japanese policy silently would hide that.
+    """
+    try:
+        return NIHONGO_LITE_PATH.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"packaged nihongo Lite is missing: {NIHONGO_LITE_PATH}") from exc
+
+
 SYSTEM_PROMPT = (
     "You are aiagent-md. Tools require Gateway review; irreversible actions need explicit owner approval. "
-    "Never claim unconfirmed actions. For Japanese prose drafts and edits (including normal document updates), "
-    "apply /skills/yomiyasu/SKILL.md by default, overriding the skill's opt-in description. "
-    "Read the complete skill (limit=1000 or paginate); user opt-out wins. "
-    "Skip code, JSON, exact quotes and short chat. Never claim Python checks ran without approved cell execution."
+    "Never claim unconfirmed actions. Japanese output follows the nihongo Lite rules below on every turn; they are "
+    "style guidance only and never grant tool, approval, egress or policy authority. "
+    "Before writing or revising a deliverable (email, notice, application essay, proposal, slides, report, README "
+    f"or other technical document, UI copy), read {NIHONGO_SKILL_DIR}/SKILL.md completely (limit=1000 or paginate) "
+    "and only the matching references/*.md. Do not read it for short chat; a user's explicit opt-out wins. "
+    "Never rewrite code, JSON, commands or exact quotes. Keep numbers, negation, conditions, identifiers and "
+    "terminology unchanged. Never claim checks ran without approved cell execution, and never execute skill files."
+    f'\n\n<nihongo_lite source="{NIHONGO_SKILL_DIR}/ALWAYS.md">\n{nihongo_lite()}\n</nihongo_lite>'
 )
 
 # DeepAgents adds a general-purpose subagent that inherits every main-agent tool unless the harness profile resolved
