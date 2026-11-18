@@ -361,3 +361,19 @@ ownership are still required.
 ### Supervisor capture fixture update
 
 The private projected capture hook now creates or validates an exclusive output directory for the signed Execution ID and rejects replayed projected Executions after Supervisor restart. A privileged Docker test ran scip-python twice using a read-only Git projection, an Execution-specific output descriptor, Supervisor-signed capture and the B1 decoder. Both artifacts were 1,362 bytes with 11 occurrences and PARTIAL coverage; definition and cross-file reference queries succeeded. The signing key, Grant and binding in that fixture are test-only. This is not an authenticated Source/Artifact RPC, DB lifecycle integration, image attestation or a production Development workflow. Replay protection requires Supervisors to share the same private journal and filesystem lock; storage loss, distributed replicas on different journals and crash-orphan cleanup remain open. A failed or interrupted execution must not be treated as a published Artifact.
+
+### Source RPC staging prototype
+
+An opt-in, process-local session registry now connects the existing authenticated
+Supervisor RPC and binary frame receiver to Git-proof staging over a Unix socket.
+The test checks the staged file and rejection of replay, wrong transfer key,
+wrong binding, revoked authority callback, trailing bytes and truncated frames.
+The session registry is **not** enabled by the Supervisor entry point. Its test
+registration is not canonical DB authority, is not durable across restart, and
+cannot be used to admit execution. The current synchronous staging and callback
+also block the event loop and are not an execution or revocation mechanism.
+Production work must provide independently authenticated cross-VM registration
+bound to canonical RUNNING authority, durable replay protection, deadline and
+revocation throughout staging, and a safe asynchronous handoff to the existing
+execution/capture path. Artifact transfer, atomic publication, recovery,
+Development Adapter and end-to-end DB/Supervisor/SCIP validation remain open.

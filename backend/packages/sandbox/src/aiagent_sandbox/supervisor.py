@@ -553,7 +553,7 @@ class Supervisor:
                 yield result, captured.fd, proof
 
 
-async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
+async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, source_sessions: Any = None) -> None:
     nonces = NonceCache()
 
     async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
@@ -566,11 +566,23 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method not in ("exec.run", "exec.cancel", "exec.heartbeat"):
+            if caller != "tool_gateway" or method not in (
+                "exec.run",
+                "exec.cancel",
+                "exec.heartbeat",
+                "source.receive",
+            ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                if method in ("exec.cancel", "exec.heartbeat"):
+                if method == "source.receive":
+                    if source_sessions is None:
+                        raise GrantError("SOURCE_BROKER_UNAVAILABLE")
+                    try:
+                        res = await source_sessions.receive(body, r)
+                    except Exception as exc:
+                        raise GrantError("SOURCE_TRANSFER_REJECTED") from exc
+                elif method in ("exec.cancel", "exec.heartbeat"):
                     fields = (
                         body.get("tenantId"),
                         body.get("executionId"),

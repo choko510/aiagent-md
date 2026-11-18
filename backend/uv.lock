@@ -244,11 +244,15 @@ name = "aiagent-sandbox"
 version = "0.3.0"
 source = { editable = "packages/sandbox" }
 dependencies = [
+    { name = "aiagent-development" },
     { name = "aiagent-domain" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "aiagent-domain", editable = "packages/domain" }]
+requires-dist = [
+    { name = "aiagent-development", editable = "packages/development" },
+    { name = "aiagent-domain", editable = "packages/domain" },
+]
 
 [[package]]
 name = "aiagent-sentinel"
