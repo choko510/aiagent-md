@@ -22,6 +22,8 @@ from devtools.free_ai import catalog, runner, transport
 _REAL_NEW_CLIENT = transport._new_client
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _HOSTS = (
+    "ai-gateway.kilo.ai",
+    # The retired Kilo host must not reappear in production wiring either.
     "api.kilo.ai",
     "oai.endpoints.kepler.ai.cloud.ovh.net",
     "opencode.ai",

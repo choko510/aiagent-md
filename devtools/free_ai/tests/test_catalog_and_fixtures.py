@@ -54,7 +54,7 @@ def _temp_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 _EXPECTED_CATALOG: dict[str, tuple[str, str, str, str, str, int, int]] = {
     "kilo": (
-        "https://api.kilo.ai/api/gateway/chat/completions",
+        "https://ai-gateway.kilo.ai/api/v1/chat/completions",
         "nvidia/nemotron-3.5-super-vl:free",
         "chat_completions",
         "ELIGIBLE",
@@ -123,10 +123,27 @@ def test_fa_t02_unknown_provider_and_tampered_spec_are_rejected_without_network(
         catalog.require_spec("not-a-provider")
 
     tampered = [
-        dataclasses.replace(catalog.require_spec("kilo"), endpoint="http://api.kilo.ai/x"),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://api.kilo.ai/api/gateway/chat/completions",
+        ),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="http://ai-gateway.kilo.ai/api/v1/chat/completions"),
         dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://evil.example/chat"),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://ai-gateway.kilo.ai.evil.example/api/v1/chat/completions",
+        ),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://api.ai-gateway.kilo.ai/api/v1/chat/completions",
+        ),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://ai-gateway.kilo.ai/api/v1/other"),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://ai-gateway.kilo.ai/api/v1/chat/completions/extra",
+        ),
         dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://127.0.0.1/chat"),
-        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://api.kilo.ai:8443/chat"),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://ai-gateway.kilo.ai:8443/chat"),
         dataclasses.replace(catalog.require_spec("kilo"), model_id="some-paid-model"),
         dataclasses.replace(catalog.require_spec("kilo"), min_interval_seconds=0),
     ]
@@ -150,14 +167,18 @@ def test_fa_t02_unknown_provider_and_tampered_spec_are_rejected_without_network(
 def test_fa_t02_endpoint_shape_rules() -> None:
     base = catalog.require_spec("kilo")
     rejected = [
-        "http://api.kilo.ai/api/gateway/chat/completions",
-        "https://user:pw@api.kilo.ai/api/gateway/chat/completions",
-        "https://api.kilo.ai/api/gateway/chat/completions?x=1",
-        "https://api.kilo.ai/api/gateway/chat/completions#frag",
-        "https://api.kilo.ai:443/api/gateway/chat/completions",
-        "https://localhost/api/gateway/chat/completions",
-        "https://[::1]/api/gateway/chat/completions",
-        "https://api.kilo.ai/",
+        "https://api.kilo.ai/api/gateway/chat/completions",
+        "http://ai-gateway.kilo.ai/api/v1/chat/completions",
+        "https://user:pw@ai-gateway.kilo.ai/api/v1/chat/completions",
+        "https://ai-gateway.kilo.ai/api/v1/chat/completions?x=1",
+        "https://ai-gateway.kilo.ai/api/v1/chat/completions#frag",
+        "https://ai-gateway.kilo.ai:443/api/v1/chat/completions",
+        "https://ai-gateway.kilo.ai.evil.example/api/v1/chat/completions",
+        "https://api.ai-gateway.kilo.ai/api/v1/chat/completions",
+        "https://ai-gateway.kilo.ai/api/v1/chat/completions/extra",
+        "https://localhost/api/v1/chat/completions",
+        "https://[::1]/api/v1/chat/completions",
+        "https://ai-gateway.kilo.ai/",
     ]
     for endpoint in rejected:
         with pytest.raises(catalog.CatalogError):
@@ -176,7 +197,7 @@ def test_fa_t03_list_dry_run_help_are_offline_and_side_effect_free(
     dry = capsys.readouterr().out
     assert "network_sent=0" in dry
     assert "bytes=" in dry
-    assert "destination=https://api.kilo.ai/api/gateway/chat/completions" in dry
+    assert "destination=https://ai-gateway.kilo.ai/api/v1/chat/completions" in dry
     assert not runs.exists()
 
     with pytest.raises(SystemExit) as help_exit:

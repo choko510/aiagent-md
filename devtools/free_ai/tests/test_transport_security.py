@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import gzip
 import inspect
+import json
 import socket
 from collections.abc import AsyncIterator, Callable
 from typing import Any, NoReturn
@@ -75,11 +76,23 @@ def test_fa_t08_unexpected_endpoint_or_spec_never_sends(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(transport, "_new_client", lambda: _REAL_NEW_CLIENT(httpx.MockTransport(handler)))
     killed = [
-        dataclasses.replace(catalog.require_spec("kilo"), endpoint="http://api.kilo.ai/api/gateway/chat/completions"),
-        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://evil.example/chat"),
-        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://api.kilo.ai/chat"),
         dataclasses.replace(
-            catalog.require_spec("kilo"), endpoint="https://api.kilo.ai:8443/api/gateway/chat/completions"
+            catalog.require_spec("kilo"),
+            endpoint="https://api.kilo.ai/api/gateway/chat/completions",
+        ),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="http://ai-gateway.kilo.ai/api/v1/chat/completions"),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://evil.example/chat"),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://ai-gateway.kilo.ai.evil.example/api/v1/chat/completions",
+        ),
+        dataclasses.replace(catalog.require_spec("kilo"), endpoint="https://ai-gateway.kilo.ai/api/v1/other"),
+        dataclasses.replace(
+            catalog.require_spec("kilo"),
+            endpoint="https://ai-gateway.kilo.ai/api/v1/chat/completions/extra",
+        ),
+        dataclasses.replace(
+            catalog.require_spec("kilo"), endpoint="https://ai-gateway.kilo.ai:8443/api/v1/chat/completions"
         ),
     ]
     for spec in killed:
@@ -98,7 +111,7 @@ def test_fa_t09_redirects_are_refused(monkeypatch: pytest.MonkeyPatch, status: i
     assert result.reason_code == "UNEXPECTED_REDIRECT"
     assert result.http_status == status
     assert len(requests) == 1
-    assert str(requests[0].url) == "https://api.kilo.ai/api/gateway/chat/completions"
+    assert str(requests[0].url) == "https://ai-gateway.kilo.ai/api/v1/chat/completions"
 
 
 def test_fa_t10_no_credentials_and_no_injected_headers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,6 +137,23 @@ def test_fa_t10_no_credentials_and_no_injected_headers(monkeypatch: pytest.Monke
     assert lowered["accept-encoding"] == "identity"
     assert request.content == transport.encode_body(fixtures.build_payload(spec, _KILO_FIXTURE))
     assert "leaked" not in repr(request.headers)
+
+
+def test_kilo_uses_only_the_frozen_gateway_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests = _mock_transport(monkeypatch, lambda _request: _json_ok())
+    spec = catalog.require_spec("kilo")
+    result = asyncio.run(transport.post_json(spec, _KILO_FIXTURE))
+    assert result.status == "OK"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "POST"
+    assert request.url.scheme == "https"
+    assert request.url.host == "ai-gateway.kilo.ai"
+    assert request.url.path == "/api/v1/chat/completions"
+    assert request.url.query == b""
+    assert request.url.port in (None, 443)
+    assert json.loads(request.content) == fixtures.build_payload(spec, _KILO_FIXTURE)
+    assert json.loads(request.content)["model"] == "nvidia/nemotron-3.5-super-vl:free"
 
 
 def test_fa_t11_proxy_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,7 +421,7 @@ def test_fa_t17_remote_error_without_fallback(monkeypatch: pytest.MonkeyPatch, s
     assert result.reason_code == "REMOTE_FAILURE"
     assert result.http_status == status
     assert len(requests) == 1
-    assert requests[0].url.host == "api.kilo.ai"
+    assert requests[0].url.host == "ai-gateway.kilo.ai"
 
 
 def test_fa_t25_http_status_wins_over_200_like_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -427,7 +457,7 @@ def test_fa_t25_non_json_content_type_is_a_format_mismatch(monkeypatch: pytest.M
 
 def test_fa_t34_socket_guard_is_effective(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RuntimeError, match="offline test attempted"):
-        socket.create_connection(("api.kilo.ai", 443), timeout=0.1)
+        socket.create_connection(("ai-gateway.kilo.ai", 443), timeout=0.1)
     _mock_transport(monkeypatch, lambda _request: _json_ok())
     result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
     assert result.status == "OK"
