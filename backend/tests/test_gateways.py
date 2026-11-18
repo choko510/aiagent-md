@@ -183,6 +183,18 @@ def test_token_estimate_includes_system_prompt_and_tool_schemas(claimed: control
     assert _estimate_request_tokens(minimal) >= MAX_OUTPUT_TOKENS  # the output bound is always reserved
 
 
+def test_token_estimate_uses_routed_provider_models(claimed: control.Claim) -> None:
+    """A logical model name must not decide the tokenizer when the provider model is different."""
+    from aiagent_domain.tools import packaged_nihongo_lite
+    from aiagent_gateways.model_gateway import _estimate_request_tokens
+
+    request = mreq(claimed, system=packaged_nihongo_lite(), model="production-main")
+    logical = _estimate_request_tokens(request)
+    claude = _estimate_request_tokens(request, tokenizer_models=["claude-sonnet-4.5"])
+    assert claude > logical
+    assert _estimate_request_tokens(request, tokenizer_models=["gpt-4o", "claude-sonnet-4.5"]) == claude
+
+
 def test_budget_boundary_reserves_the_whole_request(dbs: dict[str, Database], claimed: control.Claim) -> None:
     """The recorded budget decision must use the estimate that includes the (Lite-sized) system prompt."""
     from aiagent_domain.tools import packaged_nihongo_lite

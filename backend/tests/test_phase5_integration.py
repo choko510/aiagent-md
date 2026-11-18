@@ -198,6 +198,7 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
         port = srv.server_address[1]
         scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
         _, claim_oa = _claim_new(dbs, scope, "test openai stream", allowed_models=["gpt-4o"])
+        _, claim_gpt5 = _claim_new(dbs, scope, "test gpt-5 stream", allowed_models=["gpt-5"])
         _, claim_gm = _claim_new(dbs, scope, "test gemini stream", allowed_models=["gemini-2.5-flash"])
 
         oa = OpenAIProvider(Secret("sk-oa-test-123"), None, url=f"http://127.0.0.1:{port}/v1/chat/completions")
@@ -209,6 +210,7 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
         oa_fail = OpenAIProvider(Secret("sk-oa-fail"), None, url=f"http://127.0.0.1:{port}/v1/fail500")
         rates = {
             "gpt-4o": RouteRates(input_micro_usd_per_1m=2_500_000, output_micro_usd_per_1m=10_000_000),
+            "gpt-5": RouteRates(input_micro_usd_per_1m=2_500_000, output_micro_usd_per_1m=10_000_000),
             "gemini-2.5-flash": RouteRates(input_micro_usd_per_1m=1_000_000, output_micro_usd_per_1m=4_000_000),
         }
         gw = ModelGateway(
@@ -216,6 +218,7 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
             {"openai": oa, "gemini": gm, "oa_fail": oa_fail},
             {
                 "gpt-4o": [Route("openai", "gpt-4o")],
+                "gpt-5": [Route("openai", "gpt-5")],
                 "gemini-2.5-flash": [Route("gemini", "gemini-2.5-flash")],
                 "unknown-guard": [Route("oa_fail", "gpt-4o"), Route("openai", "gpt-4o")],
             },
@@ -246,6 +249,27 @@ def test_openai_and_gemini_streaming_providers_cost_recording_and_unknown_guard(
         }
         openai_req = next(r for r in seen_requests if r["path"] == "/v1/chat/completions")
         assert openai_req["body"]["max_tokens"] == MAX_OUTPUT_TOKENS  # output is capped to the reserved bound
+
+        out_gpt5 = _run(
+            gw.complete(
+                SealedModelRequest.from_wire(
+                    {
+                        "claim": claim_gpt5.to_wire(),
+                        "stream": "main",
+                        "system": "sys",
+                        "model": "gpt-5",
+                        "messages": [{"kind": "user", "content": "check laptop"}],
+                        "tools": ["search"],
+                    }
+                )
+            )
+        )
+        assert out_gpt5["message"]["content"] == "Price check "
+        gpt5_req = next(
+            r for r in seen_requests if r["path"] == "/v1/chat/completions" and r["body"].get("model") == "gpt-5"
+        )
+        assert gpt5_req["body"]["max_completion_tokens"] == MAX_OUTPUT_TOKENS
+        assert "max_tokens" not in gpt5_req["body"]
 
         out_gm = _run(
             gw.complete(

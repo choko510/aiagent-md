@@ -247,8 +247,9 @@ def verified_archive_files(archive: bytes) -> dict[str, bytes]:
 def recover_leftover_backup(destination: Path) -> None:
     """Recover a crash between the backup rename and the staged rename.
 
-    The previous bundle is verified before it is restored or discarded, so an arbitrary leftover directory is never
-    trusted. An ambiguous set of backups without a destination is refused rather than guessed.
+    A backup is verified before it is restored. When the destination already exists it is verified instead; a stale
+    backup is then the previous (older) bundle, so it is discarded without being checked against the current pin.
+    An ambiguous set of backups without a destination is refused rather than guessed.
     """
     backups = sorted(destination.parent.glob(".nihongo-backup-*"))
     if not backups:

@@ -63,8 +63,8 @@ def _integration_tombstone_env(memory_stack: Stack) -> Iterator[None]:
                 os.environ[k] = v
 
 
-def build_context(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: ANN201
-    owner, scope, store, source, projection = setup_memory(dbs, tenant)
+def build_context(dbs: dict[str, Database], tenant: dict[str, str], goal: str = "memory test"):  # noqa: ANN201
+    owner, scope, store, source, projection = setup_memory(dbs, tenant, goal)
     memory_id, _ = create(dbs, owner, scope, source.artifact_ref, projection.artifact_ref)
     memory_writer.grant_memory_consent(dbs["api"], owner, recipient="fake")
     memory_writer.set_context_policy(
@@ -82,7 +82,7 @@ def build_context(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: AN
         head.policy_version(scope),
         retrieval.source_epoch,
         "cursor:1",
-        (Anchor(AnchorKind.GOAL_REF, f"goal:{store._claim.goal_revision}", "memory test"),),
+        (Anchor(AnchorKind.GOAL_REF, f"goal:{store._claim.goal_revision}", goal),),
         ModelBudget("fake-gateway", "r1", "byte-upper-bound", 10000, 1000, 100),
         retrieval.projections,
         "fake",
@@ -127,8 +127,8 @@ def test_memory_context_head_runtime_rpc_fake_provider(
         }
     )
     assert packaged_nihongo_lite() in sent.system
-    assert packaged_nihongo_full() in sent.system  # tool-free Context path still gets the Full rules
-    assert "This Context path exposes no tools" in sent.system
+    assert packaged_nihongo_full() not in sent.system  # non-writing goal stays on Lite in the Context path
+    assert "includes Lite only" in sent.system
     assert payload not in sent.system
     assert attempt["request_identity"] == sent.identity()
     head = dbs["owner"].one(
@@ -137,6 +137,31 @@ def test_memory_context_head_runtime_rpc_fake_provider(
     )["checkpoint_json"]
     assert head["memory"] == [{"id": memory_id, "revision": 1}]
     assert "remembered data" not in str(head)
+
+
+def test_context_writing_goal_includes_full_without_promoting_payload(
+    dbs: dict[str, Database], tenant: dict[str, str], stack: Stack
+) -> None:
+    _, scope, store, _, plan = build_context(dbs, tenant, goal="READMEを作成して")
+    admission = ContextAdmission(dbs["model_gateway"], store._claim, b"k" * 32, int(plan.committed_head))
+    payload = admission.load()
+    asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
+    sent = SealedModelRequest.from_wire(
+        {
+            "claim": store._claim.to_wire(),
+            "stream": "main",
+            "model": "fake-gateway",
+            "tools": [],
+            "system": context_system_prompt(full=True),
+            "messages": [{"kind": "user", "content": payload}],
+        }
+    )
+    assert packaged_nihongo_lite() in sent.system
+    assert packaged_nihongo_full() in sent.system  # trusted writing goal enables Full on the tool-free path
+    assert "Apply the Lite and Full rules" in sent.system
+    assert payload not in sent.system
+    attempt = dbs["owner"].one("SELECT request_identity FROM agent.model_attempts WHERE run_id=%s", (scope.run_id,))
+    assert attempt["request_identity"] == sent.identity()
 
 
 def test_revoke_after_context_before_gateway_blocks_send(

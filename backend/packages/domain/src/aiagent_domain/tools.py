@@ -7,6 +7,7 @@ per-profile allowlist. Tools absent from a profile's allowlist are never shown t
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -233,6 +234,58 @@ def packaged_nihongo_lite() -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise RuntimeError(f"packaged nihongo Lite is missing: {path}") from exc
+
+
+# Deterministic, trusted-goal gate for the tool-free Context inference. The input is the current Task goal revision
+# (trusted user input), never Context payload or Memory. Default is Lite only; Full is added only for a writing,
+# editing or translation request. This never calls another LLM and never changes tools, approval, consent or egress.
+_NIHONGO_DOC_NOUN = re.compile(
+    r"文章|文書|メール|お知らせ|企画書|提案書|報告書|議事録|資料|スライド|プレゼン|マニュアル|技術文書|"
+    r"仕様書|設計書|リリースノート|プレスリリース|案内|挨拶|スピーチ|履歴書|職務経歴書|志望動機|"
+    r"ブログ|記事|コラム|商品説明|紹介文|自己紹介|推薦状|推薦文|カバーレター|返信|返事|文面|文案|"
+    r"下書き|UI文言|キャッチコピー|タイトル|手順書|契約書|稟議書|始末書|"
+    r"(?<![A-Za-z0-9])(?:e-?mail|report|essay|article|blog(?:\s+post)?|readme|proposal|memo|letter|cover\s+letter|"
+    r"resume|cv|slides?|presentation|press\s+release|announcement|manual|documentation|technical\s+writing|"
+    r"release\s+notes|ui\s+copy|spec(?:ification)?|design\s+doc)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_NIHONGO_WRITE_VERB = re.compile(
+    r"書いて|書く|作成|作って|作る|直して|直す|修正|整えて|整える|まとめて|まとめる|確認|見直し|レビュー|"
+    r"返信|返事|更新|編集|追記|加筆|変更|(?<![A-Za-z0-9])(?:write|writing|compose|edit|revise|create|make|prepare|review)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_NIHONGO_STRONG_WRITING = re.compile(
+    r"推敲|校正|添削|翻訳|書き直|書き換え|文面|文案|下書き|起草|構成を考え|文章を書|"
+    r"(?<![A-Za-z0-9])(?:proofread|copyedit|rewrite|translate|draft)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_NIHONGO_NON_WRITING = re.compile(
+    r"コード|プログラム|スクリプト|関数|実装|SQL|JSON|YAML|XML|CSV|API|バグ|エラー|デバッグ|計算|"
+    r"天気|検索|調べ|要約|説明して|"
+    r"(?<![A-Za-z0-9])(?:code|script|function|implement|sql|json|yaml|xml|csv|api|bug|error|debug|calculate|compute|"
+    r"weather|search|lookup|summari[sz]e|explain)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def nihongo_full_for_goal(goal: str) -> bool:
+    """Return True only when the trusted Task goal asks for a user-facing writing/editing deliverable.
+
+    Conservative by design: ambiguous or non-writing goals keep the Context path on Lite. A strong writing signal
+    (proofread/translate/draft/文面/推敲...) always applies Full; otherwise a writing verb must be paired with a
+    document noun, and code/data/read/search goals are excluded. This is product policy, not authority.
+    """
+    text = goal.strip()
+    if not text:
+        return False
+    if _NIHONGO_STRONG_WRITING.search(text):
+        return True
+    if not _NIHONGO_WRITE_VERB.search(text):
+        return False
+    document = bool(_NIHONGO_DOC_NOUN.search(text))
+    if _NIHONGO_NON_WRITING.search(text) and not document:
+        return False
+    return document
 
 
 @lru_cache(maxsize=1)

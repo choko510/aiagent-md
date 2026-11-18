@@ -28,6 +28,7 @@ class Capability:
     max_context_chars: int
     provider: str
     external_recipient: bool  # sends tenant data to a third party (needs recipient consent)
+    output_limit_param: str = "max_tokens"  # provider request field used to cap output tokens
 
 
 @dataclass
@@ -395,8 +396,13 @@ class OpenAIProvider:
         self.verify = verify
 
     def capability(self, model: str) -> Capability:
-        del model
-        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+        # OpenAI reasoning models (o-series and GPT-5+) reject `max_tokens` and require `max_completion_tokens`.
+        field = (
+            "max_completion_tokens" if model.strip().lower().startswith(("o1", "o3", "o4", "gpt-5")) else "max_tokens"
+        )
+        return Capability(
+            True, True, self.max_context_chars, self.provider_name, self.external_recipient, output_limit_param=field
+        )
 
     @staticmethod
     def _messages(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -445,11 +451,8 @@ class OpenAIProvider:
             "stream_options": {"include_usage": True},
             "messages": self._messages(system, messages),
         }
-        # Bound output to the same value the budget reserves. o-series rejects `max_tokens`.
-        if model.startswith(("o1", "o3", "o4")):
-            body["max_completion_tokens"] = MAX_OUTPUT_TOKENS
-        else:
-            body["max_tokens"] = MAX_OUTPUT_TOKENS
+        # Bound output to the same value the budget reserves; the field is a provider capability, not a name guess.
+        body[self.capability(model).output_limit_param] = MAX_OUTPUT_TOKENS
         if tools:
             body["tools"] = [
                 {
@@ -577,8 +580,13 @@ class GeminiProvider:
         self.verify = verify
 
     def capability(self, model: str) -> Capability:
-        del model
-        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+        # OpenAI reasoning models (o-series and GPT-5+) reject `max_tokens` and require `max_completion_tokens`.
+        field = (
+            "max_completion_tokens" if model.strip().lower().startswith(("o1", "o3", "o4", "gpt-5")) else "max_tokens"
+        )
+        return Capability(
+            True, True, self.max_context_chars, self.provider_name, self.external_recipient, output_limit_param=field
+        )
 
     @staticmethod
     def _contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
