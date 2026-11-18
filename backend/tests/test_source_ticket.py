@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 from aiagent_domain import uuid7
+from aiagent_sandbox.source_rpc import SourceAuthority
 from aiagent_sandbox.source_ticket import sign_source_ticket, source_transfer_key, verify_source_ticket
 
 
@@ -43,3 +47,13 @@ def test_ticket_authentication_expiry_and_execution_scope() -> None:
     ):
         with pytest.raises(ValueError):
             verify_source_ticket(key, invalid, now=1000)
+
+
+async def test_source_authority_requires_heartbeat_and_refuses_late_renewal() -> None:
+    authority = SourceAuthority(int(time.time()) + 10, heartbeat_seconds=0.1)
+    assert authority.registration_allowed() and not authority()
+    assert authority.renew() and authority()
+    watcher = asyncio.create_task(authority.watch())
+    await asyncio.wait_for(authority.revoked.wait(), timeout=2)
+    await watcher
+    assert not authority() and not authority.renew() and not authority.registration_allowed()

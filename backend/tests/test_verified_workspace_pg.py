@@ -710,6 +710,164 @@ def test_fixture_capture_transfer_drives_fenced_db_publication(dbs, verified_set
     assert (row["artifact_sha256"] is None) is tamper_receipt
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Unix socket and supervisor journal")
+def test_source_heartbeat_revokes_live_session_when_snapshot_changes(dbs, verified_setup, tmp_path):
+    """Real DB and RPC heartbeat; the staged consumer is test-only."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from aiagent_core.rpc import RpcClient
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+    from aiagent_gateways.execution_watch import pulse_source_authority
+    from aiagent_gateways.source_transfer import register_issued_source, send_source
+    from aiagent_sandbox.source_rpc import SourceAuthority, SourceSessions
+    from aiagent_sandbox.supervisor import Supervisor, serve
+
+    _, binding_id, manifest, proof, receipt, wire, parent = verified_setup
+
+    def issue(claim, prepared, _snapshot, _parent):
+        ticket_key, rpc_key = b"t" * 32, b"r" * 32
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"v" * 32))
+        ticket = lifecycle.issue_source_session(prepared, manifest, receipt, ticket_key, deadline=time.monotonic() + 30)
+
+        async def exercise():
+            staged = asyncio.Event()
+
+            def factory(payload):
+                authority = SourceAuthority(payload["expires_at"], heartbeat_seconds=2)
+
+                async def consume(_fd):
+                    staged.set()
+                    await authority.revoked.wait()
+
+                return authority, consume
+
+            sup = Supervisor(tmp_path / "heartbeat-supervisor", b"g" * 32, cell_uid=20001, cell_gid=20001)
+            sessions = SourceSessions(parent, ticket_key=ticket_key, registration_factory=factory)
+            endpoint = f"unix:{tmp_path / 'heartbeat.sock'}"
+            server = asyncio.create_task(serve(sup, {"tool_gateway": rpc_key}, endpoint, source_sessions=sessions))
+            revoked, stop, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            pulse = None
+            send = None
+            deadline = time.monotonic() + 20
+            try:
+                for _ in range(100):
+                    if (tmp_path / "heartbeat.sock").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                sid, key, source_binding = await register_issued_source(
+                    lifecycle, prepared, endpoint, rpc_key, ticket_key, ticket, manifest, proof, deadline=deadline
+                )
+                scope = {
+                    "tenantId": claim.tenant_id,
+                    "sessionId": sid,
+                    "executionId": prepared.id,
+                    "attemptId": prepared.attempt_id,
+                    "bindingSha256": prepared.binding_sha256,
+                }
+                wrong = await RpcClient(endpoint, "tool_gateway", rpc_key).call(
+                    "source.heartbeat", {**scope, "attemptId": "wrong"}
+                )
+                assert wrong == {"renewed": False}
+                pulse = asyncio.create_task(
+                    pulse_source_authority(
+                        lifecycle,
+                        endpoint,
+                        rpc_key,
+                        revoked,
+                        stop,
+                        ready,
+                        tenant_id=claim.tenant_id,
+                        session_id=sid,
+                        execution_id=prepared.id,
+                        attempt_id=prepared.attempt_id,
+                        binding_sha256=prepared.binding_sha256,
+                        interval=0.05,
+                    )
+                )
+                await asyncio.wait_for(ready.wait(), 5)
+                send = asyncio.create_task(
+                    send_source(endpoint, rpc_key, sid, key, source_binding, [wire], deadline=deadline)
+                )
+                await asyncio.wait_for(staged.wait(), 5)
+                await asyncio.to_thread(
+                    dbs["owner"].one,
+                    "UPDATE agent.repository_bindings SET generation=generation+1,workspace_revision=workspace_revision+1,"
+                    "approved_commit=%s WHERE tenant_id=%s AND id=%s RETURNING id",
+                    ("b" * 40, claim.tenant_id, binding_id),
+                )
+                await asyncio.wait_for(revoked.wait(), 5)
+                with pytest.raises(RuntimeError, match="rejected"):
+                    await asyncio.wait_for(send, 5)
+            finally:
+                stop.set()
+                if send is not None and not send.done():
+                    send.cancel()
+                if pulse is not None:
+                    await asyncio.gather(pulse, return_exceptions=True)
+                server.cancel()
+                await asyncio.gather(server, return_exceptions=True)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(lambda: asyncio.run(exercise())).result(timeout=25)
+
+    prepared_execution_fixture(dbs, verified_setup, on_prepared=issue)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Unix socket and supervisor journal")
+def test_source_cancel_before_registration_persists_replay_fence(dbs, verified_setup, tmp_path):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from aiagent_domain.rpcwire import RpcError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+    from aiagent_gateways.source_transfer import cancel_issued_source, register_source
+    from aiagent_sandbox.source_rpc import SourceAuthority, SourceSessions
+    from aiagent_sandbox.supervisor import Supervisor, serve
+
+    _, _, manifest, proof, receipt, _, parent = verified_setup
+
+    def issue(claim, prepared, _snapshot, _parent):
+        ticket_key, rpc_key = b"t" * 32, b"r" * 32
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"v" * 32))
+        ticket = lifecycle.issue_source_session(prepared, manifest, receipt, ticket_key, deadline=time.monotonic() + 30)
+
+        async def exercise():
+            sup = Supervisor(tmp_path / "cancel-supervisor", b"g" * 32, cell_uid=20001, cell_gid=20001)
+            sessions = SourceSessions(
+                parent,
+                ticket_key=ticket_key,
+                registration_factory=lambda p: (SourceAuthority(p["expires_at"]), lambda _fd: None),
+            )
+            endpoint = f"unix:{tmp_path / 'cancel.sock'}"
+            server = asyncio.create_task(serve(sup, {"tool_gateway": rpc_key}, endpoint, source_sessions=sessions))
+            deadline = time.monotonic() + 15
+            try:
+                for _ in range(100):
+                    if (tmp_path / "cancel.sock").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                assert await cancel_issued_source(
+                    lifecycle, prepared, endpoint, rpc_key, ticket_key, ticket, deadline=deadline
+                )
+                with pytest.raises(RpcError):
+                    await register_source(endpoint, rpc_key, ticket_key, ticket, manifest, proof, deadline=deadline)
+            finally:
+                server.cancel()
+                await asyncio.gather(server, return_exceptions=True)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(lambda: asyncio.run(exercise())).result(timeout=20)
+
+    claim, prepared, _, _ = prepared_execution_fixture(dbs, verified_setup, on_prepared=issue, expected_state="UNKNOWN")
+    row = dbs["owner"].one(
+        "SELECT state FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (claim.tenant_id, prepared.id)
+    )
+    assert row is not None and row["state"] == "UNKNOWN"
+
+
 def test_gateway_attempt_prepares_distinct_execution_only_with_approved_scope(dbs, verified_setup):
     prepared_execution_fixture(dbs, verified_setup)
 

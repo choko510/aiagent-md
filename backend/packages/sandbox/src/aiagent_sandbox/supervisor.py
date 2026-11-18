@@ -563,6 +563,8 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
         task = asyncio.current_task()
         if task is not None:
             connections.add(task)
+        method = ""
+        body: dict[str, Any] = {}
         try:
             n = decode_length(await r.readexactly(4))
             env = json.loads(await r.readexactly(n))
@@ -578,16 +580,37 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                 "exec.heartbeat",
                 "source.receive",
                 "source.register",
+                "source.heartbeat",
+                "source.cancel",
             ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                if method in ("source.receive", "source.register"):
+                if method in ("source.receive", "source.register", "source.heartbeat", "source.cancel"):
                     if source_sessions is None:
                         raise GrantError("SOURCE_BROKER_UNAVAILABLE")
                     try:
                         if method == "source.register":
                             res = source_sessions.register_authorized(body, sup._consume)
+                        elif method == "source.heartbeat":
+                            renewed = source_sessions.renew(body)
+                            if renewed:
+                                sup.renew_projected(
+                                    body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]
+                                )
+                            res = {"renewed": renewed}
+                        elif method == "source.cancel":
+                            if set(body) == {"ticket"}:
+                                scope = source_sessions.cancel_ticket(body, sup._consume)
+                                cancelled = True
+                                sup.cancel_projected(*scope)
+                            else:
+                                cancelled = source_sessions.cancel(body)
+                                if cancelled:
+                                    sup.cancel_projected(
+                                        body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]
+                                    )
+                            res = {"cancelled": cancelled}
                         else:
                             res = await source_sessions.receive(body, r)
                     except Exception as exc:
@@ -612,11 +635,16 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                     res = await sup.execute(
                         body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))
                     )
-                from .source_rpc import ArtifactTransfer
+                artifact_result: Any = None
+                if method == "source.receive":
+                    from .source_rpc import ArtifactTransfer
 
-                if isinstance(res, ArtifactTransfer):
+                    if isinstance(res, ArtifactTransfer):
+                        artifact_result = res
+                if artifact_result is not None:
                     from .binary_transfer import MAX_CHUNK, encode_chunks
 
+                    res = artifact_result
                     if not res.active() or time.monotonic() >= res.deadline:
                         raise GrantError("SOURCE_TRANSFER_REJECTED")
                     artifact = res.artifact
@@ -663,6 +691,8 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
             pass
         finally:
             w.close()
+            if method == "source.receive" and source_sessions is not None:
+                source_sessions.end(body.get("sessionId"))
             if task is not None:
                 connections.discard(task)
 

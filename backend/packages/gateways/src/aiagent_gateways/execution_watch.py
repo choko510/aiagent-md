@@ -8,9 +8,14 @@ alone does not revoke a remote Supervisor or publish Artifacts.
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import TYPE_CHECKING
 
 from aiagent_core import control
 from aiagent_core.db import Database
+
+if TYPE_CHECKING:
+    from .execution_lifecycle import ExecutionLifecycle
 
 
 def _check(db: Database, claim: control.Claim) -> None:
@@ -152,3 +157,66 @@ async def pulse_supervisor_authority(
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:
             pass
+
+
+async def pulse_source_authority(
+    lifecycle: ExecutionLifecycle,
+    endpoint: str,
+    rpc_key: bytes,
+    revoked: asyncio.Event,
+    stop: asyncio.Event,
+    ready: asyncio.Event,
+    *,
+    tenant_id: str,
+    session_id: str,
+    execution_id: str,
+    attempt_id: str,
+    binding_sha256: str,
+    interval: float = 0.25,
+) -> None:
+    """Renew only after a fresh canonical execution check; fail closed on error."""
+    from aiagent_core.rpc import RpcClient
+
+    if not 0.05 <= interval <= 1.0:
+        raise ValueError("invalid source heartbeat interval")
+    scope = {
+        "tenantId": tenant_id,
+        "sessionId": session_id,
+        "executionId": execution_id,
+        "attemptId": attempt_id,
+        "bindingSha256": binding_sha256,
+    }
+    try:
+        while not stop.is_set() and not revoked.is_set():
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lifecycle.check_running, execution_id, binding_sha256, deadline=time.monotonic() + 1.5
+                    ),
+                    timeout=1.5,
+                )
+                result = await asyncio.wait_for(
+                    RpcClient(endpoint, "tool_gateway", rpc_key, timeout_s=1).call("source.heartbeat", scope),
+                    timeout=1.5,
+                )
+                if result.get("renewed") is not True:
+                    raise RuntimeError("source heartbeat not accepted")
+                ready.set()
+            except asyncio.CancelledError:
+                revoked.set()
+                raise
+            except Exception:
+                revoked.set()
+                break
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+    finally:
+        if revoked.is_set():
+            try:
+                await asyncio.wait_for(
+                    RpcClient(endpoint, "tool_gateway", rpc_key, timeout_s=1).call("source.cancel", scope), timeout=1.5
+                )
+            except Exception:
+                pass

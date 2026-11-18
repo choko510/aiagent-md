@@ -42,6 +42,59 @@ from .source_ticket import (
 )
 
 
+class SourceAuthority:
+    """A remote lease, inactive until the first fresh Gateway heartbeat."""
+
+    def __init__(self, expires_at: int, *, heartbeat_seconds: float = 3.0) -> None:
+        if not time.time() < expires_at <= time.time() + 60 or not 0.1 <= heartbeat_seconds <= 10:
+            raise ValueError("invalid source authority")
+        self._expires_at, self._period = expires_at, heartbeat_seconds
+        self._deadline: float | None = None
+        self._revoked = False
+        self._lock = threading.Lock()
+        self.revoked = asyncio.Event()
+
+    def registration_allowed(self) -> bool:
+        with self._lock:
+            return not self._revoked and time.time() < self._expires_at
+
+    def __call__(self) -> bool:
+        with self._lock:
+            return (
+                not self._revoked
+                and self._deadline is not None
+                and time.monotonic() < self._deadline
+                and time.time() < self._expires_at
+            )
+
+    def renew(self) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            if (
+                self._revoked
+                or time.time() >= self._expires_at
+                or (self._deadline is not None and now >= self._deadline)
+            ):
+                self._revoked = True
+                self.revoked.set()
+                return False
+            self._deadline = now + self._period
+            return True
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._revoked = True
+        self.revoked.set()
+
+    async def watch(self) -> None:
+        """Set the execution event when a renewed lease expires."""
+        while not self.revoked.is_set():
+            if not self():
+                self.cancel()
+                return
+            await asyncio.sleep(min(0.1, self._period / 2))
+
+
 @dataclass(frozen=True)
 class CapturedArtifact:
     """Bounded bytes and receipt obtained from the Supervisor capture context."""
@@ -106,6 +159,7 @@ class SourceSessions:
         self._registration_factory = registration_factory
         self._pending: dict[str, SourceSession] = {}
         self._used: set[str] = set()
+        self._live: dict[str, SourceSession] = {}
 
     def register_authorized(self, body: dict[str, Any], consume: Callable[[str], None]) -> dict[str, str]:
         """Register only a signed DB-issued ticket and a server-selected consumer.
@@ -149,7 +203,8 @@ class SourceSessions:
         if projection_manifest_digest(manifest) != p["manifest_sha256"]:
             raise ValueError("source manifest mismatch")
         active, staged = self._registration_factory(p)
-        if not active():
+        register_allowed = active.registration_allowed if isinstance(active, SourceAuthority) else active
+        if not register_allowed():
             raise ValueError("source authority unavailable")
         receipt = ProjectionStreamReceipt(p["source_sha256"], p["source_bytes"], len(entries))
         session = SourceSession(
@@ -171,22 +226,84 @@ class SourceSessions:
         # loses availability rather than permitting a second execution.
         consume("source-session:" + p["session"])
         consume("source-execution:" + p["execution"])
-        if not active():
+        if not register_allowed():
             raise ValueError("source authority revoked")
         self.register(session)
         return {"sessionId": session.session_id}
 
     def register(self, session: SourceSession) -> None:
+        now = time.monotonic()
+        for session_id, pending in tuple(self._pending.items()):
+            if now >= pending.deadline:
+                self._pending.pop(session_id, None)
+                self._live.pop(session_id, None)
+                self._used.add(session_id)
         if (
             not session.session_id
             or len(session.session_id) > 128
             or session.session_id in self._pending
             or session.session_id in self._used
+            or len(self._pending) >= 1024
+            or len(self._used) >= 100000
             or len(session.key) < 32
-            or not time.monotonic() < session.deadline <= time.monotonic() + 300
+            or not now < session.deadline <= now + 300
         ):
             raise ValueError("invalid source session")
         self._pending[session.session_id] = session
+        self._live[session.session_id] = session
+
+    def _scoped(self, body: dict[str, Any]) -> SourceSession | None:
+        if set(body) != {"tenantId", "sessionId", "executionId", "attemptId", "bindingSha256"}:
+            return None
+        sid = body.get("sessionId")
+        if type(sid) is not str:
+            return None
+        session = self._live.get(sid)
+        if session is None or (body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]) != (
+            session.identity.tenant_id,
+            session.execution_id,
+            session.attempt_id,
+            session.binding_sha256,
+        ):
+            return None
+        return session
+
+    def renew(self, body: dict[str, Any]) -> bool:
+        session = self._scoped(body)
+        return bool(session is not None and isinstance(session.active, SourceAuthority) and session.active.renew())
+
+    def cancel(self, body: dict[str, Any]) -> bool:
+        session = self._scoped(body)
+        if session is None or not isinstance(session.active, SourceAuthority):
+            return False
+        session.active.cancel()
+        self._pending.pop(session.session_id, None)
+        self._live.pop(session.session_id, None)
+        return True
+
+    def cancel_ticket(self, body: dict[str, Any], consume: Callable[[str], None]) -> tuple[str, str, str, str]:
+        """Fence even a cancellation which arrives before registration."""
+        if self._ticket_key is None or set(body) != {"ticket"}:
+            raise ValueError("source cancellation unavailable")
+        p = verify_source_ticket(self._ticket_key, body["ticket"])
+        scope = {
+            "tenantId": p["tenant"],
+            "sessionId": p["session"],
+            "executionId": p["execution"],
+            "attemptId": p["attempt"],
+            "bindingSha256": p["binding_sha256"],
+        }
+        session = self._scoped(scope)
+        if session is None:
+            consume("source-session:" + p["session"])
+            consume("source-execution:" + p["execution"])
+        elif not self.cancel(scope):
+            raise ValueError("source cancellation unavailable")
+        return p["tenant"], p["execution"], p["attempt"], p["binding_sha256"]
+
+    def end(self, session_id: object) -> None:
+        if isinstance(session_id, str):
+            self._live.pop(session_id, None)
 
     async def receive(self, body: dict[str, Any], reader: asyncio.StreamReader) -> dict[str, Any] | ArtifactTransfer:
         if set(body) != {"sessionId"} or type(body["sessionId"]) is not str:
@@ -196,7 +313,10 @@ class SourceSessions:
         if session is None:
             raise ValueError("unknown source session")
         self._used.add(session_id)
+        if not session.active():
+            raise ValueError("source authority not renewed")
         parent_fd = _open_trusted_parent(self.parent)
+        watcher = asyncio.create_task(session.active.watch()) if isinstance(session.active, SourceAuthority) else None
         try:
             info = os.fstat(parent_fd)
             if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
@@ -204,6 +324,9 @@ class SourceSessions:
             return await self._receive_session(session, reader, parent_fd)
         finally:
             os.close(parent_fd)
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
 
     async def _receive_session(
         self, session: SourceSession, reader: asyncio.StreamReader, parent_fd: int

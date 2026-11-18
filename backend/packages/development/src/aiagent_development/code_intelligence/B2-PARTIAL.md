@@ -419,3 +419,14 @@ using a synthetic index and test-only validator. These are not a unified
 Production E2E: the production registration factory, live authority watchdog,
 approved recipe/Grant dispatcher, recovery and Development Adapter remain
 unconnected. The source-session callback is not an authorization mechanism.
+
+Migration 0015 adds a fenced canonical RUNNING check for Source heartbeats.
+The opt-in Supervisor `SourceAuthority` is inactive until the first successful
+heartbeat and expires on heartbeat loss; a signed cancellation can also consume
+the persistent replay fence before registration. A real PostgreSQL/socket test
+exercises snapshot invalidation while a staged-source consumer is active and a separate test covers the
+pre-registration cancellation race. The Gateway polling helper and this
+Supervisor lease are not yet installed by a production dispatcher, and the
+production callback must pass the lease's revocation event into execution and
+retain heartbeat monitoring through capture. None of these tests establishes
+full production recovery or a separate-kernel VM.

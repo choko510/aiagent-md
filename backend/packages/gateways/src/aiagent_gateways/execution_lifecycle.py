@@ -200,3 +200,18 @@ class ExecutionLifecycle:
                 )
         except psycopg.Error as exc:
             raise ExecutionArtifactError("EXECUTION_UNKNOWN_DENIED") from exc
+
+    def check_running(self, execution_id: str, binding_sha256: str, *, deadline: float) -> None:
+        """Recheck canonical Run, lease, snapshot, recipe and running Attempt."""
+        _deadline(deadline)
+        require_uuid7(execution_id, "execution id")
+        workspace = self._workspace(deadline)
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                _db_deadline(c, deadline)
+                c.execute(
+                    "SELECT agent.execution_check_running(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (*self._scope(workspace, execution_id), binding_sha256),
+                )
+        except psycopg.Error as exc:
+            raise ExecutionArtifactError("EXECUTION_AUTHORITY_DENIED") from exc

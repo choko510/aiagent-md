@@ -49,6 +49,41 @@ class SourceCaptureUnknown(RuntimeError):
     """Execution or publication may have completed; never retry automatically."""
 
 
+async def cancel_issued_source(
+    lifecycle: ExecutionLifecycle,
+    prepared: PreparedExecution,
+    endpoint: str,
+    rpc_key: bytes,
+    ticket_key: bytes,
+    ticket: dict[str, Any],
+    *,
+    deadline: float,
+) -> bool:
+    """Fence a session, including a cancellation racing its registration."""
+    p = verify_source_ticket(ticket_key, ticket)
+    if p["execution"] != prepared.id or p["binding_sha256"] != prepared.binding_sha256:
+        raise ValueError("source ticket execution mismatch")
+    confirmed = False
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            result = await asyncio.wait_for(
+                RpcClient(endpoint, "tool_gateway", rpc_key).call("source.cancel", {"ticket": ticket}),
+                timeout=remaining,
+            )
+            confirmed = result.get("cancelled") is True
+    finally:
+        try:
+            await asyncio.shield(
+                asyncio.to_thread(
+                    lifecycle.mark_unknown, prepared.id, prepared.binding_sha256, deadline=time.monotonic() + 5
+                )
+            )
+        except Exception as exc:
+            raise SourceRegistrationUnknown("source cancellation outcome requires reconciliation") from exc
+    return confirmed
+
+
 async def register_issued_source(
     lifecycle: ExecutionLifecycle,
     prepared: PreparedExecution,
