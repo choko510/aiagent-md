@@ -209,8 +209,9 @@ credentials and exception messages are never printed or logged.
 
 ### Timeout diagnostics (stderr only)
 
-When a probe ends in `TIMEOUT / UNKNOWN_OUTCOME`, the CLI also prints one diagnostic
-JSON line to stderr. It is never added to `probes.jsonl` or `review_scores.jsonl`, and no
+When a probe ends in `TIMEOUT / UNKNOWN_OUTCOME`, the CLI prints the existing diagnostic
+JSON line to stderr, followed by a phase-timing line when the trace extension was
+available. Neither line is added to `probes.jsonl` or `review_scores.jsonl`, and no
 diagnostic log file is created:
 
 ```json
@@ -235,6 +236,25 @@ consumed and the probe is never retried. Diagnostic fields are fixed enums, vali
 catalog/fixture identifiers, a timestamp and a boolean; exception messages, headers,
 bodies, URLs and credentials are never included. If stderr cannot be written, the probe
 result and exit code are unchanged.
+
+The second line uses the allowlisted `httpcore` trace events. It contains only normalized
+phase names, states and monotonic elapsed times:
+
+```json
+{"event":"FREE_AI_TIMEOUT_PHASES","trace_observed":true,"phases":[{"phase":"CONNECT","state":"COMPLETE","elapsed_ms":120},{"phase":"TLS","state":"COMPLETE","elapsed_ms":210},{"phase":"RESPONSE_HEADERS","state":"STARTED","elapsed_ms":225}],"provider_id":"kilo","fixture_id":"review_r04","observed_at_utc":"2026-11-19T07:16:54Z"}
+```
+
+`phase` is one of `CONNECT`, `TLS`, `REQUEST_HEADERS`, `REQUEST_BODY`,
+`RESPONSE_HEADERS` or `RESPONSE_BODY`; `state` is `STARTED`, `COMPLETE` or `FAILED`. A
+`STARTED` event without either a matching `COMPLETE` or `FAILED` means that phase was
+still in progress when the timeout ended; a `FAILED` event is reported separately.
+`trace_observed=false` with an empty `phases` list means that no allowlisted trace
+event was seen; it does not mean that no work happened. The trace
+callback compares only event names and records timestamps, never the event payload,
+request/response data or exception objects. A trace callback failure is swallowed and
+cannot change the request result. `CONNECT` covers DNS resolution plus TCP connect; DNS
+and TCP are not separated. Gateway queue time and model inference remain unobservable
+from the client. The 13/14-field stdout and JSONL formats are unchanged.
 
 ### Kilo read-timeout experiment (concluded: 15 seconds restored)
 

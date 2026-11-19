@@ -61,6 +61,34 @@ TimeoutPhase = Literal[
     "UNKNOWN",
 ]
 
+TracePhase = Literal[
+    "CONNECT",
+    "TLS",
+    "REQUEST_HEADERS",
+    "REQUEST_BODY",
+    "RESPONSE_HEADERS",
+    "RESPONSE_BODY",
+]
+
+TraceState = Literal["STARTED", "COMPLETE", "FAILED"]
+
+
+@dataclass(frozen=True, slots=True)
+class TraceEvent:
+    """One allowlisted transport phase event; never carries provider data."""
+
+    phase: TracePhase
+    state: TraceState
+    elapsed_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class TraceTiming:
+    """Observed phase events, or an explicit signal that none were observed."""
+
+    observed: bool
+    events: tuple[TraceEvent, ...]
+
 
 @dataclass(frozen=True, slots=True)
 class TimeoutDiagnostic:
@@ -90,6 +118,7 @@ class TransportResult:
     elapsed_ms: int | None = None
     unknown_outcome: bool = False
     timeout_diagnostic: TimeoutDiagnostic | None = None
+    trace_timing: TraceTiming | None = None
 
 
 def encode_body(body: dict[str, object]) -> bytes:
@@ -127,6 +156,61 @@ def _elapsed_ms(started: float) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
 
 
+#: Only these httpcore trace names are retained. The callback deliberately ignores
+#: event payloads because they may contain request or exception details.
+_TRACE_EVENTS: Final[dict[str, tuple[TracePhase, TraceState]]] = {
+    "connection.connect_tcp.started": ("CONNECT", "STARTED"),
+    "connection.connect_tcp.complete": ("CONNECT", "COMPLETE"),
+    "connection.connect_tcp.failed": ("CONNECT", "FAILED"),
+    "connection.start_tls.started": ("TLS", "STARTED"),
+    "connection.start_tls.complete": ("TLS", "COMPLETE"),
+    "connection.start_tls.failed": ("TLS", "FAILED"),
+    "http11.send_request_headers.started": ("REQUEST_HEADERS", "STARTED"),
+    "http11.send_request_headers.complete": ("REQUEST_HEADERS", "COMPLETE"),
+    "http11.send_request_headers.failed": ("REQUEST_HEADERS", "FAILED"),
+    "http11.send_request_body.started": ("REQUEST_BODY", "STARTED"),
+    "http11.send_request_body.complete": ("REQUEST_BODY", "COMPLETE"),
+    "http11.send_request_body.failed": ("REQUEST_BODY", "FAILED"),
+    "http11.receive_response_headers.started": ("RESPONSE_HEADERS", "STARTED"),
+    "http11.receive_response_headers.complete": ("RESPONSE_HEADERS", "COMPLETE"),
+    "http11.receive_response_headers.failed": ("RESPONSE_HEADERS", "FAILED"),
+    "http11.receive_response_body.started": ("RESPONSE_BODY", "STARTED"),
+    "http11.receive_response_body.complete": ("RESPONSE_BODY", "COMPLETE"),
+    "http11.receive_response_body.failed": ("RESPONSE_BODY", "FAILED"),
+}
+
+
+class _TraceCollector:
+    """Collect only allowlisted phase timestamps for one request.
+
+    The callback is deliberately total: a bug in observation must never alter the
+    request, its timeout classification, or quota accounting.
+    """
+
+    __slots__ = ("_events", "_observed", "_started")
+
+    def __init__(self, started: float) -> None:
+        self._started = started
+        self._events: list[TraceEvent] = []
+        self._observed = False
+
+    async def callback(self, name: str, info: dict[str, object]) -> None:
+        del info
+        try:
+            mapped = _TRACE_EVENTS.get(name)
+            if mapped is None:
+                return
+            phase, state = mapped
+            self._events.append(TraceEvent(phase=phase, state=state, elapsed_ms=_elapsed_ms(self._started)))
+            self._observed = True
+        except Exception:
+            # Observation is optional and must not affect the send result.
+            return
+
+    def snapshot(self) -> TraceTiming:
+        return TraceTiming(observed=self._observed, events=tuple(self._events))
+
+
 def _classify_timeout(exc: httpx.TimeoutException) -> TimeoutKind:
     """Classify only the exception type; never retain its message."""
     if isinstance(exc, httpx.ConnectTimeout):
@@ -145,6 +229,7 @@ def _timeout_result(
     kind: TimeoutKind,
     phase: TimeoutPhase,
     body_chunk_received: bool,
+    trace_timing: TraceTiming,
 ) -> TransportResult:
     return TransportResult(
         status="TIMEOUT",
@@ -156,6 +241,7 @@ def _timeout_result(
             timeout_phase=phase,
             body_chunk_received=body_chunk_received,
         ),
+        trace_timing=trace_timing,
     )
 
 
@@ -226,13 +312,20 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
         "User-Agent": USER_AGENT,
     }
     started = time.monotonic()
+    trace = _TraceCollector(started)
     phase: TimeoutPhase = "BEFORE_HEADERS"
     body_chunk_received = False
     try:
         async with asyncio.timeout(OVERALL_TIMEOUT_SECONDS):
             client = _new_client()
             async with client:
-                async with client.stream("POST", spec.endpoint, content=encoded, headers=headers) as response:
+                async with client.stream(
+                    "POST",
+                    spec.endpoint,
+                    content=encoded,
+                    headers=headers,
+                    extensions={"trace": trace.callback},
+                ) as response:
                     phase = "HEADERS_RECEIVED"
                     http_status = response.status_code
                     if 300 <= http_status < 400:
@@ -309,9 +402,15 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
                     )
     except TimeoutError:
         # asyncio.timeout() raises the built-in TimeoutError; this is the overall cap.
-        return _timeout_result(started, "OVERALL_TIMEOUT", phase, body_chunk_received)
+        return _timeout_result(started, "OVERALL_TIMEOUT", phase, body_chunk_received, trace.snapshot())
     except httpx.TimeoutException as exc:
-        return _timeout_result(started, _classify_timeout(exc), phase, body_chunk_received)
+        return _timeout_result(
+            started,
+            _classify_timeout(exc),
+            phase,
+            body_chunk_received,
+            trace.snapshot(),
+        )
     except httpx.DecodingError:
         # A corrupt or unsupported encoding is a response-format problem, not a retry.
         return TransportResult(
@@ -335,6 +434,10 @@ __all__ = [
     "TimeoutDiagnostic",
     "TimeoutKind",
     "TimeoutPhase",
+    "TraceEvent",
+    "TracePhase",
+    "TraceState",
+    "TraceTiming",
     "TransportResult",
     "TransportStatus",
     "encode_body",

@@ -54,6 +54,7 @@ from .review_key import MAX_REVIEW_FINDINGS, REVIEW_KEY, truth_count
 from .transport import (
     LocalInputError,
     TimeoutDiagnostic,
+    TraceTiming,
     TransportResult,
     encode_body,
     post_json,
@@ -155,6 +156,7 @@ class ProbeOutcome:
     record: ProbeRecord
     exit_code: int
     timeout_diagnostic: TimeoutDiagnostic | None = None
+    trace_timing: TraceTiming | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +169,7 @@ class Evaluation:
     normalized: NormalizedResponse | None
     review_score: ReviewScore | None = None
     timeout_diagnostic: TimeoutDiagnostic | None = None
+    trace_timing: TraceTiming | None = None
 
 
 @dataclass(slots=True)
@@ -256,6 +259,7 @@ def _evaluate(spec: ProviderSpec, fixture: Fixture, result: TransportResult) -> 
             exit_code=STATUS_EXIT[cast("ProbeStatus", result.status)],
             normalized=None,
             timeout_diagnostic=result.timeout_diagnostic,
+            trace_timing=result.trace_timing,
         )
     if result.body is None:
         return Evaluation(
@@ -1308,6 +1312,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         output_tokens: int | None = None,
         cost_reported_usd: float | None = None,
         timeout_diagnostic: TimeoutDiagnostic | None = None,
+        trace_timing: TraceTiming | None = None,
     ) -> ProbeOutcome:
         record = _make_record(
             spec=spec,
@@ -1322,7 +1327,12 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
             output_tokens=output_tokens,
             cost_reported_usd=cost_reported_usd,
         )
-        return ProbeOutcome(record=record, exit_code=exit_code, timeout_diagnostic=timeout_diagnostic)
+        return ProbeOutcome(
+            record=record,
+            exit_code=exit_code,
+            timeout_diagnostic=timeout_diagnostic,
+            trace_timing=trace_timing,
+        )
 
     def logged(outcome_value: ProbeOutcome) -> ProbeOutcome:
         """Persist a preflight decision; a write failure stays fail-closed."""
@@ -1378,6 +1388,7 @@ def _probe(args: argparse.Namespace) -> ProbeOutcome:
         output_tokens=None if normalized is None else normalized.output_tokens,
         cost_reported_usd=None if normalized is None else normalized.cost_reported_usd,
         timeout_diagnostic=evaluation.timeout_diagnostic,
+        trace_timing=evaluation.trace_timing,
     )
     try:
         _append_probe(outcome_value.record)
@@ -1484,6 +1495,35 @@ def _emit_timeout_diagnostic(outcome: ProbeOutcome) -> None:
         pass
 
 
+def _emit_timeout_trace(outcome: ProbeOutcome) -> None:
+    """Emit optional phase observations separately from the existing diagnostic."""
+    timing = outcome.trace_timing
+    if timing is None or outcome.timeout_diagnostic is None:
+        return
+    record = outcome.record
+    payload = {
+        "event": "FREE_AI_TIMEOUT_PHASES",
+        "trace_observed": timing.observed,
+        "phases": [
+            {
+                "phase": event.phase,
+                "state": event.state,
+                "elapsed_ms": event.elapsed_ms,
+            }
+            for event in timing.events
+        ],
+        "provider_id": record.provider_id,
+        "fixture_id": record.fixture_id,
+        "observed_at_utc": record.observed_at_utc,
+    }
+    try:
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        # This side channel is optional and must never alter the probe result.
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Exit codes: 0 pass, 2 skip, 3 unavailable, 4 bad response, 5 unsafe."""
     parser = _build_parser()
@@ -1509,6 +1549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         probe_outcome = _fallback_outcome(args, "INVALID_SCHEMA")
     print(json.dumps(probe_outcome.record.as_dict(), ensure_ascii=False, separators=(",", ":")))
     _emit_timeout_diagnostic(probe_outcome)
+    _emit_timeout_trace(probe_outcome)
     return probe_outcome.exit_code
 
 
