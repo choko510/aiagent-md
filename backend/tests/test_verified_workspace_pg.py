@@ -327,7 +327,11 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
         "SELECT state, artifact_sha256 FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
         (claim.tenant_id, prepared.id),
     )
-    assert row is not None and row["state"] == (expected_state or ("RUNNING" if on_prepared else "PREPARED"))
+    assert row is not None
+    if expected_state == "RUNNING_OR_PREPARED":
+        assert row["state"] in ("RUNNING", "PREPARED")
+    else:
+        assert row["state"] == (expected_state or ("RUNNING" if on_prepared else "PREPARED"))
     assert (row["artifact_sha256"] is not None) == (expected_state == "PUBLISHED")
     import psycopg
 
@@ -489,6 +493,54 @@ def test_concurrent_source_session_issuance_allows_one(dbs, verified_setup):
         (claim.tenant_id, prepared.id),
     )
     assert row is not None and row["n"] == 1
+
+
+def test_distinct_attempts_cannot_start_same_test_on_same_snapshot(dbs, verified_setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from aiagent_development.workspace_authority import prepare_execution
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+
+    _, _, manifest, _, receipt, _, _ = verified_setup
+    outcomes = []
+
+    def race(claim, prepared, snapshot, _parent):
+        second_attempt = uuid7()
+        dbs["owner"].one(
+            "INSERT INTO agent.tool_attempts(tenant_id,id,tool_intent_id,attempt_no,fence_token,worker_ref,"
+            "run_lease_epoch,status_code) SELECT tenant_id,%s,tool_intent_id,attempt_no+1,fence_token+1,"
+            "worker_ref,run_lease_epoch,'SENDING' FROM agent.tool_attempts WHERE tenant_id=%s AND id=%s RETURNING id",
+            (second_attempt, claim.tenant_id, prepared.attempt_id),
+        )
+        other = prepare_execution(
+            dbs["tool_gateway"], claim, second_attempt, snapshot.id, prepared.recipe_id, deadline=time.monotonic() + 10
+        )
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"v" * 32))
+        barrier = Barrier(2)
+
+        def issue(candidate):
+            barrier.wait(timeout=5)
+            try:
+                lifecycle.issue_source_session(candidate, manifest, receipt, b"s" * 32, deadline=time.monotonic() + 10)
+                return "STARTED"
+            except ExecutionArtifactError:
+                return "DENIED"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes.extend(pool.map(issue, (prepared, other)))
+
+    claim, _, snapshot, _ = prepared_execution_fixture(
+        dbs, verified_setup, on_prepared=race, expected_state="RUNNING_OR_PREPARED"
+    )
+    assert sorted(outcomes) == ["DENIED", "STARTED"]
+    rows = dbs["owner"].all(
+        "SELECT state FROM agent.execution_instances WHERE tenant_id=%s AND snapshot_id=%s",
+        (claim.tenant_id, snapshot.id),
+    )
+    assert sorted(row["state"] for row in rows) == ["PREPARED", "RUNNING"]
 
 
 def test_ambiguous_source_registration_fences_execution_as_unknown(dbs, verified_setup):
