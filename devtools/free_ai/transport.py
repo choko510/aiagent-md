@@ -25,7 +25,6 @@ MAX_REQUEST_BYTES: Final = 4096
 MAX_RESPONSE_BYTES: Final = 131072
 OVERALL_TIMEOUT_SECONDS: Final = 25.0
 DEFAULT_TIMEOUT: Final = httpx.Timeout(20.0, connect=5.0, read=15.0, write=5.0, pool=5.0)
-KILO_TIMEOUT: Final = httpx.Timeout(20.0, connect=5.0, read=20.0, write=5.0, pool=5.0)
 USER_AGENT: Final = "aiagent-md-dev-free-ai-lab/0.1"
 
 #: Any 3xx is treated as an attempted redirect and is never followed.
@@ -122,14 +121,6 @@ def _new_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.Asyn
         timeout=DEFAULT_TIMEOUT,
         transport=transport,
     )
-
-
-def _new_client_for_spec(spec: ProviderSpec) -> httpx.AsyncClient:
-    """Use the Kilo-only read-timeout experiment without changing other providers."""
-    client = _new_client()
-    if spec.provider_id == "kilo":
-        client.timeout = KILO_TIMEOUT
-    return client
 
 
 def _elapsed_ms(started: float) -> int:
@@ -239,7 +230,7 @@ async def post_json(spec: ProviderSpec, fixture_id: str) -> TransportResult:
     body_chunk_received = False
     try:
         async with asyncio.timeout(OVERALL_TIMEOUT_SECONDS):
-            client = _new_client_for_spec(spec)
+            client = _new_client()
             async with client:
                 async with client.stream("POST", spec.endpoint, content=encoded, headers=headers) as response:
                     phase = "HEADERS_RECEIVED"

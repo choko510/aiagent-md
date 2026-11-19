@@ -232,40 +232,34 @@ def test_new_client_constructor_is_fixed(monkeypatch: pytest.MonkeyPatch) -> Non
         asyncio.run(client.aclose())
 
 
-def test_kilo_only_uses_the_20_second_read_timeout() -> None:
-    async def inspect() -> dict[str, tuple[float | None, float | None, float | None, float | None]]:
-        values: dict[str, tuple[float | None, float | None, float | None, float | None]] = {}
-        for provider_id in ("kilo", "ovh", "jev_legacy", "pollinations_legacy"):
-            client = transport._new_client_for_spec(catalog.require_spec(provider_id))
-            try:
-                timeout = client.timeout
-                values[provider_id] = (timeout.connect, timeout.read, timeout.write, timeout.pool)
-            finally:
-                await client.aclose()
-        return values
+def test_all_providers_use_the_15_second_read_timeout() -> None:
+    async def inspect() -> tuple[float | None, float | None, float | None, float | None]:
+        client = transport._new_client()
+        try:
+            timeout = client.timeout
+            return (timeout.connect, timeout.read, timeout.write, timeout.pool)
+        finally:
+            await client.aclose()
 
-    values = asyncio.run(inspect())
-    assert values["kilo"] == (5.0, 20.0, 5.0, 5.0)
+    assert asyncio.run(inspect()) == (5.0, 15.0, 5.0, 5.0)
     assert transport.OVERALL_TIMEOUT_SECONDS == 25.0
-    assert values["kilo"][1] < transport.OVERALL_TIMEOUT_SECONDS
-    for provider_id in ("ovh", "jev_legacy", "pollinations_legacy"):
-        assert values[provider_id] == (5.0, 15.0, 5.0, 5.0)
 
 
-def test_post_json_selects_the_provider_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    observed: list[tuple[str, float | None]] = []
-    real_for_spec = transport._new_client_for_spec
+def test_post_json_uses_the_same_fixed_client_for_all_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float | None] = []
 
-    def recording(spec: catalog.ProviderSpec) -> httpx.AsyncClient:
-        client = real_for_spec(spec)
-        observed.append((spec.provider_id, client.timeout.read))
+    def recording() -> httpx.AsyncClient:
+        client = _REAL_NEW_CLIENT(httpx.MockTransport(lambda _request: _json_ok()))
+        observed.append(client.timeout.read)
         return client
 
-    _mock_transport(monkeypatch, lambda _request: _json_ok())
-    monkeypatch.setattr(transport, "_new_client_for_spec", recording)
-    asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
-    asyncio.run(transport.post_json(catalog.require_spec("ovh"), _KILO_FIXTURE))
-    assert observed == [("kilo", 20.0), ("ovh", 15.0)]
+    monkeypatch.setattr(transport, "_new_client", recording)
+    for provider_id in ("kilo", "ovh"):
+        result = asyncio.run(transport.post_json(catalog.require_spec(provider_id), _KILO_FIXTURE))
+        assert result.status == "OK"
+    assert observed == [15.0, 15.0]
 
 
 def test_fa_t12_oversized_request_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
