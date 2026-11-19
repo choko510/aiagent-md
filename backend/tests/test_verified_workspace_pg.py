@@ -25,8 +25,10 @@ from aiagent_development.contracts import InvalidEvidence, ScopeDenied, StaleRef
 from aiagent_development.workspace_authority import register_verified_snapshot, resolve_git_commit_binding
 from aiagent_domain import uuid7
 from aiagent_gateways.context_keys import KeyRing
+from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
+from aiagent_gateways.git_operation import admit_git_operation
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
-from psycopg.errors import CheckViolation
+from psycopg.errors import CheckViolation, InsufficientPrivilege
 
 pytestmark = [pytest.mark.pg, pytest.mark.skipif(os.name != "posix", reason="POSIX private staging")]
 
@@ -124,6 +126,33 @@ def test_git_binding_requires_explicit_branch_and_current_generation(dbs, verifi
     )
     with pytest.raises(ScopeDenied):
         resolve(3)
+
+
+def test_git_operation_rejects_missing_canonical_attempt_and_patch(dbs, verified_setup):
+    claim, binding, _, _, _, _, _ = verified_setup
+    workspace = dbs["owner"].one(
+        "SELECT workspace_id FROM agent.repository_bindings WHERE tenant_id=%s AND id=%s",
+        (claim.tenant_id, binding),
+    )["workspace_id"]
+    with pytest.raises(InsufficientPrivilege), dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
+        c.execute(
+            "SELECT agent.git_operation_admit(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                claim.tenant_id,
+                claim.owner_user_id,
+                workspace,
+                claim.task_id,
+                claim.run_id,
+                claim.goal_revision,
+                claim.lease_epoch,
+                claim.worker_ref,
+                claim.restore_incarnation,
+                uuid7(),
+                binding,
+                uuid7(),
+                uuid7(),
+            ),
+        )
 
 
 def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
@@ -225,6 +254,84 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
         )
 
     assert fetch().data == content
+    # SQL authorization fixture only: this is not a Gateway or Git E2E.
+    intent, attempt, approval, effect = (uuid7() for _ in range(4))
+    request_digest = "a" * 64
+    effect_key = claim.tenant_id + ":" + intent
+    arguments = {
+        "bindingId": binding,
+        "bindingGeneration": 2,
+        "patchId": artifact,
+        "cycleId": cycle,
+        "planRef": "plan-fixture",
+        "branch": "feat/approved",
+        "parent": parent,
+        "patchSha256": digest,
+        "paths": paths,
+    }
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.tool_intents(tenant_id,id,task_id,run_id,tool_key,invocation_key,request_sha256,"
+            "safe_arguments_json,risk_class,goal_revision,status_code) VALUES (%s,%s,%s,%s,'git.commit',%s,%s,%s,"
+            "'write_reversible',%s,'SENDING')",
+            (
+                claim.tenant_id,
+                intent,
+                claim.task_id,
+                claim.run_id,
+                intent,
+                request_digest,
+                Jsonb(arguments),
+                claim.goal_revision,
+            ),
+        )
+        c.execute(
+            "INSERT INTO agent.tool_attempts(tenant_id,id,tool_intent_id,attempt_no,fence_token,worker_ref,"
+            "run_lease_epoch,status_code) VALUES (%s,%s,%s,1,1,%s,%s,'SENDING')",
+            (claim.tenant_id, attempt, intent, claim.worker_ref, claim.lease_epoch),
+        )
+        c.execute(
+            "INSERT INTO agent.approval_records(tenant_id,id,tool_intent_id,task_id,run_id,owner_user_id,tool_key,"
+            "request_sha256,goal_revision,safe_summary,decision_code,expires_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,'git.commit',%s,%s,'fixture','APPROVED',now()+interval '1 hour')",
+            (
+                claim.tenant_id,
+                approval,
+                intent,
+                claim.task_id,
+                claim.run_id,
+                claim.owner_user_id,
+                request_digest,
+                claim.goal_revision,
+            ),
+        )
+        c.execute(
+            "INSERT INTO agent.side_effect_records(tenant_id,id,tool_intent_id,effect_key,request_sha256,outcome_code,"
+            "attempt_fence) VALUES (%s,%s,%s,%s,%s,'SENDING',1)",
+            (claim.tenant_id, effect, intent, effect_key, request_digest),
+        )
+
+    def admit():
+        return admit_git_operation(
+            dbs["tool_gateway"],
+            claim,
+            workspace_id=workspace,
+            attempt_id=attempt,
+            binding_id=binding,
+            patch_id=artifact,
+            deadline=time.monotonic() + 5,
+        )
+
+    operation = admit()
+    assert operation
+    with pytest.raises(ExecutorUnknown):
+        admit()
+    dbs["owner"].one(
+        "UPDATE agent.approval_records SET decision_code='REVOKED' WHERE tenant_id=%s AND id=%s RETURNING id",
+        (claim.tenant_id, approval),
+    )
+    with pytest.raises(ExecutorFailed):
+        admit()
     with pytest.raises(ScopeDenied):
         fetch(cycle="other")
     with pytest.raises(ScopeDenied):
