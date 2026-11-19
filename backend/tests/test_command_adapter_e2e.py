@@ -21,7 +21,15 @@ from aiagent_development.code_intelligence.indexer_recipe import approved_recipe
 from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Identity
 from aiagent_development.code_intelligence.projection import prepare_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
-from aiagent_development.contracts import Cycle, ExecutionRequest, Phase, ProjectScope, RunFence, TaskPlan
+from aiagent_development.contracts import (
+    Cycle,
+    EffectUnknown,
+    ExecutionRequest,
+    Phase,
+    ProjectScope,
+    RunFence,
+    TaskPlan,
+)
 from aiagent_development.factory import ToolGatewaySandboxAdapter
 from aiagent_development.pg_store import PostgresCycleStore, PostgresRunAuthority, PostgresWorkspacePort
 from aiagent_development.workflow import DevelopmentWorkflow
@@ -46,9 +54,18 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    "kind,test_id,exit_code", [("build", None, 0), ("static-check", None, 0), ("test", "unit", 0), ("test", "unit", 7)]
+    "kind,test_id,exit_code,lose_response",
+    [
+        ("build", None, 0, False),
+        ("static-check", None, 0, False),
+        ("test", "unit", 0, False),
+        ("test", "unit", 7, False),
+        ("build", None, 0, True),
+    ],
 )
-def test_adapter_reads_real_signed_command_receipt(dbs, tenant, tmp_path: Path, kind, test_id, exit_code):
+def test_adapter_reads_real_signed_command_receipt(
+    dbs, tenant, tmp_path: Path, kind, test_id, exit_code, lose_response, monkeypatch
+):
     git = shutil.which("git")
     assert git
     backend = Path(__file__).resolve().parents[1]
@@ -272,10 +289,34 @@ def test_adapter_reads_real_signed_command_receipt(dbs, tenant, tmp_path: Path, 
                 git=object(),
                 store=cycle_store,
             )
+            if lose_response:
+                from aiagent_gateways import tool_gateway as gateway_module
+
+                def fail_after_receipt(point):
+                    if point == "gateway_after_send":
+                        raise RuntimeError("test response loss after persisted receipt")
+
+                monkeypatch.setattr(gateway_module, "fault", fail_after_receipt)
+                with pytest.raises(EffectUnknown):
+                    workflow.execute(project, cycle.cycle_id, request)
+                intent = dbs["owner"].one(
+                    "SELECT id FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s AND tool_key='sandbox_exec'",
+                    (claim.tenant_id, claim.run_id),
+                )
+                assert intent is not None
+                import asyncio
+
+                assert asyncio.run(gateway.reconcile(claim.tenant_id, str(intent["id"]))) == {"status": "CONFIRMED"}
             updated = workflow.execute(project, cycle.cycle_id, request)
             reloaded = cycle_store.load(project, cycle.cycle_id)
             assert updated == reloaded and len(reloaded.execution_receipts) == 1
             evidence = reloaded.execution_receipts[0]
+            if lose_response:
+                count = dbs["owner"].one(
+                    "SELECT count(*) AS n FROM agent.execution_instances WHERE tenant_id=%s AND run_id=%s",
+                    (claim.tenant_id, claim.run_id),
+                )
+                assert count is not None and count["n"] == 1
         else:
             evidence = adapter.execute(request)
         assert evidence.executed and evidence.exit_code == exit_code and evidence.test_id == test_id

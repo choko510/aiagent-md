@@ -28,7 +28,7 @@ from aiagent_core.control import Claim
 from aiagent_core.db import Database, Row
 from aiagent_core.events import append_event, enqueue_run_job
 from aiagent_core.step4_gate import is_reserved_tool
-from aiagent_domain import canonical_json, sha256_hex, uuid7
+from aiagent_domain import canonical_json, is_uuid7, sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 from jsonschema import Draft202012Validator
@@ -792,6 +792,36 @@ class ToolGateway:
             return {"status": "UNKNOWN"}
         status, effect = "CONFIRMED", "RECONCILED_SENT"
         result = {"receipt": answer["receipt"]}
+        # Command reconciliation may restore only the redacted fields derived
+        # from its signature-verified canonical receipt. Other executors keep
+        # the original receipt-only reconciliation contract.
+        from .command_dispatch import AuthorizedCommandExecutor
+
+        if isinstance(executor, AuthorizedCommandExecutor):
+            command = answer.get("commandResult")
+            if not isinstance(command, dict) or set(command) != {
+                "toolAttemptId",
+                "executionId",
+                "receiptId",
+                "bodySha256",
+                "kind",
+                "testId",
+            }:
+                return {"status": "UNKNOWN"}
+            if (
+                not all(
+                    isinstance(command.get(k), str) and command[k]
+                    for k in ("toolAttemptId", "executionId", "receiptId", "bodySha256", "kind")
+                )
+                or command["kind"] not in ("build", "static-check", "test")
+                or (command["kind"] == "test") != (isinstance(command["testId"], str) and bool(command["testId"]))
+                or (command["kind"] != "test" and command["testId"] is not None)
+                or any(not is_uuid7(command[k]) for k in ("toolAttemptId", "executionId", "receiptId"))
+                or re.fullmatch(r"[0-9a-f]{64}", command["bodySha256"]) is None
+                or answer["receipt"] != "command:" + command["receiptId"]
+            ):
+                return {"status": "UNKNOWN"}
+            result.update(command)
         # Lock order is task -> run -> intent, matching claim/segment settlement.
         # Do not keep these DB locks across the external receipt query.
         with self.db.tx() as c:

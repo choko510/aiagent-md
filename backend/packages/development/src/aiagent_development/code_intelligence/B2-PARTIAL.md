@@ -502,8 +502,14 @@ executor can locate one scoped FINISHED receipt while its Intent and Attempt
 remain SENDING, then re-read and verify its signature and digest under the
 original live Run/Lease before positive reconciliation. An already-UNKNOWN
 Attempt, expired Lease, missing or altered receipt, unavailable verifier key or
-ambiguous lookup remains UNKNOWN. Full Adapter-result reconstruction after
-reconciliation and the remaining recovery cases are not yet implemented.
+ambiguous lookup remains UNKNOWN. For a still-SENDING Intent/Attempt with the
+original live fence, Gateway reconciliation now preserves the redacted
+Execution/Attempt/Receipt identifiers and body digest obtained from the
+verified receipt. The Adapter can re-read that receipt and persist Workflow
+evidence without a second command execution. A real PostgreSQL/Docker command
+test exercises response loss using a test-injected exception after receipt
+persistence; it is not a process-kill test. Already-UNKNOWN attempts, expired
+leases, real Git commit provenance and the remaining recovery cases remain open.
 The canonical DB receipt persistence and rehydration have a separate PostgreSQL
 test with a synthetic process result; it is not a substitute for a real command
 E2E. Production command execution and the local B1 verifier both remain
@@ -547,5 +553,5 @@ abort migration. Distinct attempts racing for the same test are fenced before
 either remote dispatch. Migration 0019 permits positive command reconciliation
 only while the original Intent and Attempt remain SENDING and the original
 Run/Lease is live; the stored receipt is re-read and its signature and binding
-are verified. UNKNOWN attempts and stale leases remain UNKNOWN. The generic
-Gateway reconciliation response does not yet reconstruct Adapter evidence.
+are verified. UNKNOWN attempts and stale leases remain UNKNOWN. The Gateway
+response can reconstruct Adapter evidence only for the live SENDING case.

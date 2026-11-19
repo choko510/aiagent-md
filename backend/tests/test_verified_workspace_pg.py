@@ -481,7 +481,14 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(lambda _: query(), range(3)))
-        assert results == [{"sent": True, "receipt": "command:" + receipt_id}] * 3
+        assert all(
+            item is not None
+            and item["sent"] is True
+            and item["receipt"] == "command:" + receipt_id
+            and item["commandResult"]["executionId"] == prepared.id
+            and item["commandResult"]["bodySha256"] == digest
+            for item in results
+        )
         dbs["owner"].one(
             "UPDATE agent.execution_command_receipts SET proof=%s WHERE tenant_id=%s AND execution_id=%s RETURNING receipt_id",
             (b"0" * 64, claim.tenant_id, prepared.id),

@@ -138,10 +138,21 @@ class AuthorizedCommandExecutor:
             if len(rows) != 1:
                 return None
             execution_id, receipt_id = str(rows[0]["execution_id"]), str(rows[0]["receipt_id"])
-            self._lifecycle.fetch_command_receipt(
+            payload, digest = self._lifecycle.fetch_command_receipt(
                 execution_id, receipt_id, self._receipt_key, deadline=time.monotonic() + 5
             )
-            return {"sent": True, "receipt": "command:" + receipt_id}
+            return {
+                "sent": True,
+                "receipt": "command:" + receipt_id,
+                "commandResult": {
+                    "toolAttemptId": payload["attempt"],
+                    "executionId": execution_id,
+                    "receiptId": receipt_id,
+                    "bodySha256": digest,
+                    "kind": payload["kind"],
+                    "testId": payload["test_id"],
+                },
+            }
 
         try:
             return await asyncio.to_thread(locate)
