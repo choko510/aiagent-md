@@ -539,3 +539,13 @@ for build and static-check with a test-only DB preflight; test commands still
 enter the Adapter directly because a real Gateway-backed Git commit provider is
 not available. No synthetic commit receipt is treated as a successful commit.
 Production command execution and local B1 validation remain fail-closed.
+
+Migration 0018 reserves `(tenant, cycle, snapshot, test ID)` in the same
+transaction that starts an Execution and issues its Source Session. Existing
+issued test sessions are backfilled under locks; conflicting historical rows
+abort migration. Distinct attempts racing for the same test are fenced before
+either remote dispatch. Migration 0019 permits positive command reconciliation
+only while the original Intent and Attempt remain SENDING and the original
+Run/Lease is live; the stored receipt is re-read and its signature and binding
+are verified. UNKNOWN attempts and stale leases remain UNKNOWN. The generic
+Gateway reconciliation response does not yet reconstruct Adapter evidence.
