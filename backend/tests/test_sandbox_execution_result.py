@@ -183,6 +183,77 @@ def test_real_adapter_refuses_unattested_source_before_dispatch(kind: str) -> No
     gateway.submit.assert_not_called()
 
 
+@pytest.mark.parametrize("altered", [None, "attempt", "test_id", "source_commit", "timed_out"])
+def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered):
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock, Mock
+
+    from aiagent_core import control
+    from aiagent_development.contracts import EffectUnknown, ExecutionRequest, ProjectScope, RunFence
+    from aiagent_development.factory import ToolGatewaySandboxAdapter
+
+    monkeypatch.setenv("AIAGENT_PROFILE", "test")
+    claim = control.Claim("tenant", "owner", "task", "run", 2, 3, "worker", 4)
+    scope = ProjectScope("tenant", "owner", "project", "workspace", "org/repo", "branch", "a" * 40, "1")
+    run = RunFence("task", "run", 3, 2, 4, "worker")
+    request = ExecutionRequest(scope, run, "plan", "test", ("/usr/bin/true",), "a" * 64, "intent", test_id="unit")
+    db = Mock()
+    db.tx.return_value = nullcontext(object())
+    monkeypatch.setattr(control, "check_current", lambda *_args: {"workspace_id": "workspace"})
+    monkeypatch.setattr(
+        control,
+        "find_proposal",
+        lambda *_args: ({"name": "sandbox_exec", "args": {"argv": ["/usr/bin/true"], "cwdRelative": "."}}, "main"),
+    )
+    payload = {
+        "tenant": "tenant",
+        "owner": "owner",
+        "task": "task",
+        "run": "run",
+        "goal": 3,
+        "lease": 2,
+        "workspace": "workspace",
+        "workspace_revision": 1,
+        "execution": "execution",
+        "attempt": "attempt",
+        "kind": "test",
+        "test_id": "unit",
+        "toolchain_sha256": "a" * 64,
+        "exit_code": 0,
+        "timed_out": False,
+        "truncated": False,
+        "source_commit": "b" * 40,
+    }
+    if altered == "attempt":
+        payload["attempt"] = "other"
+    elif altered == "test_id":
+        payload["test_id"] = "other"
+    elif altered == "source_commit":
+        payload["source_commit"] = None
+    elif altered == "timed_out":
+        payload["timed_out"] = None
+    gateway = Mock()
+    gateway.submit = AsyncMock(
+        return_value={
+            "status": "CONFIRMED",
+            "result": {
+                "executionId": "execution",
+                "receiptId": "receipt",
+                "toolAttemptId": "attempt",
+                "bodySha256": "d" * 64,
+            },
+        }
+    )
+    adapter = ToolGatewaySandboxAdapter(db, gateway, claim, receipt_reader=lambda *_args: (payload, "d" * 64))
+    if altered is None:
+        evidence = adapter.execute(request)
+        assert evidence.source_commit_sha == "b" * 40 and evidence.test_id == "unit"
+        assert evidence.timed_out is False and evidence.truncated is False
+    else:
+        with pytest.raises(EffectUnknown, match="receipt mismatch"):
+            adapter.execute(request)
+
+
 def test_legacy_persisted_test_without_completion_flags_cannot_pass() -> None:
     from aiagent_development.contracts import (
         CommitEvidence,
