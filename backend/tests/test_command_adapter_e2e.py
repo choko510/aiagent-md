@@ -23,7 +23,8 @@ from aiagent_development.code_intelligence.projection import prepare_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 from aiagent_development.contracts import Cycle, ExecutionRequest, Phase, ProjectScope, RunFence, TaskPlan
 from aiagent_development.factory import ToolGatewaySandboxAdapter
-from aiagent_development.pg_store import PostgresCycleStore
+from aiagent_development.pg_store import PostgresCycleStore, PostgresRunAuthority, PostgresWorkspacePort
+from aiagent_development.workflow import DevelopmentWorkflow
 from aiagent_development.workspace_authority import register_verified_snapshot
 from aiagent_domain import sha256_hex, uuid7
 from aiagent_gateways.command_dispatch import AuthorizedCommandExecutor
@@ -174,7 +175,8 @@ def test_adapter_reads_real_signed_command_receipt(dbs, tenant, tmp_path: Path, 
         )
         plan = TaskPlan("plan", "change", ("unit",), claim.goal_revision)
         cycle = Cycle("command-cycle", project, fence, Phase.PLANNED, "change", plan=plan)
-        PostgresCycleStore(dbs["tool_gateway"]).create(cycle)
+        cycle_store = PostgresCycleStore(dbs["tool_gateway"])
+        cycle_store.create(cycle)
         argv = [binary, "-B", "command.py"]
         args = {"argv": argv, "cwdRelative": "."}
         descriptor = {"kind": kind, "test_id": test_id, **args}
@@ -233,9 +235,49 @@ def test_adapter_reads_real_signed_command_receipt(dbs, tenant, tmp_path: Path, 
             dbs["model_gateway"], gateway, claim, receipt_reader=CommandReceiptReader(lifecycle, b"c" * 32)
         )
         request = ExecutionRequest(
-            project, fence, "plan", kind, tuple(argv), toolchain, "command-intent", test_id=test_id
+            project,
+            fence,
+            "plan",
+            kind,
+            tuple(argv),
+            toolchain,
+            "command-intent",
+            test_id=test_id,
+            target_commit_sha=commit,
         )
-        evidence = adapter.execute(request)
+        if kind in ("build", "static-check"):
+
+            class FixturePreflight:
+                """Test-only DB preflight; the real Tool Gateway still performs final admission."""
+
+                def require_operation(self, checked_scope, checked_run, operation, target, intent_ref):
+                    assert checked_scope == project and checked_run == fence and intent_ref == request.intent_ref
+                    assert operation == f"sandbox.{kind}" and target == commit
+                    with dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
+                        control.check_current(c, claim)
+                        approved = c.execute(
+                            "SELECT 1 FROM agent.execution_recipe_approvals r "
+                            "JOIN agent.workspace_snapshot_heads h ON h.tenant_id=r.tenant_id "
+                            "WHERE r.tenant_id=%s AND r.id=%s AND r.active AND h.workspace_id=%s AND h.snapshot_id=%s",
+                            (claim.tenant_id, recipe_id, scope.workspace_id, snapshot.id),
+                        ).fetchone()
+                        assert approved is not None
+
+            workflow = DevelopmentWorkflow(
+                runs=PostgresRunAuthority(dbs["api"]),
+                reviewers=object(),
+                workspaces=PostgresWorkspacePort(dbs["api"]),
+                gateway=FixturePreflight(),
+                sandbox=adapter,
+                git=object(),
+                store=cycle_store,
+            )
+            updated = workflow.execute(project, cycle.cycle_id, request)
+            reloaded = cycle_store.load(project, cycle.cycle_id)
+            assert updated == reloaded and len(reloaded.execution_receipts) == 1
+            evidence = reloaded.execution_receipts[0]
+        else:
+            evidence = adapter.execute(request)
         assert evidence.executed and evidence.exit_code == exit_code and evidence.test_id == test_id
         assert evidence.source_commit_sha == commit and evidence.timed_out is False and evidence.truncated is False
         row = dbs["owner"].one(

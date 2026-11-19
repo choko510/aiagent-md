@@ -273,6 +273,16 @@ def test_test_request_and_receipt_must_match_approved_test_id(env):
     assert not flow._load(scope, "cycle-1").tests
 
 
+def test_stale_explicit_execution_target_is_rejected_before_dispatch(env):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    before = len(sandbox.invocations)
+    request = replace(_request(env, kind="test", intent="stale", test_id="unit"), target_commit_sha=scope.base_sha)
+    with pytest.raises(StaleReference, match="execution target"):
+        flow.execute(scope, "cycle-1", request)
+    assert len(sandbox.invocations) == before
+
+
 @pytest.mark.parametrize("timed_out,truncated", [(None, False), (False, None), (True, False), (False, True)])
 def test_incomplete_test_evidence_never_satisfies_review_gate(env, timed_out, truncated):
     _, scope, _, _, _, sandbox, _, flow = env
@@ -329,8 +339,11 @@ def test_cross_tenant_and_workspace_denied(env):
 def test_invalid_mock_evidence_and_duplicate_test_receipt(env):
     _prepare(env)
     _test(env, "unit")
+    sandbox = env[5]
+    before = len(sandbox.invocations)
     with pytest.raises(StateConflict):
         _test(env, "unit")
+    assert len(sandbox.invocations) == before
 
 
 def test_review_unique_role_and_task_required(env):

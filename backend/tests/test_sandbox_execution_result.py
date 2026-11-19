@@ -196,7 +196,9 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
     claim = control.Claim("tenant", "owner", "task", "run", 2, 3, "worker", 4)
     scope = ProjectScope("tenant", "owner", "project", "workspace", "org/repo", "branch", "a" * 40, "1")
     run = RunFence("task", "run", 3, 2, 4, "worker")
-    request = ExecutionRequest(scope, run, "plan", "test", ("/usr/bin/true",), "a" * 64, "intent", test_id="unit")
+    request = ExecutionRequest(
+        scope, run, "plan", "test", ("/usr/bin/true",), "a" * 64, "intent", test_id="unit", target_commit_sha="b" * 40
+    )
     db = Mock()
     db.tx.return_value = nullcontext(object())
     monkeypatch.setattr(control, "check_current", lambda *_args: {"workspace_id": "workspace"})
@@ -244,7 +246,15 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
             },
         }
     )
-    adapter = ToolGatewaySandboxAdapter(db, gateway, claim, receipt_reader=lambda *_args: (payload, "d" * 64))
+
+    class Reader:
+        def preflight(self, *_args):
+            pass
+
+        def __call__(self, *_args):
+            return payload, "d" * 64
+
+    adapter = ToolGatewaySandboxAdapter(db, gateway, claim, receipt_reader=Reader())
     if altered is None:
         evidence = adapter.execute(request)
         assert evidence.source_commit_sha == "b" * 40 and evidence.test_id == "unit"

@@ -142,6 +142,7 @@ class ExecutionRequest:
     toolchain_digest: str
     intent_ref: str
     test_id: str | None = None
+    target_commit_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("build", "test", "static-check") or not self.argv or not self.intent_ref:
@@ -157,6 +158,8 @@ class ExecutionRequest:
         ):
             raise ScopeDenied("invalid test ID")
         require_digest(self.toolchain_digest)
+        if self.target_commit_sha is not None:
+            require_sha(self.target_commit_sha)
 
 
 @dataclass(frozen=True)

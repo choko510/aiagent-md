@@ -526,3 +526,11 @@ restarting the Supervisor with the same durable replay journal; live key reload
 is not supported. Artifact encryption uses the existing KeyRing: old keys must
 remain available for retained Artifacts, and missing or invalid keys make
 reconciliation stay UNKNOWN rather than asserting success.
+
+The test/development command adapter now uses a scoped PostgreSQL receipt reader
+and checks an explicit target commit against the current snapshot before Tool
+Intent creation. The Docker/PostgreSQL E2E exercises `DevelopmentWorkflow`
+for build and static-check with a test-only DB preflight; test commands still
+enter the Adapter directly because a real Gateway-backed Git commit provider is
+not available. No synthetic commit receipt is treated as a successful commit.
+Production command execution and local B1 validation remain fail-closed.

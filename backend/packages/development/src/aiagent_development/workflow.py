@@ -103,12 +103,16 @@ class DevelopmentWorkflow:
             raise ScopeDenied("execution does not belong to this plan/fence")
         if request.kind == "test" and request.test_id not in c.plan.required_tests:
             raise ScopeDenied("test ID is not approved by the current plan")
+        if request.test_id is not None and any(receipt.test_id == request.test_id for receipt in c.tests):
+            raise StateConflict("duplicate test receipt; start a new review round")
         if c.phase in (Phase.PLANNED, Phase.EXECUTING) and request.kind == "test":
             raise StateConflict("test must be bound to an immutable committed SHA")
         if c.commit is not None and c.phase in (Phase.COMMITTED, Phase.REVIEWING):
             target = c.commit.commit_sha
         else:
             target = c.commit.commit_sha if c.commit is not None else c.scope.base_sha
+        if request.target_commit_sha is not None and request.target_commit_sha != target:
+            raise StaleReference("execution target differs from current commit")
         self.gateway.require_operation(c.scope, c.run, f"sandbox.{request.kind}", target, request.intent_ref)
         receipt = self.sandbox.execute(request)
         if (

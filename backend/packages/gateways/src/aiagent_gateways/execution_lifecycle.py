@@ -52,6 +52,35 @@ class ExecutionLifecycle:
             _db_deadline(c, deadline)
             return str(control.check_current(c, self._claim)["workspace_id"])
 
+    def check_snapshot_target(self, workspace: str, revision: int, commit: str, *, deadline: float) -> None:
+        """Reject a stale or differently scoped snapshot before creating a command proposal."""
+        _deadline(deadline)
+        with self._db.tx(tenant=self._claim.tenant_id) as c:
+            _db_deadline(c, deadline)
+            current = control.check_current(c, self._claim)
+            if str(current["workspace_id"]) != workspace:
+                raise ExecutionArtifactError("COMMAND_SNAPSHOT_DENIED")
+            row = c.execute(
+                "SELECT s.owner_user_id,s.workspace_revision,s.commit_sha,s.binding_generation,"
+                "b.active,b.generation,b.workspace_revision AS binding_revision,b.approved_commit "
+                "FROM agent.workspace_snapshot_heads h "
+                "JOIN agent.workspace_snapshot_attestations s ON s.tenant_id=h.tenant_id AND s.id=h.snapshot_id "
+                "JOIN agent.repository_bindings b ON b.tenant_id=s.tenant_id AND b.id=s.binding_id "
+                "WHERE h.tenant_id=%s AND h.workspace_id=%s",
+                (self._claim.tenant_id, workspace),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["owner_user_id"]) != self._claim.owner_user_id
+                or not row["active"]
+                or int(row["workspace_revision"]) != revision
+                or int(row["binding_revision"]) != revision
+                or int(row["binding_generation"]) != int(row["generation"])
+                or str(row["commit_sha"]) != commit
+                or str(row["approved_commit"]) != commit
+            ):
+                raise ExecutionArtifactError("COMMAND_SNAPSHOT_DENIED")
+
     def start(self, execution_id: str, binding_sha256: str, *, deadline: float) -> None:
         """Fence PREPARED -> RUNNING before dispatch; a retry cannot start twice."""
         _deadline(deadline)

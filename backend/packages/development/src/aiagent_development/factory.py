@@ -60,7 +60,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
         self._cwd_relative = cwd_relative
         self._receipt_reader = receipt_reader
 
-    def execute(self, request: ExecutionRequest) -> ExecutionEvidence:  # noqa: PLR0912
+    def execute(self, request: ExecutionRequest) -> ExecutionEvidence:  # noqa: PLR0912, PLR0915
         if self._receipt_reader is None or config.profile() == "production":
             raise InvalidEvidence("sandbox execution requires verified workspace and test identity contracts")
         try:
@@ -87,8 +87,16 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             or not scope.workspace_revision.isdecimal()
             or str(int(scope.workspace_revision)) != scope.workspace_revision
             or int(scope.workspace_revision) < 1
+            or request.target_commit_sha is None
         ):
             raise InvalidEvidence("sandbox request scope mismatch")
+        preflight = getattr(self._receipt_reader, "preflight", None)
+        if not callable(preflight):
+            raise InvalidEvidence("sandbox snapshot authority unavailable")
+        try:
+            preflight(scope.workspace_id, int(scope.workspace_revision), request.target_commit_sha)
+        except Exception as exc:
+            raise InvalidEvidence("sandbox snapshot authority rejected") from exc
         args = {"argv": list(request.argv), "cwdRelative": self._cwd_relative}
         call_id = "dev_" + sha256_hex({"run": claim.run_id, "intent": request.intent_ref})[:32]
         with self._db_model.tx(tenant=claim.tenant_id) as c:
@@ -147,6 +155,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             "kind": request.kind,
             "test_id": request.test_id,
             "toolchain_sha256": request.toolchain_digest,
+            "source_commit": request.target_commit_sha,
         }
         if (
             any(payload.get(k) != v for k, v in expected.items())

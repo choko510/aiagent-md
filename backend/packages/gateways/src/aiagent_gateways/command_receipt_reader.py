@@ -19,3 +19,6 @@ class CommandReceiptReader:
         return self._lifecycle.fetch_command_receipt(
             execution_id, receipt_id, self._key, deadline=time.monotonic() + self._timeout
         )
+
+    def preflight(self, workspace: str, revision: int, commit: str) -> None:
+        self._lifecycle.check_snapshot_target(workspace, revision, commit, deadline=time.monotonic() + self._timeout)
