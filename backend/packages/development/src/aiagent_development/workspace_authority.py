@@ -41,6 +41,55 @@ class SnapshotRef:
     hash_strength: str
 
 
+@dataclass(frozen=True)
+class GitCommitBinding:
+    id: str
+    generation: int
+    workspace_id: str
+    repository: str
+    branch: str
+    parent: str
+    workspace_revision: int
+
+
+def resolve_git_commit_binding(
+    db: Database,
+    claim: control.Claim,
+    binding_id: str,
+    *,
+    workspace_id: str,
+    repository: str,
+    generation: int,
+    parent: str,
+    deadline: float,
+) -> GitCommitBinding:
+    """Resolve an operator-approved Git branch under the current Run fence.
+
+    This read is not permission to send: dispatch must recheck the same binding,
+    Run and lease under its final admission transaction and fence the worker.
+    """
+    require_deadline(deadline)
+    with db.tx(tenant=claim.tenant_id) as c:
+        _db_deadline(c, deadline)
+        _lock_scope(c, claim, workspace_id)
+        run = _locked_claim(c, claim)
+        binding = _binding_row(c, claim, binding_id, lock=True)
+        branch = binding["approved_branch"]
+        if (
+            str(run["workspace_id"]) != workspace_id
+            or str(binding["workspace_id"]) != workspace_id
+            or str(binding["repository_ref"]) != repository
+            or int(binding["generation"]) != generation
+            or str(binding["approved_commit"]) != parent
+            or not isinstance(branch, str)
+            or not branch
+        ):
+            raise ScopeDenied("Git commit binding unavailable or stale")
+        return GitCommitBinding(
+            binding_id, generation, workspace_id, repository, branch, parent, int(binding["workspace_revision"])
+        )
+
+
 def _db_deadline(c: Connection[Row], deadline: float) -> None:
     require_deadline(deadline)
     milliseconds = max(1, int((deadline - time.monotonic()) * 1000))

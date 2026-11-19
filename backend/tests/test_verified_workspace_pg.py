@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import shutil
@@ -21,8 +22,11 @@ from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Ide
 from aiagent_development.code_intelligence.projection import prepare_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 from aiagent_development.contracts import InvalidEvidence, ScopeDenied, StaleReference
-from aiagent_development.workspace_authority import register_verified_snapshot
+from aiagent_development.workspace_authority import register_verified_snapshot, resolve_git_commit_binding
 from aiagent_domain import uuid7
+from aiagent_gateways.context_keys import KeyRing
+from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
+from psycopg.errors import CheckViolation
 
 pytestmark = [pytest.mark.pg, pytest.mark.skipif(os.name != "posix", reason="POSIX private staging")]
 
@@ -72,6 +76,178 @@ def verified_setup(tmp_path: Path, dbs, tenant):
     parent = tmp_path / "private"
     parent.mkdir(mode=0o700)
     return claim, binding_id, manifest, proof, encoder.receipt, wire, parent
+
+
+def test_git_binding_requires_explicit_branch_and_current_generation(dbs, verified_setup):
+    claim, binding, manifest, _, _, _, _ = verified_setup
+    workspace = str(
+        dbs["owner"].one(
+            "SELECT workspace_id FROM agent.repository_bindings WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, binding),
+        )["workspace_id"]
+    )
+
+    def resolve(generation=1, repository="fixture/repo"):
+        return resolve_git_commit_binding(
+            dbs["tool_gateway"],
+            claim,
+            binding,
+            workspace_id=workspace,
+            repository=repository,
+            generation=generation,
+            parent=manifest.identity.commit,
+            deadline=time.monotonic() + 5,
+        )
+
+    with pytest.raises(ScopeDenied):
+        resolve()  # Existing bindings are not implicitly authorized to write.
+    with pytest.raises(CheckViolation):
+        dbs["owner"].one(
+            "UPDATE agent.repository_bindings SET approved_branch='main',generation=generation+1 "
+            "WHERE tenant_id=%s AND id=%s RETURNING id",
+            (claim.tenant_id, binding),
+        )
+    dbs["owner"].one(
+        "UPDATE agent.repository_bindings SET approved_branch='feat/approved',generation=generation+1 "
+        "WHERE tenant_id=%s AND id=%s RETURNING id",
+        (claim.tenant_id, binding),
+    )
+    assert resolve(2).branch == "feat/approved"
+    with pytest.raises(ScopeDenied):
+        resolve(1)
+    with pytest.raises(ScopeDenied):
+        resolve(2, "other/repo")
+    dbs["owner"].one(
+        "UPDATE agent.repository_bindings SET active=false,generation=generation+1 "
+        "WHERE tenant_id=%s AND id=%s RETURNING id",
+        (claim.tenant_id, binding),
+    )
+    with pytest.raises(ScopeDenied):
+        resolve(3)
+
+
+def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
+    claim, binding, manifest, _, _, _, _ = verified_setup
+    dbs["owner"].one(
+        "UPDATE agent.repository_bindings SET approved_branch='feat/approved',generation=generation+1 "
+        "WHERE tenant_id=%s AND id=%s RETURNING id",
+        (claim.tenant_id, binding),
+    )
+    workspace = str(
+        dbs["owner"].one(
+            "SELECT workspace_id FROM agent.repository_bindings WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, binding),
+        )["workspace_id"]
+    )
+    artifact, cycle, content = uuid7(), "patch-" + uuid7(), b"approved patch bytes"
+    digest, key, nonce = hashlib.sha256(content).hexdigest(), b"p" * 32, b"n" * 12
+    parent, paths = manifest.identity.commit, ["a.py"]
+    from psycopg.types.json import Jsonb
+
+    dbs["owner"].one(
+        "INSERT INTO agent.dev_cycles(tenant_id,id,owner_user_id,project_id,workspace_id,task_id,run_id,version,phase,cycle_json) "
+        "VALUES (%s,%s,%s,'project',%s,%s,%s,1,'PATCH_READY',%s) RETURNING id",
+        (
+            claim.tenant_id,
+            cycle,
+            claim.owner_user_id,
+            workspace,
+            claim.task_id,
+            claim.run_id,
+            Jsonb(
+                {
+                    "patch": {"artifact_ref": artifact, "parent_sha": parent, "diff_sha256": digest, "paths": paths},
+                    "plan": {"plan_ref": "plan-fixture", "goal_revision": claim.goal_revision},
+                    "run": {
+                        "task_id": claim.task_id,
+                        "run_id": claim.run_id,
+                        "goal_revision": claim.goal_revision,
+                        "lease_epoch": claim.lease_epoch,
+                        "restore_incarnation": claim.restore_incarnation,
+                        "worker_ref": claim.worker_ref,
+                    },
+                }
+            ),
+        ),
+    )
+    meta = {
+        "tenant_id": claim.tenant_id,
+        "id": artifact,
+        "owner_user_id": claim.owner_user_id,
+        "workspace_id": workspace,
+        "binding_id": binding,
+        "binding_generation": 2,
+        "cycle_id": cycle,
+        "task_id": claim.task_id,
+        "run_id": claim.run_id,
+        "parent_sha": parent,
+        "diff_sha256": digest,
+        "paths": paths,
+        "byte_length": len(content),
+        "key_id": "legacy",
+    }
+    keys = KeyRing.single(key)
+    ciphertext = keys.cipher("legacy").encrypt(nonce, content, git_patch_aad(meta))
+    dbs["owner"].one(
+        "INSERT INTO agent.git_patch_artifacts(tenant_id,id,owner_user_id,workspace_id,binding_id,binding_generation,"
+        "cycle_id,task_id,run_id,parent_sha,diff_sha256,paths,byte_length,key_id,nonce,ciphertext) "
+        "VALUES (%s,%s,%s,%s,%s,2,%s,%s,%s,%s,%s,%s,%s,'legacy',%s,%s) RETURNING id",
+        (
+            claim.tenant_id,
+            artifact,
+            claim.owner_user_id,
+            workspace,
+            binding,
+            cycle,
+            claim.task_id,
+            claim.run_id,
+            parent,
+            digest,
+            paths,
+            len(content),
+            nonce,
+            ciphertext,
+        ),
+    )
+
+    def fetch(**kwargs):
+        return fetch_git_patch(
+            dbs["tool_gateway"],
+            claim,
+            keys,
+            artifact,
+            workspace_id=workspace,
+            binding_id=binding,
+            binding_generation=2,
+            cycle_id=kwargs.get("cycle", cycle),
+            plan_ref=kwargs.get("plan", "plan-fixture"),
+            deadline=time.monotonic() + 5,
+        )
+
+    assert fetch().data == content
+    with pytest.raises(ScopeDenied):
+        fetch(cycle="other")
+    with pytest.raises(ScopeDenied):
+        fetch(plan="other")
+    with pytest.raises(InvalidEvidence):
+        fetch_git_patch(
+            dbs["tool_gateway"],
+            claim,
+            KeyRing.single(b"q" * 32),
+            artifact,
+            workspace_id=workspace,
+            binding_id=binding,
+            binding_generation=2,
+            cycle_id=cycle,
+            plan_ref="plan-fixture",
+            deadline=time.monotonic() + 5,
+        )
+    dbs["owner"].one(
+        "UPDATE agent.git_patch_artifacts SET active=false WHERE tenant_id=%s AND id=%s RETURNING id",
+        (claim.tenant_id, artifact),
+    )
+    with pytest.raises(ScopeDenied):
+        fetch()
 
 
 def test_register_actual_git_snapshot_and_retry_idempotently(dbs, verified_setup):
