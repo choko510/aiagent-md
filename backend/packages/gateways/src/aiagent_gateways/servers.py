@@ -123,6 +123,12 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
             raise RpcError("BAD_REQUEST")
         return await gw.submit(claim_of(body), body["toolCallId"], body["tool"], args)
 
+    async def submit_development_git(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        args, tool_call_id = body.get("args"), body.get("toolCallId")
+        if not isinstance(args, dict) or not isinstance(tool_call_id, str):
+            raise RpcError("BAD_REQUEST")
+        return await gw.submit_development_git(claim_of(body), tool_call_id, args)
+
     async def record_internal(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(
             gw.record_internal, claim_of(body), str(body["toolCallId"]), str(body["tool"]), str(body["content"])
@@ -132,6 +138,11 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
         return await gw.reconcile(str(body["tenantId"]), str(body["intentId"]))
 
     srv.register("tool.submit", submit, {"runtime"})
+    if gw._development_git_enabled:
+        key = keys.get("development")
+        if key is None or len(key) < 32 or any(value == key for name, value in keys.items() if name != "development"):
+            raise ValueError("development Git RPC requires a separate caller key")
+        srv.register("tool.development_git_commit", submit_development_git, {"development"})
     srv.register("tool.record_internal", record_internal, {"runtime"})
     srv.register("tool.reconcile", reconcile, {"ops"})
     return srv

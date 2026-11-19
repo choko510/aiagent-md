@@ -42,6 +42,47 @@ def _browser_target_props() -> dict[str, Any]:
 
 
 TOOLS: dict[str, ToolSpec] = {
+    # Internal Development operation: intentionally absent from every model
+    # profile. Only the authenticated Development Gateway entry point can use it.
+    "git.commit": ToolSpec(
+        "git.commit",
+        "Commit an approved Development patch to its bound branch.",
+        _obj(
+            {
+                "bindingId": {"type": "string", "format": "uuid"},
+                "bindingGeneration": {"type": "integer", "minimum": 1},
+                "patchId": {"type": "string", "format": "uuid"},
+                "cycleId": {"type": "string", "minLength": 1, "maxLength": 200},
+                "planRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                "branch": {"type": "string", "minLength": 1, "maxLength": 200},
+                "parent": {"type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"},
+                "patchSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "paths": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 512,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                },
+                "message": {"type": "string", "minLength": 1, "maxLength": 256},
+            },
+            [
+                "bindingId",
+                "bindingGeneration",
+                "patchId",
+                "cycleId",
+                "planRef",
+                "branch",
+                "parent",
+                "patchSha256",
+                "paths",
+                "message",
+            ],
+        ),
+        "write_reversible",
+        True,
+        "git_commit",
+    ),
     "search": ToolSpec(
         "search",
         "Read-only web search. Returns short result snippets.",

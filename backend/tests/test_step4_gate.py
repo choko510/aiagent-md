@@ -41,6 +41,15 @@ def test_existing_step3_tool_registry_is_unchanged() -> None:
     assert {"search", "send_message", "sandbox_exec"}.issubset(set(TOOLS))
     assert not any(is_reserved_tool(key) for key in TOOLS)
     assert not any(is_reserved_tool(key) for vals in PROFILE_TOOLS.values() for key in vals)
+    assert all("git.commit" not in tools for tools in PROFILE_TOOLS.values())
+
+
+def test_development_git_cannot_be_enabled_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aiagent_gateways.tool_gateway import ToolGateway
+
+    monkeypatch.setenv("AIAGENT_PROFILE", "production")
+    with pytest.raises(ValueError, match="production isolation"):
+        ToolGateway(None, {}, development_git_enabled=True)  # type: ignore[arg-type]
 
 
 def test_no_environment_flag_can_grant_step4_authority(monkeypatch: pytest.MonkeyPatch) -> None:

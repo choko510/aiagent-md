@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
+from aiagent_core.rpc import RpcClient
 from aiagent_development.code_intelligence.git_proof import build_git_tree_proof
 from aiagent_development.code_intelligence.git_reader import GitSnapshot
 from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Identity
@@ -24,10 +26,14 @@ from aiagent_development.code_intelligence.projection_stream import ProjectionEn
 from aiagent_development.contracts import InvalidEvidence, ScopeDenied, StaleReference
 from aiagent_development.workspace_authority import register_verified_snapshot, resolve_git_commit_binding
 from aiagent_domain import uuid7
+from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
+from aiagent_gateways.git_commit_dispatch import GitCommitReservationExecutor
 from aiagent_gateways.git_operation import admit_git_operation
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
+from aiagent_gateways.servers import build_tool_server
+from aiagent_gateways.tool_gateway import ToolGateway
 from psycopg.errors import CheckViolation, InsufficientPrivilege
 
 pytestmark = [pytest.mark.pg, pytest.mark.skipif(os.name != "posix", reason="POSIX private staging")]
@@ -254,6 +260,73 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
         )
 
     assert fetch().data == content
+    # Real Gateway admission over authenticated RPC, stopping at UNKNOWN until
+    # an isolated Git worker and durable result are connected.
+    gateway_args = {
+        "bindingId": binding,
+        "bindingGeneration": 2,
+        "patchId": artifact,
+        "cycleId": cycle,
+        "planRef": "plan-fixture",
+        "branch": "feat/approved",
+        "parent": parent,
+        "patchSha256": digest,
+        "paths": paths,
+        "message": "approved fixture",
+    }
+    call_id = "development-git-" + uuid7()
+    with dbs["model_gateway"].tx(tenant=claim.tenant_id) as c:
+        control.append_head(
+            c,
+            claim,
+            "assistant",
+            {
+                "kind": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "git.commit", "args": gateway_args}],
+            },
+            writer="development_git_adapter",
+        )
+    executor = GitCommitReservationExecutor(dbs["tool_gateway"], claim, keys)
+    gateway = ToolGateway(dbs["tool_gateway"], {"git_commit": executor}, development_git_enabled=True)
+
+    async def gateway_flow():
+        server = build_tool_server({"development": b"d" * 32, "runtime": b"r" * 32}, "tcp:127.0.0.1:0", gateway)
+        await server.start()
+        try:
+            endpoint = f"tcp:127.0.0.1:{server.port}"
+            client = RpcClient(endpoint, "development", b"d" * 32)
+            body = {"claim": claim.to_wire(), "toolCallId": call_id, "args": gateway_args}
+            with pytest.raises(RpcError):
+                await RpcClient(endpoint, "runtime", b"r" * 32).call("tool.development_git_commit", body)
+            pending = await client.call("tool.development_git_commit", body)
+            assert pending["status"] == "PENDING_APPROVAL"
+            scope = Scope(claim.tenant_id, claim.owner_user_id, workspace)
+            await asyncio.to_thread(
+                commands.decide_approval,
+                dbs["api"],
+                scope,
+                pending["approvalId"],
+                "APPROVED",
+                pending["requestSha256"],
+                1,
+            )
+            result = await client.call("tool.development_git_commit", body)
+            assert result["status"] == "UNKNOWN"
+            repeated = await client.call("tool.development_git_commit", body)
+            assert repeated["status"] == "UNKNOWN"
+        finally:
+            await server.close()
+
+    asyncio.run(gateway_flow())
+    rows = dbs["owner"].one(
+        "SELECT count(*) AS n FROM agent.git_operations o JOIN agent.tool_attempts a "
+        "ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id JOIN agent.tool_intents i "
+        "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id WHERE o.tenant_id=%s AND i.invocation_key=%s "
+        "AND a.status_code='UNKNOWN' AND i.status_code='UNKNOWN'",
+        (claim.tenant_id, call_id),
+    )
+    assert rows["n"] == 1
     # SQL authorization fixture only: this is not a Gateway or Git E2E.
     intent, attempt, approval, effect = (uuid7() for _ in range(4))
     request_digest = "a" * 64
