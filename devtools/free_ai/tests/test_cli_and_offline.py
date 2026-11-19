@@ -506,7 +506,7 @@ def test_timeout_diagnostic_is_stderr_only_and_preserves_both_logs(
     assert len(requests) == 1
 
     diagnostics = _stderr_diagnostics(captured.err)
-    assert len(diagnostics) == 1
+    assert len(diagnostics) == 2
     diagnostic = diagnostics[0]
     assert diagnostic["event"] == "FREE_AI_TIMEOUT_DIAGNOSTIC"
     assert diagnostic["timeout_kind"] == "READ_TIMEOUT"
@@ -514,6 +514,12 @@ def test_timeout_diagnostic_is_stderr_only_and_preserves_both_logs(
     assert diagnostic["body_chunk_received"] is False
     assert diagnostic["provider_id"] == "kilo"
     assert diagnostic["fixture_id"] == "review_r08"
+    phases = diagnostics[1]
+    assert phases["event"] == "FREE_AI_TIMEOUT_PHASES"
+    assert phases["trace_observed"] is False
+    assert phases["phases"] == []
+    assert phases["provider_id"] == "kilo"
+    assert phases["fixture_id"] == "review_r08"
     assert "provider secret" not in captured.err
     assert "ReadTimeout" not in captured.err
     assert "ai-gateway" not in captured.err
@@ -526,6 +532,63 @@ def test_timeout_diagnostic_is_stderr_only_and_preserves_both_logs(
     assert review_line["tp"] is None
     quota = json.loads((runs / "quota.json").read_text(encoding="utf-8"))
     assert quota["providers"]["kilo"]["day_count"] == 1
+
+
+def test_timeout_phase_trace_is_stderr_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _temp_runs(monkeypatch, tmp_path)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        trace = request.extensions["trace"]
+        for name in (
+            "connection.connect_tcp.started",
+            "connection.connect_tcp.complete",
+            "connection.start_tls.started",
+            "connection.start_tls.complete",
+            "http11.send_request_headers.started",
+            "http11.send_request_headers.complete",
+            "http11.send_request_body.started",
+            "http11.send_request_body.complete",
+            "http11.receive_response_headers.started",
+        ):
+            await trace(name, {"provider_secret": "must not be recorded"})
+        raise httpx.ReadTimeout("provider secret must not reach stderr", request=request)
+
+    monkeypatch.setattr(transport, "_new_client", lambda: _REAL_NEW_CLIENT(httpx.MockTransport(handler)))
+    code = runner.main(_probe_argv(fixture="review_r08"))
+    captured = capsys.readouterr()
+    assert code == 3
+
+    diagnostics = _stderr_diagnostics(captured.err)
+    assert len(diagnostics) == 2
+    assert diagnostics[0]["event"] == "FREE_AI_TIMEOUT_DIAGNOSTIC"
+    phases = diagnostics[1]
+    assert phases["event"] == "FREE_AI_TIMEOUT_PHASES"
+    assert phases["trace_observed"] is True
+    events = phases["phases"]
+    assert isinstance(events, list)
+    assert [(event["phase"], event["state"]) for event in events] == [
+        ("CONNECT", "STARTED"),
+        ("CONNECT", "COMPLETE"),
+        ("TLS", "STARTED"),
+        ("TLS", "COMPLETE"),
+        ("REQUEST_HEADERS", "STARTED"),
+        ("REQUEST_HEADERS", "COMPLETE"),
+        ("REQUEST_BODY", "STARTED"),
+        ("REQUEST_BODY", "COMPLETE"),
+        ("RESPONSE_HEADERS", "STARTED"),
+    ]
+    assert all(isinstance(event["elapsed_ms"], int) for event in events)
+    assert "provider_secret" not in captured.err
+    assert "must not be recorded" not in captured.err
+    assert "provider secret" not in captured.err
+    assert "ai-gateway" not in captured.err
+
+    probe_line = json.loads((tmp_path / ".runs" / "probes.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    review_line = json.loads((tmp_path / ".runs" / "review_scores.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert len(probe_line) == 13
+    assert len(review_line) == 14
 
 
 def test_local_refusal_has_no_timeout_diagnostic(

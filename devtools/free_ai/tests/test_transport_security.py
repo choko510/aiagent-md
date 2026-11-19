@@ -442,6 +442,59 @@ def test_timeout_kind_is_classified_without_retaining_the_message(
     assert len(requests) == 1
 
 
+def test_trace_collector_keeps_only_allowlisted_phase_events() -> None:
+    collector = transport._TraceCollector(0.0)
+    asyncio.run(collector.callback("connection.connect_tcp.started", {"secret": "must not be retained"}))
+    asyncio.run(collector.callback("connection.connect_tcp.complete", {}))
+    asyncio.run(collector.callback("connection.connect_tcp.failed", {}))
+    asyncio.run(collector.callback("unknown.event", {"secret": "ignored"}))
+    timing = collector.snapshot()
+
+    assert timing.observed is True
+    assert [(event.phase, event.state) for event in timing.events] == [
+        ("CONNECT", "STARTED"),
+        ("CONNECT", "COMPLETE"),
+        ("CONNECT", "FAILED"),
+    ]
+    assert all(event.elapsed_ms >= 0 for event in timing.events)
+    assert "secret" not in repr(timing)
+
+
+def test_trace_collector_callback_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    collector = transport._TraceCollector(0.0)
+
+    def broken(_started: float) -> int:
+        raise RuntimeError("observation failed")
+
+    monkeypatch.setattr(transport, "_elapsed_ms", broken)
+    asyncio.run(collector.callback("connection.connect_tcp.started", {"secret": "ignored"}))
+    assert collector.snapshot().observed is False
+
+
+def test_trace_callback_failure_does_not_change_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        trace = request.extensions["trace"]
+        await trace("connection.connect_tcp.started", {"secret": "ignored"})
+        raise httpx.ReadTimeout("provider secret must not be retained", request=request)
+
+    class BrokenTraceEvent:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("observation failed")
+
+    monkeypatch.setattr(transport, "TraceEvent", BrokenTraceEvent)
+    monkeypatch.setattr(transport, "_new_client", lambda: _REAL_NEW_CLIENT(httpx.MockTransport(handler)))
+    result = asyncio.run(transport.post_json(catalog.require_spec("kilo"), _KILO_FIXTURE))
+    assert result.status == "TIMEOUT"
+    assert result.reason_code == "UNKNOWN_OUTCOME"
+    assert result.trace_timing is not None
+    assert result.trace_timing.observed is False
+    assert result.trace_timing.events == ()
+    assert len(attempts) == 1
+
+
 def test_read_timeout_before_headers_has_before_headers_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("provider secret must not be retained", request=request)
