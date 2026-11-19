@@ -12,6 +12,7 @@ import os
 import re
 import subprocess  # nosec B404 - fixed argv, in an isolated provider only
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from .contracts import EffectUnknown, InvalidEvidence, StaleReference, require_sha
@@ -92,7 +93,16 @@ class IsolatedGitCommitWorker:
             raise InvalidEvidence("isolated Git operation rejected")
         return result.stdout
 
-    def commit(self, parent: str, patch: bytes, digest: str, paths: tuple[str, ...], message: str) -> str:
+    def commit(
+        self,
+        parent: str,
+        patch: bytes,
+        digest: str,
+        paths: tuple[str, ...],
+        message: str,
+        *,
+        before_cas: Callable[[str, str], None] | None = None,
+    ) -> str:
         require_sha(parent)
         if (
             len(parent) != 40
@@ -153,6 +163,8 @@ class IsolatedGitCommitWorker:
             require_sha(commit)
             if run("show", "-s", "--format=%P %T", commit).strip().decode("ascii") != f"{parent} {tree}":
                 raise InvalidEvidence("created commit mismatch")
+            if before_cas is not None:
+                before_cas(commit, tree)
             try:
                 run("update-ref", self._ref, commit, parent)
             except InvalidEvidence as exc:
