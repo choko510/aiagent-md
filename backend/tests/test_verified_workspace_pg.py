@@ -401,6 +401,7 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
     """DB binding test with a synthetic process result, not a command E2E."""
     import tempfile
 
+    from aiagent_gateways.command_dispatch import AuthorizedCommandExecutor
     from aiagent_gateways.command_receipt_reader import CommandReceiptReader
     from aiagent_gateways.execution_artifacts import ExecutionArtifactError
     from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
@@ -409,9 +410,12 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
     from aiagent_sandbox.command_receipt import sign_command_receipt
     from aiagent_sandbox.grant import verify
 
-    _, _, manifest, _, receipt, _, _ = verified_setup
+    _, _, manifest, git_proof, receipt, wire, _ = verified_setup
 
-    def finish(claim, prepared, _snapshot, _parent):
+    def finish(claim, prepared, snapshot, parent):
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
         lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"c" * 32))
         ticket = lifecycle.issue_source_session(prepared, manifest, receipt, b"t" * 32, deadline=time.monotonic() + 10)
         binding, descriptor = lifecycle.running_command_binding(prepared, deadline=time.monotonic() + 10)
@@ -454,6 +458,40 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
         )
         with pytest.raises(control.FencedOut):
             CommandReceiptReader(stale, b"c" * 32)(prepared.id, receipt_id)
+        executor = AuthorizedCommandExecutor(
+            dbs["tool_gateway"],
+            claim,
+            snapshot.id,
+            prepared.recipe_id,
+            lifecycle,
+            manifest,
+            receipt,
+            git_proof,
+            [wire],
+            "unix:/unused",
+            b"r" * 32,
+            b"t" * 32,
+            b"g" * 32,
+            b"c" * 32,
+            parent,
+        )
+
+        def query():
+            return asyncio.run(executor.query(f"{claim.tenant_id}:{prepared.intent_id}"))
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(lambda _: query(), range(3)))
+        assert results == [{"sent": True, "receipt": "command:" + receipt_id}] * 3
+        dbs["owner"].one(
+            "UPDATE agent.execution_command_receipts SET proof=%s WHERE tenant_id=%s AND execution_id=%s RETURNING receipt_id",
+            (b"0" * 64, claim.tenant_id, prepared.id),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(query).result(timeout=10) is None
+        dbs["owner"].one(
+            "UPDATE agent.execution_command_receipts SET proof=%s WHERE tenant_id=%s AND execution_id=%s RETURNING receipt_id",
+            (proof, claim.tenant_id, prepared.id),
+        )
         assert b"secret" not in body
 
     prepared_execution_fixture(dbs, verified_setup, on_prepared=finish, expected_state="FINISHED", command_recipe=True)

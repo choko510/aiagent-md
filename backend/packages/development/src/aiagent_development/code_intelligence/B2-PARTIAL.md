@@ -497,8 +497,13 @@ path uses `CommandReceiptReader` and has a real PostgreSQL/Gateway/Docker
 Supervisor E2E for build, static-check, test and a nonzero test. This fixture
 does not exercise the complete Development Workflow. The path is disabled in
 production, and the binary measurement does not attest libraries,
-image, key provisioning or source secret classification. Command reconciliation
-and complete DB-to-Adapter E2E still require implementation and verification.
+image, key provisioning or source secret classification. The opt-in command
+executor can locate one scoped FINISHED receipt while its Intent and Attempt
+remain SENDING, then re-read and verify its signature and digest under the
+original live Run/Lease before positive reconciliation. An already-UNKNOWN
+Attempt, expired Lease, missing or altered receipt, unavailable verifier key or
+ambiguous lookup remains UNKNOWN. Full Adapter-result reconstruction after
+reconciliation and the remaining recovery cases are not yet implemented.
 The canonical DB receipt persistence and rehydration have a separate PostgreSQL
 test with a synthetic process result; it is not a substitute for a real command
 E2E. Production command execution and the local B1 verifier both remain

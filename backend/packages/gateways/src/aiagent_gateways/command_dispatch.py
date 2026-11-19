@@ -15,6 +15,7 @@ from aiagent_development.code_intelligence.git_proof import GitTreeProof
 from aiagent_development.code_intelligence.projection import ProjectionManifest
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
 from aiagent_development.workspace_authority import PreparedExecution, prepare_execution
+from aiagent_domain import is_uuid7
 from aiagent_sandbox.command_authority import issue_command_grant
 
 from .execution_lifecycle import ExecutionLifecycle
@@ -119,10 +120,33 @@ class AuthorizedCommandExecutor:
             "testId": payload["test_id"],
         }
 
-    async def query(self, effect_key: str, permit: str | None = None) -> None:
-        # Positive command reconciliation requires a separate durable, scoped
-        # receipt lookup contract. Never re-execute or infer a result here.
-        return None
+    async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
+        """Confirm only a receipt revalidated under the original live Run fence."""
+        tenant, separator, intent = effect_key.partition(":")
+        claim = self._claim
+        if separator != ":" or tenant != claim.tenant_id or not is_uuid7(intent):
+            return None
+
+        def locate() -> dict[str, Any] | None:
+            with self._db.tx(tenant=claim.tenant_id) as c:
+                c.execute("SELECT set_config('statement_timeout', '5000ms', true)")
+                c.execute("SELECT set_config('lock_timeout', '5000ms', true)")
+                rows = c.execute(
+                    "SELECT * FROM agent.command_reconcile_locator(%s,%s,%s,%s,%s)",
+                    (claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id, intent),
+                ).fetchall()
+            if len(rows) != 1:
+                return None
+            execution_id, receipt_id = str(rows[0]["execution_id"]), str(rows[0]["receipt_id"])
+            self._lifecycle.fetch_command_receipt(
+                execution_id, receipt_id, self._receipt_key, deadline=time.monotonic() + 5
+            )
+            return {"sent": True, "receipt": "command:" + receipt_id}
+
+        try:
+            return await asyncio.to_thread(locate)
+        except Exception:
+            return None
 
 
 async def dispatch_command(
