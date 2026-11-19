@@ -84,3 +84,6 @@ Agentが生成したコードは、言語がPythonであってもBackend本体�
 
 [同じ仕様の17〜22節](local-device-rust-client.md#17-desktop固有機能追加要求と全体の連携2026-11-10ユーザー要望)で、(1) **Local/Cloud自動振り分け**（ローカルOCR/GUI/ビルドとCloud推論を分担）、(2) **PC横断Task移動**（共有できるProject/Task/Artifactだけを再開、実行プロセス・秘密・USB端末は移送不可）、(3) **ローカルプロジェクトの自動認識**（許可済みディレクトリ内でCargo/Gradle/Git/SDK/ADBを検出）、(4) **画面を囲んで修正→再現→自動デバッグ→ビルド→実機テスト→結果比較**を統合する。4機能ともCloudの既存Tool Gateway/Sentinel/DEV-01/05/06/12を再利用し、新たな権限正本を増やさない。追加要件`LDC-REQ-17..32`、試験`LDC-T17..32`はすべて**DESIGNED / NOT RUN**。
 
+## 後期機能候補 — Semantic Test Quality
+
+[ntlintの調査・受信Adapter・今後の安全な実行統合条件](semantic-test-quality.md) を参照。DEV-07/14の任意の補助診断であり、必須Gate/独立Reviewは変更しない。
