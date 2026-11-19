@@ -163,7 +163,7 @@ def test_binding_change_during_verification_is_rejected(dbs, verified_setup, mon
     assert not list(parent.iterdir())
 
 
-def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expected_state=None):
+def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expected_state=None, command_recipe=False):
     import asyncio
     from dataclasses import asdict
 
@@ -202,8 +202,14 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
     plan = TaskPlan("plan", "change", ("unit",), claim.goal_revision)
     cycle = Cycle("fixture-cycle", scope, fence, Phase.PLANNED, "change", plan=plan)
     PostgresCycleStore(dbs["tool_gateway"]).create(cycle)
-    args = {"argv": ["approved-test"], "cwdRelative": "."}
+    args = {"argv": ["/usr/bin/true" if command_recipe else "approved-test"], "cwdRelative": "."}
     request_sha = sha256_hex({"tool": "sandbox_exec", "args": args})
+    if command_recipe:
+        from aiagent_sandbox.command_authority import command_template_digest
+
+        template_sha = command_template_digest({"kind": "test", "test_id": "unit", **args})
+    else:
+        template_sha = "d" * 64
     recipe_id, changed_recipe, wrong_test, bad_digest = uuid7(), uuid7(), uuid7(), uuid7()
     for rid, req_sha, test_id in (
         (recipe_id, request_sha, "unit"),
@@ -224,7 +230,7 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
                 Jsonb(asdict(plan)),
                 test_id,
                 req_sha,
-                "d" * 64,
+                template_sha,
                 "e" * 64
                 if rid == bad_digest
                 else approved_recipe_digest(
@@ -232,7 +238,7 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
                     test_id=test_id,
                     plan_sha256=sha256_hex(asdict(plan)),
                     request_sha256=req_sha,
-                    template_sha256="d" * 64,
+                    template_sha256=template_sha,
                     toolchain_sha256="b" * 64,
                     image_digest="sha256:" + "c" * 64,
                 ),
@@ -331,12 +337,13 @@ def prepared_execution_fixture(dbs, verified_setup, *, on_prepared=None, expecte
             " WHERE tenant_id=%s AND id=%s",
             ("a" * 64, claim.tenant_id, prepared.id),
         )
-    with pytest.raises(psycopg.errors.CheckViolation), dbs["owner"].tx() as c:
-        c.execute(
-            "UPDATE agent.execution_instances SET state='PUBLISHED',artifact_sha256=%s,artifact_bytes=1"
-            " WHERE tenant_id=%s AND id=%s",
-            ("a" * 64, claim.tenant_id, prepared.id),
-        )
+    if expected_state != "FINISHED":
+        with pytest.raises(psycopg.errors.CheckViolation), dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.execution_instances SET state='PUBLISHED',artifact_sha256=%s,artifact_bytes=1"
+                " WHERE tenant_id=%s AND id=%s",
+                ("a" * 64, claim.tenant_id, prepared.id),
+            )
     with pytest.raises(psycopg.errors.InsufficientPrivilege), dbs["runtime"].conn() as c:
         c.execute("SELECT * FROM agent.execution_instances")
     return claim, prepared, snapshot, parent
@@ -384,6 +391,57 @@ def test_source_session_issuance_is_fenced_and_single_use(dbs, verified_setup):
         (claim.tenant_id, prepared.id),
     )
     assert row is not None and str(row["session_id"]) == issued[0]["payload"]["session"] and row["state"] == "RUNNING"
+
+
+def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_setup, tmp_path):
+    """DB binding test with a synthetic process result, not a command E2E."""
+    import tempfile
+
+    from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+    from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+    from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
+    from aiagent_sandbox.command_authority import issue_command_grant
+    from aiagent_sandbox.command_receipt import sign_command_receipt
+    from aiagent_sandbox.grant import verify
+
+    _, _, manifest, _, receipt, _, _ = verified_setup
+
+    def finish(claim, prepared, _snapshot, _parent):
+        lifecycle = ExecutionLifecycle(dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"c" * 32))
+        ticket = lifecycle.issue_source_session(prepared, manifest, receipt, b"t" * 32, deadline=time.monotonic() + 10)
+        binding, descriptor = lifecycle.running_command_binding(prepared, deadline=time.monotonic() + 10)
+        token = issue_command_grant(b"t" * 32, b"g" * 32, ticket, binding, descriptor)
+        grant = verify(b"g" * 32, token, descriptor["argv"], ".")
+        result = {
+            "status": "EXITED",
+            "executionId": prepared.id,
+            "attemptId": prepared.attempt_id,
+            "exitCode": 0,
+            "timedOut": False,
+            "truncated": False,
+            "stdout": "secret",
+            "stderr": "",
+        }
+        body, proof = sign_command_receipt(b"c" * 32, grant, binding, descriptor, result)
+        with tempfile.TemporaryFile(dir=tmp_path) as f:
+            f.write(body)
+            f.flush()
+            fd = os.open(f"/proc/self/fd/{f.fileno()}", os.O_RDONLY)
+            try:
+                with pytest.raises(ExecutionArtifactError, match="COMMAND_RECEIPT_INVALID"):
+                    lifecycle.finish_command(prepared, fd, b"0" * 64, b"c" * 32, deadline=time.monotonic() + 10)
+                receipt_id, payload, digest = lifecycle.finish_command(
+                    prepared, fd, proof, b"c" * 32, deadline=time.monotonic() + 10
+                )
+            finally:
+                os.close(fd)
+        loaded, loaded_digest = lifecycle.fetch_command_receipt(
+            prepared.id, receipt_id, b"c" * 32, deadline=time.monotonic() + 10
+        )
+        assert loaded == payload and loaded_digest == digest and loaded["test_id"] == "unit"
+        assert b"secret" not in body
+
+    prepared_execution_fixture(dbs, verified_setup, on_prepared=finish, expected_state="FINISHED", command_recipe=True)
 
 
 def test_concurrent_source_session_issuance_allows_one(dbs, verified_setup):

@@ -13,13 +13,15 @@ from datetime import UTC, datetime
 
 import psycopg
 from aiagent_core import control
-from aiagent_core.db import Database
-from aiagent_development.code_intelligence.indexer_recipe import python_scip_recipe_digest
+from aiagent_core.db import Database, Row
+from aiagent_development.code_intelligence.indexer_recipe import approved_recipe_digest, python_scip_recipe_digest
 from aiagent_development.code_intelligence.models import Identity
 from aiagent_development.code_intelligence.projection import ProjectionManifest, projection_manifest_digest
 from aiagent_development.code_intelligence.projection_stream import ProjectionStreamReceipt
-from aiagent_development.workspace_authority import PreparedExecution, _binding_payload
+from aiagent_development.workspace_authority import PreparedExecution, _binding_payload, _prepared
 from aiagent_domain import require_uuid7, sha256_hex, uuid7
+from aiagent_sandbox.command_authority import command_template_digest
+from aiagent_sandbox.command_receipt import verify_command_receipt
 from aiagent_sandbox.source_ticket import sign_source_ticket
 
 from .execution_artifacts import ExecutionArtifactError, _db_deadline, _deadline, _read_private_fd
@@ -250,3 +252,183 @@ class ExecutionLifecycle:
                 return binding
         except psycopg.Error as exc:
             raise ExecutionArtifactError("EXECUTION_AUTHORITY_DENIED") from exc
+
+    @staticmethod
+    def _command_binding(
+        execution: Row,
+        snapshot: Row,
+        recipe: Row,
+        intent: Row,
+        prepared: PreparedExecution,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        kind, args = recipe.get("kind"), intent.get("safe_arguments_json")
+        if kind not in ("build", "static-check", "test") or not isinstance(args, dict):
+            raise ExecutionArtifactError("COMMAND_RECIPE_DENIED")
+        descriptor = {
+            "kind": kind,
+            "test_id": recipe.get("test_id"),
+            "argv": args.get("argv"),
+            "cwdRelative": args.get("cwdRelative"),
+        }
+        try:
+            template = command_template_digest(descriptor)
+        except ValueError as exc:
+            raise ExecutionArtifactError("COMMAND_RECIPE_DENIED") from exc
+        if (
+            template != str(recipe["template_sha256"]).strip()
+            or sha256_hex({"tool": "sandbox_exec", "args": args}) != str(recipe["request_sha256"]).strip()
+        ):
+            raise ExecutionArtifactError("COMMAND_RECIPE_DENIED")
+        expected_recipe = approved_recipe_digest(
+            kind=str(kind),
+            test_id=str(recipe["test_id"]) if recipe.get("test_id") is not None else None,
+            plan_sha256=str(recipe["plan_sha256"]).strip(),
+            request_sha256=str(recipe["request_sha256"]).strip(),
+            template_sha256=template,
+            toolchain_sha256=str(recipe["toolchain_sha256"]).strip(),
+            image_digest=str(recipe["image_digest"]),
+        )
+        if expected_recipe != str(recipe["recipe_sha256"]).strip():
+            raise ExecutionArtifactError("COMMAND_RECIPE_DENIED")
+        binding = _binding_payload(execution, snapshot, recipe)
+        if sha256_hex(binding) != prepared.binding_sha256 or str(intent.get("id")) != prepared.intent_id:
+            raise ExecutionArtifactError("COMMAND_BINDING_DENIED")
+        return binding, descriptor
+
+    def _command_rows(
+        self, c: psycopg.Connection[Row], prepared: PreparedExecution
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        # Callers first hold the canonical execution lock in this transaction.
+        connection = c
+        tenant = self._claim.tenant_id
+        execution = connection.execute(
+            "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s", (tenant, prepared.id)
+        ).fetchone()
+        snapshot = connection.execute(
+            "SELECT * FROM agent.workspace_snapshot_attestations WHERE tenant_id=%s AND id=%s",
+            (tenant, prepared.snapshot_id),
+        ).fetchone()
+        recipe = connection.execute(
+            "SELECT * FROM agent.execution_recipe_approvals WHERE tenant_id=%s AND id=%s", (tenant, prepared.recipe_id)
+        ).fetchone()
+        intent = connection.execute(
+            "SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant, prepared.intent_id)
+        ).fetchone()
+        if execution is None or snapshot is None or recipe is None or intent is None:
+            raise ExecutionArtifactError("COMMAND_BINDING_DENIED")
+        return self._command_binding(execution, snapshot, recipe, intent, prepared)
+
+    def running_command_binding(
+        self, prepared: PreparedExecution, *, deadline: float
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Read exact approved command inputs after a fresh canonical RUNNING check."""
+        _deadline(deadline)
+        workspace = self._workspace(deadline)
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                _db_deadline(c, deadline)
+                c.execute(
+                    "SELECT agent.execution_check_running(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (*self._scope(workspace, prepared.id), prepared.binding_sha256),
+                )
+                return self._command_rows(c, prepared)
+        except psycopg.Error as exc:
+            raise ExecutionArtifactError("EXECUTION_AUTHORITY_DENIED") from exc
+
+    def finish_command(
+        self,
+        prepared: PreparedExecution,
+        body_fd: int,
+        proof: bytes,
+        receipt_key: bytes,
+        *,
+        deadline: float,
+    ) -> tuple[str, dict[str, object], str]:
+        """Authenticate real process outcome and atomically persist its canonical receipt."""
+        binding, descriptor = self.running_command_binding(prepared, deadline=deadline)
+        body = _read_private_fd(body_fd, deadline)
+        try:
+            payload = verify_command_receipt(receipt_key, body, proof, binding, descriptor)
+        except ValueError as exc:
+            raise ExecutionArtifactError("COMMAND_RECEIPT_INVALID") from exc
+        digest, proof_digest = hashlib.sha256(body).hexdigest(), hashlib.sha256(proof).hexdigest()
+        workspace = self._workspace(deadline)
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                _db_deadline(c, deadline)
+                row = c.execute(
+                    "SELECT agent.execution_finish_command(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS id",
+                    (
+                        *self._scope(workspace, prepared.id),
+                        prepared.binding_sha256,
+                        uuid7(),
+                        descriptor["kind"],
+                        descriptor["test_id"] or "",
+                        body,
+                        proof,
+                        digest,
+                        proof_digest,
+                    ),
+                ).fetchone()
+                if row is None or row["id"] is None:
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_UNAVAILABLE")
+                return str(row["id"]), payload, digest
+        except psycopg.Error as exc:
+            raise ExecutionArtifactError("COMMAND_FINISH_DENIED") from exc
+
+    def fetch_command_receipt(
+        self,
+        execution_id: str,
+        receipt_id: str,
+        receipt_key: bytes,
+        *,
+        deadline: float,
+    ) -> tuple[dict[str, object], str]:
+        """Rehydrate and authenticate a scoped durable command receipt."""
+        _deadline(deadline)
+        require_uuid7(execution_id, "execution id")
+        require_uuid7(receipt_id, "receipt id")
+        workspace = self._workspace(deadline)
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                _db_deadline(c, deadline)
+                row = c.execute(
+                    "SELECT * FROM agent.execution_fetch_command(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    self._scope(workspace, execution_id),
+                ).fetchone()
+                if row is None or str(row["receipt_id"]) != receipt_id:
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_UNAVAILABLE")
+                execution = c.execute(
+                    "SELECT * FROM agent.execution_instances WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, execution_id),
+                ).fetchone()
+                if execution is None:
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_UNAVAILABLE")
+                snapshot = c.execute(
+                    "SELECT * FROM agent.workspace_snapshot_attestations WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, execution["snapshot_id"]),
+                ).fetchone()
+                recipe = c.execute(
+                    "SELECT * FROM agent.execution_recipe_approvals WHERE tenant_id=%s AND id=%s",
+                    (self._claim.tenant_id, execution["recipe_id"]),
+                ).fetchone()
+                if snapshot is None or recipe is None:
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_UNAVAILABLE")
+                prepared = _prepared(execution, snapshot, recipe)
+                binding, descriptor = self._command_rows(c, prepared)
+                body, proof = bytes(row["body"]), bytes(row["proof"])
+                digest = hashlib.sha256(body).hexdigest()
+                if (
+                    digest != str(row["body_sha256"]).strip()
+                    or hashlib.sha256(proof).hexdigest() != str(row["proof_sha256"]).strip()
+                ):
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_INVALID")
+                try:
+                    payload = verify_command_receipt(
+                        receipt_key, body, proof, binding, descriptor, max_age_seconds=None
+                    )
+                except ValueError as exc:
+                    raise ExecutionArtifactError("COMMAND_RECEIPT_INVALID") from exc
+                return payload, digest
+        except psycopg.Error as exc:
+            raise ExecutionArtifactError("COMMAND_RECEIPT_UNAVAILABLE") from exc

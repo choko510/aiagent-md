@@ -97,6 +97,7 @@ async def register_issued_source(
     deadline: float,
     execution_binding: dict[str, Any] | None = None,
     grant: dict[str, Any] | None = None,
+    command_descriptor: dict[str, Any] | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Register a scoped ticket and fence ambiguous outcomes in the canonical DB."""
     payload = verify_source_ticket(ticket_key, ticket)
@@ -113,6 +114,7 @@ async def register_issued_source(
             deadline=deadline,
             execution_binding=execution_binding,
             grant=grant,
+            command_descriptor=command_descriptor,
         )
     except (Exception, asyncio.CancelledError) as exc:
         try:
@@ -139,6 +141,7 @@ async def register_source(
     deadline: float,
     execution_binding: dict[str, Any] | None = None,
     grant: dict[str, Any] | None = None,
+    command_descriptor: dict[str, Any] | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Register a DB-issued ticket over authenticated RPC; callers enforce live authority."""
     p = verify_source_ticket(ticket_key, ticket)
@@ -151,9 +154,13 @@ async def register_source(
     }
     if (execution_binding is None) != (grant is None):
         raise ValueError("incomplete index grant")
+    if command_descriptor is not None and execution_binding is None:
+        raise ValueError("incomplete command grant")
     if execution_binding is not None and grant is not None:
         body["execution_binding"] = execution_binding
         body["grant"] = grant
+        if command_descriptor is not None:
+            body["command_descriptor"] = command_descriptor
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("source deadline exceeded")

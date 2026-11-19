@@ -486,6 +486,20 @@ contract describes those command types and has no index operation, while this
 slice produces a SCIP Artifact; treating an index as a test receipt would invent
 evidence. Generic approved command execution, authenticated command receipts
 and their Test ID binding are still required before enabling that adapter.
+An opt-in test/development command path now verifies an exact approved argv and
+Test ID, requires proof of a complete source projection, uses a fixed measured
+executable allowlist, and produces a domain-separated signed receipt containing
+outcome flags and output hashes rather than plaintext. A disposable Docker test
+exercises build, static-check and test commands, nonzero exit, timeout, output
+overflow and read-only source. Migration 0017 and Gateway command-receipt
+operations are provisional: they are not connected to `ToolGatewaySandboxAdapter`
+or enabled in production, and the binary measurement does not attest libraries,
+image, key provisioning or source secret classification. Command reconciliation
+and complete DB-to-Adapter E2E still require implementation and verification.
+The canonical DB receipt persistence and rehydration have a separate PostgreSQL
+test with a synthetic process result; it is not a substitute for a real command
+E2E. Production command execution and the local B1 verifier both remain
+fail-closed until the required isolation and attestation boundaries exist.
 The Draft Development request now requires an explicit planned Test ID for test
 commands. The workflow checks that ID before dispatch and requires a matching
 receipt. Timeout and truncation flags are tri-state: older stored receipts with

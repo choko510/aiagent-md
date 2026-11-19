@@ -21,8 +21,8 @@ from .grant import Grant, sign
 from .source_ticket import verify_source_ticket
 
 
-def verify_index_binding(ticket: dict[str, Any], binding: dict[str, Any]) -> None:
-    """Bind the fixed SCIP template to the complete DB-authenticated Execution."""
+def verify_execution_binding(ticket: dict[str, Any], binding: dict[str, Any]) -> None:
+    """Bind a complete canonical Execution to its signed source ticket."""
     try:
         expected = {
             "execution": ticket["execution"],
@@ -46,7 +46,6 @@ def verify_index_binding(ticket: dict[str, Any], binding: dict[str, Any]) -> Non
             or any(binding.get(k) != v for k, v in expected.items())
             or str(binding["workspace_revision"]) != ticket["revision"]
             or not hmac.compare_digest(sha256_hex(binding), ticket["binding_sha256"])
-            or binding["test_id"] is not None
             or any(
                 type(binding[k]) is not str or not binding[k]
                 for k in (
@@ -59,6 +58,16 @@ def verify_index_binding(ticket: dict[str, Any], binding: dict[str, Any]) -> Non
                 )
             )
         ):
+            raise ValueError("execution binding rejected")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("execution authority rejected") from exc
+
+
+def verify_index_binding(ticket: dict[str, Any], binding: dict[str, Any]) -> None:
+    """Bind the fixed SCIP template to the complete DB-authenticated Execution."""
+    try:
+        verify_execution_binding(ticket, binding)
+        if binding["test_id"] is not None:
             raise ValueError("index binding rejected")
         recipe = approved_recipe_digest(
             kind="index",

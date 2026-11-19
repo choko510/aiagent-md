@@ -174,16 +174,29 @@ class SourceSessions:
         if (
             self._ticket_key is None
             or self._registration_factory is None
-            or set(body) not in (base_fields, base_fields | {"execution_binding", "grant"})
+            or set(body)
+            not in (
+                base_fields,
+                base_fields | {"execution_binding", "grant"},
+                base_fields | {"execution_binding", "grant", "command_descriptor"},
+            )
         ):
             raise ValueError("source registration unavailable")
         p = verify_source_ticket(self._ticket_key, body["ticket"])
         if "execution_binding" in body:
-            from .scip_authority import verify_index_binding
-
             if not isinstance(body["execution_binding"], dict) or not isinstance(body["grant"], dict):
                 raise ValueError("index authority unavailable")
-            verify_index_binding(p, body["execution_binding"])
+            if "command_descriptor" in body:
+                from .command_authority import verify_command_binding
+
+                if not isinstance(body["command_descriptor"], dict):
+                    raise ValueError("command authority unavailable")
+                verify_command_binding(p, body["execution_binding"], body["command_descriptor"])
+                p["_command_descriptor"] = body["command_descriptor"]
+            else:
+                from .scip_authority import verify_index_binding
+
+                verify_index_binding(p, body["execution_binding"])
             p["_execution_binding"] = body["execution_binding"]
             p["_grant"] = body["grant"]
         files, trees, total = body["files"], body["trees"], body["total_bytes"]

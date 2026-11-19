@@ -52,7 +52,64 @@ def python_scip_recipe_digest() -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def measure_python_scip_toolchain() -> str:  # noqa: PLR0915
+def _check_readonly_directory(path: Path) -> None:
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts[1:]):
+        raise ValueError("invalid toolchain directory")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for part in path.parts[1:]:
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
+                raise ValueError("toolchain directory is writable")
+    finally:
+        os.close(fd)
+
+
+def _measure_readonly_file(path: Path, max_size: int, *, executable: bool = False) -> tuple[str, int]:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not 0 <= before.st_size <= max_size
+            or not os.fstatvfs(fd).f_flag & os.ST_RDONLY
+            or (executable and (before.st_uid != 0 or not before.st_mode & 0o111))
+        ):
+            raise ValueError("invalid toolchain file")
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            block = os.read(fd, min(remaining, 1024 * 1024))
+            if not block:
+                raise ValueError("incomplete toolchain file")
+            digest.update(block)
+            remaining -= len(block)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ValueError("toolchain changed during measurement")
+        return digest.hexdigest(), before.st_size
+    finally:
+        os.close(fd)
+
+
+def measure_command_toolchain(executable: str) -> str:
+    """Measure one approved executable; does not attest dependencies or the image."""
+    path = Path(executable)
+    _check_readonly_directory(path.parent)
+    digest, size = _measure_readonly_file(path, 256 * 1024 * 1024, executable=True)
+    return sha256_hex({"version": "dev-command-binary-v1", "path": executable, "sha256": digest, "size": size})
+
+
+def measure_python_scip_toolchain() -> str:
     """Measure the Node binary, SCIP package files and fixed environment.
 
     This identifies locally visible bytes; it is not image attestation and does
@@ -60,57 +117,11 @@ def measure_python_scip_toolchain() -> str:  # noqa: PLR0915
     read-only trusted image and compare the result with the approved recipe.
     """
 
-    def check_directory(path: Path) -> None:
-        if not path.is_absolute() or any(part in (".", "..") for part in path.parts[1:]):
-            raise ValueError("invalid toolchain directory")
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        fd = os.open("/", flags)
-        try:
-            for part in path.parts[1:]:
-                next_fd = os.open(part, flags, dir_fd=fd)
-                os.close(fd)
-                fd = next_fd
-                if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
-                    raise ValueError("toolchain directory is writable")
-        finally:
-            os.close(fd)
-
-    def digest_file(path: Path, max_size: int) -> tuple[str, int]:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            before = os.fstat(fd)
-            if (
-                not stat.S_ISREG(before.st_mode)
-                or not 0 <= before.st_size <= max_size
-                or not os.fstatvfs(fd).f_flag & os.ST_RDONLY
-            ):
-                raise ValueError("invalid toolchain file")
-            digest = hashlib.sha256()
-            remaining = before.st_size
-            while remaining:
-                block = os.read(fd, min(remaining, 1024 * 1024))
-                if not block:
-                    raise ValueError("incomplete toolchain file")
-                digest.update(block)
-                remaining -= len(block)
-            after = os.fstat(fd)
-            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            ):
-                raise ValueError("toolchain changed during measurement")
-            return digest.hexdigest(), before.st_size
-        finally:
-            os.close(fd)
-
     root = Path(_INDEXER).parent
     for parent in (Path(_NODE).parent, Path(_ENVIRONMENT).parent, root):
-        check_directory(parent)
-    node_sha, _ = digest_file(Path(_NODE), 256 * 1024 * 1024)
-    env_sha, env_size = digest_file(Path(_ENVIRONMENT), 1024)
+        _check_readonly_directory(parent)
+    node_sha, _ = _measure_readonly_file(Path(_NODE), 256 * 1024 * 1024)
+    env_sha, env_size = _measure_readonly_file(Path(_ENVIRONMENT), 1024)
     if env_size != 3 or env_sha != hashlib.sha256(b"[]\n").hexdigest():
         raise ValueError("indexer environment mismatch")
     files: list[dict[str, object]] = []
@@ -129,7 +140,7 @@ def measure_python_scip_toolchain() -> str:  # noqa: PLR0915
             raise ValueError("invalid toolchain directory")
         for name in filenames:
             path = base / name
-            sha, size = digest_file(path, 64 * 1024 * 1024)
+            sha, size = _measure_readonly_file(path, 64 * 1024 * 1024)
             total += size
             if len(files) >= 10000 or total > 128 * 1024 * 1024:
                 raise ValueError("toolchain measurement budget exceeded")
