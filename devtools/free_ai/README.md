@@ -246,9 +246,10 @@ phase names, states and monotonic elapsed times:
 
 `phase` is one of `CONNECT`, `TLS`, `REQUEST_HEADERS`, `REQUEST_BODY`,
 `RESPONSE_HEADERS` or `RESPONSE_BODY`; `state` is `STARTED`, `COMPLETE` or `FAILED`. A
-`STARTED` event without a matching `COMPLETE` means that phase was still in progress
-when the timeout ended. `trace_observed=false` with an empty `phases` list means that no
-allowlisted trace event was seen; it does not mean that no work happened. The trace
+`STARTED` event without either a matching `COMPLETE` or `FAILED` means that phase was
+still in progress when the timeout ended; a `FAILED` event is reported separately.
+`trace_observed=false` with an empty `phases` list means that no allowlisted trace
+event was seen; it does not mean that no work happened. The trace
 callback compares only event names and records timestamps, never the event payload,
 request/response data or exception objects. A trace callback failure is swallowed and
 cannot change the request result. `CONNECT` covers DNS resolution plus TCP connect; DNS
