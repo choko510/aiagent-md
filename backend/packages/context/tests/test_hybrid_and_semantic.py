@@ -179,6 +179,33 @@ def test_hybrid_compaction_reduces_repetitive_cli_and_json_and_passthroughs_shor
     assert out_src == tiny and rec.outcome == "PASSTHROUGH"
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-4o", "o200k_base"),
+        ("gpt-5", "o200k_base"),
+        ("gpt-5-mini", "o200k_base"),
+        ("o3-mini", "o200k_base"),
+        ("claude-sonnet-4.5", "anthropic_claude_est"),
+        ("gemini-2.5-flash", "cl100k_base"),
+        ("fake-gateway", "fake_bpe_est"),
+        ("production-main", "cl100k_base"),
+    ],
+)
+def test_tokenizer_profiles_cover_reasoning_and_unknown_models(model: str, expected: str) -> None:
+    from aiagent_context.tokenizer import tokenizer_for_model
+
+    assert tokenizer_for_model(model) == expected
+
+
+def test_estimator_handles_japanese_english_code_and_json_inputs() -> None:
+    tok = ModelBoundTokenEstimator()
+    for model in ("gpt-4o", "gpt-5", "o3-mini", "claude-sonnet-4.5", "gemini-2.5-flash"):
+        tokenizer = "anthropic_claude_est" if model.startswith("claude") else "o200k_base"
+        for text in ("日本語の文章です。", "English prose.", "def f(x): return x + 1", '{"key": "value"}'):
+            assert tok.count_tokens(text, model_id=model, tokenizer_id=tokenizer) > 0
+
+
 def test_anthropic_tokenizer_uses_conservative_non_openai_margin_and_revokes_projections_on_cas_failure() -> None:
     from aiagent_context.tokenizer import tokenizer_for_model
 

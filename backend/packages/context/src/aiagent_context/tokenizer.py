@@ -17,11 +17,16 @@ class TokenEstimatorPort(Protocol):
 
 
 def tokenizer_for_model(model_id: str) -> str:
-    """Resolve explicit tokenizer profile matching a model family (fail conservative on non-OpenAI families)."""
+    """Resolve an explicit tokenizer profile for a model family.
+
+    GPT-4o, GPT-5 and o-series use o200k-family encodings. The exact encoding is only used when the optional
+    `tiktoken` package is installed; otherwise every non-Anthropic profile falls back to the conservative
+    CJK-aware approximation (with an extra margin for Claude), so this mapping never weakens the bound.
+    """
     m = model_id.strip().lower()
     if m.startswith("claude"):
         return "anthropic_claude_est"
-    if m.startswith(("gpt-4o", "o1", "o3", "o4")):
+    if m.startswith(("gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-5", "o1", "o3", "o4")):
         return "o200k_base"
     if m.startswith("fake"):
         return "fake_bpe_est"

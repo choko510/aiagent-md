@@ -185,19 +185,24 @@ jobs:
           docker build -q -f deploy/docker/Dockerfile --target runtime-base \
             --build-arg PACKAGES="aiagent-gateways aiagent-sentinel aiagent-api aiagent-runtime" -t aiagent/all:dev .
           docker build -q -f deploy/docker/Dockerfile.cell -t aiagent/cell:dev .
-      - name: Official yomiyasu is included as a read-only packaged skill
+      - name: Pinned nihongo bundle is verified, embedded as Lite and served read-only
         working-directory: .
         run: |
           docker run --rm --network none --entrypoint python aiagent/all:dev -c '
-          from aiagent_domain.tools import SKILLS_DIR
-          skill = SKILLS_DIR / "yomiyasu"
+          from aiagent_domain.tools import SKILLS_DIR, packaged_skill_texts
+          skill = SKILLS_DIR / "nihongo"
+          lite = (skill / "ALWAYS.md")
+          assert lite.is_file() and "# nihongo Lite" in lite.read_text(encoding="utf-8")
           assert (skill / "SKILL.md").stat().st_size > 30000
-          assert (skill / "references" / "doc-types" / "pr.md").is_file()
-          assert (skill / "scripts" / "yomiyasu_check.py").is_file()
-          from aiagent_runtime.agent import _fs_backend
+          assert (skill / "references" / "technical-writing.md").is_file()
+          assert (skill / "LICENSE").is_file()
+          assert not (skill / "scripts").exists()
+          assert "yomiyasu" not in "".join(packaged_skill_texts()).lower()
+          from aiagent_runtime.agent import SYSTEM_PROMPT, _fs_backend
+          assert lite.read_text(encoding="utf-8").strip() in SYSTEM_PROMPT
           from aiagent_gateways.tool_gateway import _grounded_packaged_skill_read
           from deepagents.middleware.filesystem import _prepare_read_window, _truncate_paginated_read
-          path = "/skills/yomiyasu/SKILL.md"
+          path = "/skills/nihongo/SKILL.md"
           total = len((skill / "SKILL.md").read_text(encoding="utf-8").splitlines())
           assert total > 100
           for offset in range(0, total, 100):

@@ -49,9 +49,9 @@ def tenant(memory_tenant: dict[str, str]) -> dict[str, str]:
     return memory_tenant
 
 
-def setup_memory(dbs: dict[str, Database], tenant: dict[str, str]):  # noqa: ANN201
+def setup_memory(dbs: dict[str, Database], tenant: dict[str, str], goal: str = "memory test"):  # noqa: ANN201
     owner = commands.Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
-    ids = commands.submit_task(dbs["api"], owner, "memory test")
+    ids = commands.submit_task(dbs["api"], owner, goal)
     claim = control.claim_run(dbs["runtime"], owner.tenant_id, ids["runId"], "memory-worker")
     scope = ContextScope(claim.tenant_id, claim.owner_user_id, claim.task_id, claim.run_id)
     store = PostgresArtifactStore(

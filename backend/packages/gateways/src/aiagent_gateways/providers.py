@@ -28,6 +28,7 @@ class Capability:
     max_context_chars: int
     provider: str
     external_recipient: bool  # sends tenant data to a third party (needs recipient consent)
+    output_limit_param: str = "max_tokens"  # provider request field used to cap output tokens
 
 
 @dataclass
@@ -37,6 +38,11 @@ class ProviderEvent:
     tool_id: str = ""
     tool_name: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+
+
+# Maximum output tokens requested from a real provider. Budget reservations must cover this bound, not a smaller
+# arbitrary headroom, or a long answer can exceed the reserved amount.
+MAX_OUTPUT_TOKENS = 4096
 
 
 class ProviderError(Exception):
@@ -99,23 +105,67 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 return {"content": f"done:{after['send_message'].get('status')}"}
             return _call("send_message", to="bob", body="price=42")
         return {"content": "answer: goal revised, nothing sent"}
-    # Deterministic two-page skill read for the gateway/Agent runtime integration test.
+    # Deterministic nihongo fixture for the gateway/Agent runtime integration tests: chat uses only the embedded
+    # Lite, deliverables read the full SKILL.md, writing-language/technical documents add one reference, and code/JSON stay untouched.
     # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
-    if "yomiyasu fixture" in first:
-        if "yomiyasuを使わない" in first:
+    if "nihongo fixture" in first:
+        if "nihongoを使わない" in first or "nihongo を使わない" in first:
             return {"content": "指定に従って通常回答しました。"}
-        pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
-        path = "/skills/yomiyasu/SKILL.md"
         if "read_file" not in tools:
             return {"content": "error: read_file not exposed"}
+        pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
+        deliverable = any(
+            key in first
+            for key in (
+                "文章",
+                "推敲",
+                "メール",
+                "お知らせ",
+                "提案",
+                "スライド",
+                "議事録",
+                "readme",
+                "技術文書",
+                "報告書",
+                "仕様書",
+                "設計書",
+                "企画書",
+                "書き言葉",
+            )
+        )
+        if not deliverable:
+            if "コード" in first or "json" in first:
+                return {"content": "コードとJSONは変更していません。"}
+            return {"content": "通常会話としてLiteのみで回答しました。"}
+        reference: tuple[str, str, str] | None = None
+        if any(key in first for key in ("報告書", "仕様書", "設計書", "企画書", "書き言葉")):
+            reference = (
+                "/skills/nihongo/references/register.md",
+                "# 書き言葉の段",
+                "作成済み：書き言葉の段で報告書を整えました。",
+            )
+        elif "readme" in first or "技術文書" in first:
+            reference = (
+                "/skills/nihongo/references/technical-writing.md",
+                "# 技術文書",
+                "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
+            )
+        path = "/skills/nihongo/SKILL.md"
         if not pages:
-            return _call("read_file", file_path=path, offset=0, limit=8)
+            return _call("read_file", file_path=path, offset=0, limit=100)
         if len(pages) == 1:
-            if not str(pages[0].get("content", "")).startswith("@@ lines "):
+            first_page = str(pages[0].get("content", ""))
+            if not first_page.startswith("@@ lines ") or "next offset 100" not in first_page:
                 return {"content": "error: first skill page rejected"}
-            return _call("read_file", file_path=path, offset=8, limit=1000)
+            return _call("read_file", file_path=path, offset=100, limit=1000)
         if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
             return {"content": "error: skill page rejected"}
+        if reference is not None and len(pages) == 2:
+            return _call("read_file", file_path=reference[0], offset=0, limit=1000)
+        if reference is not None and reference[1] not in str(pages[2].get("content", "")):
+            return {"content": "error: reference rejected"}
+        if reference is not None:
+            return {"content": reference[2]}
         return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):
@@ -199,7 +249,8 @@ class FakeModelProvider:
             for i in range(0, len(raw), 5):
                 yield ProviderEvent("tool_args", tool_id=tid, text=raw[i : i + 5])
             yield ProviderEvent("tool_end", tool_id=tid)
-        chars = sum(len(str(m.get("content", ""))) for m in msgs)
+        # A real provider bills the system prompt too; excluding it hid budget under-reservation in tests.
+        chars = len(system) + sum(len(str(m.get("content", ""))) for m in msgs)
         yield ProviderEvent("usage", usage={"input_tokens": chars // 4 + 1, "output_tokens": len(text) // 4 + 1})
         yield ProviderEvent("stop")
 
@@ -264,7 +315,7 @@ class AnthropicProvider:
     ) -> AsyncIterator[ProviderEvent]:
         body = {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": MAX_OUTPUT_TOKENS,
             "stream": True,
             "system": system,
             "messages": self._messages(messages),
@@ -372,8 +423,13 @@ class OpenAIProvider:
         self.verify = verify
 
     def capability(self, model: str) -> Capability:
-        del model
-        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+        # OpenAI reasoning models (o-series and GPT-5+) reject `max_tokens` and require `max_completion_tokens`.
+        field = (
+            "max_completion_tokens" if model.strip().lower().startswith(("o1", "o3", "o4", "gpt-5")) else "max_tokens"
+        )
+        return Capability(
+            True, True, self.max_context_chars, self.provider_name, self.external_recipient, output_limit_param=field
+        )
 
     @staticmethod
     def _messages(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -422,6 +478,8 @@ class OpenAIProvider:
             "stream_options": {"include_usage": True},
             "messages": self._messages(system, messages),
         }
+        # Bound output to the same value the budget reserves; the field is a provider capability, not a name guess.
+        body[self.capability(model).output_limit_param] = MAX_OUTPUT_TOKENS
         if tools:
             body["tools"] = [
                 {
@@ -549,8 +607,13 @@ class GeminiProvider:
         self.verify = verify
 
     def capability(self, model: str) -> Capability:
-        del model
-        return Capability(True, True, self.max_context_chars, self.provider_name, self.external_recipient)
+        # OpenAI reasoning models (o-series and GPT-5+) reject `max_tokens` and require `max_completion_tokens`.
+        field = (
+            "max_completion_tokens" if model.strip().lower().startswith(("o1", "o3", "o4", "gpt-5")) else "max_tokens"
+        )
+        return Capability(
+            True, True, self.max_context_chars, self.provider_name, self.external_recipient, output_limit_param=field
+        )
 
     @staticmethod
     def _contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -590,7 +653,10 @@ class GeminiProvider:
     ) -> AsyncIterator[ProviderEvent]:
         del stream
         url = self.url_template.format(model=model)
-        body: dict[str, Any] = {"contents": self._contents(messages)}
+        body: dict[str, Any] = {
+            "contents": self._contents(messages),
+            "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS},
+        }
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         if tools:
