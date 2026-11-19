@@ -199,12 +199,18 @@ class DevelopmentWorkflow:
             # A provider exception after dispatch may conceal a completed write.
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider exception; reconcile remote operation") from exc
+        try:
+            observed_head = self.git.head(scope)
+        except Exception as exc:
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise EffectUnknown("commit was dispatched but branch verification failed; reconcile") from exc
         # No blind retry if a network call may have been accepted but failed locally.
         if (
-            result.parent_sha != c.patch.parent_sha
+            not isinstance(result, CommitEvidence)
+            or result.parent_sha != c.patch.parent_sha
             or result.diff_sha256 != c.patch.diff_sha256
             or result.artifact_ref != c.patch.artifact_ref
-            or self.git.head(scope) != result.commit_sha
+            or observed_head != result.commit_sha
         ):
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider evidence cannot prove target commit; reconcile")
@@ -293,10 +299,11 @@ class DevelopmentWorkflow:
                 or observed_commit.artifact_ref != c.patch.artifact_ref
             ):
                 raise StaleReference("observed commit does not match remote HEAD or pending patch")
-            return self._save(
-                c,
-                replace(c, version=c.version + 1, phase=Phase.COMMITTED, commit=observed_commit),
-            )
+            # A matching Git HEAD and caller-supplied receipt reference do not
+            # authenticate the original Intent or prove who updated the ref.
+            # Positive recovery stays closed until a canonical Gateway receipt
+            # verifier and the original Intent/Attempt binding are available.
+            raise EffectUnknown("canonical commit receipt verification unavailable")
         if head == c.patch.parent_sha:
             return self._save(c, replace(c, version=c.version + 1, phase=Phase.BLOCKED))
         raise StaleReference("remote branch state does not match pre-commit parent SHA")

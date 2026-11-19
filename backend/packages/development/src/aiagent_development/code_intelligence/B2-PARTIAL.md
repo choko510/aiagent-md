@@ -555,3 +555,11 @@ only while the original Intent and Attempt remain SENDING and the original
 Run/Lease is live; the stored receipt is re-read and its signature and binding
 are verified. UNKNOWN attempts and stale leases remain UNKNOWN. The Gateway
 response can reconstruct Adapter evidence only for the live SENDING case.
+
+Git commit recovery is fail-closed: caller-supplied CommitEvidence and a
+matching Git HEAD do not prove the original Tool Intent/Attempt. Positive
+reconciliation remains UNKNOWN until a canonical Gateway receipt verifier is
+implemented. If the post-dispatch HEAD lookup fails, the Workflow records
+UNKNOWN_EXTERNAL_EFFECT. This deliberately changes the earlier mock-only
+positive recovery behavior; it does not implement a Git Provider, a real Git
+Commit Receipt, or the COMMITTED test E2E.

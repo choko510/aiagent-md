@@ -461,7 +461,7 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
         flow_rec.commit(scope_rec, "cycle-rec", message="uncertain", intent_ref="commit-rec")
     assert flow_rec.reconcile_commit(scope_rec, "cycle-rec", None).phase == Phase.BLOCKED
 
-    # Reconcile unknown commit when remote actually committed -> COMMITTED
+    # Matching HEAD and an asserted receipt cannot prove the original Intent.
     flow_rec.create("cycle-rec2", scope_rec, run, "change-rec2")
     flow_rec.plan(scope_rec, "cycle-rec2", TaskPlan("plan-1", "change-rec2", ("unit",), 1))
     flow_rec.execute(
@@ -476,7 +476,44 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
     committed_sha = "1" * 40
     scm_rec.heads[(scope_rec.repository, scope_rec.branch, scope_rec.workspace_id)] = committed_sha
     ev = CommitEvidence(parent_sha, committed_sha, "e" * 64, "p-rec2", "recovered-receipt")
-    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev).phase == Phase.COMMITTED
+    with pytest.raises(EffectUnknown, match="canonical commit receipt"):
+        flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev)
+    assert flow_rec._load(scope_rec, "cycle-rec2").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+
+
+def test_commit_head_lookup_failure_after_dispatch_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("head-failure", scope, run, "change")
+    flow.plan(scope, "head-failure", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "head-failure", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "head-failure", patch, root)
+    original = scm.commit_patch
+
+    def commit_then_break_head(*args, **kwargs):
+        result = original(*args, **kwargs)
+        scm.head = lambda _scope: (_ for _ in ()).throw(OSError("lookup unavailable"))
+        return result
+
+    scm.commit_patch = commit_then_break_head
+    with pytest.raises(EffectUnknown, match="branch verification failed"):
+        flow.commit(scope, "head-failure", message="fixture", intent_ref="commit")
+    assert flow._load(scope, "head-failure").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow.commit(scope, "head-failure", message="fixture", intent_ref="commit")
+
+
+def test_malformed_commit_result_after_dispatch_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("malformed-result", scope, run, "change")
+    flow.plan(scope, "malformed-result", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "malformed-result", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "malformed-result", patch, root)
+    scm.commit_patch = lambda *_args, **_kwargs: None
+    with pytest.raises(EffectUnknown, match="cannot prove target commit"):
+        flow.commit(scope, "malformed-result", message="fixture", intent_ref="commit")
+    assert flow._load(scope, "malformed-result").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
 
 
 def test_build_rejects_receipt_for_different_commit(env):
