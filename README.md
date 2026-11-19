@@ -29,15 +29,15 @@ Agent Runtime本体のOSSは**STEP 2の実測でDeepAgents Python＋LangGraphを
 
 ### 日本語文章の標準適用（nihongo）
 
-Agent Runtimeは、日本語の返答からメール・お知らせ・ES・企画書・スライド・報告書・README・技術文書・UI文言まで、[AnIT012/nihongo](https://github.com/AnIT012/nihongo)（MIT）を**唯一の日本語Skill**として使います。固定コミットは [`e62ed52`（v2.3.1）](https://github.com/AnIT012/nihongo/commit/e62ed520147c2f9b50cf93d46b9d0cecc9892565) です。
+Agent Runtimeは、日本語の返答からメール・お知らせ・ES・企画書・スライド・報告書・README・技術文書・UI文言まで、[AnIT012/nihongo](https://github.com/AnIT012/nihongo)（MIT）を**唯一の日本語Skill**として使います。公式Release [`v2.3.1`](https://github.com/AnIT012/nihongo/releases/tag/v2.3.1) の固定コミット [`61ca63f`](https://github.com/AnIT012/nihongo/commit/61ca63f0499271495aefb9c7b3c4915f75960106) です。
 
 - **Lite（`ALWAYS.md`）**はSystem Promptにそのまま埋め込み、通常チャットを含む毎ターンとContext経由の推論に標準適用します。TurnごとのTool読み込みはせず、固定文のためプロバイダのプロンプトキャッシュ対象になり得ます（ヒット率・料金はプロバイダとリクエスト構成に依存し、保証しません）。
-- **Full（`SKILL.md`）**は、人に出す文章や技術文書を作る・直す時に通常推論では `read_file` で読みます。`references/*.md` は必要な時だけ同じ経路で読みます。短い会話、コード、JSON、コマンド、引用文は変更しません。
+- **Full（`SKILL.md`）**は、人に出す文章や技術文書を作る・直す時に通常推論では `read_file` で読みます。`references/*.md` は必要な時だけ同じ経路で読み、README・仕様書・報告書などの書き言葉は新規の `references/register.md` も選択します。短い会話、コード、JSON、コマンド、引用文は変更しません。
 - **Context経由の推論**はToolを持たない一回限りの送信です。標準はLiteのみで、信頼済みのTask goalが文書作成・推敲・翻訳と判定した場合だけ、固定・検証済みFullを信頼済みSystem Promptに追加します。判定はgoal textに対する決定論的ルールで、別LLMは呼びません。Context本文は非信頼データのままUser Messageに置きます。この経路では`references/`を読めないため、モデルに参照済み・検査済みと主張させません。
 - 出力を別のLLMで再推敲するパスはありません。Context圧縮・Memory・Model Gateway・キャッシュの設計も変更しません。
-- ユーザーの明示的な不使用指定を優先し、数値・否定・条件・主体・識別子・専門用語・引用の意味を保持します。
+- ユーザーの明示的な不使用指定を優先し、数値・否定・条件・主体・識別子・専門用語・引用の意味を保持します。ただしLiteは製品ルールとしてSystem Promptに常時埋め込むため、「nihongoを使わない」で完全に除去されるわけではありません。Context経路のFull追加判定は指定を尊重し、通常推論でもモデルにSkillを読まないよう指示しますが、Liteの埋め込み自体は残るため、この残余は既知の制約です。
 
-Skillは[読み取り専用のパッケージデータ](backend/packages/domain/src/aiagent_domain/skills/nihongo)として同梱します。**ビルド時**に [検証スクリプト](backend/tools/sync_nihongo.py) が23ファイルすべてのGit blob SHA-1とSHA-256を固定値と照合し、欠落・改ざん・余剰ファイル・symlinkがあればイメージのビルドを失敗させます。Run時のSkillダウンロードはなく、`--update`（メンテナ向け）だけが固定コミットを取得し、全ファイル検証後に旧バンドルのロールバックと、rename間で停止した場合の次回起動時リカバリを伴って置き換えます（単一の原子的ディレクトリ差し替えではありません）。上流の補助Pythonスクリプト（`scripts/`）は同梱せず、Trusted Runtimeでも実行しません。そのため公式Fullのうち `trim_commas.py` や `revert_broken.py` を使う検査手順は利用できず、文章生成・推敲のルールと `references/` のみが有効です。モデルに「検査済み」と主張させません。
+Skillは[読み取り専用のパッケージデータ](backend/packages/domain/src/aiagent_domain/skills/nihongo)として同梱します。**ビルド時**に [検証スクリプト](backend/tools/sync_nihongo.py) が24ファイルすべてのGit blob SHA-1とSHA-256を固定値と照合し、欠落・改ざん・余剰ファイル・symlinkがあればイメージのビルドを失敗させます。Run時のSkillダウンロードはなく、`--update`（メンテナ向け）だけが固定コミットを取得し、全ファイル検証後に旧バンドルのロールバックと、rename間で停止した場合の次回起動時リカバリを伴って置き換えます（単一の原子的ディレクトリ差し替えではありません）。上流の補助Pythonスクリプト（`scripts/`）は同梱せず、Trusted Runtimeでも実行しません。そのため公式Fullのうち `trim_commas.py` や `revert_broken.py` を使う検査手順は利用できず、文章生成・推敲のルールと `references/` のみが有効です。モデルに「検査済み」と主張させません。
 
 **現在の境界:** 標準適用はモデルへの指示とSkill参照であり、権限付与ではありません。Tool Gateway・Sentinel・承認フローは変わりません。出力後の独立したLLM検査や、Skillスクリプトの自動実行は行わず、「検査済み」と主張しません。
 

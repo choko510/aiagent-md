@@ -65,6 +65,7 @@ def test_lite_is_embedded_and_no_yomiyasu_remains() -> None:
     assert "Never rewrite code, JSON, commands or exact quotes" in SYSTEM_PROMPT
     assert "Keep numbers, negation, conditions, identifiers" in SYSTEM_PROMPT
     assert "user's explicit opt-out wins" in SYSTEM_PROMPT
+    assert "Do not read it for short chat" in SYSTEM_PROMPT
     assert "never execute skill files" in SYSTEM_PROMPT
     assert "yomiyasu" not in SYSTEM_PROMPT.lower()
     assert "yomiyasu" not in "".join(packaged_skill_texts()).lower()
@@ -97,6 +98,7 @@ def test_context_path_applies_full_only_for_a_writing_goal() -> None:
         ("READMEを作成して", True),
         ("このメールを推敲して", True),
         ("技術文書を書いて", True),
+        ("この文章を日本語に翻訳して", True),
         ("Translate this email into Japanese.", True),
         ("Write a short report for the team.", True),
         ("天気を教えて", False),
@@ -104,7 +106,10 @@ def test_context_path_applies_full_only_for_a_writing_goal() -> None:
         ("JSONを作成して", False),
         ("コードをレビューして", False),
         ("メールを検索して", False),
+        ("メールを検索して結果をまとめて", False),
         ("議事録を要約して", False),
+        ("nihongoを使わずREADMEを作成して", False),
+        ("READMEを作成して。nihongoは使わないで", False),
         ("", False),
     ],
 )
@@ -113,14 +118,27 @@ def test_nihongo_full_classifier_uses_the_trusted_goal(goal: str, expected: bool
 
 
 def test_vendored_bundle_is_exactly_the_pinned_upstream_commit() -> None:
+    assert sync.UPSTREAM_COMMIT == "61ca63f0499271495aefb9c7b3c4915f75960106"  # official Release v2.3.1
     files = sync.verify_tree(SKILL)
+    assert len(files) == 24
     assert set(files) == set(sync.EXPECTED_FILES)
+    assert "references/register.md" in files
     assert files["ALWAYS.md"] == (SKILL / "ALWAYS.md").read_bytes()
     assert "MIT License" in files["LICENSE"].decode("utf-8")
     # Only declarative Markdown plus the upstream license: there is no skill script to execute anywhere.
     assert all(rel == "LICENSE" or rel.endswith(".md") for rel in files)
     assert not (SKILL / "scripts").exists()
     assert not any(p.suffix in {".py", ".sh", ".js"} for p in SKILL.rglob("*"))
+
+
+def test_register_reference_is_vendored_and_selected_by_full() -> None:
+    register = (SKILL / "references" / "register.md").read_text(encoding="utf-8")
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert register.startswith("# 書き言葉の段")
+    assert "参考文献" not in register
+    assert "references/register.md" in skill
+    assert "書き言葉" in skill
+    assert register in packaged_skill_texts()
 
 
 def test_tampered_skill_file_is_rejected(tmp_path, monkeypatch) -> None:

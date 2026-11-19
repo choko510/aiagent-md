@@ -266,6 +266,25 @@ _NIHONGO_NON_WRITING = re.compile(
     r"weather|search|lookup|summari[sz]e|explain)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+_NIHONGO_OPT_OUT = re.compile(
+    r"nihongo\s*(?:を|は|の)?\s*(?:使わ(?:ず|ない)|不要|無効|オフ|抜き)|"
+    r"(?:日本語|nihongo)\s*(?:の)?\s*(?:skill|スキル|ルール|指示|文体)\s*(?:を|は)?\s*(?:使わ(?:ず|ない)|不要|無効|オフ)|"
+    r"(?:Lite|Full)\s*(?:を|は)?\s*(?:使わ(?:ず|ない)|不要)|"
+    r"(?:do\s+not|don't|without|skip|no)\s+(?:use\s+)?nihongo",
+    re.IGNORECASE,
+)
+_NIHONGO_SEARCH_ACTION = re.compile(
+    r"検索|探して|探す|調べ|一覧|抽出|"
+    r"(?<![A-Za-z0-9])(?:search|lookup|find|list|extract)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+# Writing actions that turn a research/read request into a deliverable. A search/summarize request is not a writing
+# deliverable and stays on Lite; "research and write a report" still reaches Full through 作成/書いて.
+_NIHONGO_CREATE_ACTION = re.compile(
+    r"書いて|書く|作成|作って|作る|直して|直す|修正|推敲|翻訳|校正|添削|更新|編集|"
+    r"(?<![A-Za-z0-9])(?:write|writing|compose|edit|revise|create|make|rewrite|proofread|translate)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def nihongo_full_for_goal(goal: str) -> bool:
@@ -278,8 +297,14 @@ def nihongo_full_for_goal(goal: str) -> bool:
     text = goal.strip()
     if not text:
         return False
+    # Explicit opt-out wins for Full. Lite is still a reviewed product rule in the ordinary/Context system prompt;
+    # that remaining limitation is documented instead of pretending the opt-out removes Lite.
+    if _NIHONGO_OPT_OUT.search(text):
+        return False
     if _NIHONGO_STRONG_WRITING.search(text):
         return True
+    if _NIHONGO_SEARCH_ACTION.search(text) and not _NIHONGO_CREATE_ACTION.search(text):
+        return False
     if not _NIHONGO_WRITE_VERB.search(text):
         return False
     document = bool(_NIHONGO_DOC_NOUN.search(text))

@@ -106,7 +106,7 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
             return _call("send_message", to="bob", body="price=42")
         return {"content": "answer: goal revised, nothing sent"}
     # Deterministic nihongo fixture for the gateway/Agent runtime integration tests: chat uses only the embedded
-    # Lite, deliverables read the full SKILL.md, technical documents add one reference, and code/JSON stay untouched.
+    # Lite, deliverables read the full SKILL.md, writing-language/technical documents add one reference, and code/JSON stay untouched.
     # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
     if "nihongo fixture" in first:
         if "nihongoを使わない" in first or "nihongo を使わない" in first:
@@ -116,13 +116,40 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
         pages = [m for m in messages if m.get("kind") == "tool" and m.get("tool_name") == "read_file"]
         deliverable = any(
             key in first
-            for key in ("文章", "推敲", "メール", "お知らせ", "提案", "スライド", "議事録", "readme", "技術文書")
+            for key in (
+                "文章",
+                "推敲",
+                "メール",
+                "お知らせ",
+                "提案",
+                "スライド",
+                "議事録",
+                "readme",
+                "技術文書",
+                "報告書",
+                "仕様書",
+                "設計書",
+                "企画書",
+                "書き言葉",
+            )
         )
         if not deliverable:
             if "コード" in first or "json" in first:
                 return {"content": "コードとJSONは変更していません。"}
             return {"content": "通常会話としてLiteのみで回答しました。"}
-        technical = "readme" in first or "技術文書" in first
+        reference: tuple[str, str, str] | None = None
+        if any(key in first for key in ("報告書", "仕様書", "設計書", "企画書", "書き言葉")):
+            reference = (
+                "/skills/nihongo/references/register.md",
+                "# 書き言葉の段",
+                "作成済み：書き言葉の段で報告書を整えました。",
+            )
+        elif "readme" in first or "技術文書" in first:
+            reference = (
+                "/skills/nihongo/references/technical-writing.md",
+                "# 技術文書",
+                "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
+            )
         path = "/skills/nihongo/SKILL.md"
         if not pages:
             return _call("read_file", file_path=path, offset=0, limit=100)
@@ -133,12 +160,12 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
             return _call("read_file", file_path=path, offset=100, limit=1000)
         if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
             return {"content": "error: skill page rejected"}
-        if technical and len(pages) == 2:
-            return _call("read_file", file_path="/skills/nihongo/references/technical-writing.md", offset=0, limit=1000)
-        if technical and "# 技術文書" not in str(pages[2].get("content", "")):
-            return {"content": "error: technical reference rejected"}
-        if technical:
-            return {"content": "更新済み：技術文書の用語と手順を保って読みやすく整えました。"}
+        if reference is not None and len(pages) == 2:
+            return _call("read_file", file_path=reference[0], offset=0, limit=1000)
+        if reference is not None and reference[1] not in str(pages[2].get("content", "")):
+            return {"content": "error: reference rejected"}
+        if reference is not None:
+            return {"content": reference[2]}
         return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):

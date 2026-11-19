@@ -164,6 +164,28 @@ def test_context_writing_goal_includes_full_without_promoting_payload(
     assert attempt["request_identity"] == sent.identity()
 
 
+def test_context_opt_out_goal_stays_on_lite(dbs: dict[str, Database], tenant: dict[str, str], stack: Stack) -> None:
+    _, scope, store, _, plan = build_context(dbs, tenant, goal="nihongoを使わずREADMEを作成して")
+    admission = ContextAdmission(dbs["model_gateway"], store._claim, b"k" * 32, int(plan.committed_head))
+    payload = admission.load()
+    asyncio.run(call_context_model(runtime_context(stack, store._claim), plan.committed_head))
+    sent = SealedModelRequest.from_wire(
+        {
+            "claim": store._claim.to_wire(),
+            "stream": "main",
+            "model": "fake-gateway",
+            "tools": [],
+            "system": context_system_prompt(),
+            "messages": [{"kind": "user", "content": payload}],
+        }
+    )
+    assert packaged_nihongo_lite() in sent.system
+    assert packaged_nihongo_full() not in sent.system
+    assert payload not in sent.system
+    attempt = dbs["owner"].one("SELECT request_identity FROM agent.model_attempts WHERE run_id=%s", (scope.run_id,))
+    assert attempt["request_identity"] == sent.identity()
+
+
 def test_revoke_after_context_before_gateway_blocks_send(
     dbs: dict[str, Database], tenant: dict[str, str], stack: Stack
 ) -> None:

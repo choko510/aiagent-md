@@ -461,6 +461,11 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
             3,
             "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
         ),
+        (
+            "nihongo fixture: 報告書を作成してください。",
+            3,
+            "作成済み：書き言葉の段で報告書を整えました。",
+        ),
         ("nihongo fixture: このコードとJSONは変更しないでください。", 0, "コードとJSONは変更していません。"),
         ("nihongo fixture: nihongoを使わないで通常回答してください。", 0, "指定に従って通常回答しました。"),
     ],
@@ -493,7 +498,7 @@ def test_t09a_nihongo_lite_and_full_reads_through_real_gateways(
     assert "next offset 100" in pages[0]
     assert all("next offset" not in text for text in pages[1:])
     if reads == 3:
-        assert "# 技術文書" in pages[2]
+        assert ("# 書き言葉の段" if "報告書" in goal else "# 技術文書") in pages[2]
     assert all("not grounded in HEAD" not in text for text in pages)
 
 

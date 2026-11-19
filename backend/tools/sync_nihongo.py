@@ -27,7 +27,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
-UPSTREAM_COMMIT = "e62ed520147c2f9b50cf93d46b9d0cecc9892565"  # v2.3.1, latest main commit at pin time
+UPSTREAM_COMMIT = "61ca63f0499271495aefb9c7b3c4915f75960106"  # official Release v2.3.1 tag
 UPSTREAM_URL = f"https://codeload.github.com/AnIT012/nihongo/tar.gz/{UPSTREAM_COMMIT}"
 UPSTREAM_SKILL_PREFIX = f"nihongo-{UPSTREAM_COMMIT}/nihongo/"
 UPSTREAM_LICENSE = f"nihongo-{UPSTREAM_COMMIT}/LICENSE"
@@ -41,33 +41,33 @@ UPSTREAM_EXCLUDED_DIRS = ("scripts/",)
 
 # (Git blob SHA-1, SHA-256) of every upstream file. Never accept "latest main" silently.
 EXPECTED_FILES: dict[str, tuple[str, str]] = {
-    "ALWAYS.md": (
-        "5d0fd20d9b62b1792589c4dfe8bf34b21529c95b",
-        "58f2a39a8b6195bc506715883eb3e50233c190d6ea8fb51065c08aedb9500f82",
-    ),
     "LICENSE": (
         "0941ee17a37b8d6559dd869e720bed1a210f8d71",
         "c0f14ffe335cc6f5d4370dd82d716aed7402fc39074bb164a739f29dd9b690f2",
     ),
+    "ALWAYS.md": (
+        "6f833b7c8b74e2c07ea303ecc265cd510b4c5377",
+        "ace4f04704e9be30f0beaa1e9d5873b3d74a8d6c12f05f7305d9befcb4a612a4",
+    ),
     "SKILL.md": (
-        "4dfc2d357293116f106a2072d1e3e2d47ff4b70b",
-        "0f50b818c53ceecf3c39ee900bb602daadd4486bc8e626d0a8ba5012389e2e14",
+        "f422fcdae950071777d1434ffd9565ec19d8815e",
+        "2fee575987a3d033a90a4a167d90d85f5eefcb08ca3805b507df1b4d4e1f58c8",
     ),
     "references/ai-patterns.md": (
         "db78ae040a5d11f9021c5417c37879b6ee0729f4",
         "f58181d054a760b1e70e71ebddeacedb356a058a4059a799bec85204824fbd16",
     ),
     "references/business-email.md": (
-        "69e370eae8e93ddc5477aab64d958401c89ffd43",
-        "75bee399d4cbe604901fb1b10d477e69818b5219a92230b3cd7ef7c06c8ca235",
+        "77702e80a9b2a078e1a622396429ed3a2bb11b93",
+        "135c6954b50ece8f478c18e50beafc1d3ef484da42d69a27fcde6e76ebf709e2",
     ),
     "references/conversation.md": (
         "958e3c004950ec206af8d0a33238b75a51137b5b",
         "1636c20bd703bd0588644c8bc8c666dde49bfc3bdb967f9db05a453617fd01da",
     ),
     "references/craft.md": (
-        "a748ab81d955b85973e18f32a6f42f096a6718de",
-        "310755fa3f28c158eaf2fdc1a5d7e209bb9b97b29d25aee16eb9ff545d7a1a79",
+        "fe60f085b684bea37997aa371f42d929f3198238",
+        "fee52d3441468c319dfc74b1d8daa176a4ed8f2274e230217340c00ec7ade146",
     ),
     "references/entry-sheet.md": (
         "536b1c626541b59ab735f372ac5b76452e814f7e",
@@ -105,9 +105,13 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
         "1318e3cfa2b566182816f6558a818ceee01a6d11",
         "713832f145329b60c5ffc077487fa80f8c96d7371a13d2285fe5980a5a834dfe",
     ),
+    "references/register.md": (
+        "59fdf708445e76ebeac671f2c6a4bbfc8df770e6",
+        "3dad1a5f005a4efdf82dfa16f3936ea843b027556aa6bdd95d2088795ad4e6c2",
+    ),
     "references/review.md": (
-        "c8ddf477cf023110f7b9e585949383e701b09d86",
-        "fef6344b166e84069062e8f56712620dffb3aca534a04186907da908f66e2c44",
+        "d3e2a38e0419f0140426866f2322b78f9ed79a86",
+        "5523aa206f541feb3dbd3599bdf1f7e9aa264f990e8e363914aa1d4177ad7dc8",
     ),
     "references/slides-and-documents.md": (
         "771239d8921ff6c8197c4dc427ded2bafd2ee62e",
@@ -118,8 +122,8 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
         "221e51f1e4fb70a7ba8e3f6037b565ad2842b3d50d518f1ae2389c1d779a1be8",
     ),
     "references/technical-writing.md": (
-        "79cbf9deffcae0e756f0d2e31dabcdfecf6c8bd2",
-        "084cecfa7e40e2374a5612ed5ed79d451e84dff648139cbf556ecfa95bc483ff",
+        "9463353534d0a4a17269f901b3bfab8c0387e77e",
+        "8399b4e5fbd249ed9d2bedd7590bac75cc77ec46e88c67618d8dd7ff9226ae8c",
     ),
     "references/titles.md": (
         "48b396fe785885418bb29832e64d6b977deb6b15",
