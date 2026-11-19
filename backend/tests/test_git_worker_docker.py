@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 from aiagent_core.rpc import RpcClient
 from aiagent_domain import uuid7
+from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
+from aiagent_gateways.git_patch_artifacts import VerifiedGitPatch
 from aiagent_sandbox.binary_transfer import encode_chunks
 from aiagent_sandbox.git_worker_rpc import (
     git_transfer_binding,
@@ -148,6 +150,9 @@ def test_git_worker_in_networkless_docker(tmp_path: Path):
                 "git.execute", {"operation": operation, "end": base64.b64encode(frames[1]).decode()}
             )
             verified = verify_git_worker_result(b"s" * 32, response, payload, "fixture-worker")
+            verifier = RpcGitObjectVerifier("unix:" + str(socket), b"r" * 32, b"g" * 32, "fixture-worker")
+            patch_ref = VerifiedGitPatch(payload["patch_id"], parent, payload["patch_sha256"], ("a.txt",), patch)
+            await asyncio.to_thread(verifier.verify, verified, patch_ref, deadline=time.monotonic() + 10)
             assert run("rev-parse", "HEAD").decode().strip() == verified["commit"]
             assert run("rev-parse", verified["commit"] + "^").decode().strip() == parent
             assert (journal / (operation + ".prepared")).is_file()

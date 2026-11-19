@@ -93,6 +93,42 @@ class IsolatedGitCommitWorker:
             raise InvalidEvidence("isolated Git operation rejected")
         return result.stdout
 
+    def inspect_commit(self, parent: str, commit: str, tree: str) -> tuple[bytes, bytes, str]:
+        """Read Git objects and canonical diff in the isolated provider only."""
+        for value in (parent, commit, tree):
+            if len(require_sha(value)) != 40:
+                raise InvalidEvidence("unsupported Git object format")
+        with tempfile.TemporaryDirectory(prefix="git-provider-inspect-") as home:
+            index = str(Path(home) / "index")
+
+            def run(*args: str) -> bytes:
+                return self._git_call(home, index, *args)
+
+            if run("rev-parse", "--verify", self._ref).strip().decode("ascii") != commit:
+                raise StaleReference("branch moved after Git commit")
+            if run("show", "-s", "--format=%P %T", commit).strip().decode("ascii") != f"{parent} {tree}":
+                raise InvalidEvidence("Git object lineage mismatch")
+            commit_body = run("cat-file", "commit", commit)
+            tree_body = run("cat-file", "tree", tree)
+            if not 1 <= len(commit_body) <= 1024 * 1024 or not 1 <= len(tree_body) <= 1024 * 1024:
+                raise InvalidEvidence("Git object proof exceeds bounds")
+            diff = run(
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                parent,
+                commit,
+                "--",
+            )
+            if not 1 <= len(diff) <= _MAX_PATCH:
+                raise InvalidEvidence("Git diff proof exceeds bounds")
+            if run("rev-parse", "--verify", self._ref).strip().decode("ascii") != commit:
+                raise StaleReference("branch moved during Git verification")
+            return commit_body, tree_body, hashlib.sha256(diff).hexdigest()
+
     def commit(
         self,
         parent: str,

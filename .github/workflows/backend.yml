@@ -193,6 +193,8 @@ jobs:
             -v "$PWD:/w:ro" -w /w "$fixture_image" python -m pytest -q --noconftest -p no:cacheprovider -c /dev/null tests/test_command_supervisor_fixture.py
       - name: Development Adapter command integration (test-only Docker Cell)
         run: AIAGENT_COMMAND_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_command_adapter_e2e.py
+      - name: Authenticated Git worker fixture (test-only Docker, simulated authority)
+        run: AIAGENT_GIT_WORKER_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_worker_docker.py
       - name: Build images
         working-directory: .
         run: |

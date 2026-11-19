@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
 import os
 import shutil
@@ -25,13 +26,14 @@ from aiagent_development.code_intelligence.projection import prepare_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 from aiagent_development.contracts import InvalidEvidence, ScopeDenied, StaleReference
 from aiagent_development.workspace_authority import register_verified_snapshot, resolve_git_commit_binding
-from aiagent_domain import uuid7
+from aiagent_domain import canonical_json, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
 from aiagent_gateways.git_commit_dispatch import GitCommitReservationExecutor
 from aiagent_gateways.git_operation import admit_git_operation
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
+from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
 from psycopg.errors import CheckViolation, InsufficientPrivilege
@@ -341,6 +343,7 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
         "parent": parent,
         "patchSha256": digest,
         "paths": paths,
+        "message": "fixture",
     }
     with dbs["owner"].tx() as c:
         c.execute(
@@ -399,12 +402,75 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
     assert operation
     with pytest.raises(ExecutorUnknown):
         admit()
+
+    # Receipt persistence unit fixture. This deliberately synthetic signature
+    # and object verifier are not evidence of the Gateway/worker Git E2E.
+    class FixtureObjectVerifier:
+        def verify(self, result, patch, *, deadline):
+            assert result["commit"] == "b" * 40 and patch.data == content and deadline > time.monotonic()
+
+    signed_payload = {
+        "operation": operation,
+        "tenant": claim.tenant_id,
+        "owner": claim.owner_user_id,
+        "task": claim.task_id,
+        "run": claim.run_id,
+        "workspace": workspace,
+        "goal": claim.goal_revision,
+        "lease": claim.lease_epoch,
+        "restore": claim.restore_incarnation,
+        "worker_ref": claim.worker_ref,
+        "intent": intent,
+        "attempt": attempt,
+        "effect_key": effect_key,
+        "binding": binding,
+        "generation": 2,
+        "branch": "feat/approved",
+        "parent": parent,
+        "patch_id": artifact,
+        "patch_sha256": digest,
+        "patch_bytes": len(content),
+        "paths": paths,
+        "cycle_id": cycle,
+        "plan_ref": "plan-fixture",
+        "request_sha256": request_digest,
+        "message": "fixture",
+        "expires_at": int(time.time()) + 50,
+        "commit": "b" * 40,
+        "tree": "c" * 40,
+        "cas": "CONFIRMED",
+        "worker_id": "fixture-worker",
+    }
+    mac = hmac.new(
+        b"s" * 32, b"aiagent-git-worker-result-v1\0" + canonical_json(signed_payload).encode(), hashlib.sha256
+    ).hexdigest()
+    envelope = {"payload": signed_payload, "mac": mac}
+    receipt_store = GitReceiptStore(
+        dbs["tool_gateway"],
+        claim,
+        keys,
+        result_key=b"s" * 32,
+        worker_id="fixture-worker",
+        object_verifier=FixtureObjectVerifier(),
+    )
+    receipt_id = receipt_store.finish(operation, envelope, deadline=time.monotonic() + 5)
+    assert receipt_store.finish(operation, envelope, deadline=time.monotonic() + 5) == receipt_id
+    restored, body_sha = receipt_store.fetch(operation, receipt_id, deadline=time.monotonic() + 5)
+    assert (
+        restored == signed_payload and body_sha == hashlib.sha256(canonical_json(signed_payload).encode()).hexdigest()
+    )
+    with pytest.raises(GitReceiptError):
+        receipt_store.finish(
+            operation, {"payload": {**signed_payload, "attempt": uuid7()}, "mac": mac}, deadline=time.monotonic() + 5
+        )
     dbs["owner"].one(
         "UPDATE agent.approval_records SET decision_code='REVOKED' WHERE tenant_id=%s AND id=%s RETURNING id",
         (claim.tenant_id, approval),
     )
     with pytest.raises(ExecutorFailed):
         admit()
+    with pytest.raises(GitReceiptError):
+        receipt_store.fetch(operation, receipt_id, deadline=time.monotonic() + 5)
     with pytest.raises(ScopeDenied):
         fetch(cycle="other")
     with pytest.raises(ScopeDenied):
