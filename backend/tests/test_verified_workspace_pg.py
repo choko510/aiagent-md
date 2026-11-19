@@ -397,6 +397,7 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
     """DB binding test with a synthetic process result, not a command E2E."""
     import tempfile
 
+    from aiagent_gateways.command_receipt_reader import CommandReceiptReader
     from aiagent_gateways.execution_artifacts import ExecutionArtifactError
     from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
     from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
@@ -435,10 +436,20 @@ def test_command_receipt_persists_and_rehydrates_canonical_scope(dbs, verified_s
                 )
             finally:
                 os.close(fd)
-        loaded, loaded_digest = lifecycle.fetch_command_receipt(
-            prepared.id, receipt_id, b"c" * 32, deadline=time.monotonic() + 10
-        )
+        reader = CommandReceiptReader(lifecycle, b"c" * 32)
+        loaded, loaded_digest = reader(prepared.id, receipt_id)
         assert loaded == payload and loaded_digest == digest and loaded["test_id"] == "unit"
+        with pytest.raises(ExecutionArtifactError):
+            reader(prepared.id, uuid7())
+        with pytest.raises(ExecutionArtifactError):
+            CommandReceiptReader(lifecycle, b"x" * 32)(prepared.id, receipt_id)
+        stale = ExecutionLifecycle(
+            dbs["tool_gateway"],
+            replace(claim, lease_epoch=claim.lease_epoch + 1),
+            HmacCaptureVerifier(dbs["tool_gateway"], b"c" * 32),
+        )
+        with pytest.raises(control.FencedOut):
+            CommandReceiptReader(stale, b"c" * 32)(prepared.id, receipt_id)
         assert b"secret" not in body
 
     prepared_execution_fixture(dbs, verified_setup, on_prepared=finish, expected_state="FINISHED", command_recipe=True)

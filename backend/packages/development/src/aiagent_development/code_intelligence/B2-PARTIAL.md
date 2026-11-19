@@ -493,8 +493,10 @@ outcome flags and output hashes rather than plaintext. A disposable Docker test
 exercises build, static-check and test commands, nonzero exit, timeout, output
 overflow and read-only source. Migration 0017 and Gateway command-receipt
 operations are provisional: the `ToolGatewaySandboxAdapter` test/development
-path requires an injected trusted receipt reader and has not been proven by a
-real DB-to-Adapter E2E. It is disabled in production, and the binary measurement does not attest libraries,
+path uses `CommandReceiptReader` and has a real PostgreSQL/Gateway/Docker
+Supervisor E2E for build, static-check, test and a nonzero test. This fixture
+does not exercise the complete Development Workflow. The path is disabled in
+production, and the binary measurement does not attest libraries,
 image, key provisioning or source secret classification. Command reconciliation
 and complete DB-to-Adapter E2E still require implementation and verification.
 The canonical DB receipt persistence and rehydration have a separate PostgreSQL

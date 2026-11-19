@@ -86,6 +86,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             or not scope.workspace_revision.isascii()
             or not scope.workspace_revision.isdecimal()
             or str(int(scope.workspace_revision)) != scope.workspace_revision
+            or int(scope.workspace_revision) < 1
         ):
             raise InvalidEvidence("sandbox request scope mismatch")
         args = {"argv": list(request.argv), "cwdRelative": self._cwd_relative}
@@ -130,6 +131,8 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             payload, digest = self._receipt_reader(execution_id, receipt_id)
         except Exception as exc:
             raise EffectUnknown("sandbox command receipt requires reconciliation") from exc
+        if not isinstance(payload, dict) or not isinstance(digest, str):
+            raise EffectUnknown("sandbox command receipt unavailable")
         expected = {
             "tenant": claim.tenant_id,
             "owner": claim.owner_user_id,
@@ -154,22 +157,25 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             or not isinstance(payload.get("source_commit"), str)
         ):
             raise EffectUnknown("sandbox command receipt mismatch")
-        return ExecutionEvidence(
-            request.intent_ref,
-            request.run,
-            request.kind,
-            cast(int, payload["exit_code"]),
-            True,
-            digest,
-            request.toolchain_digest,
-            "",
-            "",
-            cast(str, payload["source_commit"]),
-            request.test_id,
-            "command:" + receipt_id,
-            cast(bool, payload["timed_out"]),
-            cast(bool, payload["truncated"]),
-        )
+        try:
+            return ExecutionEvidence(
+                request.intent_ref,
+                request.run,
+                request.kind,
+                cast(int, payload["exit_code"]),
+                True,
+                digest,
+                request.toolchain_digest,
+                "",
+                "",
+                cast(str, payload["source_commit"]),
+                request.test_id,
+                "command:" + receipt_id,
+                cast(bool, payload["timed_out"]),
+                cast(bool, payload["truncated"]),
+            )
+        except InvalidEvidence as exc:
+            raise EffectUnknown("sandbox command receipt mismatch") from exc
 
 
 @dataclass(frozen=True, slots=True)
