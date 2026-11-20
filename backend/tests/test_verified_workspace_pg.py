@@ -25,6 +25,7 @@ from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Ide
 from aiagent_development.code_intelligence.projection import prepare_projection
 from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 from aiagent_development.contracts import InvalidEvidence, ScopeDenied, StaleReference
+from aiagent_development.git_commit_worker import IsolatedGitCommitWorker
 from aiagent_development.workspace_authority import register_verified_snapshot, resolve_git_commit_binding
 from aiagent_domain import canonical_json, uuid7
 from aiagent_domain.rpcwire import RpcError
@@ -34,8 +35,11 @@ from aiagent_gateways.git_commit_dispatch import GitCommitReservationExecutor
 from aiagent_gateways.git_operation import admit_git_operation, prepare_git_worker_request
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
+from aiagent_gateways.git_worker_staging import stage_git_worker
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
+from aiagent_sandbox.git_operation_journal import GitOperationJournal
+from aiagent_sandbox.git_worker_rpc import GitWorkerAuthority, GitWorkerService, build_git_worker_server
 from psycopg.errors import CheckViolation, InsufficientPrivilege
 
 pytestmark = [pytest.mark.pg, pytest.mark.skipif(os.name != "posix", reason="POSIX private staging")]
@@ -163,7 +167,7 @@ def test_git_operation_rejects_missing_canonical_attempt_and_patch(dbs, verified
         )
 
 
-def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
+def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_path):
     claim, binding, manifest, _, _, _, _ = verified_setup
     dbs["owner"].one(
         "UPDATE agent.repository_bindings SET approved_branch='feat/approved',generation=generation+1 "
@@ -403,6 +407,50 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
     prepared = prepare_git_worker_request(dbs["tool_gateway"], claim, keys, operation, deadline=time.monotonic() + 5)
     assert prepared.payload["attempt"] == attempt and prepared.payload["branch"] == "feat/approved"
     assert prepared.patch.data == content
+    # Transfer fixture: the operation above is synthetic; this is not a Git E2E.
+    journal_dir = tmp_path / "git-stage-journal"
+    journal_dir.mkdir(mode=0o700)
+    journal = GitOperationJournal(journal_dir.resolve(), b"j" * 32)
+    executable = shutil.which("git")
+    assert executable is not None
+    service = GitWorkerService(
+        IsolatedGitCommitWorker((tmp_path / "repo").resolve(), Path(executable).resolve(), "feat/approved"),
+        journal,
+        tenant=claim.tenant_id,
+        binding=binding,
+        branch="feat/approved",
+        grant_key=b"g" * 32,
+        transfer_key=b"t" * 32,
+        result_key=b"s" * 32,
+        worker_id="fixture",
+        authority=GitWorkerAuthority(5),
+    )
+
+    async def stage_flow():
+        endpoint = "unix:" + str(tmp_path / "git-stage.sock")
+        server = build_git_worker_server(endpoint, b"r" * 32, service, allowed_uid=os.getuid())
+        await server.start()
+        try:
+            staged = await stage_git_worker(
+                dbs["tool_gateway"],
+                claim,
+                keys,
+                operation,
+                endpoint=endpoint,
+                rpc_key=b"r" * 32,
+                grant_key=b"g" * 32,
+                transfer_key=b"t" * 32,
+                deadline=time.monotonic() + 10,
+            )
+            assert staged.request.payload["attempt"] == attempt and not staged.revoked.is_set()
+            assert await staged.cancel()
+        finally:
+            await server.close()
+
+    try:
+        asyncio.run(stage_flow())
+    finally:
+        journal.close()
     with pytest.raises(ExecutorUnknown):
         admit()
 
