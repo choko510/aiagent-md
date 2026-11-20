@@ -24,6 +24,7 @@ from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
+from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
 from psycopg.types.json import Jsonb
@@ -49,6 +50,7 @@ pytestmark = [
         "binding_changed_before_admission",
         "goal_changed_before_admission",
         "worker_response_lost",
+        "receipt_response_lost",
     ],
 )
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str, monkeypatch):  # noqa: F811
@@ -245,7 +247,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
-            if scenario not in ("success", "worker_response_lost"):
+            if scenario not in ("success", "worker_response_lost", "receipt_response_lost"):
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
                 async def fault_at_admission(caller, payload):
@@ -313,6 +315,14 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         return response
 
                     monkeypatch.setattr(RpcClient, "call", lose_worker_response)
+                if scenario == "receipt_response_lost":
+                    original_fetch = GitReceiptStore.fetch
+
+                    def lose_receipt_response(self, *args, **kwargs):
+                        original_fetch(self, *args, **kwargs)
+                        raise GitReceiptError("fixture receipt response lost")
+
+                    monkeypatch.setattr(GitReceiptStore, "fetch", lose_receipt_response)
                 client = RpcClient(f"tcp:127.0.0.1:{server.port}", "development", b"d" * 32)
                 body = {"claim": claim.to_wire(), "toolCallId": call_id, "args": args}
                 pending = await client.call("tool.development_git_commit", body)
@@ -330,7 +340,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
                     actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
-                    if scenario not in ("cancel_after_cas_admission", "worker_response_lost"):
+                    if scenario not in ("cancel_after_cas_admission", "worker_response_lost", "receipt_response_lost"):
                         assert actual == parent
                     row = dbs["owner"].one(
                         "SELECT o.state,o.candidate_commit,a.status_code AS attempt_status FROM agent.git_operations o "
@@ -340,14 +350,25 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         (claim.tenant_id, call_id),
                     )
                     expected_state = (
-                        "CAS_PENDING"
+                        "RECEIPT_PERSISTED"
+                        if scenario == "receipt_response_lost"
+                        else "CAS_PENDING"
                         if scenario in ("admission_response_lost", "cancel_after_cas_admission", "worker_response_lost")
                         else "ADMITTED"
                     )
                     assert row["state"] == expected_state and row["attempt_status"] == "UNKNOWN"
-                    if scenario == "worker_response_lost":
+                    if scenario in ("worker_response_lost", "receipt_response_lost"):
                         assert actual == row["candidate_commit"] and actual != parent
                         assert len(list(journal.glob("*.confirmed"))) == 1
+                    if scenario == "receipt_response_lost":
+                        receipts = dbs["owner"].one(
+                            "SELECT count(*) AS n FROM agent.git_operation_receipts r "
+                            "JOIN agent.git_operations o ON o.tenant_id=r.tenant_id AND o.id=r.operation_id "
+                            "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                            "WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                            (claim.tenant_id, call_id),
+                        )
+                        assert receipts["n"] == 1
                     if scenario in ("cancel_after_cas_admission", "worker_response_lost"):
                         assert actual in (parent, row["candidate_commit"])
                         receipts = dbs["owner"].one(
@@ -358,7 +379,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert receipts["n"] == 0
-                    if scenario in ("admission_response_lost", "worker_response_lost"):
+                    if scenario in ("admission_response_lost", "worker_response_lost", "receipt_response_lost"):
                         replay = await client.call("tool.development_git_commit", body)
                         assert replay["status"] == "UNKNOWN"
                         count = dbs["owner"].one(
