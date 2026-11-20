@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from aiagent_development.git_commit_worker import IsolatedGitCommitWorker
 from aiagent_domain import uuid7
-from aiagent_sandbox.git_operation_journal import GitJournalError, GitOperationJournal
+from aiagent_sandbox.git_operation_journal import GitJournalError, GitOperationJournal, verify_prepared_journal
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -63,6 +63,23 @@ def test_git_cas_requires_durable_preparation_when_provider_supplies_fence(tmp_p
         journal = GitOperationJournal(directory.resolve(), b"j" * 32)
         prepared = journal.read(op, "prepared")
         assert prepared["parent"] == parent and prepared["request_sha256"] == request
+        envelope = journal.export_prepared(op)
+        scope = {
+            "operation": op,
+            "attempt": attempt,
+            "binding": binding,
+            "generation": 1,
+            "branch": "feat/fixture",
+            "request_sha256": request,
+            "parent": parent,
+        }
+        assert verify_prepared_journal(b"j" * 32, envelope, **scope) == prepared
+        with pytest.raises(GitJournalError):
+            verify_prepared_journal(
+                b"j" * 32, {"payload": {**prepared, "tree": "f" * 40}, "mac": envelope["mac"]}, **scope
+            )
+        with pytest.raises(GitJournalError):
+            verify_prepared_journal(b"j" * 32, envelope, **{**scope, "attempt": uuid7()})
         with pytest.raises(GitJournalError):
             journal.admit(op, request, attempt, binding, 1, "feat/fixture")
         with pytest.raises(GitJournalError):

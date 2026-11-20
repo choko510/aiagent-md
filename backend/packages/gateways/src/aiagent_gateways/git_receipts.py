@@ -42,11 +42,20 @@ class GitReceiptStore:
         result_key: bytes,
         worker_id: str,
         object_verifier: GitObjectVerifier,
+        require_fenced: bool = False,
     ) -> None:
-        if config.profile() == "production" or len(result_key) < 32 or not worker_id or object_verifier is None:
+        if (
+            config.profile() == "production"
+            or len(result_key) < 32
+            or not worker_id
+            or object_verifier is None
+            or type(require_fenced) is not bool
+            or (config.profile() != "test" and not require_fenced)
+        ):
             raise ValueError("Git receipt verification unavailable")
         self._db, self._claim, self._keys = db, claim, keys
         self._result_key, self._worker_id, self._objects = result_key, worker_id, object_verifier
+        self._require_fenced = require_fenced
 
     def _scope(self, workspace: str, operation: str) -> tuple[object, ...]:
         c = self._claim
@@ -148,8 +157,13 @@ class GitReceiptStore:
                 ms = max(1, int((deadline - time.monotonic()) * 1000))
                 c.execute("SELECT set_config('statement_timeout', %s, true)", (f"{ms}ms",))
                 c.execute("SELECT set_config('lock_timeout', %s, true)", (f"{ms}ms",))
+                sql = (
+                    "SELECT agent.git_operation_finish_fenced(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS receipt_id"
+                    if self._require_fenced
+                    else "SELECT agent.git_operation_finish(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS receipt_id"
+                )
                 row = c.execute(
-                    "SELECT agent.git_operation_finish(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS receipt_id",
+                    sql,
                     (
                         *self._scope(workspace, operation),
                         receipt_id,

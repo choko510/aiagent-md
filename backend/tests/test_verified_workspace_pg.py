@@ -32,7 +32,7 @@ from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
 from aiagent_gateways.git_commit_dispatch import GitCommitStagingExecutor
-from aiagent_gateways.git_operation import admit_git_operation, prepare_git_worker_request
+from aiagent_gateways.git_operation import admit_git_operation, enter_git_cas, prepare_git_worker_request
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.git_worker_staging import stage_git_worker
@@ -507,11 +507,42 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_pat
 
     assert heartbeat() > time.time()
 
+    # The candidate fence is checked in a rolled-back SQL fixture. It does not
+    # authorize the test-profile worker or count as a Git CAS E2E.
+    class RollbackCandidate(Exception):
+        pass
+
+    with pytest.raises(RollbackCandidate), dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
+        c.execute(
+            "SELECT agent.git_operation_enter_cas(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                claim.tenant_id,
+                claim.owner_user_id,
+                workspace,
+                claim.task_id,
+                claim.run_id,
+                claim.goal_revision,
+                claim.lease_epoch,
+                claim.worker_ref,
+                claim.restore_incarnation,
+                operation,
+                "b" * 40,
+                "c" * 40,
+                "d" * 64,
+            ),
+        )
+        row = c.execute(
+            "SELECT state,candidate_commit FROM agent.git_operations WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, operation),
+        ).fetchone()
+        assert row["state"] == "CAS_PENDING" and row["candidate_commit"] == "b" * 40
+        raise RollbackCandidate
+
     # Receipt persistence unit fixture. This deliberately synthetic signature
     # and object verifier are not evidence of the Gateway/worker Git E2E.
     class FixtureObjectVerifier:
         def verify(self, result, patch, *, deadline):
-            assert result["commit"] == "b" * 40 and patch.data == content and deadline > time.monotonic()
+            assert result["commit"] in {"b" * 40, "d" * 40} and patch.data == content and deadline > time.monotonic()
 
     signed_payload = {
         "operation": operation,
@@ -565,6 +596,91 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_pat
     assert (
         restored == signed_payload and body_sha == hashlib.sha256(canonical_json(signed_payload).encode()).hexdigest()
     )
+    # This distinct synthetic attempt tests the DB/journal boundary only.
+    intent2, attempt2, approval2, effect2 = (uuid7() for _ in range(4))
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.tool_intents(tenant_id,id,task_id,run_id,tool_key,invocation_key,request_sha256,"
+            "safe_arguments_json,risk_class,goal_revision,status_code) SELECT tenant_id,%s,task_id,run_id,tool_key,%s,"
+            "request_sha256,safe_arguments_json,risk_class,goal_revision,'SENDING' FROM agent.tool_intents "
+            "WHERE tenant_id=%s AND id=%s",
+            (intent2, intent2, claim.tenant_id, intent),
+        )
+        c.execute(
+            "INSERT INTO agent.tool_attempts(tenant_id,id,tool_intent_id,attempt_no,fence_token,worker_ref,"
+            "run_lease_epoch,status_code) VALUES (%s,%s,%s,1,1,%s,%s,'SENDING')",
+            (claim.tenant_id, attempt2, intent2, claim.worker_ref, claim.lease_epoch),
+        )
+        c.execute(
+            "INSERT INTO agent.approval_records(tenant_id,id,tool_intent_id,task_id,run_id,owner_user_id,tool_key,"
+            "request_sha256,goal_revision,safe_summary,decision_code,expires_at) SELECT tenant_id,%s,%s,task_id,"
+            "run_id,owner_user_id,tool_key,request_sha256,goal_revision,safe_summary,'APPROVED',expires_at "
+            "FROM agent.approval_records WHERE tenant_id=%s AND id=%s",
+            (approval2, intent2, claim.tenant_id, approval),
+        )
+        c.execute(
+            "INSERT INTO agent.side_effect_records(tenant_id,id,tool_intent_id,effect_key,request_sha256,"
+            "outcome_code,attempt_fence) VALUES (%s,%s,%s,%s,%s,'SENDING',1)",
+            (claim.tenant_id, effect2, intent2, claim.tenant_id + ":" + intent2, request_digest),
+        )
+    op2 = admit_git_operation(
+        dbs["tool_gateway"],
+        claim,
+        workspace_id=workspace,
+        attempt_id=attempt2,
+        binding_id=binding,
+        patch_id=artifact,
+        deadline=time.monotonic() + 5,
+    )
+    journal_dir2 = tmp_path / "cas-admission-journal"
+    journal_dir2.mkdir(mode=0o700)
+    journal2 = GitOperationJournal(journal_dir2.resolve(), b"j" * 32)
+    try:
+        journal2.admit(op2, request_digest, attempt2, binding, 2, "feat/approved")
+        journal2.prepare(op2, request_digest, parent, "d" * 40, "e" * 40)
+        proof2 = journal2.export_prepared(op2)
+        with pytest.raises(ExecutorUnknown):
+            enter_git_cas(dbs["tool_gateway"], claim, keys, op2, b"x" * 32, proof2, deadline=time.monotonic() + 5)
+        enter_git_cas(dbs["tool_gateway"], claim, keys, op2, b"j" * 32, proof2, deadline=time.monotonic() + 5)
+        row2 = dbs["owner"].one(
+            "SELECT state,candidate_commit FROM agent.git_operations WHERE tenant_id=%s AND id=%s",
+            (claim.tenant_id, op2),
+        )
+        assert row2["state"] == "CAS_PENDING" and row2["candidate_commit"] == "d" * 40
+        with pytest.raises(ExecutorUnknown):
+            enter_git_cas(dbs["tool_gateway"], claim, keys, op2, b"j" * 32, proof2, deadline=time.monotonic() + 5)
+        fenced_store = GitReceiptStore(
+            dbs["tool_gateway"],
+            claim,
+            keys,
+            result_key=b"s" * 32,
+            worker_id="fixture-worker",
+            object_verifier=FixtureObjectVerifier(),
+            require_fenced=True,
+        )
+        candidate = {
+            **signed_payload,
+            "operation": op2,
+            "intent": intent2,
+            "attempt": attempt2,
+            "effect_key": claim.tenant_id + ":" + intent2,
+            "commit": "d" * 40,
+            "tree": "e" * 40,
+        }
+
+        def signed(value):
+            signature = hmac.new(
+                b"s" * 32, b"aiagent-git-worker-result-v1\0" + canonical_json(value).encode(), hashlib.sha256
+            ).hexdigest()
+            return {"payload": value, "mac": signature}
+
+        with pytest.raises(GitReceiptError):
+            fenced_store.finish(op2, signed({**candidate, "commit": "b" * 40}), deadline=time.monotonic() + 5)
+        receipt2 = fenced_store.finish(op2, signed(candidate), deadline=time.monotonic() + 5)
+        restored2, _ = fenced_store.fetch(op2, receipt2, deadline=time.monotonic() + 5)
+        assert restored2 == candidate
+    finally:
+        journal2.close()
     with pytest.raises(GitReceiptError):
         receipt_store.finish(
             operation, {"payload": {**signed_payload, "attempt": uuid7()}, "mac": mac}, deadline=time.monotonic() + 5

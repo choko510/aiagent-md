@@ -6,6 +6,7 @@ reservation is ambiguous and must be reconciled without another Git execution.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +15,8 @@ from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_development.workspace_authority import resolve_git_commit_binding
-from aiagent_domain import is_uuid7, uuid7
+from aiagent_domain import canonical_json, is_uuid7, uuid7
+from aiagent_sandbox.git_operation_journal import verify_prepared_journal
 from psycopg import DatabaseError, errors
 
 from .context_keys import KeyRing
@@ -29,6 +31,65 @@ class PreparedGitWorkerRequest:
 
     payload: dict[str, Any]
     patch: VerifiedGitPatch
+
+
+def enter_git_cas(
+    db: Database,
+    claim: Claim,
+    keys: KeyRing,
+    operation_id: str,
+    journal_key: bytes,
+    journal_envelope: dict[str, Any],
+    *,
+    deadline: float,
+) -> None:
+    """Record irrevocable admission after authenticating the Worker's prepared journal.
+
+    This does not dispatch a CAS; Worker authentication, return-channel fencing,
+    crash handling and cancellation ordering remain the caller's responsibility.
+    """
+    prepared = prepare_git_worker_request(db, claim, keys, operation_id, deadline=deadline)
+    p = prepared.payload
+    try:
+        journal = verify_prepared_journal(
+            journal_key,
+            journal_envelope,
+            operation=operation_id,
+            attempt=p["attempt"],
+            binding=p["binding"],
+            generation=p["generation"],
+            branch=p["branch"],
+            request_sha256=p["request_sha256"],
+            parent=p["parent"],
+        )
+        journal_sha = hashlib.sha256(canonical_json(journal_envelope).encode("utf-8")).hexdigest()
+        if time.monotonic() >= deadline:
+            raise ValueError("Git authority deadline exceeded")
+        with db.tx(tenant=claim.tenant_id) as c:
+            ms = max(1, int((deadline - time.monotonic()) * 1000))
+            c.execute("SELECT set_config('statement_timeout', %s, true)", (f"{ms}ms",))
+            c.execute("SELECT set_config('lock_timeout', %s, true)", (f"{ms}ms",))
+            c.execute(
+                "SELECT agent.git_operation_enter_cas(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    claim.tenant_id,
+                    claim.owner_user_id,
+                    p["workspace"],
+                    claim.task_id,
+                    claim.run_id,
+                    claim.goal_revision,
+                    claim.lease_epoch,
+                    claim.worker_ref,
+                    claim.restore_incarnation,
+                    operation_id,
+                    journal["commit"],
+                    journal["tree"],
+                    journal_sha,
+                ),
+            )
+    except Exception as exc:
+        # A commit acknowledgement can be lost. Never issue another CAS grant.
+        raise ExecutorUnknown("Git CAS admission requires reconciliation") from exc
 
 
 def prepare_git_worker_request(

@@ -28,6 +28,69 @@ class GitJournalError(RuntimeError):
     """The operation must remain unknown and must not be re-executed."""
 
 
+def verify_prepared_journal(
+    key: bytes,
+    envelope: Any,
+    *,
+    operation: str,
+    attempt: str,
+    binding: str,
+    generation: int,
+    branch: str,
+    request_sha256: str,
+    parent: str,
+) -> dict[str, Any]:
+    """Authenticate exact pre-CAS evidence; this never asserts a CAS occurred."""
+    try:
+        if len(key) < 32 or not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+            raise ValueError
+        payload, mac = envelope["payload"], envelope["mac"]
+        if not isinstance(payload, dict) or not isinstance(mac, str):
+            raise ValueError
+        expected_fields = {
+            "version",
+            "operation",
+            "stage",
+            "request_sha256",
+            "attempt",
+            "binding",
+            "generation",
+            "branch",
+            "parent",
+            "commit",
+            "tree",
+        }
+        mac_expected = hmac.new(key, _DOMAIN + canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+        if (
+            set(payload) != expected_fields
+            or not hmac.compare_digest(mac, mac_expected)
+            or payload["version"] != 1
+            or payload["stage"] != "prepared"
+            or payload["operation"] != operation
+            or payload["attempt"] != attempt
+            or payload["binding"] != binding
+            or payload["generation"] != str(generation)
+            or payload["branch"] != branch
+            or payload["request_sha256"] != request_sha256
+            or payload["parent"] != parent
+            or not is_uuid7(operation)
+            or not is_uuid7(attempt)
+            or not is_uuid7(binding)
+            or type(generation) is not int
+            or generation < 1
+            or not _SHA256.fullmatch(request_sha256)
+            or any(
+                not isinstance(payload[k], str) or _OID.fullmatch(payload[k]) is None
+                for k in ("parent", "commit", "tree")
+            )
+            or payload["commit"] == parent
+        ):
+            raise ValueError
+        return payload
+    except (ValueError, TypeError, KeyError) as exc:
+        raise GitJournalError("prepared journal authentication failed") from exc
+
+
 class GitOperationJournal:
     """One-shot records in an externally provisioned, persistent private directory."""
 
@@ -117,6 +180,12 @@ class GitOperationJournal:
             return payload
         except (OSError, ValueError, TypeError) as exc:
             raise GitJournalError("journal record unavailable or invalid") from exc
+
+    def export_prepared(self, operation: str) -> dict[str, Any]:
+        """Export authenticated bytes only after the persisted record revalidates."""
+        payload = self.read(operation, "prepared")
+        mac = hmac.new(self._key, _DOMAIN + canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+        return {"payload": payload, "mac": mac}
 
     def admit(
         self, operation: str, request_sha256: str, attempt: str, binding: str, generation: int, branch: str
