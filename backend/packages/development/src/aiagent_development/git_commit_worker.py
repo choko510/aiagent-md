@@ -94,6 +94,12 @@ class IsolatedGitCommitWorker:
             raise InvalidEvidence("isolated Git operation rejected")
         return result.stdout
 
+    def head(self) -> str:
+        """Read only the operator-configured branch inside the isolated provider."""
+        with tempfile.TemporaryDirectory(prefix="git-provider-head-") as home:
+            result = self._git_call(home, str(Path(home) / "index"), "rev-parse", "--verify", self._ref)
+            return require_sha(result.strip().decode("ascii"))
+
     def inspect_commit(self, parent: str, commit: str, tree: str) -> tuple[bytes, bytes, str]:
         """Read Git objects and canonical diff in the isolated provider only."""
         for value in (parent, commit, tree):

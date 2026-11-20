@@ -26,6 +26,7 @@ from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
 from aiagent_gateways.git_commit_evidence import GitCommitEvidenceReader
+from aiagent_gateways.git_head_reader import RpcGitHeadReader
 from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
@@ -327,6 +328,27 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         raise GitReceiptError("fixture receipt response lost")
 
                     monkeypatch.setattr(GitReceiptStore, "fetch", lose_receipt_response)
+                scope = ProjectScope(
+                    claim.tenant_id,
+                    claim.owner_user_id,
+                    "fixture",
+                    workspace,
+                    "fixture/repo",
+                    "feat/fixture",
+                    parent,
+                    "1",
+                )
+                head_reader = RpcGitHeadReader(
+                    dbs["tool_gateway"],
+                    claim,
+                    binding_id=binding,
+                    generation=2,
+                    endpoint=worker_endpoint,
+                    rpc_key=b"r" * 32,
+                    grant_key=b"g" * 32,
+                    worker_id="fixture-worker",
+                )
+                assert await asyncio.to_thread(head_reader, scope, deadline=time.monotonic() + 5) == parent
                 client = RpcClient(f"tcp:127.0.0.1:{server.port}", "development", b"d" * 32)
                 body = {"claim": claim.to_wire(), "toolCallId": call_id, "args": args}
                 pending = await client.call("tool.development_git_commit", body)
@@ -399,6 +421,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 output = result["result"]
                 actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
                 assert actual == output["commitSha"] and run("rev-parse", actual + "^").decode().strip() == parent
+                assert await asyncio.to_thread(head_reader, scope, deadline=time.monotonic() + 5) == actual
                 row = dbs["owner"].one(
                     "SELECT o.state,o.candidate_commit,o.candidate_tree,o.prepared_journal_sha256,"
                     "a.status_code AS attempt_status,r.receipt_id FROM agent.git_operations o "

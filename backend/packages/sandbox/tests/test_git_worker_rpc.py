@@ -28,6 +28,7 @@ from aiagent_sandbox.git_worker_rpc import (
     build_git_worker_server,
     git_transfer_binding,
     git_transfer_key,
+    sign_git_head_grant,
     sign_git_worker_grant,
     verify_git_worker_result,
 )
@@ -141,6 +142,30 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
         await server.start()
         try:
             client = RpcClient(endpoint, "tool_gateway", b"r" * 32)
+            head_payload = {
+                name: payload[name]
+                for name in (
+                    "tenant",
+                    "owner",
+                    "workspace",
+                    "task",
+                    "run",
+                    "goal",
+                    "lease",
+                    "restore",
+                    "worker_ref",
+                    "binding",
+                    "generation",
+                    "branch",
+                )
+            }
+            head_payload["expires_at"] = int(time.time()) + 5
+            head_grant = sign_git_head_grant(b"g" * 32, head_payload)
+            assert (await client.call("git.head", {"grant": head_grant}))["head"] == parent
+            with pytest.raises(RpcError):
+                await client.call(
+                    "git.head", {"grant": {"payload": {**head_payload, "branch": "main"}, "mac": head_grant["mac"]}}
+                )
             grant = sign_git_worker_grant(b"g" * 32, payload)
             patch_ref = VerifiedGitPatch(payload["patch_id"], parent, payload["patch_sha256"], ("a.txt",), patch)
             with pytest.raises(RpcError):

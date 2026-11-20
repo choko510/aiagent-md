@@ -29,6 +29,24 @@ from .binary_transfer import MAX_CHUNK, receive_chunks
 from .git_operation_journal import GitJournalError, GitOperationJournal
 
 _GRANT_DOMAIN = b"aiagent-git-worker-grant-v1\0"
+_HEAD_DOMAIN = b"aiagent-git-head-grant-v1\0"
+_HEAD_FIELDS = frozenset(
+    {
+        "tenant",
+        "owner",
+        "workspace",
+        "task",
+        "run",
+        "goal",
+        "lease",
+        "restore",
+        "worker_ref",
+        "binding",
+        "generation",
+        "branch",
+        "expires_at",
+    }
+)
 _RESULT_DOMAIN = b"aiagent-git-worker-result-v1\0"
 _TRANSFER_DOMAIN = b"aiagent-git-patch-transfer-v1\0"
 _HEX = re.compile(r"[a-f0-9]{64}\Z")
@@ -71,6 +89,14 @@ def sign_git_worker_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]
         raise ValueError("invalid Git worker grant")
     body = canonical_json(payload).encode("utf-8")
     return {"payload": payload, "mac": hmac.new(key, _GRANT_DOMAIN + body, hashlib.sha256).hexdigest()}
+
+
+def sign_git_head_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]:
+    """Sign a read-only branch request after canonical scope validation."""
+    if len(key) < 32 or set(payload) != _HEAD_FIELDS:
+        raise ValueError("invalid Git head grant")
+    body = canonical_json(payload).encode("utf-8")
+    return {"payload": payload, "mac": hmac.new(key, _HEAD_DOMAIN + body, hashlib.sha256).hexdigest()}
 
 
 def git_transfer_key(key: bytes, operation: str) -> bytes:
@@ -247,6 +273,37 @@ class GitWorkerService:
 
     def _active(self, session: _Session) -> bool:
         return time.monotonic() < session.deadline and self._authority(session.payload)
+
+    def head(self, envelope: Any) -> dict[str, str]:
+        """Read the configured branch only; never treat the result as a receipt."""
+        try:
+            if not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+                raise ValueError
+            payload, mac = envelope["payload"], envelope["mac"]
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != _HEAD_FIELDS
+                or not isinstance(mac, str)
+                or not hmac.compare_digest(mac, sign_git_head_grant(self._grant_key, payload)["mac"])
+                or payload["tenant"] != self._tenant
+                or payload["binding"] != self._binding
+                or payload["branch"] != self._branch
+                or any(not is_uuid7(payload[k]) for k in ("tenant", "owner", "workspace", "task", "run", "binding"))
+                or any(
+                    type(payload[k]) is not int or payload[k] < 1 for k in ("goal", "lease", "restore", "generation")
+                )
+                or not isinstance(payload["worker_ref"], str)
+                or not payload["worker_ref"]
+                or type(payload["expires_at"]) is not int
+                or not time.time() < payload["expires_at"] <= time.time() + 10
+            ):
+                raise ValueError
+            head = self._worker.head()
+            if time.time() >= payload["expires_at"]:
+                raise ValueError
+            return {"binding": self._binding, "branch": self._branch, "head": head, "worker_id": self._worker_id}
+        except Exception as exc:
+            raise RpcError("GIT_HEAD_UNAVAILABLE") from exc
 
     def begin(self, envelope: Any) -> str:
         try:
@@ -530,6 +587,9 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
             task = asyncio.create_task(asyncio.to_thread(service.inspect, body.get("grant")))
         return await task
 
+    async def head(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(service.head, body.get("grant"))
+
     async def heartbeat(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         operation, attempt, digest = body.get("operation"), body.get("attempt"), body.get("request_sha256")
         if not isinstance(operation, str) or not isinstance(attempt, str) or not isinstance(digest, str):
@@ -546,6 +606,7 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
     server.register("git.chunk", chunk, {"tool_gateway"})
     server.register("git.execute", execute, {"tool_gateway"})
     server.register("git.inspect", inspect, {"tool_gateway"})
+    server.register("git.head", head, {"tool_gateway"})
     server.register("git.heartbeat", heartbeat, {"tool_gateway"})
     server.register("git.cancel", cancel, {"tool_gateway"})
     return server
