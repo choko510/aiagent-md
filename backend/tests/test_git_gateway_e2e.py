@@ -92,12 +92,13 @@ pytestmark = [
         "worker_response_lost",
         "receipt_response_lost",
         "workflow_commit",
+        "workflow_nonzero",
     ],
 )
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str, monkeypatch):  # noqa: F811
     claim, binding, manifest, base_proof, base_receipt, base_wire, projection_parent = verified_setup
     old_snapshot = None
-    if scenario == "workflow_commit":
+    if scenario in ("workflow_commit", "workflow_nonzero"):
         old_snapshot = register_verified_snapshot(
             dbs["tool_gateway"],
             claim,
@@ -118,7 +119,9 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
 
     parent = manifest.identity.commit
     run("branch", "feat/fixture", parent)
-    (repo / "a.py").write_text("value = 43\n", encoding="utf-8")
+    (repo / "a.py").write_text(
+        "raise SystemExit(7)\n" if scenario == "workflow_nonzero" else "value = 43\n", encoding="utf-8"
+    )
     patch = run("diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames")
     digest = hashlib.sha256(patch).hexdigest()
     workspace = str(
@@ -129,7 +132,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             (claim.tenant_id, binding),
         )["workspace_id"]
     )
-    if scenario == "workflow_commit":
+    if scenario in ("workflow_commit", "workflow_nonzero"):
         # Branch approval creates a new binding generation; its base snapshot
         # must be independently reverified before it can be promoted.
         prior_snapshot = old_snapshot
@@ -328,7 +331,13 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
-            if scenario not in ("success", "workflow_commit", "worker_response_lost", "receipt_response_lost"):
+            if scenario not in (
+                "success",
+                "workflow_commit",
+                "workflow_nonzero",
+                "worker_response_lost",
+                "receipt_response_lost",
+            ):
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
                 async def fault_at_admission(caller, payload):
@@ -438,7 +447,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     pending["requestSha256"],
                     1,
                 )
-                if scenario == "workflow_commit":
+                if scenario in ("workflow_commit", "workflow_nonzero"):
                     receipt_store = GitReceiptStore(
                         dbs["tool_gateway"],
                         claim,
@@ -724,13 +733,15 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         evidence = restored.tests[0]
                         assert (
                             evidence.executed
-                            and evidence.exit_code == 0
+                            and evidence.exit_code == (7 if scenario == "workflow_nonzero" else 0)
                             and evidence.timed_out is False
                             and evidence.truncated is False
                             and evidence.test_id == "unit"
                             and evidence.source_commit_sha == committed.commit.commit_sha
                             and evidence.snapshot_revision == 3
                         )
+                        if scenario == "workflow_nonzero":
+                            assert not DevelopmentWorkflow._gate(restored, ())
                         with pytest.raises(StateConflict):
                             await asyncio.to_thread(test_workflow.execute, scope, cycle, request)
                         attempts = dbs["owner"].one(
