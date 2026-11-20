@@ -36,7 +36,8 @@ pytestmark = [
 ]
 
 
-def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path):  # noqa: F811
+@pytest.mark.parametrize("scenario", ["success", "cancel_before_cas_admission"])
+def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str):  # noqa: F811
     claim, binding, manifest, _, _, _, _ = verified_setup
     git = shutil.which("git")
     assert git is not None
@@ -230,6 +231,19 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path):  # no
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
+            if scenario == "cancel_before_cas_admission":
+                original_handler = fence_server.methods["git.enter_cas"].handler
+
+                async def cancel_before_admission(caller, payload):
+                    await asyncio.to_thread(
+                        commands.cancel,
+                        dbs["api"],
+                        Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                        claim.task_id,
+                    )
+                    return await original_handler(caller, payload)
+
+                fence_server.methods["git.enter_cas"].handler = cancel_before_admission
             await fence_server.start()
             server = build_tool_server({"development": b"d" * 32, "runtime": b"r" * 32}, "tcp:127.0.0.1:0", gateway)
             await server.start()
@@ -248,6 +262,18 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path):  # no
                     1,
                 )
                 result = await client.call("tool.development_git_commit", body)
+                if scenario == "cancel_before_cas_admission":
+                    assert result["status"] == "UNKNOWN", result
+                    assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == parent
+                    row = dbs["owner"].one(
+                        "SELECT o.state,a.status_code AS attempt_status FROM agent.git_operations o "
+                        "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
+                        "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                        "WHERE o.tenant_id=%s AND i.invocation_key=%s",
+                        (claim.tenant_id, call_id),
+                    )
+                    assert row["state"] == "ADMITTED" and row["attempt_status"] == "UNKNOWN"
+                    return
                 assert result["status"] == "CONFIRMED", result
                 output = result["result"]
                 actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
