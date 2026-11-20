@@ -163,13 +163,17 @@ class GitCommitStagingExecutor(GitCommitReservationExecutor):
 class GitCommitTestExecutor(GitCommitStagingExecutor):
     """Real Git execution for test profile only; no production fence is claimed."""
 
-    def __init__(self, *args: Any, result_key: bytes, worker_id: str, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, result_key: bytes, worker_id: str, require_fenced: bool = False, **kwargs: Any
+    ) -> None:
         if config.profile() != "test":
             raise RuntimeError("unfenced Git execution is test-only")
         super().__init__(*args, **kwargs)
         if len(result_key) < 32 or result_key in (self._rpc_key, self._grant_key, self._transfer_key) or not worker_id:
             raise ValueError("Git worker verification unavailable")
-        self._result_key, self._worker_id = result_key, worker_id
+        if type(require_fenced) is not bool:
+            raise ValueError("invalid Git fence policy")
+        self._result_key, self._worker_id, self._require_fenced = result_key, worker_id, require_fenced
 
     async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
         import asyncio
@@ -222,6 +226,7 @@ class GitCommitTestExecutor(GitCommitStagingExecutor):
                 result_key=self._result_key,
                 worker_id=self._worker_id,
                 object_verifier=verifier,
+                require_fenced=self._require_fenced,
             )
             receipt_id = await asyncio.to_thread(receipts.finish, context["operation_id"], response, deadline=deadline)
             payload, digest = await asyncio.to_thread(

@@ -60,7 +60,7 @@ def test_local_git_cas_guard_serializes_watchdog_cancellation():
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git unavailable")
 @pytest.mark.parametrize(
-    "scenario", ["normal", "revoked_after_prepare", "bad_transfer", "heartbeat", "heartbeat_cancel"]
+    "scenario", ["normal", "revoked_after_prepare", "bad_transfer", "heartbeat", "heartbeat_cancel", "fence_error"]
 )
 def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
@@ -115,6 +115,10 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
     }
     journal = GitOperationJournal(journal_dir.resolve(), b"j" * 32)
     worker = IsolatedGitCommitWorker(repo.resolve(), Path(git).resolve(), "feat/fixture")
+
+    def refuse_admission(_payload, _journal):
+        raise RuntimeError("CAS admission response lost")
+
     service = GitWorkerService(
         worker,
         journal,
@@ -128,6 +132,7 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
         authority=GitWorkerAuthority(5)
         if scenario.startswith("heartbeat")
         else lambda _p: scenario != "revoked_after_prepare" or not (journal_dir / (operation + ".prepared")).exists(),
+        cas_admitter=refuse_admission if scenario == "fence_error" else None,
     )
 
     async def exercise():
@@ -164,11 +169,13 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
                 )
             if scenario == "heartbeat_cancel":
                 assert (await client.call("git.cancel", pulse))["cancelled"] is True
-            if scenario in ("bad_transfer", "revoked_after_prepare", "heartbeat_cancel"):
+            if scenario in ("bad_transfer", "revoked_after_prepare", "heartbeat_cancel", "fence_error"):
                 with pytest.raises(RpcError, match="GIT_RESULT_UNKNOWN"):
                     await client.call("git.execute", {"operation": operation, "end": terminator})
                 assert run("rev-parse", "HEAD").decode().strip() == parent
-                assert (journal_dir / (operation + ".prepared")).exists() == (scenario == "revoked_after_prepare")
+                assert (journal_dir / (operation + ".prepared")).exists() == (
+                    scenario in ("revoked_after_prepare", "fence_error")
+                )
                 with pytest.raises(RpcError):
                     await client.call("git.begin", {"grant": grant})
                 return

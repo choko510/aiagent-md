@@ -221,6 +221,7 @@ class GitWorkerService:
         result_key: bytes,
         worker_id: str,
         authority: Callable[[dict[str, Any]], bool],
+        cas_admitter: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> None:
         if (
             config.profile() == "production"
@@ -240,6 +241,7 @@ class GitWorkerService:
         self._tenant, self._binding, self._branch, self._worker_id = tenant, binding, branch, worker_id
         self._grant_key, self._transfer_key, self._result_key = grant_key, transfer_key, result_key
         self._authority = authority
+        self._cas_admitter = cas_admitter
         self._sessions: dict[str, _Session] = {}
         self._live: dict[str, _Session] = {}
 
@@ -402,6 +404,8 @@ class GitWorkerService:
                 if not self._active(session):
                     raise GitJournalError("Git authority expired")
                 self._journal.prepare(operation, p["request_sha256"], p["parent"], commit, tree_id)
+                if self._cas_admitter is not None:
+                    self._cas_admitter(p, self._journal.export_prepared(operation))
                 if not self._active(session):
                     raise GitJournalError("Git authority expired")
                 tree.append(tree_id)
