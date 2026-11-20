@@ -31,7 +31,7 @@ from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
 from aiagent_gateways.git_commit_dispatch import GitCommitReservationExecutor
-from aiagent_gateways.git_operation import admit_git_operation
+from aiagent_gateways.git_operation import admit_git_operation, prepare_git_worker_request
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.servers import build_tool_server
@@ -400,6 +400,9 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
 
     operation = admit()
     assert operation
+    prepared = prepare_git_worker_request(dbs["tool_gateway"], claim, keys, operation, deadline=time.monotonic() + 5)
+    assert prepared.payload["attempt"] == attempt and prepared.payload["branch"] == "feat/approved"
+    assert prepared.patch.data == content
     with pytest.raises(ExecutorUnknown):
         admit()
 

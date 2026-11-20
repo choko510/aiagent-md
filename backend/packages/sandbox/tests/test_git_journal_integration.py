@@ -16,13 +16,15 @@ from aiagent_sandbox.git_operation_journal import GitJournalError, GitOperationJ
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    executable = shutil.which("git")
+    assert executable is not None
     return subprocess.run(  # noqa: S603
-        ["git", "-C", str(root), *args],
+        [executable, "-C", str(root), *args],
         check=True,
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,  # noqa: S607
+        timeout=10,
     )
 
 
