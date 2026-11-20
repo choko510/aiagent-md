@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +31,31 @@ from aiagent_sandbox.git_worker_rpc import (
     sign_git_worker_grant,
     verify_git_worker_result,
 )
+
+
+def test_local_git_cas_guard_serializes_watchdog_cancellation():
+    authority = GitWorkerAuthority(5)
+    payload = {
+        "operation": uuid7(),
+        "attempt": uuid7(),
+        "request_sha256": "a" * 64,
+        "expires_at": int(time.time()) + 30,
+    }
+    assert authority.register(payload) and authority.renew(payload)
+    started, finished = threading.Event(), threading.Event()
+    outcomes: list[bool] = []
+
+    def cancel() -> None:
+        started.set()
+        outcomes.append(authority.cancel(payload))
+        finished.set()
+
+    with authority.cas_guard(payload):
+        thread = threading.Thread(target=cancel)
+        thread.start()
+        assert started.wait(1) and not finished.wait(0.05)
+    thread.join(timeout=1)
+    assert finished.is_set() and outcomes == [True] and not authority(payload)
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git unavailable")

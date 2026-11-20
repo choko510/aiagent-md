@@ -14,7 +14,8 @@ import re
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -126,7 +127,7 @@ class GitWorkerAuthority:
             raise ValueError("invalid Git heartbeat interval")
         self._period = heartbeat_seconds
         self._states: dict[str, dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def register(self, payload: dict[str, Any]) -> bool:
         with self._lock:
@@ -190,6 +191,18 @@ class GitWorkerAuthority:
                 return False
             state["revoked"] = True
             return True
+
+    @contextmanager
+    def cas_guard(self, payload: dict[str, Any]) -> Iterator[None]:
+        """Serialize local watchdog revocation with the ref update only.
+
+        This is not a fence against a concurrent canonical DB revocation.
+        """
+        with self._lock:
+            state = self._matching(payload)
+            if state is None or not state["renewed"]:
+                raise GitJournalError("Git authority unavailable")
+            yield
 
 
 class GitWorkerService:
@@ -393,6 +406,7 @@ class GitWorkerService:
                     raise GitJournalError("Git authority expired")
                 tree.append(tree_id)
 
+            authority = self._authority
             commit = self._worker.commit(
                 p["parent"],
                 target.getvalue(),
@@ -400,6 +414,7 @@ class GitWorkerService:
                 tuple(p["paths"]),
                 p["message"],
                 before_cas=before_cas,
+                cas_guard=(lambda: authority.cas_guard(p)) if isinstance(authority, GitWorkerAuthority) else None,
             )
             self._journal.confirm(operation, p["request_sha256"], p["parent"], commit, tree[0])
             result = {**p, "commit": commit, "tree": tree[0], "cas": "CONFIRMED", "worker_id": self._worker_id}
@@ -515,13 +530,13 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
         operation, attempt, digest = body.get("operation"), body.get("attempt"), body.get("request_sha256")
         if not isinstance(operation, str) or not isinstance(attempt, str) or not isinstance(digest, str):
             raise RpcError("BAD_REQUEST")
-        return {"renewed": service.heartbeat(operation, attempt, digest)}
+        return {"renewed": await asyncio.to_thread(service.heartbeat, operation, attempt, digest)}
 
     async def cancel(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         operation, attempt, digest = body.get("operation"), body.get("attempt"), body.get("request_sha256")
         if not isinstance(operation, str) or not isinstance(attempt, str) or not isinstance(digest, str):
             raise RpcError("BAD_REQUEST")
-        return {"cancelled": service.cancel(operation, attempt, digest)}
+        return {"cancelled": await asyncio.to_thread(service.cancel, operation, attempt, digest)}
 
     server.register("git.begin", begin, {"tool_gateway"})
     server.register("git.chunk", chunk, {"tool_gateway"})
