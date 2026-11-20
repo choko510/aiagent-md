@@ -31,7 +31,7 @@ from aiagent_domain import canonical_json, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.executors import ExecutorFailed, ExecutorUnknown
-from aiagent_gateways.git_commit_dispatch import GitCommitReservationExecutor
+from aiagent_gateways.git_commit_dispatch import GitCommitStagingExecutor
 from aiagent_gateways.git_operation import admit_git_operation, prepare_git_worker_request
 from aiagent_gateways.git_patch_artifacts import fetch_git_patch, git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
@@ -293,10 +293,38 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_pat
             },
             writer="development_git_adapter",
         )
-    executor = GitCommitReservationExecutor(dbs["tool_gateway"], claim, keys)
+    gateway_journal_dir = tmp_path / "gateway-stage-journal"
+    gateway_journal_dir.mkdir(mode=0o700)
+    gateway_journal = GitOperationJournal(gateway_journal_dir.resolve(), b"j" * 32)
+    gateway_git = shutil.which("git")
+    assert gateway_git is not None
+    gateway_worker = GitWorkerService(
+        IsolatedGitCommitWorker((tmp_path / "repo").resolve(), Path(gateway_git).resolve(), "feat/approved"),
+        gateway_journal,
+        tenant=claim.tenant_id,
+        binding=binding,
+        branch="feat/approved",
+        grant_key=b"g" * 32,
+        transfer_key=b"t" * 32,
+        result_key=b"s" * 32,
+        worker_id="fixture",
+        authority=GitWorkerAuthority(5),
+    )
+    worker_endpoint = "unix:" + str(tmp_path / "gateway-worker.sock")
+    executor = GitCommitStagingExecutor(
+        dbs["tool_gateway"],
+        claim,
+        keys,
+        endpoint=worker_endpoint,
+        rpc_key=b"r" * 32,
+        grant_key=b"g" * 32,
+        transfer_key=b"t" * 32,
+    )
     gateway = ToolGateway(dbs["tool_gateway"], {"git_commit": executor}, development_git_enabled=True)
 
     async def gateway_flow():
+        worker_server = build_git_worker_server(worker_endpoint, b"r" * 32, gateway_worker, allowed_uid=os.getuid())
+        await worker_server.start()
         server = build_tool_server({"development": b"d" * 32, "runtime": b"r" * 32}, "tcp:127.0.0.1:0", gateway)
         await server.start()
         try:
@@ -323,8 +351,12 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_pat
             assert repeated["status"] == "UNKNOWN"
         finally:
             await server.close()
+            await worker_server.close()
 
-    asyncio.run(gateway_flow())
+    try:
+        asyncio.run(gateway_flow())
+    finally:
+        gateway_journal.close()
     rows = dbs["owner"].one(
         "SELECT count(*) AS n FROM agent.git_operations o JOIN agent.tool_attempts a "
         "ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id JOIN agent.tool_intents i "
@@ -333,6 +365,7 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup, tmp_pat
         (claim.tenant_id, call_id),
     )
     assert rows["n"] == 1
+    assert len(list(gateway_journal_dir.glob("*.admitted"))) == 1
     # SQL authorization fixture only: this is not a Gateway or Git E2E.
     intent, attempt, approval, effect = (uuid7() for _ in range(4))
     request_digest = "a" * 64

@@ -195,6 +195,8 @@ jobs:
         run: AIAGENT_COMMAND_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_command_adapter_e2e.py
       - name: Authenticated Git worker fixture (test-only Docker, simulated authority)
         run: AIAGENT_GIT_WORKER_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_worker_docker.py
+      - name: Git Gateway and receipt E2E (test profile; CAS fence unverified)
+        run: AIAGENT_GIT_GATEWAY_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_gateway_e2e.py
       - name: Build images
         working-directory: .
         run: |
