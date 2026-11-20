@@ -1,4 +1,4 @@
-"""Docker test fixture only: the live-authority callback is deliberately fake."""
+"""Docker fixture only: heartbeats are not backed by canonical DB authority."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from aiagent_development.git_commit_worker import IsolatedGitCommitWorker
 from aiagent_sandbox.git_operation_journal import GitOperationJournal
-from aiagent_sandbox.git_worker_rpc import GitWorkerService, build_git_worker_server
+from aiagent_sandbox.git_worker_rpc import GitWorkerAuthority, GitWorkerService, build_git_worker_server
 
 
 async def main() -> None:
@@ -23,7 +23,7 @@ async def main() -> None:
         transfer_key=b"t" * 32,
         result_key=b"s" * 32,
         worker_id="fixture-worker",
-        authority=lambda _payload: True,
+        authority=GitWorkerAuthority(5),
     )
     server = build_git_worker_server("unix:/bridge/worker.sock", b"r" * 32, service, allowed_uid=os.getuid())
     await server.start()

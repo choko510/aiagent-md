@@ -403,6 +403,26 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
     with pytest.raises(ExecutorUnknown):
         admit()
 
+    def heartbeat():
+        with dbs["tool_gateway"].tx(tenant=claim.tenant_id) as c:
+            return c.execute(
+                "SELECT agent.git_operation_heartbeat(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS expires_at",
+                (
+                    claim.tenant_id,
+                    claim.owner_user_id,
+                    workspace,
+                    claim.task_id,
+                    claim.run_id,
+                    claim.goal_revision,
+                    claim.lease_epoch,
+                    claim.worker_ref,
+                    claim.restore_incarnation,
+                    operation,
+                ),
+            ).fetchone()["expires_at"]
+
+    assert heartbeat() > time.time()
+
     # Receipt persistence unit fixture. This deliberately synthetic signature
     # and object verifier are not evidence of the Gateway/worker Git E2E.
     class FixtureObjectVerifier:
@@ -454,6 +474,8 @@ def test_git_patch_reads_authenticated_scoped_bytes(dbs, verified_setup):
         object_verifier=FixtureObjectVerifier(),
     )
     receipt_id = receipt_store.finish(operation, envelope, deadline=time.monotonic() + 5)
+    with pytest.raises(InsufficientPrivilege):
+        heartbeat()
     assert receipt_store.finish(operation, envelope, deadline=time.monotonic() + 5) == receipt_id
     restored, body_sha = receipt_store.fetch(operation, receipt_id, deadline=time.monotonic() + 5)
     assert (

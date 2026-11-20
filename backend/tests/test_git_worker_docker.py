@@ -144,6 +144,8 @@ def test_git_worker_in_networkless_docker(tmp_path: Path):
             assert socket.exists(), subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr
             client = RpcClient("unix:" + str(socket), "tool_gateway", b"r" * 32)
             await client.call("git.begin", {"grant": sign_git_worker_grant(b"g" * 32, payload)})
+            pulse = {"operation": operation, "attempt": attempt, "request_sha256": payload["request_sha256"]}
+            assert (await client.call("git.heartbeat", pulse))["renewed"] is True
             frames = list(encode_chunks(git_transfer_key(b"t" * 32, operation), git_transfer_binding(payload), [patch]))
             await client.call("git.chunk", {"operation": operation, "frame": base64.b64encode(frames[0]).decode()})
             response = await client.call(

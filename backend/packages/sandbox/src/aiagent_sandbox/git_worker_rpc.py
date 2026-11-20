@@ -12,6 +12,7 @@ import hmac
 import io
 import re
 import struct
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -117,6 +118,80 @@ class _Session:
     bytes_received: int = 0
 
 
+class GitWorkerAuthority:
+    """Fresh authenticated Gateway heartbeats; no self-renewal or implicit allow."""
+
+    def __init__(self, heartbeat_seconds: float = 2.0) -> None:
+        if not 0.1 <= heartbeat_seconds <= 5:
+            raise ValueError("invalid Git heartbeat interval")
+        self._period = heartbeat_seconds
+        self._states: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def register(self, payload: dict[str, Any]) -> bool:
+        with self._lock:
+            for op, state in tuple(self._states.items()):
+                if time.time() >= state["expires"]:
+                    self._states.pop(op, None)
+            operation = payload["operation"]
+            if operation in self._states or len(self._states) >= 1024 or time.time() >= payload["expires_at"]:
+                return False
+            self._states[operation] = {
+                "attempt": payload["attempt"],
+                "request": payload["request_sha256"],
+                "identity": hashlib.sha256(
+                    canonical_json({k: v for k, v in payload.items() if k != "expires_at"}).encode()
+                ).hexdigest(),
+                "expires": payload["expires_at"],
+                "deadline": time.monotonic() + self._period,
+                "renewed": False,
+                "revoked": False,
+            }
+            return True
+
+    def _matching(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        operation = payload.get("operation")
+        if not isinstance(operation, str):
+            return None
+        state = self._states.get(operation)
+        if (
+            state is None
+            or state["attempt"] != payload.get("attempt")
+            or state["request"] != payload.get("request_sha256")
+            or state["identity"]
+            != hashlib.sha256(
+                canonical_json({k: v for k, v in payload.items() if k != "expires_at"}).encode()
+            ).hexdigest()
+        ):
+            return None
+        if state["revoked"] or time.time() >= state["expires"] or time.monotonic() >= state["deadline"]:
+            state["revoked"] = True
+            return None
+        return state
+
+    def __call__(self, payload: dict[str, Any]) -> bool:
+        with self._lock:
+            state = self._matching(payload)
+            return bool(state is not None and state["renewed"])
+
+    def renew(self, payload: dict[str, Any]) -> bool:
+        with self._lock:
+            state = self._matching(payload)
+            if state is None:
+                return False
+            state["renewed"] = True
+            state["deadline"] = time.monotonic() + self._period
+            return True
+
+    def cancel(self, payload: dict[str, Any]) -> bool:
+        with self._lock:
+            state = self._matching(payload)
+            if state is None:
+                return False
+            state["revoked"] = True
+            return True
+
+
 class GitWorkerService:
     """One-operation worker with authenticated framed input and durable pre-CAS fence."""
 
@@ -143,6 +218,7 @@ class GitWorkerService:
             or not branch
             or not worker_id
             or not callable(authority)
+            or (config.profile() == "development" and not isinstance(authority, GitWorkerAuthority))
             or any(len(key) < 32 for key in (grant_key, transfer_key, result_key))
             or len({grant_key, transfer_key, result_key}) != 3
         ):
@@ -152,15 +228,17 @@ class GitWorkerService:
         self._grant_key, self._transfer_key, self._result_key = grant_key, transfer_key, result_key
         self._authority = authority
         self._sessions: dict[str, _Session] = {}
+        self._live: dict[str, _Session] = {}
 
     def _active(self, session: _Session) -> bool:
         return time.monotonic() < session.deadline and self._authority(session.payload)
 
     def begin(self, envelope: Any) -> str:
         try:
-            for operation, existing in tuple(self._sessions.items()):
+            for operation, existing in tuple(self._live.items()):
                 if time.monotonic() >= existing.deadline:
                     self._sessions.pop(operation, None)
+                    self._live.pop(operation, None)
             if not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
                 raise ValueError
             p, mac = envelope["payload"], envelope["mac"]
@@ -219,15 +297,20 @@ class GitWorkerService:
                 or not p["message"].strip()
                 or len(p["message"].encode("utf-8")) > 256
                 or len(self._sessions) >= 1
+                or len(self._live) >= 8
             ):
                 raise ValueError
             session = _Session(dict(p), time.monotonic() + max(0, p["expires_at"] - time.time()))
-            if not self._active(session):
+            if isinstance(self._authority, GitWorkerAuthority):
+                if not self._authority.register(p):
+                    raise ValueError
+            elif not self._active(session):
                 raise ValueError
             self._journal.admit(
                 p["operation"], p["request_sha256"], p["attempt"], p["binding"], p["generation"], p["branch"]
             )
             self._sessions[p["operation"]] = session
+            self._live[p["operation"]] = session
             return str(p["operation"])
         except (ValueError, TypeError, KeyError, GitJournalError) as exc:
             raise RpcError("GIT_ADMISSION_DENIED") from exc
@@ -248,7 +331,31 @@ class GitWorkerService:
         except (ValueError, TypeError, KeyError, struct.error) as exc:
             raise RpcError("GIT_TRANSFER_INVALID") from exc
 
+    def heartbeat(self, operation: str, attempt: str, request_sha256: str) -> bool:
+        session = self._live.get(operation)
+        if (
+            session is None
+            or not isinstance(self._authority, GitWorkerAuthority)
+            or session.payload["attempt"] != attempt
+            or session.payload["request_sha256"] != request_sha256
+        ):
+            return False
+        return self._authority.renew(session.payload)
+
+    def cancel(self, operation: str, attempt: str, request_sha256: str) -> bool:
+        session = self._live.get(operation)
+        if (
+            session is None
+            or not isinstance(self._authority, GitWorkerAuthority)
+            or session.payload["attempt"] != attempt
+            or session.payload["request_sha256"] != request_sha256
+        ):
+            return False
+        self._sessions.pop(operation, None)
+        return self._authority.cancel(session.payload)
+
     def execute(self, operation: str, encoded_end: str) -> dict[str, Any]:
+        session: _Session | None = None
         try:
             session = self._sessions.pop(operation)
             if not self._active(session) or session.bytes_received != session.payload["patch_bytes"]:
@@ -298,6 +405,9 @@ class GitWorkerService:
         except Exception as exc:
             # Includes a lost reply or a failure after CAS: caller must reconcile.
             raise RpcError("GIT_RESULT_UNKNOWN") from exc
+        finally:
+            if session is not None:
+                session.frames.clear()
 
     def inspect(self, envelope: Any) -> dict[str, Any]:
         """Read bounded Git object evidence for a journal-confirmed operation."""
@@ -388,14 +498,30 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
         if not isinstance(operation, str) or not isinstance(end, str):
             raise RpcError("BAD_REQUEST")
         async with lock:
-            return await asyncio.to_thread(service.execute, operation, end)
+            task = asyncio.create_task(asyncio.to_thread(service.execute, operation, end))
+        return await task
 
     async def inspect(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         async with lock:
-            return await asyncio.to_thread(service.inspect, body.get("grant"))
+            task = asyncio.create_task(asyncio.to_thread(service.inspect, body.get("grant")))
+        return await task
+
+    async def heartbeat(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        operation, attempt, digest = body.get("operation"), body.get("attempt"), body.get("request_sha256")
+        if not isinstance(operation, str) or not isinstance(attempt, str) or not isinstance(digest, str):
+            raise RpcError("BAD_REQUEST")
+        return {"renewed": service.heartbeat(operation, attempt, digest)}
+
+    async def cancel(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        operation, attempt, digest = body.get("operation"), body.get("attempt"), body.get("request_sha256")
+        if not isinstance(operation, str) or not isinstance(attempt, str) or not isinstance(digest, str):
+            raise RpcError("BAD_REQUEST")
+        return {"cancelled": service.cancel(operation, attempt, digest)}
 
     server.register("git.begin", begin, {"tool_gateway"})
     server.register("git.chunk", chunk, {"tool_gateway"})
     server.register("git.execute", execute, {"tool_gateway"})
     server.register("git.inspect", inspect, {"tool_gateway"})
+    server.register("git.heartbeat", heartbeat, {"tool_gateway"})
+    server.register("git.cancel", cancel, {"tool_gateway"})
     return server

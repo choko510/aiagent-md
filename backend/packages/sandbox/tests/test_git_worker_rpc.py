@@ -21,6 +21,7 @@ from aiagent_gateways.git_patch_artifacts import VerifiedGitPatch
 from aiagent_sandbox.binary_transfer import encode_chunks
 from aiagent_sandbox.git_operation_journal import GitOperationJournal
 from aiagent_sandbox.git_worker_rpc import (
+    GitWorkerAuthority,
     GitWorkerService,
     build_git_worker_server,
     git_transfer_binding,
@@ -31,7 +32,9 @@ from aiagent_sandbox.git_worker_rpc import (
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git unavailable")
-@pytest.mark.parametrize("scenario", ["normal", "revoked_after_prepare", "bad_transfer"])
+@pytest.mark.parametrize(
+    "scenario", ["normal", "revoked_after_prepare", "bad_transfer", "heartbeat", "heartbeat_cancel"]
+)
 def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
 ):
@@ -95,9 +98,9 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
         transfer_key=b"t" * 32,
         result_key=b"s" * 32,
         worker_id="fixture-worker",
-        authority=lambda _p: (
-            scenario != "revoked_after_prepare" or not (journal_dir / (operation + ".prepared")).exists()
-        ),
+        authority=GitWorkerAuthority(5)
+        if scenario.startswith("heartbeat")
+        else lambda _p: scenario != "revoked_after_prepare" or not (journal_dir / (operation + ".prepared")).exists(),
     )
 
     async def exercise():
@@ -113,10 +116,19 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
             with pytest.raises(RpcError):
                 await client.call("git.begin", {"grant": grant})
             frames = list(encode_chunks(git_transfer_key(b"t" * 32, operation), git_transfer_binding(payload), [patch]))
+            pulse = {"operation": operation, "attempt": attempt, "request_sha256": payload["request_sha256"]}
+            if scenario.startswith("heartbeat"):
+                with pytest.raises(RpcError):
+                    await client.call(
+                        "git.chunk", {"operation": operation, "frame": base64.b64encode(frames[0]).decode()}
+                    )
+                assert (await client.call("git.heartbeat", pulse))["renewed"] is True
             if scenario == "bad_transfer":
                 frames[0] = frames[0][:-1] + bytes([frames[0][-1] ^ 1])
             await client.call("git.chunk", {"operation": operation, "frame": base64.b64encode(frames[0]).decode()})
-            if scenario != "normal":
+            if scenario == "heartbeat_cancel":
+                assert (await client.call("git.cancel", pulse))["cancelled"] is True
+            if scenario in ("bad_transfer", "revoked_after_prepare", "heartbeat_cancel"):
                 with pytest.raises(RpcError, match="GIT_RESULT_UNKNOWN"):
                     await client.call(
                         "git.execute", {"operation": operation, "end": base64.b64encode(frames[1]).decode()}
