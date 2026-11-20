@@ -93,8 +93,9 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
         preflight = getattr(self._receipt_reader, "preflight", None)
         if not callable(preflight):
             raise InvalidEvidence("sandbox snapshot authority unavailable")
+        revision = request.snapshot_revision if request.snapshot_revision is not None else int(scope.workspace_revision)
         try:
-            preflight(scope.workspace_id, int(scope.workspace_revision), request.target_commit_sha)
+            preflight(scope.workspace_id, revision, request.target_commit_sha)
         except Exception as exc:
             raise InvalidEvidence("sandbox snapshot authority rejected") from exc
         args = {"argv": list(request.argv), "cwdRelative": self._cwd_relative}
@@ -149,7 +150,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
             "goal": claim.goal_revision,
             "lease": claim.lease_epoch,
             "workspace": scope.workspace_id,
-            "workspace_revision": int(scope.workspace_revision),
+            "workspace_revision": revision,
             "execution": execution_id,
             "attempt": response.get("toolAttemptId"),
             "kind": request.kind,
@@ -182,6 +183,7 @@ class ToolGatewaySandboxAdapter(SandboxExecutionPort):
                 "command:" + receipt_id,
                 cast(bool, payload["timed_out"]),
                 cast(bool, payload["truncated"]),
+                revision,
             )
         except InvalidEvidence as exc:
             raise EffectUnknown("sandbox command receipt mismatch") from exc

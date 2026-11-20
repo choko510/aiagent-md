@@ -183,7 +183,7 @@ def test_real_adapter_refuses_unattested_source_before_dispatch(kind: str) -> No
     gateway.submit.assert_not_called()
 
 
-@pytest.mark.parametrize("altered", [None, "attempt", "test_id", "source_commit", "timed_out"])
+@pytest.mark.parametrize("altered", [None, "attempt", "test_id", "source_commit", "timed_out", "snapshot_revision"])
 def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered):
     from contextlib import nullcontext
     from unittest.mock import AsyncMock, Mock
@@ -197,7 +197,16 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
     scope = ProjectScope("tenant", "owner", "project", "workspace", "org/repo", "branch", "a" * 40, "1")
     run = RunFence("task", "run", 3, 2, 4, "worker")
     request = ExecutionRequest(
-        scope, run, "plan", "test", ("/usr/bin/true",), "a" * 64, "intent", test_id="unit", target_commit_sha="b" * 40
+        scope,
+        run,
+        "plan",
+        "test",
+        ("/usr/bin/true",),
+        "a" * 64,
+        "intent",
+        test_id="unit",
+        target_commit_sha="b" * 40,
+        snapshot_revision=2,
     )
     db = Mock()
     db.tx.return_value = nullcontext(object())
@@ -215,7 +224,7 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
         "goal": 3,
         "lease": 2,
         "workspace": "workspace",
-        "workspace_revision": 1,
+        "workspace_revision": 2,
         "execution": "execution",
         "attempt": "attempt",
         "kind": "test",
@@ -234,6 +243,8 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
         payload["source_commit"] = None
     elif altered == "timed_out":
         payload["timed_out"] = None
+    elif altered == "snapshot_revision":
+        payload["workspace_revision"] = 1
     gateway = Mock()
     gateway.submit = AsyncMock(
         return_value={
@@ -248,8 +259,8 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
     )
 
     class Reader:
-        def preflight(self, *_args):
-            pass
+        def preflight(self, *args):
+            assert args == ("workspace", 2, "b" * 40)
 
         def __call__(self, *_args):
             return payload, "d" * 64
@@ -259,9 +270,19 @@ def test_opt_in_adapter_requires_verified_matching_receipt(monkeypatch, altered)
         evidence = adapter.execute(request)
         assert evidence.source_commit_sha == "b" * 40 and evidence.test_id == "unit"
         assert evidence.timed_out is False and evidence.truncated is False
+        assert evidence.snapshot_revision == 2
     else:
         with pytest.raises(EffectUnknown, match="receipt mismatch"):
             adapter.execute(request)
+
+
+def test_explicit_snapshot_revision_requires_commit_sha():
+    from aiagent_development.contracts import ExecutionRequest, ProjectScope, RunFence, ScopeDenied
+
+    scope = ProjectScope("tenant", "owner", "project", "workspace", "org/repo", "branch", "a" * 40, "1")
+    run = RunFence("task", "run", 1, 1, 1, "worker")
+    with pytest.raises(ScopeDenied, match="explicit target commit"):
+        ExecutionRequest(scope, run, "plan", "test", ("tool",), "a" * 64, "intent", test_id="unit", snapshot_revision=2)
 
 
 def test_legacy_persisted_test_without_completion_flags_cannot_pass() -> None:

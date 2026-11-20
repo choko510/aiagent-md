@@ -122,6 +122,7 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
             receipt_ref=str(item.get("receipt_ref", "")),
             timed_out=item.get("timed_out") if type(item.get("timed_out")) is bool else None,
             truncated=item.get("truncated") if type(item.get("truncated")) is bool else None,
+            snapshot_revision=item.get("snapshot_revision"),
         )
 
     tests = tuple(_ev(x) for x in raw.get("tests", []))

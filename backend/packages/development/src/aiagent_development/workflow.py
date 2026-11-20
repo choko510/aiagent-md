@@ -95,7 +95,7 @@ class DevelopmentWorkflow:
             raise StaleReference("plan does not match canonical goal")
         return self._save(c, replace(c, version=c.version + 1, phase=Phase.PLANNED, plan=plan))
 
-    def execute(self, scope: ProjectScope, cycle_id: str, request: ExecutionRequest) -> Cycle:
+    def execute(self, scope: ProjectScope, cycle_id: str, request: ExecutionRequest) -> Cycle:  # noqa: PLR0912
         """Execute only through Cell port; persist bounded, hash-addressed receipt."""
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.PLANNED, Phase.EXECUTING, Phase.COMMITTED, Phase.REVIEWING)
@@ -113,6 +113,15 @@ class DevelopmentWorkflow:
             target = c.commit.commit_sha if c.commit is not None else c.scope.base_sha
         if request.target_commit_sha is not None and request.target_commit_sha != target:
             raise StaleReference("execution target differs from current commit")
+        if (
+            request.snapshot_revision is not None
+            and c.commit is not None
+            and target != c.scope.base_sha
+            and c.scope.workspace_revision.isascii()
+            and c.scope.workspace_revision.isdecimal()
+            and request.snapshot_revision <= int(c.scope.workspace_revision)
+        ):
+            raise StaleReference("committed execution requires a newer snapshot revision")
         self.gateway.require_operation(c.scope, c.run, f"sandbox.{request.kind}", target, request.intent_ref)
         receipt = self.sandbox.execute(request)
         if (
@@ -121,6 +130,7 @@ class DevelopmentWorkflow:
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
             or receipt.test_id != request.test_id
+            or (request.snapshot_revision is not None and receipt.snapshot_revision != request.snapshot_revision)
             or (receipt.executed and receipt.source_commit_sha is None)
             or (receipt.source_commit_sha is not None and receipt.source_commit_sha != target)
             or (

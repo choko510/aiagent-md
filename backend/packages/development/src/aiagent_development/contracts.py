@@ -143,6 +143,7 @@ class ExecutionRequest:
     intent_ref: str
     test_id: str | None = None
     target_commit_sha: str | None = None
+    snapshot_revision: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("build", "test", "static-check") or not self.argv or not self.intent_ref:
@@ -160,6 +161,12 @@ class ExecutionRequest:
         require_digest(self.toolchain_digest)
         if self.target_commit_sha is not None:
             require_sha(self.target_commit_sha)
+        if self.snapshot_revision is not None and (
+            type(self.snapshot_revision) is not int or self.snapshot_revision < 1
+        ):
+            raise ScopeDenied("invalid execution snapshot revision")
+        if self.snapshot_revision is not None and self.target_commit_sha is None:
+            raise ScopeDenied("snapshot revision requires an explicit target commit")
 
 
 @dataclass(frozen=True)
@@ -179,6 +186,7 @@ class ExecutionEvidence:
     receipt_ref: str = ""
     timed_out: bool | None = None
     truncated: bool | None = None
+    snapshot_revision: int | None = None
 
     def __post_init__(self) -> None:
         require_digest(self.artifact_sha256)
@@ -197,6 +205,10 @@ class ExecutionEvidence:
             raise InvalidEvidence("unexecuted receipt cannot report exit code")
         if any(value is not None and type(value) is not bool for value in (self.timed_out, self.truncated)):
             raise InvalidEvidence("invalid execution completion flags")
+        if self.snapshot_revision is not None and (
+            type(self.snapshot_revision) is not int or self.snapshot_revision < 1
+        ):
+            raise InvalidEvidence("invalid execution snapshot revision")
 
 
 @dataclass(frozen=True)
