@@ -103,12 +103,16 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
     )
 
     def _ev(item: dict[str, Any]) -> ExecutionEvidence:
+        if type(item.get("executed")) is not bool or (
+            item.get("exit_code") is not None and type(item.get("exit_code")) is not int
+        ):
+            raise InvalidEvidence("invalid stored execution status")
         return ExecutionEvidence(
             intent_ref=str(item["intent_ref"]),
             run=_deserialize_fence(item["run"]),
             kind=str(item["kind"]),
-            exit_code=int(item["exit_code"]) if item.get("exit_code") is not None else None,
-            executed=bool(item["executed"]),
+            exit_code=item.get("exit_code"),
+            executed=item["executed"],
             artifact_sha256=str(item["artifact_sha256"]),
             toolchain_digest=str(item["toolchain_digest"]),
             stdout=str(item["stdout"]),
@@ -116,6 +120,9 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
             source_commit_sha=str(item["source_commit_sha"]) if item.get("source_commit_sha") is not None else None,
             test_id=str(item["test_id"]) if item.get("test_id") is not None else None,
             receipt_ref=str(item.get("receipt_ref", "")),
+            timed_out=item.get("timed_out") if type(item.get("timed_out")) is bool else None,
+            truncated=item.get("truncated") if type(item.get("truncated")) is bool else None,
+            snapshot_revision=item.get("snapshot_revision"),
         )
 
     tests = tuple(_ev(x) for x in raw.get("tests", []))

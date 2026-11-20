@@ -129,9 +129,11 @@ class FakeCell:
             request.toolchain_digest,
             "bounded stdout",
             "",
-            self.git.head_sha if is_test else None,
+            self.git.head_sha,
             request.argv[-1] if is_test else None,
             f"cell-receipt-{self.execute_calls}",
+            False,
+            False,
         )
 
 
@@ -225,7 +227,14 @@ def run_tests(h, cycle_id="cycle-1", names=("unit", "security")):
             scope,
             cycle_id,
             ExecutionRequest(
-                scope, fence, f"plan-{cycle_id}", "test", ("fixture-test", test), TOOLCHAIN, f"test-{test}"
+                scope,
+                fence,
+                f"plan-{cycle_id}",
+                "test",
+                ("fixture-test", test),
+                TOOLCHAIN,
+                f"test-{test}",
+                test_id=test,
             ),
         )
 
@@ -248,6 +257,25 @@ def test_complete_code_ready_but_never_auto_push(harness):
     flow, scope, _, _, _, _, git, *_ = harness
     assert flow.assert_code_ready(scope, "cycle-1").phase == Phase.CODE_READY
     assert git.calls == ["commit"]
+
+
+def test_post_commit_explicit_snapshot_rejects_receipt_without_revision(harness):
+    flow, scope, fence = commit(harness)
+    request = ExecutionRequest(
+        scope,
+        fence,
+        "plan-cycle-1",
+        "test",
+        ("fixture-test", "unit"),
+        TOOLCHAIN,
+        "test-unit",
+        test_id="unit",
+        target_commit_sha=harness[6].head_sha,
+        snapshot_revision=2,
+    )
+    with pytest.raises(InvalidEvidence, match="receipt mismatches"):
+        flow.execute(scope, "cycle-1", request)
+    assert flow.store.load(scope, "cycle-1").tests == ()
 
 
 def test_branch_cas_conflict_no_silent_overwrite(harness):

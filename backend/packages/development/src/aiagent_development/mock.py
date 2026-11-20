@@ -186,7 +186,10 @@ class MockSandbox:
             toolchain_digest=request.toolchain_digest,
             stdout="mock only, no execution",
             stderr="",
-            source_commit_sha=self.source_sha,
+            # Synthetic test-only value; this mock provides no actual attestation.
+            source_commit_sha=self.source_sha or request.project.base_sha,
             test_id=test_id,
             receipt_ref="mock-receipt:" + request.intent_ref,
+            timed_out=False,
+            truncated=False,
         )

@@ -95,18 +95,33 @@ class DevelopmentWorkflow:
             raise StaleReference("plan does not match canonical goal")
         return self._save(c, replace(c, version=c.version + 1, phase=Phase.PLANNED, plan=plan))
 
-    def execute(self, scope: ProjectScope, cycle_id: str, request: ExecutionRequest) -> Cycle:
+    def execute(self, scope: ProjectScope, cycle_id: str, request: ExecutionRequest) -> Cycle:  # noqa: PLR0912
         """Execute only through Cell port; persist bounded, hash-addressed receipt."""
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.PLANNED, Phase.EXECUTING, Phase.COMMITTED, Phase.REVIEWING)
         if request.project != c.scope or request.run != c.run or c.plan is None or request.plan_ref != c.plan.plan_ref:
             raise ScopeDenied("execution does not belong to this plan/fence")
+        if request.kind == "test" and request.test_id not in c.plan.required_tests:
+            raise ScopeDenied("test ID is not approved by the current plan")
+        if request.test_id is not None and any(receipt.test_id == request.test_id for receipt in c.tests):
+            raise StateConflict("duplicate test receipt; start a new review round")
         if c.phase in (Phase.PLANNED, Phase.EXECUTING) and request.kind == "test":
             raise StateConflict("test must be bound to an immutable committed SHA")
         if c.commit is not None and c.phase in (Phase.COMMITTED, Phase.REVIEWING):
             target = c.commit.commit_sha
         else:
             target = c.commit.commit_sha if c.commit is not None else c.scope.base_sha
+        if request.target_commit_sha is not None and request.target_commit_sha != target:
+            raise StaleReference("execution target differs from current commit")
+        if (
+            request.snapshot_revision is not None
+            and c.commit is not None
+            and target != c.scope.base_sha
+            and c.scope.workspace_revision.isascii()
+            and c.scope.workspace_revision.isdecimal()
+            and request.snapshot_revision <= int(c.scope.workspace_revision)
+        ):
+            raise StaleReference("committed execution requires a newer snapshot revision")
         self.gateway.require_operation(c.scope, c.run, f"sandbox.{request.kind}", target, request.intent_ref)
         receipt = self.sandbox.execute(request)
         if (
@@ -114,10 +129,14 @@ class DevelopmentWorkflow:
             or receipt.intent_ref != request.intent_ref
             or receipt.kind != request.kind
             or receipt.toolchain_digest != request.toolchain_digest
+            or receipt.test_id != request.test_id
+            or (request.snapshot_revision is not None and receipt.snapshot_revision != request.snapshot_revision)
+            or (receipt.executed and receipt.source_commit_sha is None)
+            or (receipt.source_commit_sha is not None and receipt.source_commit_sha != target)
             or (
                 c.commit is not None
                 and c.phase in (Phase.COMMITTED, Phase.REVIEWING)
-                and receipt.source_commit_sha != c.commit.commit_sha
+                and receipt.source_commit_sha is None
             )
         ):
             raise InvalidEvidence("sandbox receipt mismatches immutable request/SHA/fence")
@@ -190,12 +209,18 @@ class DevelopmentWorkflow:
             # A provider exception after dispatch may conceal a completed write.
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider exception; reconcile remote operation") from exc
+        try:
+            observed_head = self.git.head(scope)
+        except Exception as exc:
+            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise EffectUnknown("commit was dispatched but branch verification failed; reconcile") from exc
         # No blind retry if a network call may have been accepted but failed locally.
         if (
-            result.parent_sha != c.patch.parent_sha
+            not isinstance(result, CommitEvidence)
+            or result.parent_sha != c.patch.parent_sha
             or result.diff_sha256 != c.patch.diff_sha256
             or result.artifact_ref != c.patch.artifact_ref
-            or self.git.head(scope) != result.commit_sha
+            or observed_head != result.commit_sha
         ):
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider evidence cannot prove target commit; reconcile")
@@ -232,7 +257,12 @@ class DevelopmentWorkflow:
         if tested != required or len(c.tests) != len(required):
             return False
         if any(
-            not t.executed or t.exit_code != 0 or t.kind != "test" or t.source_commit_sha != c.commit.commit_sha
+            not t.executed
+            or t.exit_code != 0
+            or t.kind != "test"
+            or t.source_commit_sha != c.commit.commit_sha
+            or t.timed_out is not False
+            or t.truncated is not False
             for t in c.tests
         ):
             return False
@@ -279,10 +309,11 @@ class DevelopmentWorkflow:
                 or observed_commit.artifact_ref != c.patch.artifact_ref
             ):
                 raise StaleReference("observed commit does not match remote HEAD or pending patch")
-            return self._save(
-                c,
-                replace(c, version=c.version + 1, phase=Phase.COMMITTED, commit=observed_commit),
-            )
+            # A matching Git HEAD and caller-supplied receipt reference do not
+            # authenticate the original Intent or prove who updated the ref.
+            # Positive recovery stays closed until a canonical Gateway receipt
+            # verifier and the original Intent/Attempt binding are available.
+            raise EffectUnknown("canonical commit receipt verification unavailable")
         if head == c.patch.parent_sha:
             return self._save(c, replace(c, version=c.version + 1, phase=Phase.BLOCKED))
         raise StaleReference("remote branch state does not match pre-commit parent SHA")

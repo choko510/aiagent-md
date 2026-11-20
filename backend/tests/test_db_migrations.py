@@ -15,6 +15,16 @@ from conftest import PgEnv, drop_database, make_database
 pytestmark = pytest.mark.pg
 
 
+def test_git_operation_fence_is_read_only_until_gateway_admission_exists(pg: PgEnv) -> None:
+    with connect(pg.owner) as c:
+        row = c.execute(
+            "SELECT has_table_privilege('aiagent_tool_gateway', 'agent.git_operations', 'SELECT') AS can_read,"
+            " has_table_privilege('aiagent_tool_gateway', 'agent.git_operations', 'INSERT') AS can_insert,"
+            " has_table_privilege('aiagent_tool_gateway', 'agent.git_operations', 'UPDATE') AS can_update"
+        ).fetchone()
+        assert row is not None and row["can_read"] and not row["can_insert"] and not row["can_update"]
+
+
 def test_reapply_is_noop(pg: PgEnv) -> None:
     assert migrate.up(pg.owner) == []
     assert all(st == "applied" for _, _, st in migrate.status(pg.owner))

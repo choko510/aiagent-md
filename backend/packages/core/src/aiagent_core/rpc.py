@@ -208,8 +208,12 @@ class RpcClient:
             cid, vport = self.endpoint.path.split(":")
             sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             sock.setblocking(False)
-            await asyncio.get_running_loop().sock_connect(sock, (int(cid), int(vport)))
-            return await asyncio.open_connection(sock=sock)
+            try:
+                await asyncio.get_running_loop().sock_connect(sock, (int(cid), int(vport)))
+                return await asyncio.open_connection(sock=sock)
+            except BaseException:
+                sock.close()
+                raise
         if self.endpoint.kind == "unix":
             return await asyncio.open_unix_connection(self.endpoint.path)  # type: ignore[attr-defined,no-any-return]
         host, port = self.endpoint.host_port

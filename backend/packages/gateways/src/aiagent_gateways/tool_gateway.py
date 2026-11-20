@@ -23,12 +23,12 @@ from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Any
 
-from aiagent_core import control
+from aiagent_core import config, control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database, Row
 from aiagent_core.events import append_event, enqueue_run_job
 from aiagent_core.step4_gate import is_reserved_tool
-from aiagent_domain import canonical_json, sha256_hex, uuid7
+from aiagent_domain import canonical_json, is_uuid7, sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import INTERNAL_TOOLS, PROFILE_TOOLS, TOOLS
 from jsonschema import Draft202012Validator
@@ -74,9 +74,13 @@ class ToolGateway:
         sentinel: Any = None,
         approval_ttl_s: int = 3600,
         max_tool_calls: int = 32,
+        development_git_enabled: bool = False,
     ) -> None:
+        if development_git_enabled and config.profile() == "production":
+            raise ValueError("Git commit requires verified production isolation")
         self.db, self.executors, self.sentinel = db, executors, sentinel
         self.ttl, self.max_tool_calls = approval_ttl_s, max_tool_calls
+        self._development_git_enabled = development_git_enabled
 
     # ------------------------------------------------------------------ helpers
     def _record_head(self, claim: Claim, tool_call_id: str, tool: str, o: dict[str, Any], stream: str) -> None:
@@ -124,6 +128,8 @@ class ToolGateway:
 
             data = json.loads(hit["content"])
             return outcome(data.pop("status"), data, replayed=True)
+        if tool == "git.commit":
+            return await asyncio.to_thread(self._deny, claim, tool_call_id, tool, "DEVELOPMENT_ONLY", stream)
         # STEP 4 names must remain fail-closed even if a registry/profile changes
         # before the PostgreSQL, Run/Goal/fence, effect-ledger and Sentinel adapters exist.
         if is_reserved_tool(tool):
@@ -135,14 +141,54 @@ class ToolGateway:
             return await asyncio.to_thread(self._deny, claim, tool_call_id, tool, "schema", stream)
         return await asyncio.to_thread(self._submit_sync, claim, tool_call_id, tool, args, stream)
 
+    async def submit_development_git(self, claim: Claim, tool_call_id: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Internal Development endpoint; caller authentication is enforced by the RPC server."""
+        if not self._development_git_enabled or config.profile() == "production":
+            raise RpcError("DENIED", "development Git is disabled")
+        with self.db.conn() as c:
+            control.check_current(c, claim)
+            rows = c.execute(
+                "SELECT tc,stream,writer_ref FROM agent.run_checkpoints, "
+                "jsonb_array_elements(checkpoint_json->'tool_calls') tc WHERE tenant_id=%s AND run_id=%s "
+                "AND entry_kind='assistant' AND tc->>'id'=%s",
+                (claim.tenant_id, claim.run_id, tool_call_id),
+            ).fetchall()
+            hit = control.find_tool(c, claim.tenant_id, claim.run_id, tool_call_id)
+        if (
+            len(rows) != 1
+            or rows[0]["writer_ref"] != "development_git_adapter"
+            or rows[0]["tc"].get("name") != "git.commit"
+            or rows[0]["tc"].get("args") != args
+        ):
+            raise RpcError("NOT_IN_HEAD", "development proposal mismatch")
+        if hit is not None:
+            import json
+
+            data = json.loads(hit["content"])
+            return outcome(data.pop("status"), data, replayed=True)
+        if not Draft202012Validator(TOOLS["git.commit"].parameters).is_valid(args):
+            return await asyncio.to_thread(self._deny, claim, tool_call_id, "git.commit", "schema", rows[0]["stream"])
+        return await asyncio.to_thread(
+            self._submit_sync, claim, tool_call_id, "git.commit", args, rows[0]["stream"], development_git=True
+        )
+
     def _submit_sync(
-        self, claim: Claim, tool_call_id: str, tool: str, args: dict[str, Any], stream: str
+        self,
+        claim: Claim,
+        tool_call_id: str,
+        tool: str,
+        args: dict[str, Any],
+        stream: str,
+        *,
+        development_git: bool = False,
     ) -> dict[str, Any]:
         spec = TOOLS[tool]
         executor = self.executors.get(spec.executor)
         bind_fn = getattr(executor, "bind_request", None) if executor is not None else None
         bound_form: dict[str, Any] | None = None
         bind_error: str | None = None
+        if development_git and (tool != "git.commit" or not callable(bind_fn)):
+            bind_error = "Git authority unavailable"
         req_sha = sha256_hex({"tool": tool, "args": args})
         if callable(bind_fn):
             needs_bind = False
@@ -177,7 +223,14 @@ class ToolGateway:
                 ) != canonical_json(args):
                     raise RpcError("INTENT_CONFLICT")
                 req_sha = str(existing_peek["request_sha256"])
-            elif pre_run_ok and pre_task is not None and tool in PROFILE_TOOLS.get(pre_task["profile_code"], ()):
+            elif (
+                pre_run_ok
+                and pre_task is not None
+                and (
+                    tool in PROFILE_TOOLS.get(pre_task["profile_code"], ())
+                    or (development_git and tool == "git.commit")
+                )
+            ):
                 needs_bind = True
             if needs_bind:
                 try:
@@ -245,7 +298,9 @@ class ToolGateway:
                 if cancelled:
                     return self._finish_denied(c, claim, tool_call_id, tool, args, req_sha, spec, "CANCELLED", stream)
                 assert run is not None
-                if tool not in PROFILE_TOOLS.get(task["profile_code"], ()):
+                if tool not in PROFILE_TOOLS.get(task["profile_code"], ()) and not (
+                    development_git and tool == "git.commit"
+                ):
                     return self._finish_denied(
                         c,
                         claim,
@@ -626,12 +681,71 @@ class ToolGateway:
                 "task_id": claim.task_id,
                 "run_id": claim.run_id,
                 "intent_id": intent["id"],
+                "attempt_id": str(attempt_id),
                 "goal_revision": claim.goal_revision,
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,
                 "permit_issuer": _issue_hop_permit,
                 "bound_form": bound_form,
             }
+        if tool == "git.commit":
+            from .git_operation import admit_git_operation
+
+            if (
+                not self._development_git_enabled
+                or config.profile() == "production"
+                or not hasattr(executor, "context")
+            ):
+                return self._settle(
+                    claim,
+                    intent,
+                    attempt_id,
+                    tool_call_id,
+                    tool,
+                    stream,
+                    "FAILED",
+                    {"error": "Git authority unavailable"},
+                    effect="FAILED",
+                )
+            try:
+                with self.db.tx(tenant=claim.tenant_id) as c:
+                    workspace_id = str(control.check_current(c, claim)["workspace_id"])
+                import time
+
+                operation_id = admit_git_operation(
+                    self.db,
+                    claim,
+                    workspace_id=workspace_id,
+                    attempt_id=attempt_id,
+                    binding_id=args["bindingId"],
+                    patch_id=args["patchId"],
+                    deadline=time.monotonic() + 10,
+                )
+                executor.context[effect_key]["operation_id"] = operation_id
+            except ExecutorFailed:
+                return self._settle(
+                    claim,
+                    intent,
+                    attempt_id,
+                    tool_call_id,
+                    tool,
+                    stream,
+                    "FAILED",
+                    {"error": "Git operation denied"},
+                    effect="FAILED",
+                )
+            except (ExecutorUnknown, control.ControlError):
+                return self._settle(
+                    claim,
+                    intent,
+                    attempt_id,
+                    tool_call_id,
+                    tool,
+                    stream,
+                    "UNKNOWN",
+                    {"note": "Git operation requires reconciliation"},
+                    effect="UNKNOWN",
+                )
         fault("gateway_before_send")
         try:
             res = _run(executor.execute(effect_key, args, permit))
@@ -791,6 +905,36 @@ class ToolGateway:
             return {"status": "UNKNOWN"}
         status, effect = "CONFIRMED", "RECONCILED_SENT"
         result = {"receipt": answer["receipt"]}
+        # Command reconciliation may restore only the redacted fields derived
+        # from its signature-verified canonical receipt. Other executors keep
+        # the original receipt-only reconciliation contract.
+        from .command_dispatch import AuthorizedCommandExecutor
+
+        if isinstance(executor, AuthorizedCommandExecutor):
+            command = answer.get("commandResult")
+            if not isinstance(command, dict) or set(command) != {
+                "toolAttemptId",
+                "executionId",
+                "receiptId",
+                "bodySha256",
+                "kind",
+                "testId",
+            }:
+                return {"status": "UNKNOWN"}
+            if (
+                not all(
+                    isinstance(command.get(k), str) and command[k]
+                    for k in ("toolAttemptId", "executionId", "receiptId", "bodySha256", "kind")
+                )
+                or command["kind"] not in ("build", "static-check", "test")
+                or (command["kind"] == "test") != (isinstance(command["testId"], str) and bool(command["testId"]))
+                or (command["kind"] != "test" and command["testId"] is not None)
+                or any(not is_uuid7(command[k]) for k in ("toolAttemptId", "executionId", "receiptId"))
+                or re.fullmatch(r"[0-9a-f]{64}", command["bodySha256"]) is None
+                or answer["receipt"] != "command:" + command["receiptId"]
+            ):
+                return {"status": "UNKNOWN"}
+            result.update(command)
         # Lock order is task -> run -> intent, matching claim/segment settlement.
         # Do not keep these DB locks across the external receipt query.
         with self.db.tx() as c:

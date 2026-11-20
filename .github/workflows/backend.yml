@@ -179,6 +179,24 @@ jobs:
           docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined             --security-opt apparmor=unconfined -e AIAGENT_EXPECT_NETNS=1 -v "$PWD:/w" -w /w python:3.13-slim             sh -c "PYTHONPATH=/w/.linuxdeps:packages/domain/src:packages/sandbox/src               python -m pytest -q -rA -p no:cacheprovider --confcutdir tests/linux -c /dev/null tests/linux"
       - name: Generated code runs only in Docker cell (same-kernel RPC with grants; not KVM)
         run: uv run pytest -q -rA -p no:cacheprovider tests/test_cell_e2e.py
+      - name: Real SCIP source-to-publication integration (test-only Docker Cell)
+        run: |
+          uv run python packages/development/scripts/scip_cell_fixture/build_fixture.py
+          AIAGENT_SCIP_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_scip_production_e2e.py
+      - name: Approved command fixture (test-only Docker Cell)
+        run: |
+          fixture_image=$(docker image inspect codex-dev13-scip-cell-fixture --format '{{.Id}}')
+          docker run --rm --read-only --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined --memory 3g --pids-limit 256 --tmpfs /tmp:exec,mode=1777,size=256m \
+            -e AIAGENT_SCIP_FIXTURE=1 -e PYTHONDONTWRITEBYTECODE=1 \
+            -e PYTHONPATH=/w/packages/domain/src:/w/packages/core/src:/w/packages/gateways/src:/w/packages/sandbox/src:/w/packages/development/src \
+            -v "$PWD:/w:ro" -w /w "$fixture_image" python -m pytest -q --noconftest -p no:cacheprovider -c /dev/null tests/test_command_supervisor_fixture.py
+      - name: Development Adapter command integration (test-only Docker Cell)
+        run: AIAGENT_COMMAND_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_command_adapter_e2e.py
+      - name: Authenticated Git worker fixture (test-only Docker, simulated authority)
+        run: AIAGENT_GIT_WORKER_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_worker_docker.py
+      - name: Git Gateway and receipt E2E (test profile; CAS fence unverified)
+        run: AIAGENT_GIT_GATEWAY_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_gateway_e2e.py
       - name: Build images
         working-directory: .
         run: |

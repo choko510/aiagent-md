@@ -24,7 +24,7 @@ from .config import secret
 from .db import Row, connect
 
 # Schema version this code base requires and the newest it understands.
-APP_SCHEMA_VERSION = 12
+APP_SCHEMA_VERSION = 26
 APP_MIN_READER = 5
 APP_MIN_WRITER = 5
 LOCK_KEY = 0x61696167656E74  # 'aiagent'
@@ -127,6 +127,11 @@ def _maybe_reconcile_legacy_pr92(
         return done
     m6 = next((m for m in migrations if m.version == 6 and m.name == "step4_context_memory"), None)
     if m6 is None:
+        return done
+    # The current lineage can also legitimately reach version 16. Its own
+    # migration 6 identifies it before considering the older PR #92 lineage;
+    # the normal checksum loop below still verifies every applied migration.
+    if done[6]["name"] == m6.name:
         return done
     for m in migrations:
         if m.version <= 5 and done[m.version]["checksum_sha256"] != m.checksum:
