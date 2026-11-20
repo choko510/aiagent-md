@@ -19,6 +19,7 @@ from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.rpc import RpcClient
 from aiagent_domain import uuid7
+from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
@@ -36,7 +37,16 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("scenario", ["success", "cancel_before_cas_admission"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "success",
+        "cancel_before_cas_admission",
+        "lease_expired_before_admission",
+        "approval_revoked_before_admission",
+        "admission_response_lost",
+    ],
+)
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str):  # noqa: F811
     claim, binding, manifest, _, _, _, _ = verified_setup
     git = shutil.which("git")
@@ -231,19 +241,37 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
-            if scenario == "cancel_before_cas_admission":
+            if scenario != "success":
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
-                async def cancel_before_admission(caller, payload):
-                    await asyncio.to_thread(
-                        commands.cancel,
-                        dbs["api"],
-                        Scope(claim.tenant_id, claim.owner_user_id, workspace),
-                        claim.task_id,
-                    )
-                    return await original_handler(caller, payload)
+                async def fault_at_admission(caller, payload):
+                    if scenario == "cancel_before_cas_admission":
+                        await asyncio.to_thread(
+                            commands.cancel,
+                            dbs["api"],
+                            Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                            claim.task_id,
+                        )
+                    elif scenario == "lease_expired_before_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.runs SET lease_expires_at=clock_timestamp()-interval '1 second' "
+                            "WHERE tenant_id=%s AND id=%s RETURNING id",
+                            (claim.tenant_id, claim.run_id),
+                        )
+                    elif scenario == "approval_revoked_before_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.approval_records SET decision_code='REVOKED' "
+                            "WHERE tenant_id=%s AND run_id=%s RETURNING id",
+                            (claim.tenant_id, claim.run_id),
+                        )
+                    result = await original_handler(caller, payload)
+                    if scenario == "admission_response_lost":
+                        raise RpcError("FIXTURE_RESPONSE_LOST")
+                    return result
 
-                fence_server.methods["git.enter_cas"].handler = cancel_before_admission
+                fence_server.methods["git.enter_cas"].handler = fault_at_admission
             await fence_server.start()
             server = build_tool_server({"development": b"d" * 32, "runtime": b"r" * 32}, "tcp:127.0.0.1:0", gateway)
             await server.start()
@@ -262,7 +290,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     1,
                 )
                 result = await client.call("tool.development_git_commit", body)
-                if scenario == "cancel_before_cas_admission":
+                if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
                     assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == parent
                     row = dbs["owner"].one(
@@ -272,7 +300,19 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         "WHERE o.tenant_id=%s AND i.invocation_key=%s",
                         (claim.tenant_id, call_id),
                     )
-                    assert row["state"] == "ADMITTED" and row["attempt_status"] == "UNKNOWN"
+                    expected_state = "CAS_PENDING" if scenario == "admission_response_lost" else "ADMITTED"
+                    assert row["state"] == expected_state and row["attempt_status"] == "UNKNOWN"
+                    if scenario == "admission_response_lost":
+                        replay = await client.call("tool.development_git_commit", body)
+                        assert replay["status"] == "UNKNOWN"
+                        count = dbs["owner"].one(
+                            "SELECT count(*) AS n FROM agent.git_operations o JOIN agent.tool_intents i "
+                            "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                            "WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                            (claim.tenant_id, call_id),
+                        )
+                        assert count["n"] == 1
+                        assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == parent
                     return
                 assert result["status"] == "CONFIRMED", result
                 output = result["result"]
