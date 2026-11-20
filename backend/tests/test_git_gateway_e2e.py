@@ -7,33 +7,52 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import os
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.rpc import RpcClient
+from aiagent_development.code_intelligence.git_proof import build_git_tree_proof
+from aiagent_development.code_intelligence.git_reader import GitSnapshot
+from aiagent_development.code_intelligence.indexer_recipe import approved_recipe_digest
+from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Identity
+from aiagent_development.code_intelligence.projection import prepare_projection
+from aiagent_development.code_intelligence.projection_stream import ProjectionEncoder
 from aiagent_development.contracts import (
     Cycle,
     EffectUnknown,
+    ExecutionRequest,
     PatchArtifact,
     Phase,
     ProjectScope,
     RunFence,
     ScopeDenied,
+    StaleReference,
+    StateConflict,
     TaskPlan,
 )
+from aiagent_development.factory import ToolGatewaySandboxAdapter
 from aiagent_development.pg_store import PostgresCycleStore, PostgresRunAuthority, PostgresWorkspacePort
 from aiagent_development.workflow import DevelopmentWorkflow
-from aiagent_domain import uuid7
+from aiagent_development.workspace_authority import register_verified_snapshot
+from aiagent_domain import sha256_hex, uuid7
 from aiagent_domain.rpcwire import RpcError
+from aiagent_gateways.command_dispatch import AuthorizedCommandExecutor
+from aiagent_gateways.command_receipt_reader import CommandReceiptReader
 from aiagent_gateways.context_keys import KeyRing
+from aiagent_gateways.development_authorization import DevelopmentCommandAuthorization
+from aiagent_gateways.execution_artifacts import ExecutionArtifactError
+from aiagent_gateways.execution_capture_proof import HmacCaptureVerifier
+from aiagent_gateways.execution_lifecycle import ExecutionLifecycle
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
 from aiagent_gateways.git_commit_evidence import GitCommitEvidenceReader
@@ -42,8 +61,13 @@ from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
 from aiagent_gateways.git_provider_adapter import ToolGatewayGitProvider
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
+from aiagent_gateways.git_snapshot_promotion import GitSnapshotPromotionUnknown, promote_git_snapshot
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
+from aiagent_sandbox.command_authority import command_template_digest
+from psycopg.types.json import Jsonb
+from stack import wait_port
+from test_cell_e2e import _supervisor_answers
 from test_verified_workspace_pg import verified_setup  # noqa: F401
 
 pytestmark = [
@@ -71,7 +95,20 @@ pytestmark = [
     ],
 )
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str, monkeypatch):  # noqa: F811
-    claim, binding, manifest, _, _, _, _ = verified_setup
+    claim, binding, manifest, base_proof, base_receipt, base_wire, projection_parent = verified_setup
+    old_snapshot = None
+    if scenario == "workflow_commit":
+        old_snapshot = register_verified_snapshot(
+            dbs["tool_gateway"],
+            claim,
+            binding,
+            manifest,
+            base_proof,
+            base_receipt,
+            io.BytesIO(base_wire),
+            projection_parent,
+            deadline=time.monotonic() + 15,
+        )
     git = shutil.which("git")
     assert git is not None
     repo = tmp_path / "repo"
@@ -87,10 +124,34 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
     workspace = str(
         dbs["owner"].one(
             "UPDATE agent.repository_bindings SET approved_branch='feat/fixture',"
-            "generation=generation+1 WHERE tenant_id=%s AND id=%s RETURNING workspace_id",
+            "generation=generation+1,workspace_revision=workspace_revision+1 "
+            "WHERE tenant_id=%s AND id=%s RETURNING workspace_id",
             (claim.tenant_id, binding),
         )["workspace_id"]
     )
+    if scenario == "workflow_commit":
+        # Branch approval creates a new binding generation; its base snapshot
+        # must be independently reverified before it can be promoted.
+        prior_snapshot = old_snapshot
+        base_identity = Identity(claim.tenant_id, claim.owner_user_id, binding, "2", parent)
+        base_snapshot = GitSnapshot(AuthorizedSnapshot(base_identity, repo.resolve()), Path(git).resolve())
+        base_manifest2 = prepare_projection(base_snapshot, base_identity, base_snapshot.tree)
+        base_proof2 = build_git_tree_proof(base_snapshot)
+        base_encoder2 = ProjectionEncoder(base_snapshot, base_manifest2)
+        base_source2 = b"".join(base_encoder2.chunks())
+        assert base_encoder2.receipt is not None and prior_snapshot is not None
+        old_snapshot = register_verified_snapshot(
+            dbs["tool_gateway"],
+            claim,
+            binding,
+            base_manifest2,
+            base_proof2,
+            base_encoder2.receipt,
+            io.BytesIO(base_source2),
+            projection_parent,
+            deadline=time.monotonic() + 15,
+        )
+        assert old_snapshot.id != prior_snapshot.id and old_snapshot.revision == 2
     artifact, cycle, nonce = uuid7(), "git-e2e-" + uuid7(), secrets.token_bytes(12)
     paths, key_id = ["a.py"], "legacy"
     metadata = {
@@ -112,12 +173,12 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
     keys = KeyRing.single(b"p" * 32)
     ciphertext = keys.cipher(key_id).encrypt(nonce, patch, git_patch_aad(metadata))
     project = ProjectScope(
-        claim.tenant_id, claim.owner_user_id, "fixture", workspace, "fixture/repo", "feat/fixture", parent, "1"
+        claim.tenant_id, claim.owner_user_id, "fixture", workspace, "fixture/repo", "feat/fixture", parent, "2"
     )
     fence = RunFence(
         claim.task_id, claim.run_id, claim.goal_revision, claim.lease_epoch, claim.restore_incarnation, claim.worker_ref
     )
-    approved_patch = PatchArtifact(artifact, digest, tuple(paths), parent, "1", fence)
+    approved_patch = PatchArtifact(artifact, digest, tuple(paths), parent, "2", fence)
     cycle_store = PostgresCycleStore(dbs["tool_gateway"])
     cycle_store.create(
         Cycle(
@@ -351,7 +412,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     "fixture/repo",
                     "feat/fixture",
                     parent,
-                    "1",
+                    "2",
                 )
                 head_reader = RpcGitHeadReader(
                     dbs["tool_gateway"],
@@ -395,7 +456,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         head_reader=head_reader,
                         receipt_reader=GitCommitEvidenceReader(dbs["tool_gateway"], claim, receipt_store),
                     )
-                    wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "1", fence)
+                    wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "2", fence)
                     with pytest.raises(ScopeDenied):
                         await asyncio.to_thread(
                             provider.commit_patch, scope, wrong_patch, parent, call_id, "approved fixture"
@@ -422,6 +483,264 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     loaded = await asyncio.to_thread(cycle_store.load, scope, cycle)
                     assert loaded.phase == Phase.COMMITTED and loaded.commit == committed.commit
                     assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == committed.commit.commit_sha
+                    new_identity = Identity(
+                        claim.tenant_id, claim.owner_user_id, binding, "3", committed.commit.commit_sha
+                    )
+                    snapshot = GitSnapshot(AuthorizedSnapshot(new_identity, repo.resolve()), Path(git).resolve())
+                    new_manifest = prepare_projection(snapshot, new_identity, snapshot.tree)
+                    new_proof = build_git_tree_proof(snapshot)
+                    encoder = ProjectionEncoder(snapshot, new_manifest)
+                    source_chunks = list(encoder.chunks())
+                    source = b"".join(source_chunks)
+                    assert encoder.receipt is not None and old_snapshot is not None
+                    operation_row = dbs["owner"].one(
+                        "SELECT o.id FROM agent.git_operations o JOIN agent.tool_intents i "
+                        "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                        (claim.tenant_id, call_id),
+                    )
+                    with pytest.raises(GitSnapshotPromotionUnknown):
+                        await asyncio.to_thread(
+                            promote_git_snapshot,
+                            dbs["tool_gateway"],
+                            claim,
+                            receipt_store,
+                            str(operation_row["id"]),
+                            committed.commit.receipt_ref.removeprefix("git:"),
+                            replace(new_manifest, identity=manifest.identity),
+                            new_proof,
+                            encoder.receipt,
+                            io.BytesIO(source),
+                            projection_parent,
+                            deadline=time.monotonic() + 10,
+                        )
+                    assert (
+                        dbs["owner"].one(
+                            "SELECT approved_commit FROM agent.repository_bindings WHERE tenant_id=%s AND id=%s",
+                            (claim.tenant_id, binding),
+                        )["approved_commit"]
+                        == parent
+                    )
+                    promoted = await asyncio.to_thread(
+                        promote_git_snapshot,
+                        dbs["tool_gateway"],
+                        claim,
+                        receipt_store,
+                        str(operation_row["id"]),
+                        committed.commit.receipt_ref.removeprefix("git:"),
+                        new_manifest,
+                        new_proof,
+                        encoder.receipt,
+                        io.BytesIO(source),
+                        projection_parent,
+                        deadline=time.monotonic() + 10,
+                    )
+                    assert promoted.commit == committed.commit.commit_sha and promoted.revision == 3
+                    assert promoted.id != old_snapshot.id
+                    with pytest.raises(GitSnapshotPromotionUnknown):
+                        await asyncio.to_thread(
+                            promote_git_snapshot,
+                            dbs["tool_gateway"],
+                            claim,
+                            receipt_store,
+                            str(operation_row["id"]),
+                            committed.commit.receipt_ref.removeprefix("git:"),
+                            new_manifest,
+                            new_proof,
+                            encoder.receipt,
+                            io.BytesIO(source),
+                            projection_parent,
+                            deadline=time.monotonic() + 10,
+                        )
+                    loaded_after = await asyncio.to_thread(cycle_store.load, scope, cycle)
+                    assert loaded_after.scope == scope and loaded_after.commit == committed.commit
+                    # Actual command execution is dispatched under a separately
+                    # approved recipe against the newly promoted snapshot.
+                    assert control.heartbeat(dbs["runtime"], claim, lease_s=120)
+                    command_name = "aiagent-git-command-e2e-" + secrets.token_hex(5)
+                    image = subprocess.check_output(
+                        ["docker", "image", "inspect", "codex-dev13-scip-cell-fixture:latest", "--format", "{{.Id}}"],
+                        text=True,
+                    ).strip()
+                    launched = subprocess.run(
+                        [
+                            "docker",
+                            "run",
+                            "-d",
+                            "--name",
+                            command_name,
+                            "-p",
+                            "127.0.0.1::7000",
+                            "--cap-add",
+                            "SYS_ADMIN",
+                            "--security-opt",
+                            "seccomp=unconfined",
+                            "--security-opt",
+                            "apparmor=unconfined",
+                            "--read-only",
+                            "--tmpfs",
+                            "/tmp:exec,mode=1777,size=256m",
+                            "--pids-limit",
+                            "256",
+                            "--memory",
+                            "3g",
+                            "-v",
+                            f"{backend}:/w:ro",
+                            "-w",
+                            "/w",
+                            "-e",
+                            "PYTHONDONTWRITEBYTECODE=1",
+                            "-e",
+                            "PYTHONPATH=/w/packages/domain/src:/w/packages/core/src:/w/packages/gateways/src:/w/packages/sandbox/src:/w/packages/development/src",
+                            image,
+                            "python",
+                            "/w/packages/development/scripts/scip_cell_fixture/serve_command.py",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    assert launched.returncode == 0, launched.stderr
+                    try:
+                        port = int(
+                            subprocess.check_output(["docker", "port", command_name, "7000/tcp"], text=True)
+                            .strip()
+                            .rsplit(":", 1)[1]
+                        )
+                        await asyncio.to_thread(wait_port, port, 60)
+                        assert await asyncio.to_thread(_supervisor_answers, port, 30)
+                        binary = "/usr/local/bin/python3.13"
+                        toolchain = subprocess.check_output(
+                            [
+                                "docker",
+                                "exec",
+                                command_name,
+                                "python",
+                                "-c",
+                                "from aiagent_development.code_intelligence.indexer_recipe import measure_command_toolchain; "
+                                "print(measure_command_toolchain('/usr/local/bin/python3.13'))",
+                            ],
+                            text=True,
+                        ).strip()
+                        argv = [binary, "-B", "a.py"]
+                        command_args = {"argv": argv, "cwdRelative": "."}
+                        descriptor = {"kind": "test", "test_id": "unit", **command_args}
+                        assert loaded_after.plan is not None
+                        request_sha = sha256_hex({"tool": "sandbox_exec", "args": command_args})
+                        plan_sha = sha256_hex(asdict(loaded_after.plan))
+                        template, recipe_id = command_template_digest(descriptor), uuid7()
+                        recipe_sha = approved_recipe_digest(
+                            kind="test",
+                            test_id="unit",
+                            plan_sha256=plan_sha,
+                            request_sha256=request_sha,
+                            template_sha256=template,
+                            toolchain_sha256=toolchain,
+                            image_digest=image,
+                        )
+                        dbs["owner"].one(
+                            "INSERT INTO agent.execution_recipe_approvals(tenant_id,id,cycle_id,goal_revision,"
+                            "plan_sha256,plan_json,kind,test_id,request_sha256,template_sha256,recipe_sha256,toolchain_sha256,"
+                            "image_digest,approval_ref) VALUES (%s,%s,%s,%s,%s,%s,'test','unit',%s,%s,%s,%s,%s,%s) RETURNING id",
+                            (
+                                claim.tenant_id,
+                                recipe_id,
+                                cycle,
+                                claim.goal_revision,
+                                plan_sha,
+                                Jsonb(asdict(loaded_after.plan)),
+                                request_sha,
+                                template,
+                                recipe_sha,
+                                toolchain,
+                                image,
+                                "operator-test-fixture",
+                            ),
+                        )
+                        lifecycle = ExecutionLifecycle(
+                            dbs["tool_gateway"], claim, HmacCaptureVerifier(dbs["tool_gateway"], b"c" * 32)
+                        )
+                        with pytest.raises(ExecutionArtifactError, match="COMMAND_SNAPSHOT_DENIED"):
+                            await asyncio.to_thread(
+                                lifecycle.check_snapshot_target, workspace, 2, parent, deadline=time.monotonic() + 5
+                            )
+                        command_executor = AuthorizedCommandExecutor(
+                            dbs["tool_gateway"],
+                            claim,
+                            promoted.id,
+                            recipe_id,
+                            lifecycle,
+                            new_manifest,
+                            encoder.receipt,
+                            new_proof,
+                            source_chunks,
+                            f"tcp:127.0.0.1:{port}",
+                            b"r" * 32,
+                            b"t" * 32,
+                            b"g" * 32,
+                            b"c" * 32,
+                            projection_parent,
+                        )
+                        command_gateway = ToolGateway(dbs["tool_gateway"], {"sandbox_cell": command_executor})
+                        command_adapter = ToolGatewaySandboxAdapter(
+                            dbs["model_gateway"],
+                            command_gateway,
+                            claim,
+                            receipt_reader=CommandReceiptReader(lifecycle, b"c" * 32),
+                        )
+                        auth = DevelopmentCommandAuthorization(
+                            dbs["tool_gateway"], claim, recipe_id=recipe_id, snapshot_id=promoted.id, cycle_id=cycle
+                        )
+                        test_workflow = DevelopmentWorkflow(
+                            runs=PostgresRunAuthority(dbs["tool_gateway"]),
+                            workspaces=PostgresWorkspacePort(dbs["tool_gateway"]),
+                            gateway=auth,
+                            git=provider,
+                            store=cycle_store,
+                            reviewers=None,
+                            sandbox=command_adapter,
+                        )  # type: ignore[arg-type]
+                        request = ExecutionRequest(
+                            scope,
+                            fence,
+                            "plan-fixture",
+                            "test",
+                            tuple(argv),
+                            toolchain,
+                            "post-commit-test",
+                            test_id="unit",
+                            target_commit_sha=committed.commit.commit_sha,
+                            snapshot_revision=3,
+                        )
+                        with pytest.raises(StaleReference):
+                            await asyncio.to_thread(
+                                test_workflow.execute, scope, cycle, replace(request, snapshot_revision=2)
+                            )
+                        with pytest.raises(StaleReference):
+                            await asyncio.to_thread(
+                                test_workflow.execute, scope, cycle, replace(request, target_commit_sha=parent)
+                            )
+                        completed = await asyncio.to_thread(test_workflow.execute, scope, cycle, request)
+                        restored = await asyncio.to_thread(cycle_store.load, scope, cycle)
+                        assert completed == restored and len(restored.tests) == 1
+                        evidence = restored.tests[0]
+                        assert (
+                            evidence.executed
+                            and evidence.exit_code == 0
+                            and evidence.timed_out is False
+                            and evidence.truncated is False
+                            and evidence.test_id == "unit"
+                            and evidence.source_commit_sha == committed.commit.commit_sha
+                            and evidence.snapshot_revision == 3
+                        )
+                        with pytest.raises(StateConflict):
+                            await asyncio.to_thread(test_workflow.execute, scope, cycle, request)
+                        attempts = dbs["owner"].one(
+                            "SELECT count(*) AS n FROM agent.execution_instances "
+                            "WHERE tenant_id=%s AND run_id=%s AND recipe_id=%s",
+                            (claim.tenant_id, claim.run_id, recipe_id),
+                        )
+                        assert attempts["n"] == 1
+                    finally:
+                        subprocess.run(["docker", "rm", "-f", command_name], capture_output=True, check=False)
                     return
                 result = await client.call("tool.development_git_commit", body)
                 if scenario != "success":
@@ -528,9 +847,9 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     "fixture/repo",
                     "feat/fixture",
                     parent,
-                    "1",
+                    "2",
                 )
-                patch_ref = PatchArtifact(artifact, digest, tuple(paths), parent, "1", run_fence)
+                patch_ref = PatchArtifact(artifact, digest, tuple(paths), parent, "2", run_fence)
                 reader = GitCommitEvidenceReader(dbs["tool_gateway"], claim, receipt_store)
                 evidence = await asyncio.to_thread(
                     reader.read,
@@ -541,7 +860,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     deadline=time.monotonic() + 3,
                 )
                 assert evidence.commit_sha == actual and evidence.receipt_ref == "git:" + output["receiptId"]
-                wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "1", run_fence)
+                wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "2", run_fence)
                 with pytest.raises(EffectUnknown):
                     await asyncio.to_thread(
                         reader.read,

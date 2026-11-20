@@ -107,7 +107,7 @@ def fetch_git_patch(
             or str(row["cycle_workspace"]) != workspace_id
             or str(row["cycle_task"]) != claim.task_id
             or str(row["cycle_run"]) != claim.run_id
-            or row["phase"] not in ("PATCH_READY", "COMMIT_PENDING")
+            or row["phase"] not in ("PATCH_READY", "COMMIT_PENDING", "COMMITTED")
             or not isinstance(plan, dict)
             or not plan_ref
             or plan.get("plan_ref") != plan_ref
