@@ -19,11 +19,13 @@ import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.rpc import RpcClient
+from aiagent_development.contracts import EffectUnknown, PatchArtifact, ProjectScope, RunFence
 from aiagent_domain import uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
+from aiagent_gateways.git_commit_evidence import GitCommitEvidenceReader
 from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
@@ -426,6 +428,49 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 )
                 assert receipt["attempt"] == output["toolAttemptId"] and receipt["commit"] == actual
                 assert receipt_sha == output["bodySha256"]
+                run_fence = RunFence(
+                    claim.task_id,
+                    claim.run_id,
+                    claim.goal_revision,
+                    claim.lease_epoch,
+                    claim.restore_incarnation,
+                    claim.worker_ref,
+                )
+                scope = ProjectScope(
+                    claim.tenant_id,
+                    claim.owner_user_id,
+                    "fixture",
+                    workspace,
+                    "fixture/repo",
+                    "feat/fixture",
+                    parent,
+                    "1",
+                )
+                patch_ref = PatchArtifact(artifact, digest, tuple(paths), parent, "1", run_fence)
+                reader = GitCommitEvidenceReader(dbs["tool_gateway"], claim, receipt_store)
+                evidence = await asyncio.to_thread(
+                    reader.read,
+                    scope,
+                    patch_ref,
+                    output["operationId"],
+                    output["receiptId"],
+                    deadline=time.monotonic() + 3,
+                )
+                assert evidence.commit_sha == actual and evidence.receipt_ref == "git:" + output["receiptId"]
+                wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "1", run_fence)
+                with pytest.raises(EffectUnknown):
+                    await asyncio.to_thread(
+                        reader.read,
+                        scope,
+                        wrong_patch,
+                        output["operationId"],
+                        output["receiptId"],
+                        deadline=time.monotonic() + 3,
+                    )
+                with pytest.raises(EffectUnknown):
+                    await asyncio.to_thread(
+                        reader.read, scope, patch_ref, output["operationId"], uuid7(), deadline=time.monotonic() + 3
+                    )
             finally:
                 await server.close()
                 await fence_server.close()
