@@ -198,6 +198,7 @@ class GitCommitTestExecutor(GitCommitStagingExecutor):
         ):
             raise ExecutorFailed("Git operation scope mismatch")
         staged = None
+        completed = False
         deadline = time.monotonic() + 25
         try:
             staged = await stage_git_worker(
@@ -232,6 +233,10 @@ class GitCommitTestExecutor(GitCommitStagingExecutor):
             payload, digest = await asyncio.to_thread(
                 receipts.fetch, context["operation_id"], receipt_id, deadline=deadline
             )
+            # Leave the already-consumed, read-only session alive only until its
+            # existing watchdog expires so a caller can revalidate immediately.
+            # This is not restart recovery or authorization to execute again.
+            completed = True
             return {
                 "receipt": "git:" + receipt_id,
                 "operationId": context["operation_id"],
@@ -243,5 +248,5 @@ class GitCommitTestExecutor(GitCommitStagingExecutor):
         except Exception as exc:
             raise ExecutorUnknown("Git result requires reconciliation") from exc
         finally:
-            if staged is not None:
+            if staged is not None and not completed:
                 await staged.cancel()

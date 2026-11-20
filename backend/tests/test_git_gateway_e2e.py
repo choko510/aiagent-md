@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
 from aiagent_gateways.git_cas_fence_rpc import build_git_cas_fence_server
 from aiagent_gateways.git_commit_dispatch import GitCommitTestExecutor
+from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.servers import build_tool_server
@@ -409,6 +411,21 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 assert row["candidate_tree"] == run("rev-parse", actual + "^{tree}").decode().strip()
                 journal_bytes = (journal / (output["operationId"] + ".prepared")).read_bytes()
                 assert hashlib.sha256(journal_bytes).hexdigest() == row["prepared_journal_sha256"]
+                # Re-read after the real Gateway settled its Intent and Attempt.
+                receipt_store = GitReceiptStore(
+                    dbs["tool_gateway"],
+                    claim,
+                    keys,
+                    result_key=b"s" * 32,
+                    worker_id="fixture-worker",
+                    object_verifier=RpcGitObjectVerifier(worker_endpoint, b"r" * 32, b"g" * 32, "fixture-worker"),
+                    require_fenced=True,
+                )
+                receipt, receipt_sha = await asyncio.to_thread(
+                    receipt_store.fetch, output["operationId"], output["receiptId"], deadline=time.monotonic() + 3
+                )
+                assert receipt["attempt"] == output["toolAttemptId"] and receipt["commit"] == actual
+                assert receipt_sha == output["bodySha256"]
             finally:
                 await server.close()
                 await fence_server.close()
