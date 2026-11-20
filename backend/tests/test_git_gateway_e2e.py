@@ -45,6 +45,9 @@ pytestmark = [
         "lease_expired_before_admission",
         "approval_revoked_before_admission",
         "admission_response_lost",
+        "cancel_after_cas_admission",
+        "binding_changed_before_admission",
+        "goal_changed_before_admission",
     ],
 )
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str):  # noqa: F811
@@ -266,7 +269,30 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             "WHERE tenant_id=%s AND run_id=%s RETURNING id",
                             (claim.tenant_id, claim.run_id),
                         )
+                    elif scenario == "binding_changed_before_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.repository_bindings SET generation=generation+1 "
+                            "WHERE tenant_id=%s AND id=%s RETURNING id",
+                            (claim.tenant_id, binding),
+                        )
+                    elif scenario == "goal_changed_before_admission":
+                        await asyncio.to_thread(
+                            commands.steer,
+                            dbs["api"],
+                            Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                            claim.task_id,
+                            "revised fixture goal",
+                            claim.goal_revision,
+                        )
                     result = await original_handler(caller, payload)
+                    if scenario == "cancel_after_cas_admission":
+                        await asyncio.to_thread(
+                            commands.cancel,
+                            dbs["api"],
+                            Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                            claim.task_id,
+                        )
                     if scenario == "admission_response_lost":
                         raise RpcError("FIXTURE_RESPONSE_LOST")
                     return result
@@ -292,16 +318,32 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 result = await client.call("tool.development_git_commit", body)
                 if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
-                    assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == parent
+                    actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
+                    if scenario != "cancel_after_cas_admission":
+                        assert actual == parent
                     row = dbs["owner"].one(
-                        "SELECT o.state,a.status_code AS attempt_status FROM agent.git_operations o "
+                        "SELECT o.state,o.candidate_commit,a.status_code AS attempt_status FROM agent.git_operations o "
                         "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
                         "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
                         "WHERE o.tenant_id=%s AND i.invocation_key=%s",
                         (claim.tenant_id, call_id),
                     )
-                    expected_state = "CAS_PENDING" if scenario == "admission_response_lost" else "ADMITTED"
+                    expected_state = (
+                        "CAS_PENDING"
+                        if scenario in ("admission_response_lost", "cancel_after_cas_admission")
+                        else "ADMITTED"
+                    )
                     assert row["state"] == expected_state and row["attempt_status"] == "UNKNOWN"
+                    if scenario == "cancel_after_cas_admission":
+                        assert actual in (parent, row["candidate_commit"])
+                        receipts = dbs["owner"].one(
+                            "SELECT count(*) AS n FROM agent.git_operation_receipts r "
+                            "JOIN agent.git_operations o ON o.tenant_id=r.tenant_id AND o.id=r.operation_id "
+                            "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                            "WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                            (claim.tenant_id, call_id),
+                        )
+                        assert receipts["n"] == 0
                     if scenario == "admission_response_lost":
                         replay = await client.call("tool.development_git_commit", body)
                         assert replay["status"] == "UNKNOWN"
