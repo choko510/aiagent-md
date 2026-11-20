@@ -355,6 +355,11 @@ class GitWorkerService:
         return self._authority.cancel(session.payload)
 
     def execute(self, operation: str, encoded_end: str) -> dict[str, Any]:
+        # A heartbeat alone cannot serialize revocation with the Git ref update.
+        # Until a durable CAS fence is implemented, only isolated test fixtures
+        # may exercise this method; development and production remain closed.
+        if config.profile() != "test":
+            raise RpcError("GIT_CAS_FENCE_UNAVAILABLE")
         session: _Session | None = None
         try:
             session = self._sessions.pop(operation)

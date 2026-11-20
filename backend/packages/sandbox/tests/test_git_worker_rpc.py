@@ -163,5 +163,8 @@ def test_real_socket_git_worker_uses_scoped_grant_and_durable_journal(
 
     try:
         asyncio.run(exercise())
+        monkeypatch.setenv("AIAGENT_PROFILE", "development")
+        with pytest.raises(RpcError, match="GIT_CAS_FENCE_UNAVAILABLE"):
+            service.execute(operation, "")
     finally:
         journal.close()
