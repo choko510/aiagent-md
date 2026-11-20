@@ -48,9 +48,10 @@ pytestmark = [
         "cancel_after_cas_admission",
         "binding_changed_before_admission",
         "goal_changed_before_admission",
+        "worker_response_lost",
     ],
 )
-def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str):  # noqa: F811
+def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str, monkeypatch):  # noqa: F811
     claim, binding, manifest, _, _, _, _ = verified_setup
     git = shutil.which("git")
     assert git is not None
@@ -244,7 +245,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
-            if scenario != "success":
+            if scenario not in ("success", "worker_response_lost"):
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
                 async def fault_at_admission(caller, payload):
@@ -302,6 +303,16 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             server = build_tool_server({"development": b"d" * 32, "runtime": b"r" * 32}, "tcp:127.0.0.1:0", gateway)
             await server.start()
             try:
+                if scenario == "worker_response_lost":
+                    original_call = RpcClient.call
+
+                    async def lose_worker_response(self, method, payload):
+                        response = await original_call(self, method, payload)
+                        if method == "git.execute":
+                            raise RpcError("FIXTURE_WORKER_RESPONSE_LOST")
+                        return response
+
+                    monkeypatch.setattr(RpcClient, "call", lose_worker_response)
                 client = RpcClient(f"tcp:127.0.0.1:{server.port}", "development", b"d" * 32)
                 body = {"claim": claim.to_wire(), "toolCallId": call_id, "args": args}
                 pending = await client.call("tool.development_git_commit", body)
@@ -319,7 +330,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
                     actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
-                    if scenario != "cancel_after_cas_admission":
+                    if scenario not in ("cancel_after_cas_admission", "worker_response_lost"):
                         assert actual == parent
                     row = dbs["owner"].one(
                         "SELECT o.state,o.candidate_commit,a.status_code AS attempt_status FROM agent.git_operations o "
@@ -330,11 +341,14 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     )
                     expected_state = (
                         "CAS_PENDING"
-                        if scenario in ("admission_response_lost", "cancel_after_cas_admission")
+                        if scenario in ("admission_response_lost", "cancel_after_cas_admission", "worker_response_lost")
                         else "ADMITTED"
                     )
                     assert row["state"] == expected_state and row["attempt_status"] == "UNKNOWN"
-                    if scenario == "cancel_after_cas_admission":
+                    if scenario == "worker_response_lost":
+                        assert actual == row["candidate_commit"] and actual != parent
+                        assert len(list(journal.glob("*.confirmed"))) == 1
+                    if scenario in ("cancel_after_cas_admission", "worker_response_lost"):
                         assert actual in (parent, row["candidate_commit"])
                         receipts = dbs["owner"].one(
                             "SELECT count(*) AS n FROM agent.git_operation_receipts r "
@@ -344,7 +358,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert receipts["n"] == 0
-                    if scenario == "admission_response_lost":
+                    if scenario in ("admission_response_lost", "worker_response_lost"):
                         replay = await client.call("tool.development_git_commit", body)
                         assert replay["status"] == "UNKNOWN"
                         count = dbs["owner"].one(
@@ -354,7 +368,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert count["n"] == 1
-                        assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == parent
+                        assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == actual
                     return
                 assert result["status"] == "CONFIRMED", result
                 output = result["result"]
