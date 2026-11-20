@@ -19,7 +19,18 @@ import pytest
 from aiagent_core import commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.rpc import RpcClient
-from aiagent_development.contracts import EffectUnknown, PatchArtifact, ProjectScope, RunFence
+from aiagent_development.contracts import (
+    Cycle,
+    EffectUnknown,
+    PatchArtifact,
+    Phase,
+    ProjectScope,
+    RunFence,
+    ScopeDenied,
+    TaskPlan,
+)
+from aiagent_development.pg_store import PostgresCycleStore, PostgresRunAuthority, PostgresWorkspacePort
+from aiagent_development.workflow import DevelopmentWorkflow
 from aiagent_domain import uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_gateways.context_keys import KeyRing
@@ -29,10 +40,10 @@ from aiagent_gateways.git_commit_evidence import GitCommitEvidenceReader
 from aiagent_gateways.git_head_reader import RpcGitHeadReader
 from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
+from aiagent_gateways.git_provider_adapter import ToolGatewayGitProvider
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
-from psycopg.types.json import Jsonb
 from test_verified_workspace_pg import verified_setup  # noqa: F401
 
 pytestmark = [
@@ -56,6 +67,7 @@ pytestmark = [
         "goal_changed_before_admission",
         "worker_response_lost",
         "receipt_response_lost",
+        "workflow_commit",
     ],
 )
 def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenario: str, monkeypatch):  # noqa: F811
@@ -99,22 +111,25 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
     }
     keys = KeyRing.single(b"p" * 32)
     ciphertext = keys.cipher(key_id).encrypt(nonce, patch, git_patch_aad(metadata))
-    cycle_json = {
-        "patch": {"artifact_ref": artifact, "parent_sha": parent, "diff_sha256": digest, "paths": paths},
-        "plan": {"plan_ref": "plan-fixture", "goal_revision": claim.goal_revision},
-        "run": {
-            "task_id": claim.task_id,
-            "run_id": claim.run_id,
-            "goal_revision": claim.goal_revision,
-            "lease_epoch": claim.lease_epoch,
-            "restore_incarnation": claim.restore_incarnation,
-            "worker_ref": claim.worker_ref,
-        },
-    }
-    dbs["owner"].one(
-        "INSERT INTO agent.dev_cycles(tenant_id,id,owner_user_id,project_id,workspace_id,task_id,run_id,"
-        "version,phase,cycle_json) VALUES (%s,%s,%s,'fixture',%s,%s,%s,1,'PATCH_READY',%s) RETURNING id",
-        (claim.tenant_id, cycle, claim.owner_user_id, workspace, claim.task_id, claim.run_id, Jsonb(cycle_json)),
+    project = ProjectScope(
+        claim.tenant_id, claim.owner_user_id, "fixture", workspace, "fixture/repo", "feat/fixture", parent, "1"
+    )
+    fence = RunFence(
+        claim.task_id, claim.run_id, claim.goal_revision, claim.lease_epoch, claim.restore_incarnation, claim.worker_ref
+    )
+    approved_patch = PatchArtifact(artifact, digest, tuple(paths), parent, "1", fence)
+    cycle_store = PostgresCycleStore(dbs["tool_gateway"])
+    cycle_store.create(
+        Cycle(
+            cycle,
+            project,
+            fence,
+            Phase.PATCH_READY,
+            "fixture-change",
+            version=1,
+            plan=TaskPlan("plan-fixture", "fixture-change", ("unit",), claim.goal_revision),
+            patch=approved_patch,
+        )
     )
     dbs["owner"].one(
         "INSERT INTO agent.git_patch_artifacts(tenant_id,id,owner_user_id,workspace_id,binding_id,"
@@ -252,7 +267,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 b"j" * 32,
                 allowed_uid=os.getuid(),
             )
-            if scenario not in ("success", "worker_response_lost", "receipt_response_lost"):
+            if scenario not in ("success", "workflow_commit", "worker_response_lost", "receipt_response_lost"):
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
                 async def fault_at_admission(caller, payload):
@@ -362,6 +377,52 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     pending["requestSha256"],
                     1,
                 )
+                if scenario == "workflow_commit":
+                    receipt_store = GitReceiptStore(
+                        dbs["tool_gateway"],
+                        claim,
+                        keys,
+                        result_key=b"s" * 32,
+                        worker_id="fixture-worker",
+                        object_verifier=RpcGitObjectVerifier(worker_endpoint, b"r" * 32, b"g" * 32, "fixture-worker"),
+                        require_fenced=True,
+                    )
+                    provider = ToolGatewayGitProvider(
+                        dbs["tool_gateway"],
+                        claim,
+                        endpoint=f"tcp:127.0.0.1:{server.port}",
+                        rpc_key=b"d" * 32,
+                        head_reader=head_reader,
+                        receipt_reader=GitCommitEvidenceReader(dbs["tool_gateway"], claim, receipt_store),
+                    )
+                    wrong_patch = PatchArtifact(artifact, "0" * 64, tuple(paths), parent, "1", fence)
+                    with pytest.raises(ScopeDenied):
+                        await asyncio.to_thread(
+                            provider.commit_patch, scope, wrong_patch, parent, call_id, "approved fixture"
+                        )
+                    assert (
+                        dbs["owner"].one(
+                            "SELECT count(*) AS n FROM agent.git_operations WHERE tenant_id=%s", (claim.tenant_id,)
+                        )["n"]
+                        == 0
+                    )
+                    workflow = DevelopmentWorkflow(
+                        runs=PostgresRunAuthority(dbs["tool_gateway"]),
+                        workspaces=PostgresWorkspacePort(dbs["tool_gateway"]),
+                        gateway=provider,
+                        git=provider,
+                        store=cycle_store,
+                        reviewers=None,
+                        sandbox=None,
+                    )  # type: ignore[arg-type]
+                    committed = await asyncio.to_thread(
+                        workflow.commit, scope, cycle, message="approved fixture", intent_ref=call_id
+                    )
+                    assert committed.phase == Phase.COMMITTED and committed.commit is not None
+                    loaded = await asyncio.to_thread(cycle_store.load, scope, cycle)
+                    assert loaded.phase == Phase.COMMITTED and loaded.commit == committed.commit
+                    assert run("rev-parse", "refs/heads/feat/fixture").decode().strip() == committed.commit.commit_sha
+                    return
                 result = await client.call("tool.development_git_commit", body)
                 if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
