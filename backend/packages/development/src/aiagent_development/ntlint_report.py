@@ -1,0 +1,253 @@
+"""Bounded read-only ntlint 0.1.1 JSONL importer.
+
+No execution, API call, shell access, provider key or release-gate mutation.
+Trusted owners must authenticate the artifact and supply its source SHA.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from dataclasses import dataclass
+from typing import Literal, cast
+
+from .contracts import InvalidEvidence, InvalidPath, require_sha
+from .paths import safe_relative_path
+
+_RULE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}\Z")
+_FINDING_FIELDS = {
+    "type",
+    "ruleId",
+    "docs",
+    "severity",
+    "messageId",
+    "file",
+    "line",
+    "endLine",
+    "subject",
+    "subjectSource",
+    "value",
+    "at",
+    "margin",
+    "confidence",
+}
+_SUMMARY_FIELDS = {
+    "type",
+    "verdicts",
+    "reported",
+    "candidates",
+    "unsure",
+    "missing",
+    "requests",
+    "inputTokens",
+    "usd",
+    "cached",
+    "failures",
+    "complete",
+}
+Status = Literal["INCOMPLETE", "NO_TESTS", "REVIEW_REQUIRED", "NO_CANDIDATES"]
+
+
+@dataclass(frozen=True, slots=True)
+class NtlintFinding:
+    """A candidate only, never an independently verified ReviewFinding."""
+
+    rule_id: str
+    file: str
+    line: int
+    end_line: int
+    message_id: Literal["candidate", "violation"]
+    severity: Literal["info", "warning", "error"]
+    value: float
+
+
+@dataclass(frozen=True, slots=True)
+class NtlintReport:
+    source_sha: str
+    exit_code: int
+    status: Status
+    findings: tuple[NtlintFinding, ...]
+    verdicts: int
+    missing: int
+    unsure: int
+    failures: int
+    input_tokens: int
+    usd: float
+
+    @property
+    def complete(self) -> bool:
+        """Completeness of the scan, NOT a test/review/release PASS."""
+        return self.status not in ("INCOMPLETE", "NO_TESTS")
+
+
+def _record(v: object) -> dict[str, object]:
+    if not isinstance(v, dict) or any(not isinstance(k, str) for k in v):
+        raise InvalidEvidence("invalid ntlint JSON record")
+    return cast(dict[str, object], v)
+
+
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise InvalidEvidence("duplicate ntlint JSON key")
+        record[key] = value
+    return record
+
+
+def _require_keys(data: dict[str, object], expected: set[str]) -> None:
+    if data.keys() != expected:
+        raise InvalidEvidence("missing or unexpected ntlint JSON fields")
+
+
+def _validate_finding_metadata(data: dict[str, object]) -> None:
+    if data["subjectSource"] not in ("test", "suite", "function", "file"):
+        raise InvalidEvidence("invalid ntlint subjectSource")
+    for key in ("docs", "subject"):
+        value = data[key]
+        if value is not None and not isinstance(value, str):
+            raise InvalidEvidence(f"invalid ntlint metadata: {key}")
+    _number(data, "at", 1.0)
+    for key in ("margin", "confidence"):
+        if data[key] is not None:
+            _number(data, key, 10_000_000 if key == "margin" else 1.0)
+
+
+def _count(record: dict[str, object], key: str) -> int:
+    n = record.get(key)
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 10_000_000:
+        raise InvalidEvidence(f"invalid ntlint count: {key}")
+    return n
+
+
+def _number(record: dict[str, object], key: str, high: float) -> float:
+    n = record.get(key)
+    if not isinstance(n, (int, float)) or isinstance(n, bool):
+        raise InvalidEvidence(f"invalid ntlint number: {key}")
+    try:
+        value = float(n)
+    except (OverflowError, ValueError) as exc:
+        raise InvalidEvidence(f"invalid ntlint number: {key}") from exc
+    if not math.isfinite(value) or not 0 <= value <= high:
+        raise InvalidEvidence(f"out-of-range ntlint number: {key}")
+    return value
+
+
+def _finding(d: dict[str, object]) -> NtlintFinding:
+    _require_keys(d, _FINDING_FIELDS)
+    _validate_finding_metadata(d)
+    rule, path = d.get("ruleId"), d.get("file")
+    if not isinstance(rule, str) or not _RULE.fullmatch(rule):
+        raise InvalidEvidence("invalid ntlint rule ID")
+    if not isinstance(path, str):
+        raise InvalidEvidence("invalid ntlint file path")
+    try:
+        safe_relative_path(path)
+    except InvalidPath as exc:
+        raise InvalidEvidence("unsafe ntlint file path") from exc
+    start, end = _count(d, "line"), _count(d, "endLine")
+    if start < 1 or end < start:
+        raise InvalidEvidence("invalid ntlint line span")
+    message, severity = d.get("messageId"), d.get("severity")
+    if message not in ("candidate", "violation") or severity not in ("info", "warning", "error"):
+        raise InvalidEvidence("unsupported ntlint finding type")
+    return NtlintFinding(
+        rule,
+        path,
+        start,
+        end,
+        message,
+        severity,
+        _number(d, "value", 1.0),
+    )
+
+
+def _reject_nonfinite(_: str) -> None:
+    raise InvalidEvidence("nonfinite ntlint JSON number")
+
+
+def _decode_lines(output: str) -> tuple[list[NtlintFinding], dict[str, object]]:
+    if not isinstance(output, str) or not output:
+        raise InvalidEvidence("empty or oversized ntlint output")
+    try:
+        length = len(output.encode("utf-8"))
+    except UnicodeError as exc:
+        raise InvalidEvidence("invalid ntlint UTF-8 output") from exc
+    if length > 1_048_576:
+        raise InvalidEvidence("empty or oversized ntlint output")
+    lines = output.splitlines()
+    if len(lines) > 1025 or any(not line or len(line) > 16_384 for line in lines):
+        raise InvalidEvidence("ntlint report size or record count exceeded")
+
+    findings: list[NtlintFinding] = []
+    summary: dict[str, object] | None = None
+    for line in lines:
+        try:
+            d = _record(json.loads(line, parse_constant=_reject_nonfinite, object_pairs_hook=_unique_pairs))
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise InvalidEvidence("malformed ntlint JSONL") from exc
+        if summary is not None:
+            raise InvalidEvidence("ntlint has records after summary")
+        if d.get("type") == "finding":
+            findings.append(_finding(d))
+        elif d.get("type") == "summary":
+            summary = d
+        else:
+            raise InvalidEvidence("unknown ntlint JSONL record")
+    if summary is None:
+        raise InvalidEvidence("missing ntlint summary")
+
+    return findings, summary
+
+
+def parse_ntlint_jsonl(output: str, *, exit_code: int, source_sha: str, expected_sha: str) -> NtlintReport:
+    """Parse a verified Cell artifact; source_sha and expected_sha must originate from trusted owners.
+
+    Does not validate their authority, send data to Typesafe AI or run ntlint.
+    """
+    if require_sha(source_sha) != require_sha(expected_sha):
+        raise InvalidEvidence("missing or stale trusted ntlint SHA")
+    if type(exit_code) is not int or exit_code not in (0, 1, 2):
+        raise InvalidEvidence("invalid ntlint exit code")
+    findings, summary = _decode_lines(output)
+
+    _require_keys(summary, _SUMMARY_FIELDS)
+    verdicts = _count(summary, "verdicts")
+    reported = _count(summary, "reported")
+    candidates = _count(summary, "candidates")
+    missing = _count(summary, "missing")
+    unsure = _count(summary, "unsure")
+    failures = _count(summary, "failures")
+    _count(summary, "requests")
+    _count(summary, "cached")
+    tokens = _count(summary, "inputTokens")
+    usd = _number(summary, "usd", 10_000_000)
+    complete = summary.get("complete")
+    if type(complete) is not bool:
+        raise InvalidEvidence("missing ntlint completeness")
+    if (
+        reported != len(findings)
+        or candidates != sum(f.message_id == "candidate" for f in findings)
+        or reported + missing + unsure > verdicts
+    ):
+        raise InvalidEvidence("inconsistent ntlint summary")
+
+    if (
+        exit_code == 2
+        or not complete
+        or missing
+        or failures
+        or (exit_code == 1 and not any(f.message_id == "violation" for f in findings))
+        or (exit_code == 0 and any(f.message_id == "violation" for f in findings))
+    ):
+        status: Status = "INCOMPLETE"
+    elif verdicts == 0:
+        status = "NO_TESTS"
+    elif findings or unsure:
+        status = "REVIEW_REQUIRED"
+    else:
+        status = "NO_CANDIDATES"
+    return NtlintReport(
+        source_sha, exit_code, status, tuple(findings), verdicts, missing, unsure, failures, tokens, usd
+    )
