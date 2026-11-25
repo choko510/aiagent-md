@@ -89,6 +89,8 @@ pytestmark = [
         "approval_revoked_before_admission",
         "admission_response_lost",
         "cancel_after_cas_admission",
+        "lease_expired_after_admission",
+        "approval_revoked_after_admission",
         "binding_changed_before_admission",
         "goal_changed_before_admission",
         "worker_response_lost",
@@ -400,6 +402,20 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             dbs["api"],
                             Scope(claim.tenant_id, claim.owner_user_id, workspace),
                             claim.task_id,
+                        )
+                    if scenario == "lease_expired_after_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.runs SET lease_expires_at=clock_timestamp()-interval '1 second' "
+                            "WHERE tenant_id=%s AND id=%s RETURNING id",
+                            (claim.tenant_id, claim.run_id),
+                        )
+                    if scenario == "approval_revoked_after_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.approval_records SET decision_code='REVOKED' "
+                            "WHERE tenant_id=%s AND run_id=%s RETURNING id",
+                            (claim.tenant_id, claim.run_id),
                         )
                     if scenario == "admission_response_lost":
                         raise RpcError("FIXTURE_RESPONSE_LOST")
@@ -784,6 +800,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
                     if scenario not in (
                         "cancel_after_cas_admission",
+                        "lease_expired_after_admission",
+                        "approval_revoked_after_admission",
                         "worker_response_lost",
                         "receipt_response_lost",
                         "worker_crash_after_cas",
@@ -804,6 +822,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         in (
                             "admission_response_lost",
                             "cancel_after_cas_admission",
+                            "lease_expired_after_admission",
+                            "approval_revoked_after_admission",
                             "worker_response_lost",
                             "worker_crash_after_cas",
                         )
@@ -960,7 +980,13 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert receipts["n"] == 1
-                    if scenario in ("cancel_after_cas_admission", "worker_response_lost", "worker_crash_after_cas"):
+                    if scenario in (
+                        "cancel_after_cas_admission",
+                        "lease_expired_after_admission",
+                        "approval_revoked_after_admission",
+                        "worker_response_lost",
+                        "worker_crash_after_cas",
+                    ):
                         assert actual in (parent, row["candidate_commit"])
                         receipts = dbs["owner"].one(
                             "SELECT count(*) AS n FROM agent.git_operation_receipts r "
