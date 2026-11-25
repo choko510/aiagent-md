@@ -599,6 +599,9 @@ class GitWorkerService:
             )
             if diff_sha != p["patch_sha256"] or time.time() >= p["expires_at"]:
                 raise ValueError
+            journal_sha = hashlib.sha256(
+                canonical_json(self._journal.export_prepared(p["operation"])).encode()
+            ).hexdigest()
             return {
                 "operation": p["operation"],
                 "worker_id": self._worker_id,
@@ -606,6 +609,7 @@ class GitWorkerService:
                 "tree": prepared["tree"],
                 "parent": p["parent"],
                 "diff_sha256": diff_sha,
+                "prepared_journal_sha256": journal_sha,
                 "commit_object": base64.b64encode(commit_body).decode("ascii"),
                 "tree_object": base64.b64encode(tree_body).decode("ascii"),
             }

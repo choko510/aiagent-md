@@ -61,6 +61,7 @@ from aiagent_gateways.git_object_verifier import RpcGitObjectVerifier
 from aiagent_gateways.git_patch_artifacts import git_patch_aad
 from aiagent_gateways.git_provider_adapter import ToolGatewayGitProvider
 from aiagent_gateways.git_receipts import GitReceiptError, GitReceiptStore
+from aiagent_gateways.git_recovery_inspection import GitRecoveryUnavailable, inspect_unknown_git_operation
 from aiagent_gateways.git_snapshot_promotion import GitSnapshotPromotionUnknown, promote_git_snapshot
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
@@ -863,6 +864,43 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                                 await asyncio.sleep(0.1)
                         assert evidence is not None and evidence["commit"] == actual
                         assert evidence["parent"] == parent and evidence["diff_sha256"] == digest
+                        observation = await inspect_unknown_git_operation(
+                            dbs["tool_gateway"],
+                            claim,
+                            keys,
+                            str(record["id"]),
+                            endpoint=worker_endpoint,
+                            rpc_key=b"r" * 32,
+                            grant_key=b"g" * 32,
+                            worker_id="fixture-worker",
+                            deadline=time.monotonic() + 8,
+                        )
+                        assert observation.commit == actual and observation.attempt_id == str(record["attempt_id"])
+                        with pytest.raises(GitRecoveryUnavailable):
+                            await inspect_unknown_git_operation(
+                                dbs["tool_gateway"],
+                                replace(claim, lease_epoch=claim.lease_epoch + 1),
+                                keys,
+                                str(record["id"]),
+                                endpoint=worker_endpoint,
+                                rpc_key=b"r" * 32,
+                                grant_key=b"g" * 32,
+                                worker_id="fixture-worker",
+                                deadline=time.monotonic() + 8,
+                            )
+                        (journal / (str(record["id"]) + ".prepared")).write_bytes(b"tampered journal")
+                        with pytest.raises(GitRecoveryUnavailable):
+                            await inspect_unknown_git_operation(
+                                dbs["tool_gateway"],
+                                claim,
+                                keys,
+                                str(record["id"]),
+                                endpoint=worker_endpoint,
+                                rpc_key=b"r" * 32,
+                                grant_key=b"g" * 32,
+                                worker_id="fixture-worker",
+                                deadline=time.monotonic() + 8,
+                            )
                         with pytest.raises(RpcError):
                             await recover_client.call(
                                 "git.recovery_inspect", {"grant": {"payload": recovery, "mac": "0" * 64}}

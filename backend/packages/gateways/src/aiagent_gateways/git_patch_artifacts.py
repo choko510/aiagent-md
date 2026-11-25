@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from aiagent_core import control
+from aiagent_core import config, control
 from aiagent_core.db import Database
 from aiagent_development.contracts import InvalidEvidence, ScopeDenied
 from aiagent_development.paths import safe_relative_path
@@ -67,7 +67,10 @@ def fetch_git_patch(
     cycle_id: str,
     plan_ref: str,
     deadline: float,
+    recovery_read: bool = False,
 ) -> VerifiedGitPatch:
+    if type(recovery_read) is not bool or (recovery_read and config.profile() != "test"):
+        raise ScopeDenied("Git recovery read unavailable")
     if not time.monotonic() < deadline <= time.monotonic() + 3600:
         raise InvalidEvidence("patch deadline invalid")
     with db.tx(tenant=claim.tenant_id) as c:
@@ -107,7 +110,10 @@ def fetch_git_patch(
             or str(row["cycle_workspace"]) != workspace_id
             or str(row["cycle_task"]) != claim.task_id
             or str(row["cycle_run"]) != claim.run_id
-            or row["phase"] not in ("PATCH_READY", "COMMIT_PENDING", "COMMITTED")
+            or (
+                row["phase"] not in ("PATCH_READY", "COMMIT_PENDING", "COMMITTED")
+                and not (recovery_read and row["phase"] == "UNKNOWN_EXTERNAL_EFFECT")
+            )
             or not isinstance(plan, dict)
             or not plan_ref
             or plan.get("plan_ref") != plan_ref
