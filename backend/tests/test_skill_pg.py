@@ -11,7 +11,7 @@ import pytest
 from aiagent_core import admin
 from aiagent_core.db import Database
 from aiagent_skills.contracts import InstallationState, ReleaseState
-from aiagent_skills.digest import capability_digest
+from aiagent_skills.digest import capability_digest, dependency_digest
 from aiagent_skills.errors import SkillNotFound
 from aiagent_skills.pg_store import PostgresSkillStore
 from aiagent_skills.policy import validate_requested
@@ -139,7 +139,7 @@ def test_postgres_lifecycle_rls_and_least_privilege(
         run_id="018f0000-0000-7000-8000-0000000000bb",
         installation_id=installation.id,
         capability_digest_value=capability,
-        dependency_digest_value=capability_digest(frozenset()),
+        dependency_digest_value=dependency_digest({}),
     )
     assert store.get_pin(tenant_id, pin.run_id, installation.id) == pin
 
