@@ -40,7 +40,7 @@ def test_single_page_skill_finishes_without_a_synthetic_second_page() -> None:
     assert out["content"] == "推敲済み：日本語の文章を読みやすく整えました。"
 
 
-def test_multi_page_skill_and_reference_follow_only_advertised_offsets() -> None:
+def test_multi_page_skill_and_references_follow_only_advertised_offsets() -> None:
     prompt = "nihongo fixture: READMEを作成してください。 page-limit=20"
     pages: list[str] = []
     out = fake_policy("main", _messages(prompt, pages), ["read_file"])
@@ -63,26 +63,61 @@ def test_multi_page_skill_and_reference_follow_only_advertised_offsets() -> None
                 20,
             )
 
+    def read_reference(path: str, total: int, marker: str) -> dict[str, Any]:
+        out = fake_policy("main", _messages(prompt, pages), ["read_file"])
+        for start in range(1, total + 1, 20):
+            name, call_args = _tool_call(out)
+            assert (name, call_args["file_path"], call_args["offset"], call_args["limit"]) == (
+                "read_file",
+                path,
+                start - 1,
+                20,
+            )
+            end = min(start + 19, total)
+            body = marker + "\n" if start == 1 else "参照本文"
+            pages.append(_page(start, end, total, body))
+            out = fake_policy("main", _messages(prompt, pages), ["read_file"])
+            if end < total:
+                _, next_args = _tool_call(out)
+                assert (next_args["file_path"], next_args["offset"], next_args["limit"]) == (
+                    path,
+                    end,
+                    20,
+                )
+        return out
+
     _, ref_args = _tool_call(out)
     assert (ref_args["file_path"], ref_args["offset"], ref_args["limit"]) == (
         "/skills/nihongo/references/technical-writing.md",
         0,
         20,
     )
-    for start in (1, 21, 41):
-        end = min(start + 19, 45)
-        body = "# 技術文書\n" if start == 1 else "参照本文"
-        pages.append(_page(start, end, 45, body))
-        out = fake_policy("main", _messages(prompt, pages), ["read_file"])
-        if end < 45:
-            _, next_args = _tool_call(out)
-            assert (next_args["file_path"], next_args["offset"], next_args["limit"]) == (
-                "/skills/nihongo/references/technical-writing.md",
-                end,
-                20,
-            )
+    out = read_reference("/skills/nihongo/references/technical-writing.md", 45, "# 技術文書")
+    _, register_args = _tool_call(out)
+    assert (register_args["file_path"], register_args["offset"], register_args["limit"]) == (
+        "/skills/nihongo/references/register.md",
+        0,
+        20,
+    )
+    out = read_reference("/skills/nihongo/references/register.md", 60, "# 書き言葉の段")
     assert "tool_calls" not in out
     assert out["content"] == "更新済み：技術文書の用語と手順を保って読みやすく整えました。"
+
+
+def test_marketing_goal_reads_skill_then_marketing_reference() -> None:
+    prompt = "nihongo fixture: LPの広告文を作成してください。"
+    pages = [_page(1, 94, 94, "name: nihongo")]
+    out = fake_policy("main", _messages(prompt, pages), ["read_file"])
+    name, args = _tool_call(out)
+    assert (name, args["file_path"], args["offset"]) == (
+        "read_file",
+        "/skills/nihongo/references/marketing-copy.md",
+        0,
+    )
+    pages.append(_page(1, 40, 40, "# マーケ・広告・LP・告知コピー"))
+    out = fake_policy("main", _messages(prompt, pages), ["read_file"])
+    assert "tool_calls" not in out
+    assert out["content"] == "作成済み：事実と勢いを保って広告文を整えました。"
 
 
 def test_invalid_duplicate_backward_and_malformed_pages_stop_without_looping() -> None:

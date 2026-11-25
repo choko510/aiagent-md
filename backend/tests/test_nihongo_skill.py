@@ -37,6 +37,12 @@ _SPEC.loader.exec_module(sync)
 SKILL = SKILLS_DIR / "nihongo"
 
 
+def _work(destination: Path) -> Path:
+    work = sync._work_root(destination)
+    work.mkdir(parents=True, exist_ok=True)
+    return work
+
+
 def _archive(*members: tuple[str, bytes, str]) -> bytes:
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w:gz") as tar:
@@ -113,6 +119,9 @@ def test_context_path_applies_full_only_for_a_writing_goal() -> None:
     ("goal", "expected"),
     [
         ("READMEを作成して", True),
+        ("LPのコピーを書いて", True),
+        ("広告文を作成して", True),
+        ("SNS投稿を作成して", True),
         ("このメールを推敲して", True),
         ("技術文書を書いて", True),
         ("この文章を日本語に翻訳して", True),
@@ -124,6 +133,8 @@ def test_context_path_applies_full_only_for_a_writing_goal() -> None:
         ("コードをレビューして", False),
         ("メールを検索して", False),
         ("メールを検索して結果をまとめて", False),
+        ("LPの表示速度を改善して", False),
+        ("LPのデザインを修正して", False),
         ("議事録を要約して", False),
         ("nihongoを使わずREADMEを作成して", False),
         ("READMEを作成して。nihongoは使わないで", False),
@@ -165,7 +176,7 @@ def test_register_reference_is_vendored_and_selected_by_full() -> None:
     assert register in packaged_skill_texts()
 
 
-def test_marketing_reference_is_vendored_and_selected_by_full() -> None:
+def test_marketing_reference_is_vendored_and_listed_by_full() -> None:
     marketing = (SKILL / "references" / "marketing-copy.md").read_text(encoding="utf-8")
     skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert marketing.startswith("# マーケ・広告・LP・告知コピー")
@@ -277,7 +288,7 @@ def test_fetch_or_verification_failure_never_ships_a_partial_bundle(tmp_path, mo
     with pytest.raises(OSError, match="upstream unavailable"):
         sync.update(destination, fetch=broken_fetch)
     assert (destination / "ALWAYS.md").read_bytes() == installed
-    assert not list(tmp_path.glob(".nihongo-stage-*"))
+    assert not list(_work(destination).glob(".nihongo-stage-*"))
 
     with pytest.raises(ValueError, match="unverified skill bundle"):
         sync.install({}, destination)
@@ -294,7 +305,7 @@ def test_leftover_backup_is_recovered_after_a_crash_between_renames(tmp_path, mo
     sync.install({"ALWAYS.md": data}, destination)
 
     # Simulate a hard kill after destination.rename(backup) and before staging.rename(destination).
-    backup = tmp_path / ".nihongo-backup-crash"
+    backup = _work(destination) / ".nihongo-backup-crash"
     destination.rename(backup)
     assert not destination.exists()
     sync.recover_leftover_backup(destination)
@@ -303,12 +314,70 @@ def test_leftover_backup_is_recovered_after_a_crash_between_renames(tmp_path, mo
 
     # A completed swap that crashed before cleanup leaves a stale backup; it is discarded only after verification.
     sync.install({"ALWAYS.md": data}, destination)
-    stale = tmp_path / ".nihongo-backup-stale"
+    stale = _work(destination) / ".nihongo-backup-stale"
     stale.mkdir()
     (stale / "ALWAYS.md").write_bytes(data)
     sync.recover_leftover_backup(destination)
     assert not stale.exists()
     assert (destination / "ALWAYS.md").read_bytes() == data
+
+
+def test_stale_staging_and_backups_fail_closed_and_update_cleans_them(tmp_path, monkeypatch) -> None:
+    data = b"pinned bytes\n"
+    monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
+    destination = tmp_path / "nihongo"
+    sync.install({"ALWAYS.md": data}, destination)
+    work = _work(destination)
+
+    staged = work / ".nihongo-stage-left"
+    staged.mkdir()
+    (staged / "ALWAYS.md").write_bytes(data)
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.verify_tree(destination)
+    sync.recover_leftover_backup(destination, allow_legacy=True)
+    assert not staged.exists()
+    assert sync.verify_tree(destination) == {"ALWAYS.md": data}
+
+    # A legacy in-tree stage/backup is still rejected; only the update path may clean it up.
+    public_stage = destination.parent / ".nihongo-stage-public"
+    public_stage.mkdir()
+    (public_stage / "ALWAYS.md").write_bytes(data)
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.verify_tree(destination)
+    sync.recover_leftover_backup(destination, allow_legacy=True)
+    assert not public_stage.exists()
+
+    public_backup = destination.parent / ".nihongo-backup-public"
+    public_backup.mkdir()
+    (public_backup / "ALWAYS.md").write_bytes(data)
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.verify_tree(destination)
+    sync.recover_leftover_backup(destination, allow_legacy=True)
+    assert not public_backup.exists()
+    assert sync.verify_tree(destination) == {"ALWAYS.md": data}
+
+
+def test_backup_cleanup_failure_is_reported_and_backup_is_preserved(tmp_path, monkeypatch) -> None:
+    data = b"pinned bytes\n"
+    monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
+    destination = tmp_path / "nihongo"
+    sync.install({"ALWAYS.md": data}, destination)
+
+    original = shutil.rmtree
+
+    def failing_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+        if Path(path).name.startswith(".nihongo-backup-"):
+            raise OSError("busy backup")
+        original(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(shutil, "rmtree", failing_cleanup)
+    with pytest.raises(RuntimeError, match="preserved for manual recovery"):
+        sync.install({"ALWAYS.md": data}, destination)
+    backups = list(_work(destination).glob(".nihongo-backup-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "ALWAYS.md").read_bytes() == data
+    original(backups[0])
+    assert sync.verify_tree(destination) == {"ALWAYS.md": data}
 
 
 def test_legacy_backup_is_update_only_and_never_current(tmp_path, monkeypatch) -> None:
@@ -317,7 +386,7 @@ def test_legacy_backup_is_update_only_and_never_current(tmp_path, monkeypatch) -
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(current)})
     monkeypatch.setattr(sync, "LEGACY_BUNDLES", {"old-pin": (len(legacy), sync.bundle_fingerprint(legacy))})
     destination = tmp_path / "nihongo"
-    backup = tmp_path / ".nihongo-backup-legacy"
+    backup = _work(destination) / ".nihongo-backup-legacy"
     backup.mkdir()
     for rel, data in legacy.items():
         (backup / rel).write_bytes(data)
@@ -340,7 +409,7 @@ def test_update_replaces_a_legacy_bundle_restored_after_a_crash(tmp_path, monkey
     monkeypatch.setattr(sync, "LEGACY_BUNDLES", {"old-pin": (len(legacy), sync.bundle_fingerprint(legacy))})
     monkeypatch.setattr(sync, "verified_archive_files", lambda _: current)
     destination = tmp_path / "nihongo"
-    backup = tmp_path / ".nihongo-backup-legacy"
+    backup = _work(destination) / ".nihongo-backup-legacy"
     backup.mkdir()
     for rel, data in legacy.items():
         (backup / rel).write_bytes(data)
@@ -349,7 +418,7 @@ def test_update_replaces_a_legacy_bundle_restored_after_a_crash(tmp_path, monkey
 
     assert sync.verify_tree(destination) == current
     assert not backup.exists()
-    assert not list(tmp_path.glob(".nihongo-backup-*"))
+    assert not list(_work(destination).glob(".nihongo-backup-*"))
 
 
 def test_download_failure_keeps_the_current_bundle_or_restores_the_legacy_backup(tmp_path, monkeypatch) -> None:
@@ -367,7 +436,7 @@ def test_download_failure_keeps_the_current_bundle_or_restores_the_legacy_backup
     assert sync.verify_tree(destination) == {"ALWAYS.md": current["ALWAYS.md"]}
 
     shutil.rmtree(destination)
-    backup = tmp_path / ".nihongo-backup-old"
+    backup = _work(destination) / ".nihongo-backup-old"
     backup.mkdir()
     for rel, data in legacy.items():
         (backup / rel).write_bytes(data)
@@ -383,17 +452,18 @@ def test_ambiguous_or_unverifiable_leftover_backups_are_refused(tmp_path, monkey
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
     destination = tmp_path / "nihongo"
+    work = _work(destination)
     for name in (".nihongo-backup-a", ".nihongo-backup-b"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "ALWAYS.md").write_bytes(data)
+        (work / name).mkdir()
+        (work / name / "ALWAYS.md").write_bytes(data)
     with pytest.raises(RuntimeError, match="ambiguous nihongo backups"):
         sync.recover_leftover_backup(destination)
 
     moved = tmp_path / "old"
     moved.mkdir()
-    for backup in tmp_path.glob(".nihongo-backup-*"):
+    for backup in work.glob(".nihongo-backup-*"):
         backup.rename(moved / backup.name)
-    bad = tmp_path / ".nihongo-backup-bad"
+    bad = work / ".nihongo-backup-bad"
     bad.mkdir()
     (bad / "ALWAYS.md").write_bytes(b"not the pinned bundle")
     with pytest.raises(RuntimeError, match="not a verified bundle"):
@@ -418,5 +488,5 @@ def test_failed_replacement_restores_the_previous_bundle(tmp_path, monkeypatch) 
     with pytest.raises(OSError, match="simulated swap failure"):
         sync.install({"ALWAYS.md": data}, destination)
     assert (destination / "ALWAYS.md").read_bytes() == data
-    assert not list(tmp_path.glob(".nihongo-stage-*"))
-    assert not list(tmp_path.glob(".nihongo-backup-*"))
+    assert not list(_work(destination).glob(".nihongo-stage-*"))
+    assert not list(_work(destination).glob(".nihongo-backup-*"))

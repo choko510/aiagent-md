@@ -258,7 +258,12 @@ def packaged_skill_texts() -> tuple[str, ...]:
     """Read-only skills shipped with the code (reviewed like code; never written by agents)."""
     if not SKILLS_DIR.is_dir():
         return ()
-    return tuple(p.read_text(encoding="utf-8") for p in sorted(SKILLS_DIR.rglob("*.md")))
+    visible = [
+        path
+        for path in sorted(SKILLS_DIR.rglob("*.md"))
+        if not any(part.startswith(".") for part in path.relative_to(SKILLS_DIR).parts)
+    ]
+    return tuple(path.read_text(encoding="utf-8") for path in visible)
 
 
 @lru_cache(maxsize=1)
@@ -297,10 +302,13 @@ _NIHONGO_DOC_NOUN = re.compile(
     r"文章|文書|メール|お知らせ|企画書|提案書|報告書|議事録|資料|スライド|プレゼン|マニュアル|技術文書|"
     r"仕様書|設計書|リリースノート|プレスリリース|案内|挨拶|スピーチ|履歴書|職務経歴書|志望動機|"
     r"ブログ|記事|コラム|商品説明|紹介文|自己紹介|推薦状|推薦文|カバーレター|返信|返事|文面|文案|"
-    r"下書き|UI文言|キャッチコピー|タイトル|手順書|契約書|稟議書|始末書|"
+    r"下書き|UI文言|キャッチコピー|タイトル|手順書|契約書|稟議書|始末書|広告|広告文|宣伝|販促|告知|"
+    r"ランディングページ|マーケティング|マーケ|プロモーション|ソーシャル|投稿文|"
+    r"(?<![A-Za-z0-9])(?:LP|SNS)(?![A-Za-z0-9])|"
     r"(?<![A-Za-z0-9])(?:e-?mail|report|essay|article|blog(?:\s+post)?|readme|proposal|memo|letter|cover\s+letter|"
     r"resume|cv|slides?|presentation|press\s+release|announcement|manual|documentation|technical\s+writing|"
-    r"release\s+notes|ui\s+copy|spec(?:ification)?|design\s+doc)(?![A-Za-z0-9])",
+    r"release\s+notes|ui\s+copy|spec(?:ification)?|design\s+doc|landing\s+page|advertising|ad\s+copy|"
+    r"social\s+media|marketing|promotion|promo)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _NIHONGO_WRITE_VERB = re.compile(
@@ -313,11 +321,15 @@ _NIHONGO_STRONG_WRITING = re.compile(
     r"(?<![A-Za-z0-9])(?:proofread|copyedit|rewrite|translate|draft)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+_NIHONGO_MARKETING_TARGET = re.compile(
+    r"広告|(?<![A-Za-z0-9])(?:LP|SNS)(?![A-Za-z0-9])|マーケ|キャッチコピー|プロモーション|ランディングページ",
+    re.IGNORECASE,
+)
 _NIHONGO_NON_WRITING = re.compile(
     r"コード|プログラム|スクリプト|関数|実装|SQL|JSON|YAML|XML|CSV|API|バグ|エラー|デバッグ|計算|"
-    r"天気|検索|調べ|要約|説明して|"
+    r"表示速度|ページ速度|デザイン|レイアウト|パフォーマンス|SEO|天気|検索|調べ|要約|説明して|"
     r"(?<![A-Za-z0-9])(?:code|script|function|implement|sql|json|yaml|xml|csv|api|bug|error|debug|calculate|compute|"
-    r"weather|search|lookup|summari[sz]e|explain)(?![A-Za-z0-9])",
+    r"weather|search|lookup|summari[sz]e|explain|render|layout|performance|seo|analytics)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _NIHONGO_OPT_OUT = re.compile(
@@ -362,8 +374,13 @@ def nihongo_full_for_goal(goal: str) -> bool:
     if not _NIHONGO_WRITE_VERB.search(text):
         return False
     document = bool(_NIHONGO_DOC_NOUN.search(text))
-    if _NIHONGO_NON_WRITING.search(text) and not document:
-        return False
+    if _NIHONGO_NON_WRITING.search(text):
+        if not document:
+            return False
+        # A marketing deliverable is still a document, but an implementation/design request about its surface
+        # (speed, layout, SEO) is development work, not copywriting.
+        if _NIHONGO_MARKETING_TARGET.search(text):
+            return False
     return document
 
 

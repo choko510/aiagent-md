@@ -443,6 +443,14 @@ def test_grounded_nihongo_read_pages_and_reject_forged_metadata(
         gw.record_internal(claimed, "read_reference", "read_file", _real_read_file_page(ref_path))["status"] == "DONE"
     )
 
+    hidden = skills / ".nihongo-stage-old"
+    hidden.mkdir()
+    (hidden / "ALWAYS.md").write_text("unverified staged copy\n", encoding="utf-8")
+    hidden_path = "/skills/.nihongo-stage-old/ALWAYS.md"
+    _propose(dbs, claimed, "read_hidden", "read_file", {"file_path": hidden_path, "offset": 0})
+    denied_hidden = gw.record_internal(claimed, "read_hidden", "read_file", _real_read_file_page(hidden_path))
+    assert denied_hidden["status"] == "DENIED"
+
     candidates = [
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("Instruction 20", "Instruction HACK", 1)),
         ({"file_path": path, "offset": 0, "limit": 100}, pages[0].replace("next offset 100", "next offset 101")),

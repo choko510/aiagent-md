@@ -8,10 +8,11 @@ and the WEB.md onboarding page are excluded from the bundle entirely.
 
 `--update` is the maintainer path when bumping the pin. It fetches that exact commit's archive, verifies every file
 with the same digests, and only then replaces the destination (staged, then renamed). A failed download or a
-mismatched file leaves the existing bundle untouched. A crash between the two renames is recovered on the next
-install/update from the leftover `.nihongo-backup-*` directory. A known legacy bundle is restored only for the update
-path and still fails ordinary verification until the new pin is installed; the swap is rollback-safe, not a single
-atomic directory replacement.
+mismatched file leaves the existing bundle untouched. Staging and backup directories live in a private
+`.nihongo-work/<key>` area beside `skills/`, never inside the Runtime-visible skills tree. A crash between the two
+renames is recovered on the next install/update from the leftover backup. A known legacy bundle is restored only for
+the update path and still fails ordinary verification until the new pin is installed; the swap is rollback-safe, not
+a single atomic directory replacement. Stale staging or backup directories make ordinary verification fail closed.
 
 Upstream: https://github.com/AnIT012/nihongo (MIT). Lite = ALWAYS.md, Full = SKILL.md + references/.
 """
@@ -232,8 +233,8 @@ def bundle_fingerprint(files: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
-def verify_tree(destination: Path) -> dict[str, bytes]:
-    """Verify the checked-in bundle byte for byte; any missing, extra, linked or modified file fails the build."""
+def _verify_bundle(destination: Path) -> dict[str, bytes]:
+    """Verify one directory's bytes without inspecting recovery work directories."""
     files = _read_declarative_bundle(destination)
     for rel, data in files.items():
         verify_file(rel, data)
@@ -241,6 +242,53 @@ def verify_tree(destination: Path) -> dict[str, bytes]:
     if missing:
         raise ValueError(f"incomplete nihongo skill bundle: {missing}")
     return files
+
+
+def _work_root(destination: Path) -> Path:
+    """Private staging/backup area outside the publicly exposed skills tree.
+
+    A destination-specific key prevents tests and two checkouts from sharing recovery state. The directory lives
+    beside skills rather than inside it, so the Runtime filesystem route and packaged_skill_texts cannot discover
+    an unverified staged copy.
+    """
+    key = hashlib.sha256(str(destination.resolve()).encode("utf-8")).hexdigest()[:16]
+    return destination.parent.parent / ".nihongo-work" / key
+
+
+def _staging_dirs(destination: Path) -> list[Path]:
+    paths = list(destination.parent.glob(".nihongo-stage-*"))
+    work = _work_root(destination)
+    if work.is_dir():
+        paths.extend(work.glob(".nihongo-stage-*"))
+    return sorted(paths)
+
+
+def _backup_dirs(destination: Path) -> list[Path]:
+    paths = list(destination.parent.glob(".nihongo-backup-*"))
+    work = _work_root(destination)
+    if work.is_dir():
+        paths.extend(work.glob(".nihongo-backup-*"))
+    return sorted(paths)
+
+
+def _remove_tree(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise RuntimeError(f"failed to remove nihongo work directory; preserved for manual recovery: {path}") from exc
+
+
+def _discard_stale_staging(destination: Path) -> None:
+    for path in _staging_dirs(destination):
+        _remove_tree(path)
+
+
+def verify_tree(destination: Path) -> dict[str, bytes]:
+    """Verify the checked-in bundle byte for byte; stale recovery directories fail closed."""
+    stale = [*_staging_dirs(destination), *_backup_dirs(destination)]
+    if stale:
+        raise RuntimeError(f"unrecovered nihongo work directory; remove it manually: {stale}")
+    return _verify_bundle(destination)
 
 
 def legacy_bundle_pin(destination: Path) -> str | None:
@@ -312,27 +360,29 @@ def recover_leftover_backup(destination: Path, *, allow_legacy: bool = False) ->
     """Recover a crash between the backup rename and the staged rename.
 
     A backup is verified before it is restored. The current pin is always accepted. A known v2.3.1 bundle is accepted
-    only when `allow_legacy` is explicit (the update path), because restoring it means the next ordinary build must
+    only when allow_legacy is explicit (the update path), because restoring it means the next ordinary build must
     still fail until the new pin is installed. Unknown or modified backups are refused and left on disk for manual
-    recovery. When the destination already exists it must verify against the current pin before stale backups are
-    discarded.
+    recovery. Stale staging is discarded only on the update path; ordinary verification fails closed instead. When
+    the destination already exists it must verify against the current pin before stale backups are discarded.
     """
-    backups = sorted(destination.parent.glob(".nihongo-backup-*"))
+    if allow_legacy:
+        _discard_stale_staging(destination)
+    backups = _backup_dirs(destination)
     if not backups:
         return None
     if destination.exists():
         try:
-            verify_tree(destination)
+            _verify_bundle(destination)
         except (OSError, ValueError) as exc:
             raise RuntimeError("destination is not the pinned nihongo bundle; refusing to discard its backup") from exc
         for backup in backups:
-            shutil.rmtree(backup, ignore_errors=True)
+            _remove_tree(backup)
         return None
     if len(backups) > 1:
         raise RuntimeError(f"ambiguous nihongo backups; manual recovery required: {backups}")
     backup = backups[0]
     try:
-        verify_tree(backup)
+        _verify_bundle(backup)
     except (OSError, ValueError) as current_error:
         legacy_pin = legacy_bundle_pin(backup)
         if legacy_pin is None:
@@ -364,8 +414,11 @@ def install(files: dict[str, bytes], destination: Path, *, allow_legacy_destinat
         verify_file(rel, data)
     if not (allow_legacy_destination and legacy_bundle_pin(destination) is not None):
         recover_leftover_backup(destination, allow_legacy=True)
+    _discard_stale_staging(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=destination.parent))
+    work = _work_root(destination)
+    work.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=work))
     backup: Path | None = None
     try:
         for rel, data in files.items():
@@ -375,7 +428,7 @@ def install(files: dict[str, bytes], destination: Path, *, allow_legacy_destinat
         if destination.is_symlink():
             raise ValueError("refusing to replace a symlink")
         if destination.exists():
-            backup = Path(tempfile.mkdtemp(prefix=".nihongo-backup-", dir=destination.parent))
+            backup = Path(tempfile.mkdtemp(prefix=".nihongo-backup-", dir=work))
             backup.rmdir()
             destination.rename(backup)
         try:
@@ -384,15 +437,17 @@ def install(files: dict[str, bytes], destination: Path, *, allow_legacy_destinat
             if backup is not None and not destination.exists():
                 try:
                     backup.rename(destination)  # restore the previously verified bundle
-                except OSError:
-                    pass  # keep the backup on disk for manual recovery
+                except OSError as restore_error:
+                    raise RuntimeError(
+                        f"failed to swap nihongo and failed to restore; backup preserved: {backup}"
+                    ) from restore_error
             raise
         if backup is not None:
-            shutil.rmtree(backup)
+            _remove_tree(backup)
             backup = None
     finally:
         if staging.exists():
-            shutil.rmtree(staging)
+            _remove_tree(staging)
 
 
 def update(destination: Path, fetch: Callable[[], bytes] = download_archive) -> dict[str, bytes]:
