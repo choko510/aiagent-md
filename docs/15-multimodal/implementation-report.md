@@ -108,7 +108,7 @@ OCR confidenceは「認識器の自己申告」であり真実ではない。con
 
 ## 4. 実行した検証
 
-環境: Windows、Python 3.12、portable PostgreSQL 16（127.0.0.1:55432）、Node.js。
+環境: Windows、Python 3.12、portable PostgreSQL 16（127.0.0.1:55432）、npm/Vite。
 
 ### 4.1 Pythonテスト
 
@@ -146,7 +146,7 @@ npm run check
 npm run build
 ```
 
-結果: TypeScript `tsc --noEmit` 成功、Vite production build 成功。
+結果: `tsc --noEmit` 成功、Vite production build 成功。
 
 ### 4.4 実ブラウザ
 
