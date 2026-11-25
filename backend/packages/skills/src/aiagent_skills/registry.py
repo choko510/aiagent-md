@@ -423,6 +423,8 @@ class SkillRegistry:
             installation = self.store.get_installation(tenant_id, installation_id)
             assert_owner(installation, owner_user_id)
             release = self.store.get_release(tenant_id, installation.release_id)
+            if release.scan is not None:
+                assert_release_installable(release, release.scan)
             self._approval(
                 approval=approval,
                 tenant_id=tenant_id,
@@ -601,6 +603,7 @@ class SkillRegistry:
                 raise LifecycleConflict("installation already points at the rollback target")
             if target.scan is not None:
                 assert_release_installable(target, target.scan)
+            self.resolve_dependencies(tenant_id, owner_user_id, target)
             history = self.store.list_history(tenant_id, installation_id)
             if target_release_id not in history:
                 raise LifecycleConflict("rollback target is not in this installation history")
