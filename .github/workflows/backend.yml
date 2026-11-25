@@ -207,30 +207,67 @@ jobs:
         working-directory: .
         run: |
           docker run --rm --network none --entrypoint python aiagent/all:dev -c '
-          from aiagent_domain.tools import SKILLS_DIR, packaged_skill_texts
-          skill = SKILLS_DIR / "nihongo"
-          lite = (skill / "ALWAYS.md")
-          assert lite.is_file() and "# nihongo Lite" in lite.read_text(encoding="utf-8")
-          assert (skill / "SKILL.md").stat().st_size > 30000
-          assert (skill / "references" / "technical-writing.md").is_file()
-          assert (skill / "LICENSE").is_file()
-          assert not (skill / "scripts").exists()
-          assert "yomiyasu" not in "".join(packaged_skill_texts()).lower()
-          from aiagent_runtime.agent import SYSTEM_PROMPT, _fs_backend
-          assert lite.read_text(encoding="utf-8").strip() in SYSTEM_PROMPT
+          import hashlib, os
+          from aiagent_domain.tools import (
+              NIHONGO_AUTHORITY_BOUNDARY, SKILLS_DIR, packaged_nihongo_full, packaged_nihongo_lite,
+              packaged_skill_texts,
+          )
+          from aiagent_gateways.model_gateway import context_system_prompt
           from aiagent_gateways.tool_gateway import _grounded_packaged_skill_read
+          from aiagent_runtime.agent import SYSTEM_PROMPT, _fs_backend
           from deepagents.middleware.filesystem import _prepare_read_window, _truncate_paginated_read
-          path = "/skills/nihongo/SKILL.md"
-          total = len((skill / "SKILL.md").read_text(encoding="utf-8").splitlines())
-          assert total > 100
-          for offset in range(0, total, 100):
-              result = _fs_backend().read(path, offset=offset, limit=100)
-              assert result.file_data is not None and not result.error
-              normalized, body = _prepare_read_window(result, result.file_data["content"], offset)
-              rendered = _truncate_paginated_read(body, path, normalized, None)
-              assert _grounded_packaged_skill_read(
-                  rendered, {"file_path": path, "offset": offset, "limit": 100}
-              )
+
+          skill = SKILLS_DIR / "nihongo"
+          files = sorted((p for p in skill.rglob("*") if p.is_file()), key=lambda p: p.relative_to(skill).as_posix())
+          assert len(files) == 25 and sum(p.stat().st_size for p in files) == 112849
+          assert not (skill / "WEB.md").exists() and not (skill / "scripts").exists()
+          assert not any(p.suffix in {".py", ".sh", ".js"} for p in skill.rglob("*"))
+          assert all(not os.access(p, os.W_OK) for p in [*files, *skill.rglob("*")])
+
+          def fingerprint():
+              digest = hashlib.sha256()
+              for path in files:
+                  rel = path.relative_to(skill).as_posix()
+                  digest.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+              return digest.hexdigest()
+
+          assert fingerprint() == "6b8d5a9fbaf9f2135cc79920bc93a39df65433cee89a35951b33226911037ad8"
+          all_text = "".join(packaged_skill_texts())
+          assert "yomiyasu" not in all_text.lower()
+          assert (skill / "references" / "marketing-copy.md").is_file()
+          assert (skill / "references" / "technical-writing.md").is_file()
+          assert (skill / "references" / "register.md").is_file()
+          assert "version: \"3.1.1\"" in (skill / "SKILL.md").read_text(encoding="utf-8")
+          assert (skill / "LICENSE").is_file()
+
+          lite = packaged_nihongo_lite()
+          full = packaged_nihongo_full()
+          assert lite in SYSTEM_PROMPT and full not in SYSTEM_PROMPT
+          assert NIHONGO_AUTHORITY_BOUNDARY in SYSTEM_PROMPT
+          assert SYSTEM_PROMPT.index(lite) < SYSTEM_PROMPT.index(NIHONGO_AUTHORITY_BOUNDARY)
+          assert "marketing-copy.md" in SYSTEM_PROMPT
+          context_lite = context_system_prompt()
+          assert NIHONGO_AUTHORITY_BOUNDARY in context_lite
+          assert context_lite.index(lite) < context_lite.index(NIHONGO_AUTHORITY_BOUNDARY)
+          assert full in context_system_prompt(full=True)
+
+          def read_all(path, limit):
+              offset = 0
+              for _ in range(20):
+                  result = _fs_backend().read(path, offset=offset, limit=limit)
+                  assert result.file_data is not None and not result.error
+                  normalized, body = _prepare_read_window(result, result.file_data["content"], offset)
+                  rendered = _truncate_paginated_read(body, path, normalized, None)
+                  assert _grounded_packaged_skill_read(rendered, {"file_path": path, "offset": offset, "limit": limit})
+                  assert normalized.start_line == offset + 1
+                  if normalized.next_offset is None:
+                      return offset
+                  assert normalized.next_offset > offset
+                  offset = normalized.next_offset
+              raise AssertionError("pagination did not finish")
+
+          assert read_all("/skills/nihongo/SKILL.md", 20) > 0
+          assert read_all("/skills/nihongo/references/technical-writing.md", 20) > 0
           '
       - name: Compose network isolation gate (dev topology)
         working-directory: .

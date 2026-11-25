@@ -3,14 +3,16 @@
 The Skill is pinned to one upstream commit and shipped as read-only package data. The default mode runs during the
 Docker build and verifies every checked-in file against its upstream Git blob SHA-1 and SHA-256, so an incomplete or
 modified bundle never becomes an image. Nothing is downloaded at agent runtime, and no upstream file is executed:
-the bundle contains only Markdown and the upstream MIT license. Upstream helper scripts (nihongo/scripts/*.py) are
-excluded from the bundle entirely.
+the bundle contains only Markdown and the upstream MIT license. Upstream helper scripts (nihongo/scripts/*.py)
+and the WEB.md onboarding page are excluded from the bundle entirely.
 
 `--update` is the maintainer path when bumping the pin. It fetches that exact commit's archive, verifies every file
 with the same digests, and only then replaces the destination (staged, then renamed). A failed download or a
-mismatched file leaves the existing bundle untouched. A crash between the two renames is recovered on the next
-install/verify from the leftover `.nihongo-backup-*` directory; the swap is rollback-safe, not a single atomic
-directory replacement.
+mismatched file leaves the existing bundle untouched. Staging and backup directories live in a private
+`.nihongo-work/<key>` area beside `skills/`, never inside the Runtime-visible skills tree. A crash between the two
+renames is recovered on the next install/update from the leftover backup. A known legacy bundle is restored only for
+the update path and still fails ordinary verification until the new pin is installed; the swap is rollback-safe, not
+a single atomic directory replacement. Stale staging or backup directories make ordinary verification fail closed.
 
 Upstream: https://github.com/AnIT012/nihongo (MIT). Lite = ALWAYS.md, Full = SKILL.md + references/.
 """
@@ -27,7 +29,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
-UPSTREAM_COMMIT = "61ca63f0499271495aefb9c7b3c4915f75960106"  # official Release v2.3.1 tag
+UPSTREAM_COMMIT = "eccf51724ef2feef9fb8a96cd7a64d298c7715d7"  # official Release v3.1.1 tag
 UPSTREAM_URL = f"https://codeload.github.com/AnIT012/nihongo/tar.gz/{UPSTREAM_COMMIT}"
 UPSTREAM_SKILL_PREFIX = f"nihongo-{UPSTREAM_COMMIT}/nihongo/"
 UPSTREAM_LICENSE = f"nihongo-{UPSTREAM_COMMIT}/LICENSE"
@@ -35,27 +37,29 @@ MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 
-# Upstream ships helper scripts in nihongo/scripts/. They are never vendored, installed or executed here: the
-# shipped bundle is declarative Markdown plus the MIT license only.
+# Upstream ships helper scripts in nihongo/scripts/ and a separate WEB.md onboarding page. Neither is vendored,
+# installed or executed here: the shipped bundle is declarative Markdown plus the MIT license only. WEB.md is
+# excluded by exact name while reading the pinned archive; it is never an accepted bundle member.
 UPSTREAM_EXCLUDED_DIRS = ("scripts/",)
+UPSTREAM_EXCLUDED_FILES = ("WEB.md",)
 
-# (Git blob SHA-1, SHA-256) of every upstream file. Never accept "latest main" silently.
+# (Git blob SHA-1, SHA-256) of every one of the 25 adopted upstream files. Never accept "latest main" silently.
 EXPECTED_FILES: dict[str, tuple[str, str]] = {
     "LICENSE": (
         "0941ee17a37b8d6559dd869e720bed1a210f8d71",
         "c0f14ffe335cc6f5d4370dd82d716aed7402fc39074bb164a739f29dd9b690f2",
     ),
     "ALWAYS.md": (
-        "6f833b7c8b74e2c07ea303ecc265cd510b4c5377",
-        "ace4f04704e9be30f0beaa1e9d5873b3d74a8d6c12f05f7305d9befcb4a612a4",
+        "0c5f6e4e263c9c45b46ee482dd9fea3e9565a726",
+        "71e65072df64f857f4e31c4ecff34aa966ba938cd44ed219bd2bea55ce99506e",
     ),
     "SKILL.md": (
-        "f422fcdae950071777d1434ffd9565ec19d8815e",
-        "2fee575987a3d033a90a4a167d90d85f5eefcb08ca3805b507df1b4d4e1f58c8",
+        "0f42c077f19521d9690da74581a5d7425fb46177",
+        "1117a827a7615906d8c2bbcc5a77cea3353213ae0aa89991434ef0f87c32df7a",
     ),
     "references/ai-patterns.md": (
-        "db78ae040a5d11f9021c5417c37879b6ee0729f4",
-        "f58181d054a760b1e70e71ebddeacedb356a058a4059a799bec85204824fbd16",
+        "3e02aa9d7f79d4bc63644ec520450ec9daa02277",
+        "3feb063ba04b9093b1ce286c8e7243ba01009c471839074b351f050817d453a0",
     ),
     "references/business-email.md": (
         "77702e80a9b2a078e1a622396429ed3a2bb11b93",
@@ -66,12 +70,12 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
         "1636c20bd703bd0588644c8bc8c666dde49bfc3bdb967f9db05a453617fd01da",
     ),
     "references/craft.md": (
-        "fe60f085b684bea37997aa371f42d929f3198238",
-        "fee52d3441468c319dfc74b1d8daa176a4ed8f2274e230217340c00ec7ade146",
+        "afee8e94273409e8c7ec16dba5322c6f95e517ae",
+        "4b657b870cb01bb7e83e7b849f208adf3012b08c9b92924bc09b0a769a58e1e5",
     ),
     "references/entry-sheet.md": (
-        "536b1c626541b59ab735f372ac5b76452e814f7e",
-        "a8b36ded05ed602679b2ffe4f02b4396e31d2d339937bfe4b98fb7f2fa0eaf84",
+        "357c7d100b99d2b7d0330b52fcac82a1422c07b4",
+        "7dbdf55bb92d0db9ddabd9889cb97dbe68b0d553d8c29719fc8e9e95fa1de871",
     ),
     "references/essays-and-promotion.md": (
         "58c37d914ee8a5bc719e9d1d03ee8ca9b8823e5c",
@@ -82,28 +86,32 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
         "dce99964728f9cda0cdb53087894b3601e7b001102b503e7060033609695f8a1",
     ),
     "references/make-profile.md": (
-        "0054a5acdd7a51649f4728a654405aa59f826bf9",
-        "e557d02352394f68c0a16af2c267ff984385762aac5d94cec323be208f711c89",
+        "32215d6aefb9ab395485dbc8f83eea03d45e6a99",
+        "c4210710f00422086ffaaae89691f90f43aa0b4014f6ed5ca87dc20609d096b2",
+    ),
+    "references/marketing-copy.md": (
+        "7a4df9972dba8ab4f0f36168ac2a68324d0eae57",
+        "6bc27aaada9ff9e94615fb38ab6059c33a3cbbcf1c2be916631236193017c4ec",
     ),
     "references/media.md": (
         "ae25abcc05312402b959de6ad3771a301a4bb872",
         "94bbbab217f30aeeadd90e57f8a62b1e2e8fdebb7459d05de0b46a05cc0cf53d",
     ),
     "references/messaging.md": (
-        "852630f38c510eead698e31a37ed7cf03535fade",
-        "b3a086e46b1abe4360dbd2317550f46359aa5ead3dc1e94389cc585e9816d8a9",
+        "e8aab7f1605338f6b1fd466a80be9023095e2e61",
+        "bb42a2c352bef47e3bbb0b5f48e562156f6b35dfd0ea00bd998407b49756be31",
     ),
     "references/notices.md": (
-        "ce220f8b0e2b9ffa3af53a1101bc5525665a7ab0",
-        "728aa530acf618de243be862fb7639ae645a3a8bdcacdc4dc90ce064bbcee8a3",
+        "04eef3394f043a5acdf5e804ec648446212cb080",
+        "558a530dcbed2cfc9f6ed4dc582cfb9ddaeea78f8ae08a8378407be9cc4ce8aa",
     ),
     "references/orthography.md": (
-        "d6a142fe7592a5ecf1842194d03894e3a5e6f3ef",
-        "189dc9424f6f489fb05720a8a5e4e5580da72a691511129daee904e7521deb11",
+        "1965225280b4f5225e1e452336104e381b7d3eff",
+        "c4d85f437721f519fa02892741a02775a51a152a457bb1f53034fe914c49e8e1",
     ),
     "references/personal-profile.md": (
-        "1318e3cfa2b566182816f6558a818ceee01a6d11",
-        "713832f145329b60c5ffc077487fa80f8c96d7371a13d2285fe5980a5a834dfe",
+        "f542d844a9000d654c12ac2708e39f2534cba481",
+        "c7dce5bb3cfaf33a1c13c499b0958576aec77cdf188f46aa38c8b8d38c976c05",
     ),
     "references/register.md": (
         "59fdf708445e76ebeac671f2c6a4bbfc8df770e6",
@@ -114,8 +122,8 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
         "5523aa206f541feb3dbd3599bdf1f7e9aa264f990e8e363914aa1d4177ad7dc8",
     ),
     "references/slides-and-documents.md": (
-        "771239d8921ff6c8197c4dc427ded2bafd2ee62e",
-        "50df37422ef9ccd9c16a01e3e16cc6742b6792201a52f4ab57e89619b3cb1831",
+        "4e4319dc9c8564dda9be6daad8a4b51a3556d4ec",
+        "49a6535fe0d90f2e734983556223509a0e20c07d2302bb44687cfd119c5ff8a1",
     ),
     "references/speech.md": (
         "e2e9de29f2f3bc577b6d5dddb19c5825f8dfeff0",
@@ -136,6 +144,15 @@ EXPECTED_FILES: dict[str, tuple[str, str]] = {
     "references/ui-copy.md": (
         "5457aff8f597d72b7a3df0805c5329d50f3773c5",
         "caa317fbff2cfc20775749b545c1a16c3adeca8f826fa5d6a121e83cba947efa",
+    ),
+}
+
+# v2.3.1 bundles are valid only for crash recovery from an interrupted update, never as the current bundle.
+# The value is (file count, canonical bundle fingerprint) where the fingerprint covers the exact path set and bytes.
+LEGACY_BUNDLES: dict[str, tuple[int, str]] = {
+    "61ca63f0499271495aefb9c7b3c4915f75960106": (
+        24,
+        "11331b49da5d8db19a631f89b305dcb5983037b66962f24472374ff893413b13",
     ),
 }
 
@@ -175,8 +192,12 @@ def _checked_relpath(rel: str) -> PurePosixPath:
     return posix
 
 
-def verify_tree(destination: Path) -> dict[str, bytes]:
-    """Verify the checked-in bundle byte for byte; any missing, extra, linked or modified file fails the build."""
+def _read_declarative_bundle(destination: Path) -> dict[str, bytes]:
+    """Read a declarative bundle while enforcing path, entry-type, hardlink and size limits.
+
+    This helper deliberately does not compare against EXPECTED_FILES: legacy-bundle recovery needs the exact bytes
+    first, then compares a canonical fingerprint against a separately pinned legacy version.
+    """
     if not destination.is_dir() or destination.is_symlink():
         raise ValueError(f"missing nihongo skill bundle: {destination}")
     files: dict[str, bytes] = {}
@@ -188,18 +209,122 @@ def verify_tree(destination: Path) -> dict[str, bytes]:
             continue
         if not path.is_file():
             raise ValueError(f"unsupported entry in nihongo skill bundle: {path}")
+        if path.stat(follow_symlinks=False).st_nlink > 1:
+            raise ValueError(f"hardlink inside nihongo skill bundle: {path}")
         rel = path.relative_to(destination).as_posix()
         _checked_relpath(rel)
         data = path.read_bytes()
-        verify_file(rel, data)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"oversized nihongo skill file: {rel}")
         total_bytes += len(data)
         if total_bytes > MAX_TOTAL_BYTES:
             raise ValueError("nihongo skill bundle exceeds size limit")
         files[rel] = data
+    return files
+
+
+def bundle_fingerprint(files: dict[str, bytes]) -> str:
+    """Canonical SHA-256 over the exact relative-path set and each file's SHA-256."""
+    digest = hashlib.sha256()
+    for rel in sorted(files):
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(files[rel]).digest())
+    return digest.hexdigest()
+
+
+def _verify_bundle(destination: Path) -> dict[str, bytes]:
+    """Verify one directory's bytes without inspecting recovery work directories."""
+    files = _read_declarative_bundle(destination)
+    for rel, data in files.items():
+        verify_file(rel, data)
     missing = sorted(set(EXPECTED_FILES) - set(files))
     if missing:
         raise ValueError(f"incomplete nihongo skill bundle: {missing}")
     return files
+
+
+def _work_base(destination: Path) -> Path:
+    """Private staging/backup parent beside skills, outside the publicly exposed tree."""
+    return destination.parent.parent / ".nihongo-work"
+
+
+def _work_key(destination: Path) -> str:
+    """Key work state by a path relative to the work parent, not by an absolute checkout path.
+
+    The same source tree can be copied from WSL to Docker and therefore has a different absolute path. Hashing
+    'skills/nihongo' relative to the source tree keeps the state discoverable after such a copy, while still
+    separating two different relative destinations under one work parent.
+    """
+    root = destination.parent.parent
+    try:
+        relative = destination.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        relative = Path(destination.name)
+    return hashlib.sha256(relative.as_posix().encode("utf-8")).hexdigest()[:16]
+
+
+def _work_root(destination: Path) -> Path:
+    """Private staging/backup area outside the publicly exposed skills tree.
+
+    The directory lives beside skills rather than inside it, so the Runtime filesystem route and
+    packaged_skill_texts cannot discover an unverified staged copy. Its key is relative-path based so a copied
+    source tree finds the same work directory.
+    """
+    return _work_base(destination) / _work_key(destination)
+
+
+def _work_entries(destination: Path, pattern: str) -> list[Path]:
+    """Find work entries under every key, including keys left by an older absolute-path scheme."""
+    base = _work_base(destination)
+    if not base.is_dir():
+        return []
+    return sorted({*base.glob(pattern), *base.glob(f"*/{pattern}")})
+
+
+def _staging_dirs(destination: Path) -> list[Path]:
+    paths = list(destination.parent.glob(".nihongo-stage-*"))
+    paths.extend(_work_entries(destination, ".nihongo-stage-*"))
+    return sorted(paths)
+
+
+def _backup_dirs(destination: Path) -> list[Path]:
+    paths = list(destination.parent.glob(".nihongo-backup-*"))
+    paths.extend(_work_entries(destination, ".nihongo-backup-*"))
+    return sorted(paths)
+
+
+def _remove_tree(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise RuntimeError(f"failed to remove nihongo work directory; preserved for manual recovery: {path}") from exc
+
+
+def _discard_stale_staging(destination: Path) -> None:
+    for path in _staging_dirs(destination):
+        _remove_tree(path)
+
+
+def verify_tree(destination: Path) -> dict[str, bytes]:
+    """Verify the checked-in bundle byte for byte; stale recovery directories fail closed."""
+    stale = [*_staging_dirs(destination), *_backup_dirs(destination)]
+    if stale:
+        raise RuntimeError(f"unrecovered nihongo work directory; remove it manually: {stale}")
+    return _verify_bundle(destination)
+
+
+def legacy_bundle_pin(destination: Path) -> str | None:
+    """Return the pin when a complete, known legacy bundle is present; never trust an arbitrary directory."""
+    try:
+        files = _read_declarative_bundle(destination)
+    except (OSError, ValueError):
+        return None
+    fingerprint = bundle_fingerprint(files)
+    for pin, (count, expected) in LEGACY_BUNDLES.items():
+        if len(files) == count and fingerprint == expected:
+            return pin
+    return None
 
 
 def download_archive() -> bytes:
@@ -216,12 +341,18 @@ def verified_archive_files(archive: bytes) -> dict[str, bytes]:
     if len(archive) > MAX_ARCHIVE_BYTES:
         raise ValueError("nihongo archive exceeds size limit")
     files: dict[str, bytes] = {}
+    excluded: set[str] = set()
     total_bytes = 0
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         for member in tar:
             if not member.name.startswith(UPSTREAM_SKILL_PREFIX) and member.name != UPSTREAM_LICENSE:
                 continue
             rel = "LICENSE" if member.name == UPSTREAM_LICENSE else member.name[len(UPSTREAM_SKILL_PREFIX) :]
+            if rel in UPSTREAM_EXCLUDED_FILES:
+                if not member.isfile() or rel in excluded:
+                    raise ValueError(f"unsafe excluded upstream skill member: {member.name}")
+                excluded.add(rel)
+                continue  # WEB.md is onboarding content, not part of the static bundle
             if member.isdir():
                 continue
             if rel.startswith(UPSTREAM_EXCLUDED_DIRS):
@@ -248,48 +379,69 @@ def verified_archive_files(archive: bytes) -> dict[str, bytes]:
     return files
 
 
-def recover_leftover_backup(destination: Path) -> None:
+def recover_leftover_backup(destination: Path, *, allow_legacy: bool = False) -> str | None:
     """Recover a crash between the backup rename and the staged rename.
 
-    A backup is verified before it is restored. When the destination already exists it is verified instead; a stale
-    backup is then the previous (older) bundle, so it is discarded without being checked against the current pin.
-    An ambiguous set of backups without a destination is refused rather than guessed.
+    A backup is verified before it is restored. The current pin is always accepted. A known v2.3.1 bundle is accepted
+    only when allow_legacy is explicit (the update path), because restoring it means the next ordinary build must
+    still fail until the new pin is installed. Unknown or modified backups are refused and left on disk for manual
+    recovery. Stale staging is discarded only on the update path; ordinary verification fails closed instead. When
+    the destination already exists it must verify against the current pin before stale backups are discarded.
     """
-    backups = sorted(destination.parent.glob(".nihongo-backup-*"))
+    if allow_legacy:
+        _discard_stale_staging(destination)
+    backups = _backup_dirs(destination)
     if not backups:
-        return
+        return None
     if destination.exists():
         try:
-            verify_tree(destination)
+            _verify_bundle(destination)
         except (OSError, ValueError) as exc:
             raise RuntimeError("destination is not the pinned nihongo bundle; refusing to discard its backup") from exc
         for backup in backups:
-            shutil.rmtree(backup, ignore_errors=True)
-        return
+            _remove_tree(backup)
+        return None
     if len(backups) > 1:
         raise RuntimeError(f"ambiguous nihongo backups; manual recovery required: {backups}")
+    backup = backups[0]
     try:
-        verify_tree(backups[0])
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"leftover nihongo backup is not a verified bundle: {backups[0]}") from exc
-    backups[0].rename(destination)
+        _verify_bundle(backup)
+    except (OSError, ValueError) as current_error:
+        legacy_pin = legacy_bundle_pin(backup)
+        if legacy_pin is None:
+            raise RuntimeError(f"leftover nihongo backup is not a verified bundle: {backup}") from current_error
+        if not allow_legacy:
+            raise RuntimeError(
+                f"leftover nihongo backup is verified legacy {legacy_pin}, not the current pin; "
+                "run --update or restore it manually (backup preserved)"
+            ) from current_error
+        backup.rename(destination)
+        return legacy_pin
+    backup.rename(destination)
+    return None
 
 
-def install(files: dict[str, bytes], destination: Path) -> None:
+def install(files: dict[str, bytes], destination: Path, *, allow_legacy_destination: bool = False) -> None:
     """Stage verified files, keep the old bundle until the swap succeeds, and roll back if the swap fails.
 
     A directory rename cannot replace a non-empty directory, so the old bundle is moved aside first. The window
     between that move and the staged rename is covered by a rollback: if the swap raises, the previous verified
-    bundle is restored. If the process dies in that window, the next install/verify restores the verified backup
-    before proceeding, so the destination is not left missing.
+    bundle is restored. If the process dies in that window, the next install/update restores the verified backup
+    before proceeding, so the destination is not left missing. Ordinary verification never writes.
+    ``allow_legacy_destination`` is used only by the update path after it has restored a known legacy backup; the
+    legacy bundle is then replaced, never accepted as the current pin.
     """
     if set(files) != set(EXPECTED_FILES):
         raise ValueError("unverified skill bundle")
     for rel, data in files.items():
         verify_file(rel, data)
-    recover_leftover_backup(destination)
+    if not (allow_legacy_destination and legacy_bundle_pin(destination) is not None):
+        recover_leftover_backup(destination, allow_legacy=True)
+    _discard_stale_staging(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=destination.parent))
+    work = _work_root(destination)
+    work.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".nihongo-stage-", dir=work))
     backup: Path | None = None
     try:
         for rel, data in files.items():
@@ -299,7 +451,7 @@ def install(files: dict[str, bytes], destination: Path) -> None:
         if destination.is_symlink():
             raise ValueError("refusing to replace a symlink")
         if destination.exists():
-            backup = Path(tempfile.mkdtemp(prefix=".nihongo-backup-", dir=destination.parent))
+            backup = Path(tempfile.mkdtemp(prefix=".nihongo-backup-", dir=work))
             backup.rmdir()
             destination.rename(backup)
         try:
@@ -308,21 +460,24 @@ def install(files: dict[str, bytes], destination: Path) -> None:
             if backup is not None and not destination.exists():
                 try:
                     backup.rename(destination)  # restore the previously verified bundle
-                except OSError:
-                    pass  # keep the backup on disk for manual recovery
+                except OSError as restore_error:
+                    raise RuntimeError(
+                        f"failed to swap nihongo and failed to restore; backup preserved: {backup}"
+                    ) from restore_error
             raise
         if backup is not None:
-            shutil.rmtree(backup)
+            _remove_tree(backup)
             backup = None
     finally:
         if staging.exists():
-            shutil.rmtree(staging)
+            _remove_tree(staging)
 
 
 def update(destination: Path, fetch: Callable[[], bytes] = download_archive) -> dict[str, bytes]:
     """Fetch, verify, then install with rollback and crash recovery; a failure leaves the bundle untouched."""
+    recover_leftover_backup(destination, allow_legacy=True)
     files = verified_archive_files(fetch())
-    install(files, destination)
+    install(files, destination, allow_legacy_destination=True)
     return files
 
 
@@ -335,11 +490,11 @@ def main() -> None:
         help="fetch the pinned upstream commit and replace the bundle after verification (maintainer only)",
     )
     args = parser.parse_args()
-    recover_leftover_backup(args.destination)
     if args.update:
         files = update(args.destination)
         print(f"Verified and installed upstream nihongo {UPSTREAM_COMMIT} ({len(files)} files)")
         return
+    # Ordinary verification is read-only. Recovery and stale-directory cleanup belong to --update.
     files = verify_tree(args.destination)
     print(f"Verified packaged nihongo {UPSTREAM_COMMIT} ({len(files)} files)")
 

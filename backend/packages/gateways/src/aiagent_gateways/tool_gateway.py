@@ -1123,6 +1123,8 @@ def _grounded_packaged_skill_read(content: str, args: dict[str, Any]) -> bool:
     parts = posix.parts
     if len(parts) < 4 or parts[:2] != ("/", "skills") or not parts[-1].endswith((".md", ".txt")):
         return False
+    if any(part.startswith(".") for part in parts[2:]):
+        return False
     candidate = SKILLS_DIR.joinpath(*parts[2:])
     if not candidate.is_file() or any(p.is_symlink() for p in (candidate, *candidate.parents)):
         return False

@@ -30,6 +30,7 @@ from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import (
     INTERNAL_TOOL_SPECS,
     INTERNAL_TOOLS,
+    NIHONGO_AUTHORITY_BOUNDARY,
     PROFILE_TOOLS,
     TOOLS,
     nihongo_full_for_goal,
@@ -52,26 +53,29 @@ _TOKEN_ESTIMATOR = ModelBoundTokenEstimator()
 
 
 def context_system_prompt(*, full: bool = False) -> str:
-    """Trusted system prompt for a Context inference: Lite, optionally Full, and the Context authority rule.
+    """Trusted system prompt for a Context inference: Lite, optionally Full, and the authority boundaries.
 
     The committed Context payload is untrusted data and stays in the user message; it never enters the system
     prompt. Lite is always applied. Full is added only when the trusted Task goal is classified as a document
-    writing/editing request, so an ordinary Context inference does not pay ~12.7k extra tokens. The Context request
-    exposes no tools; references remain unavailable on this path and the model is told not to claim otherwise.
+    writing/editing request, so an ordinary Context inference does not pay the Full-text cost. The Context request
+    exposes no tools; references, Personal profiles, the CLI and MCP remain unavailable on this path and the model
+    is told not to claim otherwise.
     """
     parts = [packaged_nihongo_lite()]
     if full:
         parts.append(packaged_nihongo_full())
+    parts.append(NIHONGO_AUTHORITY_BOUNDARY)
     parts.append(CONTEXT_AUTHORITY_RULE)
     if full:
         parts.append(
-            "This Context path exposes no tools. Apply the Lite and Full rules above directly; references/ files "
-            "are not readable here, so do not claim to have read them or run any checks."
+            "This Context path exposes no tools. Apply the Lite and Full rules above directly; references/ files, "
+            "nihongo Personal profiles, the CLI and MCP are not available here, so do not claim to have read them or "
+            "run any checks."
         )
     else:
         parts.append(
-            "This Context path exposes no tools and includes Lite only; Full and references/ are not available "
-            "here. Do not claim to have read them or to have run checks."
+            "This Context path exposes no tools and includes Lite only; Full, references/, nihongo Personal "
+            "profiles, the CLI and MCP are not available here. Do not claim to have read them or to have run checks."
         )
     return "\n\n".join(parts)
 

@@ -450,7 +450,7 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
     ("goal", "reads", "result"),
     [
         ("nihongo fixture: 今日の天気を教えてください。", 0, "通常会話としてLiteのみで回答しました。"),
-        ("nihongo fixture: 日本語の文章を推敲してください。", 2, "推敲済み：日本語の文章を読みやすく整えました。"),
+        ("nihongo fixture: 日本語の文章を推敲してください。", 1, "推敲済み：日本語の文章を読みやすく整えました。"),
         (
             "nihongo fixture: READMEの技術文書を更新してください。",
             3,
@@ -466,6 +466,21 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
             3,
             "作成済み：書き言葉の段で報告書を整えました。",
         ),
+        (
+            "nihongo fixture: LPの広告文を作成してください。",
+            2,
+            "作成済み：事実と勢いを保って広告文を整えました。",
+        ),
+        (
+            "nihongo fixture: 長文のコラムを推敲してください。",
+            3,
+            "推敲済み：長文の構成と表記を整えました。",
+        ),
+        (
+            "nihongo fixture: お詫びのメールを作成してください。",
+            3,
+            "作成済み：用件が伝わるビジネスメールに整えました。",
+        ),
         ("nihongo fixture: このコードとJSONは変更しないでください。", 0, "コードとJSONは変更していません。"),
         ("nihongo fixture: nihongoを使わないで通常回答してください。", 0, "指定に従って通常回答しました。"),
     ],
@@ -473,13 +488,16 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
 def test_t09a_nihongo_lite_and_full_reads_through_real_gateways(
     stack: Stack, api, t, pg: PgEnv, goal: str, reads: int, result: str
 ) -> None:
-    """Real Gateway path: chat needs no skill read, deliverables read Full, technical docs add one reference,
+    """Real Gateway path: chat needs no skill read, deliverables read Full and only the required references,
     code/JSON stay untouched, and an explicit opt-out wins. The provider is a deterministic mock."""
     task = submit(api, t, goal)
     attempts = stack.drive()
     st = state(api, t, task)
     assert st["state"] == "SUCCEEDED", (st, [p.stderr[-1500:] for p in attempts])
     assert st["run"]["result"] == result
+    model_rows = [a for a in model_attempts(pg, task) if a["stream"] == "main"]
+    assert len(model_rows) == reads + 1  # one proposal per tool result, plus the final answer
+    assert all(a["status_code"] == "COMPLETED" and a["admitted"] for a in model_rows)
     entries = q(
         pg.owner,
         "SELECT entry_kind, checkpoint_json FROM agent.run_checkpoints WHERE run_id=%s ORDER BY checkpoint_revision",
@@ -495,10 +513,22 @@ def test_t09a_nihongo_lite_and_full_reads_through_real_gateways(
         return
     assert all(text.startswith("@@ lines ") for text in pages)
     assert 'name: "nihongo"' in pages[0]
-    assert "next offset 100" in pages[0]
+    assert "next offset" not in pages[0]  # v3.1.1 SKILL.md fits in one read page
     assert all("next offset" not in text for text in pages[1:])
-    if reads == 3:
-        assert ("# 書き言葉の段" if "報告書" in goal else "# 技術文書") in pages[2]
+    expected: list[str] = []
+    if "報告書" in goal:
+        expected = ["# スライド・資料・企画書・議事録・手順書・表", "# 書き言葉の段"]
+    elif "README" in goal:
+        expected = ["# 技術文書", "# 書き言葉の段"]
+    elif "広告" in goal:
+        expected = ["# マーケ・広告・LP・告知コピー"]
+    elif "長文" in goal:
+        expected = ["# 文の組み立て・言葉の選び方", "# 表記・数字・句読点"]
+    elif "メール" in goal:
+        expected = ["# ビジネス・大学メール", "# 書き言葉の段"]
+    assert len(expected) == reads - 1
+    for marker, text in zip(expected, pages[1:]):
+        assert marker in text
     assert all("not grounded in HEAD" not in text for text in pages)
 
 

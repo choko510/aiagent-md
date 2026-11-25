@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import uuid
 from collections.abc import AsyncIterator
@@ -67,6 +68,92 @@ def _call(name: str, **args: Any) -> dict[str, Any]:
     return {"content": "", "tool_calls": [{"name": name, "args": args}]}
 
 
+# A grounded read header is the only source of page metadata. Never infer a fixed page size or page count.
+_READ_PAGE_RE = re.compile(r"@@ lines ([1-9][0-9]*)-([1-9][0-9]*) of ([1-9][0-9]*)(?: \| next offset ([0-9]+))? @@")
+_PAGE_LIMIT_RE = re.compile(r"page[- ]limit(?:=|:)\s*([1-9][0-9]{0,3})")
+
+
+def _fixture_page_limit(first: str) -> int:
+    """Fixture-only small page size for multi-page regression; production reads request 1000 lines."""
+    match = _PAGE_LIMIT_RE.search(first)
+    return min(int(match.group(1)), 1000) if match else 1000
+
+
+def _parse_read_page(content: str) -> tuple[int, int, int, int | None] | None:
+    """Parse and validate one DeepAgents read window: (start, end, total, next offset)."""
+    first_line = content.splitlines()[0] if content else ""
+    match = _READ_PAGE_RE.fullmatch(first_line)
+    if match is None:
+        return None
+    start, end, total = (int(match.group(i)) for i in (1, 2, 3))
+    next_offset = int(match.group(4)) if match.group(4) is not None else None
+    if start > end or end > total:
+        return None
+    if next_offset is None:
+        if end != total:
+            return None
+    elif next_offset != end or end >= total:
+        return None
+    return start, end, total, next_offset
+
+
+def _consume_read_pages(pages: list[dict[str, Any]], start: int) -> tuple[int, int | None, str | None]:
+    """Consume a complete read chain from start; return (next index, resume offset, error)."""
+    if start >= len(pages):
+        return start, None, "missing read_file page"
+    expected_start = 1
+    expected_total: int | None = None
+    for index in range(start, len(pages)):
+        parsed = _parse_read_page(str(pages[index].get("content", "")))
+        if parsed is None:
+            return index, None, "read_file page has invalid window metadata"
+        page_start, _page_end, total, next_offset = parsed
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            return index, None, "read_file pages disagree on total lines"
+        if page_start != expected_start:
+            return index, None, f"read_file page starts at {page_start}, expected {expected_start}"
+        if next_offset is None:
+            return index + 1, None, None
+        expected_start = next_offset + 1
+    return len(pages), expected_start - 1, None
+
+
+_NIHONGO_FIXTURE_SOCIAL = re.compile(r"(?<![a-z0-9])(?:lp|sns)(?![a-z0-9])")
+
+
+def _fake_nihongo_references(first: str) -> tuple[list[tuple[str, str]], str]:
+    """Fixture reference route for the v3.1.1 categories; each tuple is (path, required heading)."""
+    if any(key in first for key in ("広告", "マーケ", "キャッチコピー", "プロモーション")) or (
+        _NIHONGO_FIXTURE_SOCIAL.search(first)
+    ):
+        return [
+            ("/skills/nihongo/references/marketing-copy.md", "# マーケ・広告・LP・告知コピー"),
+        ], "作成済み：事実と勢いを保って広告文を整えました。"
+    if any(key in first for key in ("報告書", "仕様書", "設計書", "企画書", "書き言葉", "スライド", "議事録")):
+        return [
+            ("/skills/nihongo/references/slides-and-documents.md", "# スライド・資料・企画書・議事録・手順書・表"),
+            ("/skills/nihongo/references/register.md", "# 書き言葉の段"),
+        ], "作成済み：書き言葉の段で報告書を整えました。"
+    if "readme" in first or "技術文書" in first:
+        return [
+            ("/skills/nihongo/references/technical-writing.md", "# 技術文書"),
+            ("/skills/nihongo/references/register.md", "# 書き言葉の段"),
+        ], "更新済み：技術文書の用語と手順を保って読みやすく整えました。"
+    if any(key in first for key in ("長文", "コラム", "エッセイ")):
+        return [
+            ("/skills/nihongo/references/craft.md", "# 文の組み立て・言葉の選び方"),
+            ("/skills/nihongo/references/orthography.md", "# 表記・数字・句読点"),
+        ], "推敲済み：長文の構成と表記を整えました。"
+    if "メール" in first:
+        return [
+            ("/skills/nihongo/references/business-email.md", "# ビジネス・大学メール"),
+            ("/skills/nihongo/references/register.md", "# 書き言葉の段"),
+        ], "作成済み：用件が伝わるビジネスメールに整えました。"
+    return [], ""
+
+
 def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -> dict[str, Any]:
     first = next((m.get("content", "") for m in messages if m.get("kind") == "user"), "").lower()
     r = _results(messages)
@@ -106,7 +193,7 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
             return _call("send_message", to="bob", body="price=42")
         return {"content": "answer: goal revised, nothing sent"}
     # Deterministic nihongo fixture for the gateway/Agent runtime integration tests: chat uses only the embedded
-    # Lite, deliverables read the full SKILL.md, writing-language/technical documents add one reference, and code/JSON stay untouched.
+    # Lite, deliverables read the full SKILL.md, each category adds only its required references, and code/JSON stay untouched.
     # No model-side bypass: these calls must be proposed, admitted, and committed by the real gateways.
     if "nihongo fixture" in first:
         if "nihongoを使わない" in first or "nihongo を使わない" in first:
@@ -131,42 +218,53 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 "設計書",
                 "企画書",
                 "書き言葉",
+                "広告",
+                "マーケ",
+                "キャッチコピー",
+                "長文",
+                "コラム",
             )
-        )
+        ) or bool(_NIHONGO_FIXTURE_SOCIAL.search(first))
         if not deliverable:
             if "コード" in first or "json" in first:
                 return {"content": "コードとJSONは変更していません。"}
             return {"content": "通常会話としてLiteのみで回答しました。"}
-        reference: tuple[str, str, str] | None = None
-        if any(key in first for key in ("報告書", "仕様書", "設計書", "企画書", "書き言葉")):
-            reference = (
-                "/skills/nihongo/references/register.md",
-                "# 書き言葉の段",
-                "作成済み：書き言葉の段で報告書を整えました。",
-            )
-        elif "readme" in first or "技術文書" in first:
-            reference = (
-                "/skills/nihongo/references/technical-writing.md",
-                "# 技術文書",
-                "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
-            )
+        references, result = _fake_nihongo_references(first)
         path = "/skills/nihongo/SKILL.md"
+        page_limit = _fixture_page_limit(first)
         if not pages:
-            return _call("read_file", file_path=path, offset=0, limit=100)
-        if len(pages) == 1:
-            first_page = str(pages[0].get("content", ""))
-            if not first_page.startswith("@@ lines ") or "next offset 100" not in first_page:
-                return {"content": "error: first skill page rejected"}
-            return _call("read_file", file_path=path, offset=100, limit=1000)
-        if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
-            return {"content": "error: skill page rejected"}
-        if reference is not None and len(pages) == 2:
-            return _call("read_file", file_path=reference[0], offset=0, limit=1000)
-        if reference is not None and reference[1] not in str(pages[2].get("content", "")):
-            return {"content": "error: reference rejected"}
-        if reference is not None:
-            return {"content": reference[2]}
-        return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
+            return _call("read_file", file_path=path, offset=0, limit=page_limit)
+        skill_end, skill_next, error = _consume_read_pages(pages, 0)
+        if error is not None:
+            return {"content": f"error: {error}"}
+        if skill_next is not None:
+            return _call("read_file", file_path=path, offset=skill_next, limit=page_limit)
+        if not references:
+            if skill_end != len(pages):
+                return {"content": "error: unexpected read after SKILL.md"}
+            return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
+        if skill_end == len(pages):
+            return _call("read_file", file_path=references[0][0], offset=0, limit=page_limit)
+        cursor = skill_end
+        for index, (ref_path, marker) in enumerate(references):
+            ref_end, ref_next, ref_error = _consume_read_pages(pages, cursor)
+            if ref_error is not None:
+                return {"content": f"error: {ref_error}"}
+            if ref_next is not None:
+                return _call("read_file", file_path=ref_path, offset=ref_next, limit=page_limit)
+            ref_text = "".join(str(pages[i].get("content", "")) for i in range(cursor, ref_end))
+            if marker not in ref_text:
+                return {"content": "error: reference rejected"}
+            cursor = ref_end
+            if index + 1 < len(references):
+                if cursor == len(pages):
+                    return _call("read_file", file_path=references[index + 1][0], offset=0, limit=page_limit)
+                # The next reference's pages may already be present; validate them on the next loop iteration.
+                continue
+            if cursor != len(pages):
+                return {"content": "error: unexpected read after reference"}
+        return {"content": result}
+
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):
             return {"content": "done:delegated"}
