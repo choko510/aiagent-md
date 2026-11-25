@@ -251,7 +251,17 @@ class PostgresSkillStore:
                     "SELECT * FROM agent.skill_run_pins WHERE tenant_id=%s AND run_id=%s AND installation_id=%s",
                     (pin.tenant_id, pin.run_id, pin.installation_id),
                 ).fetchone()
-                if stored is None or stored["content_digest"] != pin.content_digest:
+                if stored is None or any(
+                    stored[field] != expected
+                    for field, expected in (
+                        ("release_id", pin.release_id),
+                        ("content_digest", pin.content_digest),
+                        ("activation_generation", pin.activation_generation),
+                        ("capability_digest", pin.capability_digest),
+                        ("dependency_digest", pin.dependency_digest),
+                        ("skill_surface_digest", pin.skill_surface_digest),
+                    )
+                ):
                     raise LifecycleConflict("run pin is immutable")
 
     def get_pin(self, tenant_id: str, run_id: str, installation_id: str) -> RunSkillPin | None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +154,32 @@ def test_lifecycle_install_enable_pin_and_load(tmp_path: Path) -> None:
     )
     assert disabled.result["installation"]["effective"] == "SUSPENDED"
     assert reg.catalog(TENANT, OWNER).all_entries() == ()
+
+
+def test_run_pin_is_immutable(tmp_path: Path) -> None:
+    reg, store, _ = registry(tmp_path)
+    release_id = ingest(reg, make_zip({"SKILL.md": skill_md()}))
+    installation_id = install_and_enable(reg, store, release_id)
+    installation = store.get_installation(TENANT, installation_id)
+    capability = capability_digest(
+        validate_requested(store.get_release(TENANT, release_id).manifest.requested_capabilities)
+    )
+    pin = reg.pin_for_run(
+        tenant_id=TENANT,
+        run_id="run-immutable",
+        installation_id=installation.id,
+        capability_digest_value=capability,
+        dependency_digest_value=dependency_digest({}),
+    )
+    reg.pin_for_run(
+        tenant_id=TENANT,
+        run_id="run-immutable",
+        installation_id=installation.id,
+        capability_digest_value=capability,
+        dependency_digest_value=dependency_digest({}),
+    )
+    with pytest.raises(SkillError, match="immutable"):
+        store.put_pin(replace(pin, activation_generation=pin.activation_generation + 1))
 
 
 def test_idempotency_and_approval_binding(tmp_path: Path) -> None:

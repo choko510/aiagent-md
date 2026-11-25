@@ -87,6 +87,18 @@ class SkillStore(Protocol):
     def get_pin(self, tenant_id: str, run_id: str, installation_id: str) -> RunSkillPin | None: ...
 
 
+def _pin_identity(pin: RunSkillPin) -> tuple[object, ...]:
+    return (
+        pin.release_id,
+        pin.content_digest,
+        pin.activation_generation,
+        pin.policy_revision,
+        pin.capability_digest,
+        pin.dependency_digest,
+        pin.skill_surface_digest,
+    )
+
+
 class InMemorySkillStore:
     """Single-process test store. Production uses PostgreSQL with tenant RLS."""
 
@@ -205,7 +217,13 @@ class InMemorySkillStore:
 
     def put_pin(self, pin: RunSkillPin) -> None:
         with self._lock:
-            self._pins[(pin.tenant_id, pin.run_id, pin.installation_id)] = pin
+            key = (pin.tenant_id, pin.run_id, pin.installation_id)
+            existing = self._pins.get(key)
+            if existing is not None:
+                if _pin_identity(existing) != _pin_identity(pin):
+                    raise LifecycleConflict("run pin is immutable")
+                return
+            self._pins[key] = pin
 
     def get_pin(self, tenant_id: str, run_id: str, installation_id: str) -> RunSkillPin | None:
         with self._lock:
