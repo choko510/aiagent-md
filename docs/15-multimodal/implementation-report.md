@@ -85,6 +85,7 @@
 - PR #122（Autonomous Development / Phase 7）が `0029` を主張している。
 - 本ブランチは仕様の連番規約に従い `0029_multimodal_ingestion` を追加した。
 - **merge順序により片方の番号を振り直す必要がある。** 本PRでは勝手にrenumberせず、衝突をここに記録する。
+- `aiagent_core.migrate.APP_SCHEMA_VERSION` を `29` へ更新し、既存のmigrationテスト12件も通した。
 - 本ブランチのDBテストは、このリポジトリの作業ツリーで `0029` まで適用した専用DBで実行した。
 
 ### 3.2 nested archive を拒否
