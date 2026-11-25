@@ -1,8 +1,10 @@
 # MCP Adapter — Detailed Implementation Specification (03-05)
 
-> CHAT_03 / canonical `docs/03-tools/mcp-adapter.md` / Draft [PROVISIONAL] / rev 0.2 / inspected 2026-10-30 JST / main `b45d4e989998663a00ef09673e69ae1f4191f00d`.
+> CHAT_03 / canonical `docs/03-tools/mcp-adapter.md` / Draft [PROVISIONAL] / rev 0.3 / inspected 2026-11-26 / main `53ac14c5376509cef0293ed236bd417a6c8d2f6e`.
 >
 > Scope: externally provided MCP protocol tools to internal Registry/Gateway contract. **Not** generic unrestricted MCP deployment, not a new agent loop. Owners: tool policy/gateway CHAT_03, shared Tool IO CHAT_01, external connections CHAT_05 (provider integration), secrets/egress CHAT_09, DB CHAT_10, UI CHAT_08, QA CHAT_11.
+>
+> Implementation note (2026-11-26): the local vertical slice is recorded in [mcp-adapter-implementation.md](mcp-adapter-implementation.md), with [security](mcp-adapter-security.md), [operations](mcp-adapter-operations.md) and [verification](../11-qa/mcp-adapter-verification.md) notes. Status is **IMPLEMENTED_PARTIAL**; this canonical document remains **Draft / PROVISIONAL** and is not Locked.
 
 ## 0. 決定事項
 MCPは**利用できる外部Tool APIのtransport/description protocolであり、それ自身が実行権限や安全分類を保証しない**。管理者が許可したMCP serverのみ接続。MCP `initialize`→capability negotiation→`tools/list`全ページ走査→strict validation→管理者allowlist・risk付与→Registry snapshotへのatomic publish。モデルには安全に整形したTool metadataだけを表示し、`tools/call`は**必ずTool Gateway**から実行する。

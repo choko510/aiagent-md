@@ -321,3 +321,14 @@ P1はSealed Original/Redacted Projection、Protected-only A0/A2、Historical/Cur
 - **ADR-036との整合:** Python-firstはTrusted Control VMのBackend/Agent Runtime/Gateway/Browser Worker/Memory/Automationを対象とする。外部に配布するRust Device AgentはOS権限とデバイス操作の独立した信頼境界にある。BackendのRust全面移行、同一バイナリ化、Agent Loopの言語変更、Runtime CellからローカルPCへの直接Shell権限は**認めない**。
 - **Rejected:** Rustで全OS GUIを自作、未公開Rust SDK crateを直接vendoringして初版に固定、Cua/Chromeのraw MCPやCDPをCloudへ転送、`sandbox.exec`をローカルPCで再利用、ユーザーPCで無制限Shellを許可。
 - **Acceptance:** Cloud Tool Gateway/Approval/Sentinelの正本維持、Device Side再認可、旧世代・通信断・重複副作用のfail closed、Windows 11実機のUI/署名/操作検証、Cua version lockとライセンス監査。Owner: CHAT_00/01/02/03/04/08/09/10/11/DEV。**未承認のSchema/DB/APIをLocked扱いしない。**
+
+## ADR-042: Generic MCP Adapterを独立Pythonパッケージ＋Gateway Executorとして追加し、未検証の本番公開をしない（2026-11-26 / PROVISIONAL、NOT LOCKED）
+
+- **State:** IMPLEMENTED_PARTIAL / CODE_READY。Local adapter sliceはHOST_VERIFIED、productionはNOT VERIFIED。Canonical Draft [03-05](../03-tools/mcp-adapter.md)はDraftのまま。
+- **Decision:** 公式MCP Python SDK `mcp 2.3.0`（MIT）を`aiagent-mcp-adapter`にpinし、admin-owned `ProviderConfig`、strict schema、bounded pagination、atomic snapshot、Sentinel経由egress、`McpToolExecutor`を実装する。`MCP_ADAPTER_ENABLED`を既定offとし、Provider enable、Credential Broker、Sentinel permitなしに接続・列挙・実行しない。stdio transport、model指定command、MCP metadataによる権限付与は実装しない。
+- **Gateway boundary:** 現行`ToolGateway`は静的`TOOLS`からtoolを解決し、`destination_for_tool`をadmitted identityの`executor.context`投入前に呼ぶ。MCP toolはtenant/owner-scopedでruntime discoveryされるため、global `TOOLS`へ登録するとtenant間のtool名leakになる。`McpToolExecutor.destination_for_tool`は`mcp_destination_requires_admitted_identity`でfail-closedとし、tenant-scoped resolverとGateway順序変更を別review changeの条件とする。Adapterをmodel/runtimeから直接呼ぶ迂回は認めない。
+- **Egress caveat:** 既存forward proxyは`CONNECT`禁止で、本adapterはTLS終端しない。remote HTTPS providerにはSentinel permitとdestination検査を保持するreviewed TLS-terminating egress connectorが必要であり、本変更には含めない。loopback HTTP E2Eのみ実行済み。
+- **Persistence:** `SnapshotStore`はCAS/TTL/pin/revokeのin-memory reference implementation。PostgreSQL schema/RLSはPR #122が`0029`を所有するため本変更ではmigrationを追加せず、`BLOCKED_ON_PR_122`とする。実PostgreSQL/RLS試験なしにVerifiedと報告しない。
+- **Failure semantics:** 404/session loss、send後timeout/reset、`isError`を含む曖昧なwriteは`ExecutorUnknown`/UNKNOWNとし、自動replayしない。cancelはremote cancelの証明ではない。
+- **Rejected:** Agent/Runtime内でのraw SDK利用、MCP Adapterから直接外向きHTTP、modelがendpoint/header/credentialを指定する設計、`annotations.readOnlyHint`によるrisk省略、stdio自動起動、本変更での`0029`追加、実際のremote provider/PostgreSQLなしのMERGE_READY主張。
+- **Acceptance / follow-ups:** tenant-scoped tool surface、Gateway bound-request統合、実PostgreSQL RLS、real provider TLS/auth/404/SSE、kill後のUNKNOWN非再送、Security review。Owner: CHAT_03/09/10/11、実装は`backend/packages/mcp_adapter`と`aiagent_gateways/mcp_executor.py`。
