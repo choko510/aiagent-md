@@ -91,6 +91,8 @@ pytestmark = [
         "cancel_after_cas_admission",
         "lease_expired_after_admission",
         "approval_revoked_after_admission",
+        "binding_changed_after_admission",
+        "goal_changed_after_admission",
         "binding_changed_before_admission",
         "goal_changed_before_admission",
         "worker_response_lost",
@@ -416,6 +418,22 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             "UPDATE agent.approval_records SET decision_code='REVOKED' "
                             "WHERE tenant_id=%s AND run_id=%s RETURNING id",
                             (claim.tenant_id, claim.run_id),
+                        )
+                    if scenario == "binding_changed_after_admission":
+                        await asyncio.to_thread(
+                            dbs["owner"].one,
+                            "UPDATE agent.repository_bindings SET generation=generation+1 "
+                            "WHERE tenant_id=%s AND id=%s RETURNING id",
+                            (claim.tenant_id, binding),
+                        )
+                    if scenario == "goal_changed_after_admission":
+                        await asyncio.to_thread(
+                            commands.steer,
+                            dbs["api"],
+                            Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                            claim.task_id,
+                            "revised fixture goal",
+                            claim.goal_revision,
                         )
                     if scenario == "admission_response_lost":
                         raise RpcError("FIXTURE_RESPONSE_LOST")
@@ -802,6 +820,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         "cancel_after_cas_admission",
                         "lease_expired_after_admission",
                         "approval_revoked_after_admission",
+                        "binding_changed_after_admission",
+                        "goal_changed_after_admission",
                         "worker_response_lost",
                         "receipt_response_lost",
                         "worker_crash_after_cas",
@@ -824,6 +844,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             "cancel_after_cas_admission",
                             "lease_expired_after_admission",
                             "approval_revoked_after_admission",
+                            "binding_changed_after_admission",
+                            "goal_changed_after_admission",
                             "worker_response_lost",
                             "worker_crash_after_cas",
                         )
@@ -984,6 +1006,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         "cancel_after_cas_admission",
                         "lease_expired_after_admission",
                         "approval_revoked_after_admission",
+                        "binding_changed_after_admission",
+                        "goal_changed_after_admission",
                         "worker_response_lost",
                         "worker_crash_after_cas",
                     ):
