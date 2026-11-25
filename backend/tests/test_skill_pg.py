@@ -49,7 +49,7 @@ def test_postgres_lifecycle_rls_and_least_privilege(
     owner_id = memory_tenant["userId"]
     store = PostgresSkillStore(memory_dbs["api"])
     quarantine = QuarantineStore(tmp_path / "quarantine")
-    registry = SkillRegistry(store, quarantine)
+    registry = SkillRegistry(store, quarantine=quarantine)
     name = f"pg-skill-{tenant_id[-8:]}"
 
     archive = make_zip(name, "1.0.0")
