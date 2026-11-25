@@ -1,6 +1,6 @@
 # Skill lifecycle (MKT-2) — implementation notes
 
-Status: **IMPLEMENTED_PARTIAL / CODE_READY (unit-tested), runtime wiring NOT_IMPLEMENTED, PostgreSQL path NOT_TESTED here.**
+Status: **IMPLEMENTED_PARTIAL / CODE_READY (unit-tested), runtime wiring NOT_IMPLEMENTED, PostgreSQL path CI-verified.**
 
 This document records what the branch actually implements. It does not turn the Draft specs into Locked contracts.
 `docs/06-memory-skills/skill-lifecycle.md` remains the authority for the lifecycle intent; this file describes the
@@ -22,7 +22,7 @@ current code and its limits.
 | Registry orchestration and idempotency | `aiagent_skills.registry` | idempotent replay and conflicting-payload test |
 | Run pins and progressive disclosure | `aiagent_skills.pinning` | pinned catalog, immutable backend, offset/truncation test |
 | Source adapters | `aiagent_skills.sources` | GitHub/ClawHub require an injected `EgressPort`; upload is local |
-| PostgreSQL persistence | `aiagent_skills.pg_store`, migration `0029` | SQL and a `pg`-marked integration test are written; skipped here without a server |
+| PostgreSQL persistence | `aiagent_skills.pg_store`, migration `0029` | CI integration test passes on Python 3.12 and 3.13 (migration, RLS, CAS, least privilege, pins); skipped locally without a server |
 | Owner-scoped HTTP API | `aiagent_api.skills` | TestClient tests with an in-memory registry |
 | Feature flag / app hook | `aiagent_api.app` | `AIAGENT_SKILLS_ENABLED=1` registers the router |
 
@@ -149,14 +149,16 @@ Executed in this branch on Windows:
 ```text
 uv run pytest packages/skills/tests -q          # 24 passed
 uv run pytest tests/test_skill_api.py -q        # 5 passed
-uv run pytest tests/test_skill_pg.py -q         # skipped here: no PostgreSQL
+uv run pytest tests/test_skill_pg.py -q         # skipped locally: no PostgreSQL
+# CI integration: 1 passed (Python 3.12 and 3.13)
 uv run ruff check packages/skills packages/api/src/aiagent_api/skills.py
 uv run mypy packages/skills/src packages/api/src/aiagent_api/skills.py
 ```
 
-Not executed here: PostgreSQL migration/RLS/concurrency tests, full API lifespan, Docker/VM isolation, GitHub/ClawHub
-network resolution, and any live Agent Runtime run. Those remain unverified and must be run in CI or the deployment
-environment before claiming production readiness.
+The PostgreSQL migration/RLS/CAS/least-privilege test executed in GitHub Actions run `45665909124` on both Python 3.12
+and 3.13. Not executed locally: full API lifespan, Docker/VM isolation, GitHub/ClawHub network resolution, and any live
+Agent Runtime run. Those remain unverified and must be run in the deployment environment before claiming production
+readiness.
 
 A deterministic disclosure-budget test (`test_disclosure_benchmark.py`) builds 40 Skills with 16,000-line bodies and
 asserts that the enabled-catalog surface is under 1% of the full body bytes, and that one disclosure slice stays within
