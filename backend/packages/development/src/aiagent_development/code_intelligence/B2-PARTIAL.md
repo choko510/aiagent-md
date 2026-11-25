@@ -557,9 +557,34 @@ are verified. UNKNOWN attempts and stale leases remain UNKNOWN. The Gateway
 response can reconstruct Adapter evidence only for the live SENDING case.
 
 Git commit recovery is fail-closed: caller-supplied CommitEvidence and a
-matching Git HEAD do not prove the original Tool Intent/Attempt. Positive
-reconciliation remains UNKNOWN until a canonical Gateway receipt verifier is
-implemented. If the post-dispatch HEAD lookup fails, the Workflow records
-UNKNOWN_EXTERNAL_EFFECT. This deliberately changes the earlier mock-only
-positive recovery behavior; it does not implement a Git Provider, a real Git
-Commit Receipt, or the COMMITTED test E2E.
+matching Git HEAD alone do not prove the original Tool Intent/Attempt. If the
+post-dispatch HEAD lookup fails or the COMMIT_PENDING -> COMMITTED fence fails,
+the Workflow records UNKNOWN_EXTERNAL_EFFECT for reconciliation.
+
+### Isolated Git worker, CAS fence, and confirmed receipt recovery (test profile)
+
+Migrations 0020..0028 add canonical repository branch binding, fenced Git
+operation admission, encrypted patch artifacts, live authority heartbeats,
+CAS admission bound to the durable prepared journal, snapshot promotion, and
+confirmed recovery scoping. An isolated Git worker (`git_worker_rpc.py` and
+`git_operation_journal.py`) enforces signed scoped grants, authenticated binary
+patch transfer, local CAS/cancellation serialization, and a bounded durable
+journal that fails closed at capacity without deleting recorded evidence.
+
+Under `AIAGENT_PROFILE=test`, `ToolGatewayGitProvider`, `GitReceiptStore`,
+`RpcGitObjectVerifier`, and `GitCommitEvidenceReader` drive real Git commits
+and reverified recovery over the authenticated Gateway and worker RPC.
+`PostgresCycleStore.save` now requires a confirmed canonical Tool Intent, Tool
+Attempt, Side-Effect Record, persisted `git_operations` receipt, and matching
+`receipt_body_sha256` / `receipt_proof_sha256` digests for both
+`COMMIT_PENDING -> COMMITTED` and `UNKNOWN_EXTERNAL_EFFECT -> COMMITTED`
+transitions, rejecting unattested mock providers and receipt tampering.
+`test_git_gateway_e2e.py` exercises this path against real PostgreSQL and a
+disposable Docker Git worker, including CAS races, authority loss, binding/goal
+changes, lost responses, worker crashes, receipt tampering, and fresh-process
+recovery after restart.
+
+Production profile remains fail-closed for SCIP local B1 verification, command
+execution, and Git commit execution until separate-kernel VM isolation,
+production egress enforcement, image/toolchain attestation, key provisioning,
+and multi-host durable journal coordination are verified.

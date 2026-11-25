@@ -69,7 +69,7 @@ jobs:
       - name: STEP 4 isolated mock and fixture tests (not production integration)
         env:
           AIAGENT_REQUIRE_CHROMIUM: "1"
-        run: uv run --python ${{ matrix.python }} pytest -q -rs -p no:cacheprovider packages/context/tests packages/memory/tests packages/development/tests packages/automation/tests packages/browser/tests
+        run: uv run --python ${{ matrix.python }} pytest -q -rs -p no:cacheprovider packages/context/tests packages/memory/tests packages/development/tests packages/automation/tests packages/browser/tests packages/sandbox/tests
       - name: Contracts, migrations, Run control, QueuePort/Outbox/Scheduler, gateways, Sentinel, E2E, production gates
         env:
           AIAGENT_REQUIRE_CHROMIUM: "1"
@@ -195,7 +195,7 @@ jobs:
         run: AIAGENT_COMMAND_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_command_adapter_e2e.py
       - name: Authenticated Git worker fixture (test-only Docker, simulated authority)
         run: AIAGENT_GIT_WORKER_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_worker_docker.py
-      - name: Git Gateway and receipt E2E (test profile; CAS fence unverified)
+      - name: Git Gateway, CAS fence, and recovery E2E (test-only Docker)
         run: AIAGENT_GIT_GATEWAY_E2E=1 uv run pytest -q -rA -p no:cacheprovider tests/test_git_gateway_e2e.py
       - name: Build images
         working-directory: .
