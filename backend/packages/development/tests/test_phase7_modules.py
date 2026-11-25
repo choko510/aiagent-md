@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from aiagent_development.adaptive_testing import AdaptiveTestingGate, plan_adaptive_tests
+from aiagent_development.adaptive_testing import AdaptiveTestingGate, AdaptiveTestPlan, plan_adaptive_tests
 from aiagent_development.code_intelligence.git_reader import open_snapshot
 from aiagent_development.code_intelligence.inventory import inventory
 from aiagent_development.code_intelligence.models import AuthorizedSnapshot, Identity
@@ -27,8 +27,7 @@ from aiagent_development.contracts import (
     TaskPlan,
 )
 from aiagent_development.design_demo import DevelopmentPreferences, normalize_design_candidates, redact_dev_text
-from aiagent_development.mock import MockSandbox
-from aiagent_development.pr_guardian import evaluate_pr_checks
+from aiagent_development.pr_guardian import PrGuardian, evaluate_pr_checks
 from aiagent_development.reproduction import ReproductionLab
 
 
@@ -76,10 +75,11 @@ def _make_git_repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(tmp_path: Path) -> None:
+    """DEV-14 / P2-12: fail-closed TEXT_ONLY fallback, separate static command, authoritative TaskPlan, evidence validation."""
     repo, sha = _make_git_repo(tmp_path)
     scope = ProjectScope("t1", "u1", "p1", "w1", "org/demo", "main", sha, "1")
     run = RunFence("task-1", "run-1", 1, 1, 0)
-    plan = TaskPlan("plan-1", "cr-1", ("test_security_baseline.py",), 1)
+    plan = TaskPlan("plan-1", "cr-1", ("test_security_baseline.py", "static:pkg_a"), 1)
     tc_digest = hashlib.sha256(b"toolchain-v1").hexdigest()
 
     git_bin = shutil.which("git")
@@ -91,25 +91,54 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
     assert opened.reader is not None
     reader = opened.reader
     inv = inventory(reader)
-    # 1. Pure Python source change -> selects impacted tests/test_app.py only (no full fallback)
-    ad_plan = plan_adaptive_tests(reader, inv, ("pkg_a/app.py",), plan)
+
+    # 1. Default allow_text_only_narrowing=False falls back to full suite when impact coverage is TEXT_ONLY (P2-12)
+    conservative_plan = plan_adaptive_tests(reader, inv, ("pkg_a/app.py",), plan)
+    assert conservative_plan.fallback_to_full is True
+    assert "coverage:TEXT_ONLY" in conservative_plan.fallback_reasons
+    assert set(conservative_plan.impacted_tests) == {"tests/test_app.py", "tests/test_other.py"}
+    assert conservative_plan.mandatory_tests == ("test_security_baseline.py", "static:pkg_a")
+
+    # 2. Explicit allow_text_only_narrowing=True narrows pure Python source change to tests/test_app.py only
+    ad_plan = plan_adaptive_tests(reader, inv, ("pkg_a/app.py",), plan, allow_text_only_narrowing=True)
     assert ad_plan.fallback_to_full is False
     assert ad_plan.impacted_tests == ("tests/test_app.py",)
-    assert ad_plan.mandatory_tests == ("test_security_baseline.py",)
+    assert ad_plan.mandatory_tests == ("test_security_baseline.py", "static:pkg_a")
 
-    # 2. Manifest / config change triggers conservative fallback to full discovered test suite
-    fb_plan = plan_adaptive_tests(reader, inv, ("pyproject.toml",), plan)
+    # 3. Manifest / config change triggers conservative fallback even with allow_text_only_narrowing=True
+    fb_plan = plan_adaptive_tests(reader, inv, ("pyproject.toml",), plan, allow_text_only_narrowing=True)
     assert fb_plan.fallback_to_full is True
     assert set(fb_plan.impacted_tests) == {"tests/test_app.py", "tests/test_other.py"}
 
-    # 3. Deleted/missing file also triggers conservative fallback
-    del_plan = plan_adaptive_tests(reader, inv, ("deleted_file.py",), plan)
+    # 4. Deleted/missing file triggers conservative fallback
+    del_plan = plan_adaptive_tests(reader, inv, ("deleted_file.py",), plan, allow_text_only_narrowing=True)
     assert del_plan.fallback_to_full is True
     assert set(del_plan.impacted_tests) == {"tests/test_app.py", "tests/test_other.py"}
 
-    # 4. Impacted PASS with mandatory SKIPPED MUST NOT report overall_passed=True
-    sb = MockSandbox()
-    gate = AdaptiveTestingGate(sb)
+    # 5. Impacted PASS with mandatory SKIPPED MUST NOT report overall_passed=True
+    recorded_reqs: list[ExecutionRequest] = []
+
+    class _RecordingSandbox:
+        def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
+            recorded_reqs.append(request)
+            return ExecutionEvidence(
+                intent_ref=request.intent_ref,
+                run=request.run,
+                kind=request.kind,
+                exit_code=0,
+                executed=True,
+                artifact_sha256=tc_digest,
+                toolchain_digest=request.toolchain_digest,
+                stdout="ok",
+                stderr="",
+                source_commit_sha=request.target_commit_sha,
+                test_id=request.test_id,
+                receipt_ref=f"rcpt:{request.intent_ref}",
+                timed_out=False,
+                truncated=False,
+            )
+
+    gate = AdaptiveTestingGate(_RecordingSandbox())
     res_skip = gate.run_gate(
         scope=scope,
         run=run,
@@ -124,12 +153,20 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
     assert res_skip.mandatory_status == "SKIPPED"
     assert res_skip.overall_passed is False
 
-    # 5. Both impacted and mandatory PASS -> overall_passed=True
-    res_ok = gate.run_gate(
+    # 6. Separate test_command vs static_command AND authoritative TaskPlan.required_tests (tampered adaptive_plan ignored)
+    recorded_reqs.clear()
+    tampered_plan = AdaptiveTestPlan(
+        changed_paths=ad_plan.changed_paths,
+        impacted_tests=ad_plan.impacted_tests,
+        mandatory_tests=(),  # Tampered empty list MUST be ignored in favor of TaskPlan.required_tests
+        fallback_to_full=False,
+        fallback_reasons=(),
+    )
+    res_ok = AdaptiveTestingGate(_RecordingSandbox()).run_gate(
         scope=scope,
         run=run,
         plan=plan,
-        adaptive_plan=ad_plan,
+        adaptive_plan=tampered_plan,
         toolchain_digest=tc_digest,
         intent_prefix="g2",
         target_commit_sha=sha,
@@ -138,9 +175,19 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
     assert res_ok.impacted_status == "PASSED"
     assert res_ok.mandatory_status == "PASSED"
     assert res_ok.overall_passed is True
+    assert res_ok.plan.mandatory_tests == ("test_security_baseline.py", "static:pkg_a")
+    static_reqs = [r for r in recorded_reqs if r.kind == "static-check"]
+    assert len(static_reqs) == 1
+    assert static_reqs[0].argv == ("ruff", "check", "pkg_a")
+    assert static_reqs[0].test_id is None
 
-    # 6. Truncated/timed-out sandbox evidence fails closed even if exit_code==0
-    class _TruncatedSandbox:
+    # 7. Truncated OR mismatched-commit/test_id sandbox evidence fails closed even if exit_code==0
+    class _MismatchedSandbox:
+        def __init__(self, *, truncate: bool = False, wrong_commit: bool = False, wrong_test: bool = False) -> None:
+            self.truncate = truncate
+            self.wrong_commit = wrong_commit
+            self.wrong_test = wrong_test
+
         def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
             return ExecutionEvidence(
                 intent_ref=request.intent_ref,
@@ -152,27 +199,33 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
                 toolchain_digest=request.toolchain_digest,
                 stdout="clipped",
                 stderr="",
-                source_commit_sha=sha,
-                test_id=request.test_id,
-                receipt_ref="trunc:1",
+                source_commit_sha=("f" * 40) if self.wrong_commit else sha,
+                test_id="other_test" if self.wrong_test else request.test_id,
+                receipt_ref=f"rcpt:{request.intent_ref}",
                 timed_out=False,
-                truncated=True,
+                truncated=self.truncate,
             )
 
-    res_trunc = AdaptiveTestingGate(_TruncatedSandbox()).run_gate(
-        scope=scope,
-        run=run,
-        plan=plan,
-        adaptive_plan=ad_plan,
-        toolchain_digest=tc_digest,
-        intent_prefix="g3",
-        target_commit_sha=sha,
-    )
-    assert res_trunc.impacted_status == "FAILED"
-    assert res_trunc.overall_passed is False
+    for bad_sb in (
+        _MismatchedSandbox(truncate=True),
+        _MismatchedSandbox(wrong_commit=True),
+        _MismatchedSandbox(wrong_test=True),
+    ):
+        res_bad = AdaptiveTestingGate(bad_sb).run_gate(
+            scope=scope,
+            run=run,
+            plan=plan,
+            adaptive_plan=ad_plan,
+            toolchain_digest=tc_digest,
+            intent_prefix="g3",
+            target_commit_sha=sha,
+        )
+        assert res_bad.impacted_status == "FAILED"
+        assert res_bad.overall_passed is False
 
 
 def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> None:
+    """DEV-12 / P1-08: strict pair binding, duplicate receipt rejection, pytest collection error rejection, flake check."""
     sha_pre = "a" * 40
     sha_post = "b" * 40
     scope = ProjectScope("t1", "u1", "p1", "w1", "org/demo", "main", sha_pre, "1")
@@ -186,32 +239,106 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
         scope, run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "test_bug", sha_post
     )
 
-    # 1. Valid pre-FAIL + post-PASS pair
-    sb = MockSandbox()
-    sb.results["repro-pre"] = (True, 1, "test_bug")
-    sb.results["repro-post"] = (True, 0, "test_bug")
+    class _CommitAwareSandbox:
+        def __init__(self, codes: dict[str, int]) -> None:
+            self.codes = codes
+
+        def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
+            return ExecutionEvidence(
+                intent_ref=request.intent_ref,
+                run=request.run,
+                kind=request.kind,
+                exit_code=self.codes.get(request.intent_ref, 0),
+                executed=True,
+                artifact_sha256=hashlib.sha256(
+                    f"{request.intent_ref}:{request.target_commit_sha}".encode()
+                ).hexdigest(),
+                toolchain_digest=request.toolchain_digest,
+                stdout="",
+                stderr="",
+                source_commit_sha=request.target_commit_sha,
+                test_id=request.test_id,
+                receipt_ref=f"rcpt:{request.intent_ref}",
+                timed_out=False,
+                truncated=False,
+            )
+
+    # 1. Valid pre-FAIL (exit_code=1) + post-PASS (exit_code=0) pair
+    sb = _CommitAwareSandbox({"repro-pre": 1, "repro-post": 0})
     proof = ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
     assert proof.verified is True
     assert proof.flaky is False
     assert proof.reason == "VERIFIED"
     assert proof.before_fail_digest is not None and proof.after_pass_digest is not None
 
-    # 2. Pre-fix already passing -> rejected
-    sb2 = MockSandbox()
-    sb2.results["repro-pre"] = (True, 0, "test_bug")
-    sb2.results["repro-post"] = (True, 0, "test_bug")
+    # 2. P1-08: Reject mismatched test_id, mismatched argv, or identical pre==post commit SHA
+    wrong_test_post = ExecutionRequest(
+        scope, run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "other_test", sha_post
+    )
+    with pytest.raises(InvalidEvidence, match="test_id"):
+        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_test_post)
+
+    wrong_argv_post = ExecutionRequest(
+        scope, run, "plan-1", "test", ("pytest", "test_other.py"), tc_digest, "repro-post", "test_bug", sha_post
+    )
+    with pytest.raises(InvalidEvidence, match="identical test command"):
+        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_argv_post)
+
+    same_sha_post = ExecutionRequest(
+        scope, run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "test_bug", sha_pre
+    )
+    with pytest.raises(InvalidEvidence, match="must differ"):
+        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=same_sha_post)
+
+    # 3. P1-08: Pre-fix pytest collection/environment error (exit_code=5) MUST NOT count as bug reproduction
+    sb_env = _CommitAwareSandbox({"repro-pre": 5, "repro-post": 0})
+    p_env = ReproductionLab(sb_env).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
+    assert p_env.verified is False and p_env.reason == "PRE_FIX_ENV_OR_COLLECTION_ERROR"
+
+    # 4. Pre-fix already passing -> rejected
+    sb2 = _CommitAwareSandbox({"repro-pre": 0, "repro-post": 0})
     p_nofail = ReproductionLab(sb2).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
     assert p_nofail.verified is False and p_nofail.reason == "PRE_FIX_DID_NOT_FAIL"
 
-    # 3. Flaky post-fix test (alternates 0 and 1 across repeat_count=2)
+    # 5. P1-08: Duplicate receipt_ref reused across repeat_count=2 is rejected
+    class _DupReceiptSandbox:
+        def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
+            is_pre = request.intent_ref.startswith("repro-pre")
+            return ExecutionEvidence(
+                intent_ref=request.intent_ref,
+                run=request.run,
+                kind=request.kind,
+                exit_code=1 if is_pre else 0,
+                executed=True,
+                artifact_sha256=tc_digest,
+                toolchain_digest=request.toolchain_digest,
+                stdout="",
+                stderr="",
+                source_commit_sha=request.target_commit_sha,
+                test_id=request.test_id,
+                receipt_ref="dup-static-receipt",
+                timed_out=False,
+                truncated=False,
+            )
+
+    p_dup = ReproductionLab(_DupReceiptSandbox()).verify_pair(
+        test_id="test_bug", pre_request=pre_req, post_request=post_req, repeat_count=2
+    )
+    assert p_dup.verified is False and p_dup.reason == "DUPLICATE_EXECUTION_RECEIPT"
+
+    # 6. Flaky post-fix test (alternates 0 and 1 across repeat_count=2 with distinct intent_ref & receipt_ref)
     class _FlakySandbox:
         def __init__(self) -> None:
-            self.calls: dict[str, int] = {}
+            self.seen_intents: list[str] = []
+            self.post_calls = 0
 
         def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
-            n = self.calls.get(request.intent_ref, 0)
-            self.calls[request.intent_ref] = n + 1
-            code = 1 if request.intent_ref == "repro-pre" else (0 if n == 0 else 1)
+            self.seen_intents.append(request.intent_ref)
+            if request.intent_ref.startswith("repro-pre"):
+                code = 1
+            else:
+                code = 0 if self.post_calls == 0 else 1
+                self.post_calls += 1
             return ExecutionEvidence(
                 intent_ref=request.intent_ref,
                 run=request.run,
@@ -224,14 +351,16 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
                 stderr="",
                 source_commit_sha=request.target_commit_sha,
                 test_id=request.test_id,
-                receipt_ref=f"flaky:{n}",
+                receipt_ref=f"flaky:{request.intent_ref}",
                 timed_out=False,
                 truncated=False,
             )
 
-    p_flaky = ReproductionLab(_FlakySandbox()).verify_pair(
+    flaky_sb = _FlakySandbox()
+    p_flaky = ReproductionLab(flaky_sb).verify_pair(
         test_id="test_bug", pre_request=pre_req, post_request=post_req, repeat_count=2
     )
+    assert len(set(flaky_sb.seen_intents)) == 4
     assert p_flaky.flaky is True and p_flaky.verified is False and p_flaky.reason == "FLAKY_REPRODUCTION"
 
 
@@ -281,26 +410,127 @@ def test_dev03_design_preferences_reject_legacy_demo_choice_and_sanitize() -> No
 
 
 def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
+    """DEV-11 / P1-09: stale HEAD, required checks, neutral/unknown conclusions, pagination, mergeable=None, commit status."""
+    sha = "a" * 40
+    other_sha = "b" * 40
+
     ev_pass = evaluate_pr_checks(
-        pr_payload={"mergeable": True, "mergeable_state": "clean"},
-        check_runs_payload={"check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}]},
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        required_checks=("static",),
         repair_attempts=0,
         max_repair_attempts=3,
     )
     assert ev_pass.ci_state == "PASS" and ev_pass.should_repair is False and ev_pass.escalated is False
 
-    ev_fail = evaluate_pr_checks(
-        pr_payload={"mergeable": True, "mergeable_state": "unstable"},
-        check_runs_payload={"check_runs": [{"name": "pytest", "status": "completed", "conclusion": "failure"}]},
-        repair_attempts=1,
+    # Stale HEAD refuses PASS even when checks report success
+    ev_stale = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": other_sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        required_checks=("static",),
+        repair_attempts=0,
         max_repair_attempts=3,
     )
-    assert ev_fail.ci_state == "FAIL" and ev_fail.failing_checks == ("pytest",)
-    assert ev_fail.should_repair is True and ev_fail.escalated is False
+    assert ev_stale.ci_state == "STALE_HEAD" and ev_stale.observed_head_sha == other_sha
 
+    # Missing required check -> UNKNOWN (never PASS)
+    ev_missing_req = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        required_checks=("static", "security-gate"),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_missing_req.ci_state == "UNKNOWN"
+    assert ev_missing_req.missing_required_checks == ("security-gate",)
+
+    # Neutral/skipped-only checks -> UNKNOWN (never PASS)
+    ev_neutral = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "lint", "status": "completed", "conclusion": "skipped"}],
+        },
+        expected_head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_neutral.ci_state == "UNKNOWN"
+
+    # Unknown conclusion -> UNKNOWN
+    ev_unk_conc = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 2,
+            "check_runs": [
+                {"name": "static", "status": "completed", "conclusion": "success"},
+                {"name": "custom", "status": "completed", "conclusion": "weird_future_state"},
+            ],
+        },
+        expected_head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_unk_conc.ci_state == "UNKNOWN"
+
+    # Incomplete pagination -> UNKNOWN
+    ev_incomplete = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 150,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_incomplete.ci_state == "UNKNOWN"
+
+    # mergeable=None -> PENDING (never PASS)
+    ev_merge_none = evaluate_pr_checks(
+        pr_payload={"mergeable": None, "mergeable_state": "unknown", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_merge_none.ci_state == "PENDING"
+
+    # Commit status failure triggers FAIL even if check_runs succeeded
+    ev_status_fail = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        commit_status_payload={"statuses": [{"context": "external/deploy-check", "state": "failure"}]},
+        expected_head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_status_fail.ci_state == "FAIL"
+    assert ev_status_fail.failing_checks == ("external/deploy-check",)
+
+    # Finite repair ceiling & conflict
     ev_cap = evaluate_pr_checks(
-        pr_payload={"mergeable": True, "mergeable_state": "unstable"},
+        pr_payload={"mergeable": True, "mergeable_state": "unstable", "head": {"sha": sha}},
         check_runs_payload={"check_runs": [{"name": "pytest", "status": "completed", "conclusion": "failure"}]},
+        expected_head_sha=sha,
         repair_attempts=3,
         max_repair_attempts=3,
     )
@@ -308,9 +538,46 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
     assert ev_cap.should_repair is False and ev_cap.escalated is True
 
     ev_conf = evaluate_pr_checks(
-        pr_payload={"mergeable": False, "mergeable_state": "dirty"},
+        pr_payload={"mergeable": False, "mergeable_state": "dirty", "head": {"sha": sha}},
         check_runs_payload={"check_runs": []},
+        expected_head_sha=sha,
         repair_attempts=0,
         max_repair_attempts=2,
     )
     assert ev_conf.ci_state == "CONFLICT" and ev_conf.should_repair is True
+
+    # PrGuardian paginates check-runs and reads commit statuses
+    seen_paths: list[str] = []
+
+    def _fake_read(scope: ProjectScope, intent_ref: str, path: str) -> tuple[int, dict[str, object]]:
+        del scope, intent_ref
+        seen_paths.append(path)
+        if path.endswith("/pulls/9"):
+            return 200, {"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}}
+        if "check-runs?per_page=100&page=1" in path:
+            return 200, {
+                "total_count": 101,
+                "check_runs": [{"name": f"c-{i}", "status": "completed", "conclusion": "success"} for i in range(100)],
+            }
+        if "check-runs?per_page=100&page=2" in path:
+            return 200, {
+                "total_count": 101,
+                "check_runs": [{"name": "required-last", "status": "completed", "conclusion": "success"}],
+            }
+        if path.endswith("/status"):
+            return 200, {"statuses": [{"context": "legacy/ci", "state": "success"}]}
+        return 404, {}
+
+    scope = ProjectScope("t1", "u1", "p1", "w1", "org/demo", "feat/x", sha, "1")
+    ev_paged = PrGuardian(_fake_read).inspect_pr(
+        scope=scope,
+        intent_ref="int-1",
+        pr_number=9,
+        head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=2,
+        required_checks=("required-last", "legacy/ci"),
+    )
+    assert ev_paged.ci_state == "PASS"
+    assert any("page=2" in p for p in seen_paths)
+    assert any(p.endswith("/status") for p in seen_paths)

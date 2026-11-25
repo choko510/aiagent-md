@@ -1,7 +1,18 @@
 """PostgreSQL persistence for Phase 7 Development application entities (0029) & Review Attestation.
 
-All queries enforce server-resolved (tenant_id, owner_user_id, workspace_id) isolation,
-CAS revision checks on design/demo decisions, and transactional domain event emission.
+Hardens P1-03, P1-06, P1-07, and P2-10:
+- PostgresReviewAttestationPort requires a SUCCEEDED independent reviewer Run AND a persisted
+  `agent.dev_review_artifacts` row matching (id, task_id, run_id, owner_user_id, project_id,
+  reviewer_role, target_sha, passed).
+- Design & Demo operations serialize on deterministic lock order `dev_cycles -> dev_design_decisions`;
+  changing selected candidate ALWAYS invalidates prior Demo approval (`demo_decision='PENDING'`) and
+  recomputes `demo_snapshot_digest` over (cycle, commit_sha, goal_revision, design_revision,
+  selected_candidate_id, candidates_digest).
+- `begin_pr_record` enforces uniqueness on BOTH `idempotency_key` AND `intent_id` atomically so an
+  EFFECT_UNKNOWN or PENDING intent can NEVER be re-dispatched under a different idempotency key.
+- `claim_guardian_repair_slot` atomically checks and increments `repair_attempts < max_repair_attempts`
+  inside one PostgreSQL UPDATE, preventing concurrent overrun and preventing read-only checks from
+  consuming repair budget.
 """
 
 from __future__ import annotations
@@ -14,7 +25,7 @@ from urllib.parse import urlsplit
 from aiagent_core import control
 from aiagent_core.db import Database
 from aiagent_core.events import append_event
-from aiagent_domain import is_uuid7, uuid7
+from aiagent_domain import is_uuid7, sha256_hex, uuid7
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
@@ -72,6 +83,27 @@ def _validate_github_base(url: str | None) -> str | None:
     return val
 
 
+def _demo_binding_digest(
+    *,
+    cycle_id: str,
+    commit_sha: str | None,
+    goal_revision: int,
+    design_revision: int,
+    selected_candidate_id: str | None,
+    candidates: list[Any],
+) -> str:
+    return sha256_hex(
+        {
+            "cycleId": cycle_id,
+            "commitSha": commit_sha or "",
+            "goalRevision": goal_revision,
+            "designRevision": design_revision,
+            "selectedCandidateId": selected_candidate_id or "",
+            "candidates": candidates,
+        }
+    )
+
+
 def _project_dto(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -123,6 +155,10 @@ def _pr_dto(row: dict[str, Any]) -> dict[str, Any]:
         "prUrl": str(row["pr_url"]) if row.get("pr_url") else None,
         "idempotencyKey": str(row["idempotency_key"]),
         "intentId": str(row["intent_id"]) if row.get("intent_id") else None,
+        "gitPushReceiptRef": str(row["git_push_receipt_ref"]) if row.get("git_push_receipt_ref") else None,
+        "requiredChecks": list(row["required_checks_json"])
+        if isinstance(row.get("required_checks_json"), list)
+        else [],
         "effectStatus": str(row["effect_status"]),
         "ciState": str(row["ci_state"]),
         "repairAttempts": int(row["repair_attempts"]),
@@ -157,7 +193,7 @@ def _debug_dto(row: dict[str, Any]) -> dict[str, Any]:
 
 
 class PostgresReviewAttestationPort(ReviewAttestationPort):
-    """Verifies reviewer independence, owner/tenant scope, and DB-backed Task/Run provenance."""
+    """Verifies independent SUCCEEDED reviewer Run + persisted Review Evidence Artifact (P1-07)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -166,31 +202,33 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
         require_sha(verdict.target_sha)
         if not verdict.reviewer_task_id or verdict.reviewer_task_id == builder_run.task_id:
             raise ScopeDenied("independent reviewer task required (self-review forbidden)")
-        if not verdict.evidence_ref or not verdict.evidence_ref.strip():
-            raise InvalidEvidence("reviewer verdict requires verifiable evidence ref")
         if not is_uuid7(verdict.reviewer_task_id):
             raise ScopeDenied("reviewer_task_id must be a canonical task uuid7")
+        if not is_uuid7(verdict.evidence_ref):
+            raise InvalidEvidence("reviewer evidence_ref must be a persisted dev_review_artifacts uuid7")
 
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
-                "SELECT t.owner_user_id, t.workspace_id, r.id AS run_id, r.status_code"
-                " FROM agent.tasks t"
-                " LEFT JOIN LATERAL ("
-                "   SELECT id, status_code FROM agent.runs"
-                "   WHERE tenant_id=t.tenant_id AND task_id=t.id"
-                "   ORDER BY created_at DESC LIMIT 1"
-                " ) r ON true"
-                " WHERE t.tenant_id=%s AND t.id=%s",
-                (scope.tenant_id, verdict.reviewer_task_id),
+                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.reviewer_role,"
+                " a.target_sha, a.passed, t.workspace_id, r.status_code"
+                " FROM agent.dev_review_artifacts a"
+                " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
+                " JOIN agent.runs r ON r.tenant_id=a.tenant_id AND r.task_id=a.task_id AND r.id=a.run_id"
+                " WHERE a.tenant_id=%s AND a.id=%s",
+                (scope.tenant_id, verdict.evidence_ref),
             ).fetchone()
             if (
                 row is None
+                or str(row["task_id"]) != verdict.reviewer_task_id
                 or str(row["owner_user_id"]) != scope.owner_user_id
                 or str(row["workspace_id"]) != scope.workspace_id
-                or row["run_id"] is None
-                or str(row["status_code"]) in ("CANCELLED", "EXPIRED")
+                or str(row["project_id"]) != scope.project_id
+                or str(row["reviewer_role"]) != verdict.reviewer_role
+                or str(row["target_sha"]) != verdict.target_sha
+                or bool(row["passed"]) != verdict.passed
+                or str(row["status_code"]) != "SUCCEEDED"
             ):
-                raise ScopeDenied("reviewer task/run missing or out of scope")
+                raise ScopeDenied("review artifact missing, mismatched, or reviewer run did not SUCCEED")
 
 
 class PostgresDevStore:
@@ -280,6 +318,49 @@ class PostgresDevStore:
             ).fetchone()
         return _project_dto(dict(row)) if row is not None else None
 
+    # ------------------------------------------------------------------ Review Evidence Artifacts (P1-07)
+    def record_review_artifact(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        project_id: str,
+        cycle_id: str,
+        task_id: str,
+        run_id: str,
+        reviewer_role: str,
+        target_sha: str,
+        evidence_sha256: str,
+        passed: bool,
+        findings: Sequence[dict[str, Any]] = (),
+    ) -> str:
+        require_sha(target_sha)
+        require_digest(evidence_sha256)
+        if reviewer_role not in ("functional", "security", "ui-e2e"):
+            raise InvalidEvidence("invalid reviewer_role")
+        art_id = uuid7()
+        with self._db.tx(tenant=tenant_id) as c:
+            c.execute(
+                "INSERT INTO agent.dev_review_artifacts(tenant_id, id, task_id, run_id, owner_user_id,"
+                " project_id, cycle_id, reviewer_role, target_sha, evidence_sha256, passed, findings_json)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    tenant_id,
+                    art_id,
+                    task_id,
+                    run_id,
+                    owner_user_id,
+                    project_id,
+                    cycle_id,
+                    reviewer_role,
+                    target_sha,
+                    evidence_sha256,
+                    bool(passed),
+                    Jsonb(list(findings)),
+                ),
+            )
+        return art_id
+
     # ------------------------------------------------------------------ Cycles Read Projection
     def list_cycles(
         self,
@@ -330,12 +411,15 @@ class PostgresDevStore:
         tests: list[Any] = raw_tests if isinstance(raw_tests, list) else []
         raw_scope = cj.get("scope")
         scope: dict[str, Any] = raw_scope if isinstance(raw_scope, dict) else {}
+        raw_run = cj.get("run")
+        run_obj: dict[str, Any] = raw_run if isinstance(raw_run, dict) else {}
         return {
             "id": str(row["id"]),
             "projectId": str(row["project_id"]),
             "workspaceId": str(row["workspace_id"]),
             "taskId": str(row["task_id"]),
             "runId": str(row["run_id"]),
+            "goalRevision": int(run_obj.get("goal_revision", 1)),
             "version": int(row["version"]),
             "phase": str(row["phase"]),
             "roundNumber": int(cj.get("round_number", 1)),
@@ -352,7 +436,7 @@ class PostgresDevStore:
             "updatedAt": row["updated_at"].isoformat(),
         }
 
-    # ------------------------------------------------------------------ Design & Demo Decisions (DEV-03)
+    # ------------------------------------------------------------------ Design & Demo Decisions (DEV-03 / P1-06)
     def create_design_proposal(
         self,
         *,
@@ -364,17 +448,18 @@ class PostgresDevStore:
         demo_acceptance_policy: str | None = None,
         recommended_candidate_id: str | None = None,
     ) -> dict[str, Any]:
-        normalized, digest = normalize_design_candidates(candidates)
+        normalized, _ = normalize_design_candidates(candidates)
         cand_ids = {c["candidateId"] for c in normalized}
         if recommended_candidate_id is not None and recommended_candidate_id not in cand_ids:
             raise InvalidEvidence("recommendedCandidateId not in candidates")
 
         with self._db.tx(tenant=tenant_id) as c:
+            # Lock order: dev_cycles -> dev_design_decisions
             cy = c.execute(
                 "SELECT c.project_id, c.task_id, c.run_id, c.cycle_json, p.preferences_json"
                 " FROM agent.dev_cycles c"
                 " JOIN agent.dev_projects p ON p.tenant_id=c.tenant_id AND p.id=c.project_id"
-                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s",
+                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s FOR UPDATE OF c",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cy is None:
@@ -384,7 +469,6 @@ class PostgresDevStore:
             )
             dp = design_policy or prefs.design_policy
             dap = demo_acceptance_policy or prefs.demo_acceptance_policy
-            # Re-validate policies through DevelopmentPreferences
             DevelopmentPreferences.from_raw({"designPolicy": dp, "demoAcceptancePolicy": dap})
             max_rev_row = c.execute(
                 "SELECT COALESCE(MAX(design_revision), 0) AS r FROM agent.dev_design_decisions"
@@ -395,10 +479,21 @@ class PostgresDevStore:
             cj = dict(cy["cycle_json"]) if isinstance(cy["cycle_json"], dict) else {}
             raw_run = cj.get("run")
             run_obj: dict[str, Any] = raw_run if isinstance(raw_run, dict) else {}
+            raw_commit = cj.get("commit")
+            commit_sha = (
+                str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
+            )
             goal_rev = max(1, int(run_obj.get("goal_revision", 1)))
             rec_id = recommended_candidate_id or (normalized[0]["candidateId"] if dp == "AUTO_RECOMMEND" else None)
             did = uuid7()
-            # AUTO_RECOMMEND recommends only — NEVER sets selected_candidate_id or demo_decision='APPROVED'!
+            digest = _demo_binding_digest(
+                cycle_id=cycle_id,
+                commit_sha=commit_sha,
+                goal_revision=goal_rev,
+                design_revision=next_rev,
+                selected_candidate_id=None,
+                candidates=normalized,
+            )
             row = c.execute(
                 "INSERT INTO agent.dev_design_decisions(tenant_id, id, owner_user_id, project_id, cycle_id,"
                 " goal_revision, design_revision, design_policy, demo_acceptance_policy, candidates_json,"
@@ -444,11 +539,18 @@ class PostgresDevStore:
         feedback: str | None = None,
     ) -> dict[str, Any]:
         with self._db.tx(tenant=tenant_id) as c:
+            # Lock order: dev_cycles -> dev_design_decisions (serialized with create_design_proposal & demo_decision)
+            cy_row = c.execute(
+                "SELECT task_id, run_id, cycle_json FROM agent.dev_cycles"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
+                (tenant_id, cycle_id, owner_user_id),
+            ).fetchone()
+            if cy_row is None:
+                raise ScopeDenied("cycle not found")
             cur_row = c.execute(
-                "SELECT d.*, c.task_id, c.run_id FROM agent.dev_design_decisions d"
-                " JOIN agent.dev_cycles c ON c.tenant_id=d.tenant_id AND c.id=d.cycle_id"
-                " WHERE d.tenant_id=%s AND d.cycle_id=%s AND d.owner_user_id=%s"
-                " ORDER BY d.design_revision DESC LIMIT 1 FOR UPDATE OF d",
+                "SELECT * FROM agent.dev_design_decisions"
+                " WHERE tenant_id=%s AND cycle_id=%s AND owner_user_id=%s"
+                " ORDER BY design_revision DESC LIMIT 1 FOR UPDATE",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cur_row is None:
@@ -458,28 +560,45 @@ class PostgresDevStore:
             cands = list(cur_row["candidates_json"]) if isinstance(cur_row["candidates_json"], list) else []
             if selected_candidate_id not in {str(x.get("candidateId")) for x in cands if isinstance(x, dict)}:
                 raise InvalidEvidence("selectedCandidateId not found in design revision")
+
+            cj = dict(cy_row["cycle_json"]) if isinstance(cy_row["cycle_json"], dict) else {}
+            raw_commit = cj.get("commit")
+            commit_sha = (
+                str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
+            )
+            new_digest = _demo_binding_digest(
+                cycle_id=cycle_id,
+                commit_sha=commit_sha,
+                goal_revision=int(cur_row["goal_revision"]),
+                design_revision=design_revision,
+                selected_candidate_id=selected_candidate_id,
+                candidates=cands,
+            )
             clean_fb = redact_dev_text(feedback, limit=500) if feedback else None
+            # P1-06: selecting or changing candidate ALWAYS resets demo_decision to PENDING & binds new digest!
             updated = c.execute(
                 "UPDATE agent.dev_design_decisions"
-                " SET selected_candidate_id=%s, feedback=%s, updated_at=now()"
+                " SET selected_candidate_id=%s, demo_decision='PENDING', decided_at=NULL,"
+                " demo_snapshot_digest=%s, feedback=%s, updated_at=now()"
                 " WHERE tenant_id=%s AND id=%s RETURNING *",
-                (selected_candidate_id, clean_fb, tenant_id, cur_row["id"]),
+                (selected_candidate_id, new_digest, clean_fb, tenant_id, cur_row["id"]),
             ).fetchone()
             append_event(
                 c,
                 tenant_id=tenant_id,
                 aggregate_type="task",
-                aggregate_id=str(cur_row["task_id"]),
+                aggregate_id=str(cy_row["task_id"]),
                 kind="dev.design_decided",
                 payload={
                     "cycleId": cycle_id,
                     "designRevision": design_revision,
                     "candidateId": selected_candidate_id,
+                    "demoSnapshotDigest": new_digest,
                 },
                 actor={"type": "user", "id": owner_user_id},
                 owner_user_id=owner_user_id,
-                task_id=str(cur_row["task_id"]),
-                run_id=str(cur_row["run_id"]),
+                task_id=str(cy_row["task_id"]),
+                run_id=str(cy_row["run_id"]),
             )
         assert updated is not None
         return _design_dto(dict(updated))
@@ -500,45 +619,68 @@ class PostgresDevStore:
         require_digest(demo_snapshot_digest)
 
         with self._db.tx(tenant=tenant_id) as c:
+            cy_row = c.execute(
+                "SELECT task_id, run_id, cycle_json FROM agent.dev_cycles"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
+                (tenant_id, cycle_id, owner_user_id),
+            ).fetchone()
+            if cy_row is None:
+                raise ScopeDenied("cycle not found")
             cur_row = c.execute(
-                "SELECT d.*, c.task_id, c.run_id FROM agent.dev_design_decisions d"
-                " JOIN agent.dev_cycles c ON c.tenant_id=d.tenant_id AND c.id=d.cycle_id"
-                " WHERE d.tenant_id=%s AND d.cycle_id=%s AND d.owner_user_id=%s"
-                " ORDER BY d.design_revision DESC LIMIT 1 FOR UPDATE OF d",
+                "SELECT * FROM agent.dev_design_decisions"
+                " WHERE tenant_id=%s AND cycle_id=%s AND owner_user_id=%s"
+                " ORDER BY design_revision DESC LIMIT 1 FOR UPDATE",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cur_row is None:
                 raise ScopeDenied("design proposal not found")
             if int(cur_row["design_revision"]) != design_revision:
                 raise StateConflict("stale design_revision")
-            if cur_row["demo_snapshot_digest"] and str(cur_row["demo_snapshot_digest"]) != demo_snapshot_digest:
-                raise StateConflict("demoSnapshotDigest mismatch with current design revision")
             if decision == "APPROVED" and not cur_row["selected_candidate_id"]:
                 raise StateConflict("must select a design candidate before approving demo")
+            # Re-verify digest against live cycle commit, goal_revision, selected_candidate_id & candidates!
+            cj = dict(cy_row["cycle_json"]) if isinstance(cy_row["cycle_json"], dict) else {}
+            raw_commit = cj.get("commit")
+            commit_sha = (
+                str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
+            )
+            cands = list(cur_row["candidates_json"]) if isinstance(cur_row["candidates_json"], list) else []
+            expected_digest = _demo_binding_digest(
+                cycle_id=cycle_id,
+                commit_sha=commit_sha,
+                goal_revision=int(cur_row["goal_revision"]),
+                design_revision=design_revision,
+                selected_candidate_id=str(cur_row["selected_candidate_id"])
+                if cur_row["selected_candidate_id"]
+                else None,
+                candidates=cands,
+            )
+            if demo_snapshot_digest != expected_digest or str(cur_row["demo_snapshot_digest"] or "") != expected_digest:
+                raise StateConflict("demoSnapshotDigest mismatch with current design/commit state")
             clean_fb = redact_dev_text(feedback, limit=500) if feedback else None
             updated = c.execute(
                 "UPDATE agent.dev_design_decisions"
                 " SET demo_decision=%s, demo_snapshot_digest=%s, feedback=COALESCE(%s, feedback),"
                 " decided_at=now(), updated_at=now()"
                 " WHERE tenant_id=%s AND id=%s RETURNING *",
-                (decision, demo_snapshot_digest, clean_fb, tenant_id, cur_row["id"]),
+                (decision, expected_digest, clean_fb, tenant_id, cur_row["id"]),
             ).fetchone()
             append_event(
                 c,
                 tenant_id=tenant_id,
                 aggregate_type="task",
-                aggregate_id=str(cur_row["task_id"]),
+                aggregate_id=str(cy_row["task_id"]),
                 kind="dev.demo_decided",
                 payload={
                     "cycleId": cycle_id,
                     "designRevision": design_revision,
                     "decision": decision,
-                    "demoSnapshotDigest": demo_snapshot_digest,
+                    "demoSnapshotDigest": expected_digest,
                 },
                 actor={"type": "user", "id": owner_user_id},
                 owner_user_id=owner_user_id,
-                task_id=str(cur_row["task_id"]),
-                run_id=str(cur_row["run_id"]),
+                task_id=str(cy_row["task_id"]),
+                run_id=str(cy_row["run_id"]),
             )
         assert updated is not None
         return _design_dto(dict(updated))
@@ -618,7 +760,7 @@ class PostgresDevStore:
             ).fetchall()
         return [_debug_dto(dict(r)) for r in rows]
 
-    # ------------------------------------------------------------------ PR Records & Guardian (DEV-05 / DEV-11)
+    # ------------------------------------------------------------------ PR Records & Guardian (P1-03 / P2-10)
     def begin_pr_record(
         self,
         *,
@@ -631,24 +773,31 @@ class PostgresDevStore:
         head_sha: str,
         idempotency_key: str,
         intent_id: str,
+        git_push_receipt_ref: str | None = None,
+        required_checks: Sequence[str] = (),
         max_repair_attempts: int = 3,
     ) -> tuple[dict[str, Any], bool]:
-        """Idempotently reserve a PR integration record; returns (dto, created)."""
+        """Atomically acquire single-dispatch right per BOTH idempotency_key AND intent_id (P1-03)."""
         require_sha(head_sha)
-        if not idempotency_key.strip():
-            raise InvalidEvidence("idempotency_key is required")
+        if not idempotency_key.strip() or not is_uuid7(intent_id):
+            raise InvalidEvidence("idempotency_key and uuid7 intent_id are required")
         with self._db.tx(tenant=tenant_id) as c:
             existing = c.execute(
-                "SELECT * FROM agent.dev_pr_records WHERE tenant_id=%s AND idempotency_key=%s AND owner_user_id=%s",
-                (tenant_id, idempotency_key, owner_user_id),
+                "SELECT * FROM agent.dev_pr_records"
+                " WHERE tenant_id=%s AND (idempotency_key=%s OR intent_id=%s)"
+                " FOR UPDATE",
+                (tenant_id, idempotency_key, intent_id),
             ).fetchone()
             if existing is not None:
+                if str(existing["owner_user_id"]) != owner_user_id:
+                    raise ScopeDenied("pr record belongs to another owner")
                 return _pr_dto(dict(existing)), False
             rid = uuid7()
             row = c.execute(
                 "INSERT INTO agent.dev_pr_records(tenant_id, id, owner_user_id, project_id, cycle_id,"
-                " repository, branch, head_sha, idempotency_key, intent_id, effect_status, max_repair_attempts)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s) RETURNING *",
+                " repository, branch, head_sha, idempotency_key, intent_id, git_push_receipt_ref,"
+                " required_checks_json, effect_status, max_repair_attempts)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s) RETURNING *",
                 (
                     tenant_id,
                     rid,
@@ -660,6 +809,8 @@ class PostgresDevStore:
                     head_sha,
                     idempotency_key,
                     intent_id,
+                    git_push_receipt_ref,
+                    Jsonb(list(required_checks)),
                     max(1, min(max_repair_attempts, 10)),
                 ),
             ).fetchone()
@@ -676,7 +827,6 @@ class PostgresDevStore:
         pr_number: int | None = None,
         pr_url: str | None = None,
         ci_state: str | None = None,
-        increment_repair: bool = False,
         last_error_code: str | None = None,
         event_kind: str = "dev.pr_recorded",
     ) -> dict[str, Any]:
@@ -689,18 +839,16 @@ class PostgresDevStore:
             ).fetchone()
             if cur is None:
                 raise ScopeDenied("pr record not found")
-            new_repairs = int(cur["repair_attempts"]) + (1 if increment_repair else 0)
             row = c.execute(
                 "UPDATE agent.dev_pr_records"
                 " SET effect_status=%s, pr_number=COALESCE(%s, pr_number), pr_url=COALESCE(%s, pr_url),"
-                " ci_state=COALESCE(%s, ci_state), repair_attempts=%s, last_error_code=%s, updated_at=now()"
+                " ci_state=COALESCE(%s, ci_state), last_error_code=%s, updated_at=now()"
                 " WHERE tenant_id=%s AND id=%s RETURNING *",
                 (
                     effect_status,
                     pr_number,
                     pr_url,
                     ci_state,
-                    new_repairs,
                     last_error_code,
                     tenant_id,
                     record_id,
@@ -725,6 +873,76 @@ class PostgresDevStore:
             )
         assert row is not None
         return _pr_dto(dict(row))
+
+    def claim_guardian_repair_slot(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        record_id: str,
+        ci_state: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically check repair_attempts < max_repair_attempts and increment in ONE SQL UPDATE (P2-10)."""
+        with self._db.tx(tenant=tenant_id) as c:
+            meta = c.execute(
+                "SELECT r.cycle_id, cy.task_id, cy.run_id FROM agent.dev_pr_records r"
+                " JOIN agent.dev_cycles cy ON cy.tenant_id=r.tenant_id AND cy.id=r.cycle_id"
+                " WHERE r.tenant_id=%s AND r.id=%s AND r.owner_user_id=%s FOR UPDATE OF r",
+                (tenant_id, record_id, owner_user_id),
+            ).fetchone()
+            if meta is None:
+                raise ScopeDenied("pr record not found")
+            claimed = c.execute(
+                "UPDATE agent.dev_pr_records"
+                " SET repair_attempts = repair_attempts + 1, ci_state=%s, updated_at=now()"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND repair_attempts < max_repair_attempts"
+                " RETURNING *",
+                (ci_state, tenant_id, record_id, owner_user_id),
+            ).fetchone()
+            if claimed is not None:
+                append_event(
+                    c,
+                    tenant_id=tenant_id,
+                    aggregate_type="task",
+                    aggregate_id=str(meta["task_id"]),
+                    kind="dev.pr_reconciled",
+                    payload={
+                        "prRecordId": record_id,
+                        "cycleId": str(meta["cycle_id"]),
+                        "ciState": ci_state,
+                        "repairAttempt": int(claimed["repair_attempts"]),
+                    },
+                    actor={"type": "service", "id": "development"},
+                    owner_user_id=owner_user_id,
+                    task_id=str(meta["task_id"]),
+                    run_id=str(meta["run_id"]),
+                )
+                return _pr_dto(dict(claimed)), True
+
+            escalated = c.execute(
+                "UPDATE agent.dev_pr_records SET ci_state='ESCALATED_LIMIT_REACHED', updated_at=now()"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s RETURNING *",
+                (tenant_id, record_id, owner_user_id),
+            ).fetchone()
+            assert escalated is not None
+            append_event(
+                c,
+                tenant_id=tenant_id,
+                aggregate_type="task",
+                aggregate_id=str(meta["task_id"]),
+                kind="dev.guardian_escalated",
+                payload={
+                    "prRecordId": record_id,
+                    "cycleId": str(meta["cycle_id"]),
+                    "ciState": "ESCALATED_LIMIT_REACHED",
+                    "repairAttempts": int(escalated["repair_attempts"]),
+                },
+                actor={"type": "service", "id": "development"},
+                owner_user_id=owner_user_id,
+                task_id=str(meta["task_id"]),
+                run_id=str(meta["run_id"]),
+            )
+            return _pr_dto(dict(escalated)), False
 
     def get_pr_record(self, *, tenant_id: str, owner_user_id: str, record_id: str) -> dict[str, Any] | None:
         with self._db.tx(tenant=tenant_id) as c:

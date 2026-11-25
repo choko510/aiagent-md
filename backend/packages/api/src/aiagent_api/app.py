@@ -446,6 +446,7 @@ def create_app(
     notify_direct_send_fn: notifications.DirectSendFn | None = None,
     dev_github_client: Any = None,
     dev_debug_probe_fn: Any = None,
+    tool_gateway_db: Database | None = None,
     web_dist_dir: Path | None = None,
 ) -> FastAPI:
     state: dict[str, Database] = {}
@@ -2359,6 +2360,7 @@ def create_app(
         egress_proxy=egress_proxy,
         dev_github_client=dev_github_client,
         dev_debug_probe_fn=dev_debug_probe_fn,
+        tool_gateway_db=tool_gateway_db,
     )
 
     # Optional same-origin built Web UI serving (for self-hosted console & real browser E2E)

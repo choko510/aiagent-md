@@ -264,9 +264,25 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         "fixture",
         commit=CommitEvidence("a" * 40, "b" * 40, "c" * 64, "synthetic", "synthetic"),
     )
+    from aiagent_development.store import PostgresDevStore
+
+    PostgresDevStore(dbs["api"]).create_project(
+        tenant_id=scope.tenant_id,
+        owner_user_id=scope.user_id,
+        workspace_id=scope.workspace_id,
+        project_id="preview-fixture",
+        name="Preview Fixture",
+        repository="org/fixture",
+        default_branch="feat/fixture",
+    )
+    PostgresCycleStore(dbs["api"]).create(fixture)
     broker = PreviewBroker(dbs["api"])
+    broker.register_instance(fixture, target_port=4173, process_attestation_sha256="d" * 64)
     lease, token = broker.issue_lease(fixture, target_port=4173, ttl_s=60)
-    assert broker.verify_lease(scope.tenant_id, scope.user_id, lease, token, 4173) == "b" * 40
+    assert (
+        broker.verify_lease(scope.tenant_id, scope.user_id, lease, token, 4173, expected_cycle_id="preview-fixture")
+        == "b" * 40
+    )
     assert broker.revoke_lease(scope.tenant_id, scope.user_id, lease) is True
     sse = api.get(
         f"/v1/tasks/{created['taskId']}/events/stream", headers={"Authorization": f"Bearer {tenant['token']}"}

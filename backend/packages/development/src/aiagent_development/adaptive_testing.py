@@ -1,9 +1,12 @@
 """DEV-14 Adaptive Testing Gate: separates fast impacted feedback from mandatory security/regression gates.
 
-Never mislabels an impacted-only pass as full verification. Falls back conservatively to the full
-discovered test suite whenever coverage is incomplete, deletions/config/migrations change, or
-impact analysis hits limits or yields empty candidates. Enforces PR #110 strict completion flags
-(executed=True, timed_out=False, truncated=False).
+Hardens P2-12:
+- Conservative fallback on any non-COMPLETE coverage (including TEXT_ONLY by default), analysis issues,
+  manifest/lock/SQL/UI/deleted changes, or empty impacted candidates.
+- Separate command builders for test targets (`pytest -q`) vs static-check targets (`ruff check`).
+- Authoritatively reads mandatory tests from TaskPlan.required_tests.
+- Strictly verifies returned ExecutionEvidence (intent_ref, toolchain_digest, test_id, source_commit_sha,
+  executed=True, timed_out=False, truncated=False, exit_code=0).
 """
 
 from __future__ import annotations
@@ -42,8 +45,21 @@ class AdaptiveGateResult:
     mandatory_evidence: tuple[ExecutionEvidence, ...]
 
 
-def _evidence_passed(ev: ExecutionEvidence) -> bool:
-    return ev.executed and ev.exit_code == 0 and ev.timed_out is False and ev.truncated is False
+def _evidence_matches_and_passed(
+    req: ExecutionRequest,
+    ev: ExecutionEvidence,
+    *,
+    expected_commit_sha: str | None,
+) -> bool:
+    if not (ev.executed and ev.exit_code == 0 and ev.timed_out is False and ev.truncated is False):
+        return False
+    if ev.intent_ref != req.intent_ref or ev.toolchain_digest != req.toolchain_digest or ev.kind != req.kind:
+        return False
+    if ev.test_id != req.test_id:
+        return False
+    if expected_commit_sha is not None and ev.source_commit_sha != expected_commit_sha:
+        return False
+    return bool(ev.receipt_ref and ev.receipt_ref.strip())
 
 
 def plan_adaptive_tests(
@@ -53,6 +69,7 @@ def plan_adaptive_tests(
     task_plan: TaskPlan,
     *,
     full_suite_tests: Sequence[str] | None = None,
+    allow_text_only_narrowing: bool = False,
 ) -> AdaptiveTestPlan:
     res = impact(reader, inv, changed)
     inv_map = {item.entry.path: item for item in inv.files}
@@ -61,8 +78,9 @@ def plan_adaptive_tests(
         dict.fromkeys(full_suite_tests if full_suite_tests else discovered_tests or task_plan.required_tests)
     )
 
+    allowed_cov = (Coverage.COMPLETE, Coverage.TEXT_ONLY) if allow_text_only_narrowing else (Coverage.COMPLETE,)
     reasons: list[str] = []
-    if res.coverage not in (Coverage.COMPLETE, Coverage.TEXT_ONLY):
+    if res.coverage not in allowed_cov:
         reasons.append(f"coverage:{res.coverage.value}")
     if res.issues:
         reasons.append("analysis_issues:" + ";".join(res.issues[:3]))
@@ -107,10 +125,14 @@ class AdaptiveTestingGate:
         toolchain_digest: str,
         intent_prefix: str,
         target_commit_sha: str | None = None,
-        command_builder: Sequence[str] | None = None,
+        test_command: Sequence[str] | None = None,
+        static_command: Sequence[str] | None = None,
         run_mandatory: bool = True,
     ) -> AdaptiveGateResult:
-        cmd_base = tuple(command_builder or ("pytest", "-q"))
+        test_base = tuple(test_command or ("pytest", "-q"))
+        static_base = tuple(static_command or ("ruff", "check"))
+        # Always derive authoritative mandatory tests from TaskPlan, never trusting an altered adaptive_plan list.
+        authoritative_mandatory = plan.required_tests
         impacted_ev: list[ExecutionEvidence] = []
         mandatory_ev: list[ExecutionEvidence] = []
 
@@ -122,7 +144,7 @@ class AdaptiveTestingGate:
                 run=run,
                 plan_ref=plan.plan_ref,
                 kind="test",
-                argv=(*cmd_base, target),
+                argv=(*test_base, target),
                 toolchain_digest=toolchain_digest,
                 intent_ref=f"{intent_prefix}:imp:{idx}:{digest[:16]}",
                 test_id=target,
@@ -130,22 +152,23 @@ class AdaptiveTestingGate:
             )
             ev = self._sandbox.execute(req)
             impacted_ev.append(ev)
-            if not _evidence_passed(ev):
+            if not _evidence_matches_and_passed(req, ev, expected_commit_sha=target_commit_sha):
                 impacted_ok = False
 
         impacted_status = "PASSED" if (impacted_ev and impacted_ok) else "FAILED"
 
         mandatory_ok = True
         if run_mandatory:
-            for idx, m_target in enumerate(adaptive_plan.mandatory_tests):
+            for idx, m_target in enumerate(authoritative_mandatory):
                 digest = hashlib.sha256(f"{intent_prefix}:mandatory:{idx}:{m_target}".encode()).hexdigest()
                 is_static = m_target.startswith("static:")
+                static_arg = m_target.removeprefix("static:") or "."
                 req = ExecutionRequest(
                     project=scope,
                     run=run,
                     plan_ref=plan.plan_ref,
                     kind="static-check" if is_static else "test",
-                    argv=(*cmd_base, m_target),
+                    argv=(*static_base, static_arg) if is_static else (*test_base, m_target),
                     toolchain_digest=toolchain_digest,
                     intent_ref=f"{intent_prefix}:man:{idx}:{digest[:16]}",
                     test_id=None if is_static else m_target,
@@ -153,15 +176,22 @@ class AdaptiveTestingGate:
                 )
                 ev = self._sandbox.execute(req)
                 mandatory_ev.append(ev)
-                if not _evidence_passed(ev):
+                if not _evidence_matches_and_passed(req, ev, expected_commit_sha=target_commit_sha):
                     mandatory_ok = False
             mandatory_status = "PASSED" if (mandatory_ev and mandatory_ok) else "FAILED"
         else:
             mandatory_status = "SKIPPED"
 
         overall_passed = impacted_status == "PASSED" and mandatory_status == "PASSED"
+        resolved_plan = AdaptiveTestPlan(
+            changed_paths=adaptive_plan.changed_paths,
+            impacted_tests=adaptive_plan.impacted_tests,
+            mandatory_tests=authoritative_mandatory,
+            fallback_to_full=adaptive_plan.fallback_to_full,
+            fallback_reasons=adaptive_plan.fallback_reasons,
+        )
         return AdaptiveGateResult(
-            plan=adaptive_plan,
+            plan=resolved_plan,
             impacted_status=impacted_status,
             mandatory_status=mandatory_status,
             overall_passed=overall_passed,

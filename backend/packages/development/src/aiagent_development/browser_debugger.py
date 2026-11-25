@@ -1,24 +1,39 @@
-"""DEV-06 Autonomous Browser Debugger bound strictly to short-lived loopback PreviewBroker leases.
+"""DEV-06 Autonomous Browser Debugger bound strictly to attested loopback PreviewBroker leases.
 
-Never exposes raw cookies, credentials, external URLs, or Chrome DevTools WebSocket URLs.
+Hardens P0-02 and P2-11:
+- Verifies PreviewBroker lease against exact (tenant_id, owner_user_id, cycle_id, lease_id, token, port)
+  AND live attested `dev_preview_instances` BEFORE spawning browser execution.
+- Runs Chromium ONLY inside an isolated worker subprocess (`aiagent_development.browser_debug_worker`)
+  with a stripped environment (zero AIAGENT_* secrets or DB DSNs) and network-layer DNS + route/redirect
+  confinement to `http://127.0.0.1:<leased_port>`.
 """
 
 from __future__ import annotations
 
-import asyncio
-import importlib
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .contracts import ScopeDenied
-from .design_demo import redact_dev_text
 from .pg_store import PreviewBroker
 
-_VIEWPORTS: tuple[tuple[str, int, int], ...] = (
-    ("desktop", 1280, 800),
-    ("mobile", 390, 844),
+_ALLOWED_WORKER_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "PYTHONPATH",
+    "LANG",
+    "LC_ALL",
 )
+_MAX_STDOUT_BYTES = 131_072
 
 
 @dataclass(frozen=True)
@@ -31,93 +46,51 @@ class DebugReport:
     status: str  # OPEN | VERIFIED
 
 
-async def run_browser_debug_probe(
+def _sanitized_worker_env() -> dict[str, str]:
+    """Strip all AIAGENT_* secrets, DB DSNs, tokens, and proxy credentials before spawning browser worker."""
+    return {k: v for k, v in os.environ.items() if k in _ALLOWED_WORKER_ENV_KEYS}
+
+
+def run_isolated_browser_debug_worker(
     *,
     target_url: str,
+    leased_port: int,
     commit_sha: str,
+    timeout_s: float = 30.0,
 ) -> DebugReport:
-    """Inspect a loopback preview URL in headless Chromium across desktop & mobile viewports."""
     pu = urlsplit(target_url)
-    if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port is None:
-        raise ScopeDenied("browser debugger permits loopback 127.0.0.1 preview URLs only")
+    if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port != leased_port:
+        raise ScopeDenied("browser debugger permits attested loopback 127.0.0.1 preview origin only")
 
-    try:
-        pw_mod = importlib.import_module("playwright.async_api")
-    except ImportError as exc:
-        raise RuntimeError("BROWSER_DEBUG_UNAVAILABLE") from exc
-
-    console_errors: list[str] = []
-    network_errors: list[str] = []
-    layout_issues: list[str] = []
-
-    async with pw_mod.async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            for vp_name, width, height in _VIEWPORTS:
-                context = await browser.new_context(viewport={"width": width, "height": height})
-                page = await context.new_page()
-                page.on(
-                    "console",
-                    lambda msg, vp=vp_name: (
-                        console_errors.append(redact_dev_text(f"[{vp}] {msg.text}", limit=240))
-                        if msg.type == "error" and len(console_errors) < 30
-                        else None
-                    ),
-                )
-                page.on(
-                    "response",
-                    lambda resp, vp=vp_name: (
-                        network_errors.append(
-                            redact_dev_text(
-                                f"[{vp}] HTTP {resp.status} {urlsplit(resp.url).path}",
-                                limit=240,
-                            )
-                        )
-                        if resp.status >= 400 and len(network_errors) < 30
-                        else None
-                    ),
-                )
-                page.on(
-                    "requestfailed",
-                    lambda req, vp=vp_name: (
-                        network_errors.append(
-                            redact_dev_text(
-                                f"[{vp}] FAILED {urlsplit(req.url).path}",
-                                limit=240,
-                            )
-                        )
-                        if len(network_errors) < 30
-                        else None
-                    ),
-                )
-                try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
-                    overflow = await page.evaluate(
-                        "() => ({sw: document.documentElement.scrollWidth, iw: window.innerWidth})"
-                    )
-                    if isinstance(overflow, dict) and int(overflow.get("sw", 0)) > int(overflow.get("iw", 0)):
-                        layout_issues.append(
-                            f"[{vp_name}] horizontal overflow: scrollWidth={overflow['sw']} > innerWidth={overflow['iw']}"
-                        )
-                finally:
-                    await context.close()
-        finally:
-            await browser.close()
-
-    has_issues = bool(console_errors or network_errors or layout_issues)
-    redacted_url = f"http://127.0.0.1:{pu.port}{pu.path or '/'}"
+    payload = json.dumps({"targetUrl": target_url, "leasedPort": leased_port, "commitSha": commit_sha}).encode("utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "aiagent_development.browser_debug_worker"],
+        input=payload,
+        capture_output=True,
+        env=_sanitized_worker_env(),
+        timeout=timeout_s,
+        shell=False,
+        check=False,
+    )
+    if proc.returncode == 3 or b"BROWSER_DEBUG_UNAVAILABLE" in proc.stderr:
+        raise RuntimeError("BROWSER_DEBUG_UNAVAILABLE")
+    if proc.returncode != 0:
+        raise RuntimeError(f"BROWSER_DEBUG_WORKER_FAILED:{proc.returncode}")
+    if len(proc.stdout) > _MAX_STDOUT_BYTES:
+        raise RuntimeError("BROWSER_DEBUG_OUTPUT_TOO_LARGE")
+    data = json.loads(proc.stdout.decode("utf-8"))
     return DebugReport(
-        commit_sha=commit_sha,
-        source_url_redacted=redacted_url,
-        console_errors=tuple(console_errors),
-        network_errors=tuple(network_errors),
-        layout_issues=tuple(layout_issues),
-        status="OPEN" if has_issues else "VERIFIED",
+        commit_sha=str(data["commitSha"]),
+        source_url_redacted=str(data["sourceUrlRedacted"]),
+        console_errors=tuple(str(x) for x in data.get("consoleErrors", ())),
+        network_errors=tuple(str(x) for x in data.get("networkErrors", ())),
+        layout_issues=tuple(str(x) for x in data.get("layoutIssues", ())),
+        status=str(data["status"]),
     )
 
 
 class AutonomousBrowserDebugger:
-    """Binds Playwright debug probes strictly to valid PreviewBroker capability leases."""
+    """Binds isolated Playwright debug worker strictly to cycle-bound PreviewBroker capability leases."""
 
     def __init__(self, previews: PreviewBroker) -> None:
         self._previews = previews
@@ -127,6 +100,7 @@ class AutonomousBrowserDebugger:
         *,
         tenant_id: str,
         owner_user_id: str,
+        cycle_id: str,
         lease_id: str,
         token: str,
         port: int,
@@ -136,12 +110,23 @@ class AutonomousBrowserDebugger:
     ) -> DebugReport:
         if not path.startswith("/") or ".." in path or "\\" in path or len(path) > 256:
             raise ScopeDenied("invalid preview path")
-        commit_sha = self._previews.verify_lease(tenant_id, owner_user_id, lease_id, token, port)
+        commit_sha = self._previews.verify_lease(
+            tenant_id,
+            owner_user_id,
+            lease_id,
+            token,
+            port,
+            expected_cycle_id=cycle_id,
+        )
         target_url = f"http://127.0.0.1:{port}{path}"
         try:
             if probe_fn is not None:
                 return probe_fn(target_url=target_url, commit_sha=commit_sha)
-            return asyncio.run(run_browser_debug_probe(target_url=target_url, commit_sha=commit_sha))
+            return run_isolated_browser_debug_worker(
+                target_url=target_url,
+                leased_port=port,
+                commit_sha=commit_sha,
+            )
         finally:
             if revoke_after:
                 self._previews.revoke_lease(tenant_id, owner_user_id, lease_id)

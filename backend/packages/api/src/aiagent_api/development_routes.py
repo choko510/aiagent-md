@@ -1,8 +1,12 @@
 """DEV-09 FastAPI routes for Autonomous Software Development (Projects, Cycles, Design/Demo, Previews, Debug, PRs).
 
-Every route resolves (tenant_id, user_id, workspace_id) strictly from the authenticated Scope
-(Bearer token or HttpOnly cookie + CSRF + Same-Origin). No route exposes raw credentials,
-CDP URLs, or unapproved external write authority.
+Hardened against PR #122 review findings (P0-01, P0-02, P1-03..09, P2-10..13):
+- Binds Preview Leases strictly to registered attested `dev_preview_instances` + exact Cycle ID.
+- Runs Browser Debugger exclusively via isolated worker subprocess with DNS & redirect confinement.
+- Binds PR creation to canonical approved tool_intents / approval_records + Sentinel Path/Body digest
+  + remote branch HEAD verification + response head.sha verification + Intent-level single-dispatch lock.
+- PR Guardian read-only inspection never burns repair budget; atomic `claimRepair=True` slot acquisition
+  prevents concurrent repair ceiling overruns.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from aiagent_development.contracts import (
     StateConflict,
     require_sha,
 )
-from aiagent_development.github_egress import GitHubEgressClient
+from aiagent_development.github_egress import GitHubEgressClient, default_github_token_provider
 from aiagent_development.pg_store import PostgresCycleStore, PreviewBroker
 from aiagent_development.pr_guardian import PrGuardian
 from aiagent_development.store import PostgresDevStore
@@ -70,6 +74,7 @@ def register_development_routes(
     egress_proxy: str | None = None,
     dev_github_client: Any = None,
     dev_debug_probe_fn: Any = None,
+    tool_gateway_db: Database | None = None,
 ) -> None:
     def _store() -> PostgresDevStore:
         return PostgresDevStore(get_db())
@@ -77,7 +82,7 @@ def register_development_routes(
     def _previews() -> PreviewBroker:
         return PreviewBroker(get_db())
 
-    def _github_client(github_api_base: str) -> Any:
+    def _github_client(github_api_base: str, *, repository_binding_id: str | None = None) -> Any:
         if dev_github_client is not None:
             return dev_github_client
         return GitHubEgressClient(
@@ -85,6 +90,10 @@ def register_development_routes(
             sentinel=sentinel,
             github_api_base=github_api_base,
             egress_proxy=egress_proxy,
+            token_provider=lambda repo: default_github_token_provider(
+                repo, repository_binding_id=repository_binding_id
+            ),
+            tool_gateway_db=tool_gateway_db,
         )
 
     # ------------------------------------------------------------------ Projects
@@ -266,16 +275,19 @@ def register_development_routes(
             "grantsExternalApproval": False,
         }
 
-    # ------------------------------------------------------------------ Preview Leases & Browser Debug (DEV-06)
+    # ------------------------------------------------------------------ Preview Leases & Browser Debug (DEV-06 / P0-02 / P2-11)
     @app.post("/v1/development/cycles/{cycle_id}/previews", status_code=201)
     async def issue_dev_preview(cycle_id: str, request: Request, s: Scope = Depends(scope_dep)) -> dict[str, Any]:  # noqa: B008
         body = await _parse_json_obj(request)
         raw_port = body.get("targetPort")
         raw_ttl = body.get("ttlSeconds", 120)
+        preview_instance_id = body.get("previewInstanceId")
         if isinstance(raw_port, bool) or not isinstance(raw_port, int):
             raise HTTPException(422, detail={"error": "TARGET_PORT_REQUIRED"})
         if isinstance(raw_ttl, bool) or not isinstance(raw_ttl, int):
             raise HTTPException(422, detail={"error": "INVALID_TTL"})
+        if preview_instance_id is not None and not is_uuid7(str(preview_instance_id)):
+            raise HTTPException(422, detail={"error": "INVALID_PREVIEW_INSTANCE_ID"})
         cy_dto = await asyncio.to_thread(
             _store().get_cycle, tenant_id=s.tenant_id, owner_user_id=s.user_id, cycle_id=cycle_id
         )
@@ -294,7 +306,11 @@ def register_development_routes(
         try:
             cycle_obj = await asyncio.to_thread(PostgresCycleStore(get_db()).load, proj_scope, cycle_id)
             lease_id, raw_token = await asyncio.to_thread(
-                _previews().issue_lease, cycle_obj, target_port=raw_port, ttl_s=raw_ttl
+                _previews().issue_lease,
+                cycle_obj,
+                target_port=raw_port,
+                ttl_s=raw_ttl,
+                preview_instance_id=str(preview_instance_id) if preview_instance_id else None,
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
@@ -336,11 +352,18 @@ def register_development_routes(
 
         token = str(body.get("previewToken") or "")
         raw_port = body.get("targetPort")
+        expected_cycle_id = str(body["cycleId"]) if body.get("cycleId") else None
         if not token or isinstance(raw_port, bool) or not isinstance(raw_port, int):
             raise HTTPException(422, detail={"error": "PREVIEW_TOKEN_AND_PORT_REQUIRED"})
         try:
             commit_sha = await asyncio.to_thread(
-                _previews().verify_lease, s.tenant_id, s.user_id, lease_id, token, raw_port
+                _previews().verify_lease,
+                s.tenant_id,
+                s.user_id,
+                lease_id,
+                token,
+                raw_port,
+                expected_cycle_id=expected_cycle_id,
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
@@ -388,6 +411,7 @@ def register_development_routes(
                 dbg.debug_preview,
                 tenant_id=s.tenant_id,
                 owner_user_id=s.user_id,
+                cycle_id=cycle_id,
                 lease_id=lease_id,
                 token=token,
                 port=raw_port,
@@ -456,10 +480,13 @@ def register_development_routes(
         pr_body = str(body.get("body") or "Created under bounded development workflow.").strip()
         draft = body.get("draft", True)
         max_repairs = body.get("maxRepairAttempts", 3)
+        raw_req_checks = body.get("requiredChecks") or []
         if not isinstance(draft, bool):
             raise HTTPException(422, detail={"error": "DRAFT_MUST_BE_BOOLEAN"})
         if isinstance(max_repairs, bool) or not isinstance(max_repairs, int) or not 1 <= max_repairs <= 10:
             raise HTTPException(422, detail={"error": "INVALID_MAX_REPAIR_ATTEMPTS"})
+        if not isinstance(raw_req_checks, list) or any(not isinstance(x, str) or not x.strip() for x in raw_req_checks):
+            raise HTTPException(422, detail={"error": "INVALID_REQUIRED_CHECKS"})
         if not cycle_id or not is_uuid7(intent_id) or not idem_key:
             raise HTTPException(422, detail={"error": "CYCLE_INTENT_AND_IDEMPOTENCY_REQUIRED"})
         try:
@@ -479,25 +506,32 @@ def register_development_routes(
         if cycle["phase"] != "CODE_READY" or cycle["commitSha"] != expected_head_sha:
             raise HTTPException(409, detail={"error": "CYCLE_NOT_CODE_READY_OR_HEAD_MISMATCH"})
 
-        record, created = await asyncio.to_thread(
-            st.begin_pr_record,
-            tenant_id=s.tenant_id,
-            owner_user_id=s.user_id,
-            project_id=project_id,
-            cycle_id=cycle_id,
-            repository=proj["repository"],
-            branch=cycle["branch"],
-            head_sha=expected_head_sha,
-            idempotency_key=idem_key,
-            intent_id=intent_id,
-            max_repair_attempts=max_repairs,
-        )
+        try:
+            record, created = await asyncio.to_thread(
+                st.begin_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                repository=proj["repository"],
+                branch=cycle["branch"],
+                head_sha=expected_head_sha,
+                idempotency_key=idem_key,
+                intent_id=intent_id,
+                git_push_receipt_ref=cycle.get("pushReceipt"),
+                required_checks=raw_req_checks,
+                max_repair_attempts=max_repairs,
+            )
+        except DevelopmentError as exc:
+            _raise_dev_http(exc)
         if not created:
-            if record["effectStatus"] == "EFFECT_UNKNOWN":
+            if record["effectStatus"] in ("EFFECT_UNKNOWN", "PENDING"):
                 return JSONResponse(
                     {"schemaVersion": "1.0", "error": "EFFECT_UNKNOWN", "prRecord": record, "reconcileRequired": True},
                     status_code=409,
                 )
+            if record["effectStatus"] == "FAILED":
+                raise HTTPException(409, detail={"error": "INTENT_ALREADY_FAILED", "prRecord": record})
             return {"schemaVersion": "1.0", "prRecord": record, "idempotentReplay": True}
 
         proj_scope = ProjectScope(
@@ -510,11 +544,15 @@ def register_development_routes(
             base_sha=cycle["baseSha"],
             workspace_revision="1",
         )
-        gh = _github_client(proj["githubApiBase"] or "")
+        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
         try:
             created_pr = await asyncio.to_thread(
                 gh.create_pull_request,
                 scope=proj_scope,
+                cycle_id=cycle_id,
+                task_id=cycle["taskId"],
+                run_id=cycle["runId"],
+                goal_revision=cycle["goalRevision"],
                 head_sha=expected_head_sha,
                 intent_id=intent_id,
                 base_branch=proj["defaultBranch"],
@@ -582,7 +620,7 @@ def register_development_routes(
             base_sha=rec["headSha"],
             workspace_revision="1",
         )
-        gh = _github_client(proj["githubApiBase"] or "")
+        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
         try:
             found = await asyncio.to_thread(
                 gh.reconcile_pull_request,
@@ -608,9 +646,17 @@ def register_development_routes(
         return {"schemaVersion": "1.0", "reconciled": True, "prRecord": updated}
 
     @app.post("/v1/development/prs/{pr_record_id}/guardian-check")
-    async def guardian_check_dev_pr(pr_record_id: str, s: Scope = Depends(scope_dep)) -> dict[str, Any]:  # noqa: B008
+    async def guardian_check_dev_pr(
+        pr_record_id: str,
+        request: Request,
+        s: Scope = Depends(scope_dep),  # noqa: B008
+    ) -> dict[str, Any]:
         if not is_uuid7(pr_record_id):
             raise HTTPException(404)
+        body = await _parse_json_obj(request)
+        claim_repair = body.get("claimRepair", False)
+        if not isinstance(claim_repair, bool):
+            raise HTTPException(422, detail={"error": "CLAIM_REPAIR_MUST_BE_BOOLEAN"})
         st = _store()
         rec = await asyncio.to_thread(
             st.get_pr_record, tenant_id=s.tenant_id, owner_user_id=s.user_id, record_id=pr_record_id
@@ -634,7 +680,7 @@ def register_development_routes(
             base_sha=rec["headSha"],
             workspace_revision="1",
         )
-        gh = _github_client(proj["githubApiBase"] or "")
+        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
         guardian = PrGuardian(gh.read_get)
         try:
             ev = await asyncio.to_thread(
@@ -645,27 +691,41 @@ def register_development_routes(
                 head_sha=rec["headSha"],
                 repair_attempts=rec["repairAttempts"],
                 max_repair_attempts=rec["maxRepairAttempts"],
+                required_checks=rec["requiredChecks"],
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
-        updated = await asyncio.to_thread(
-            st.settle_pr_record,
-            tenant_id=s.tenant_id,
-            owner_user_id=s.user_id,
-            record_id=rec["id"],
-            effect_status=rec["effectStatus"],
-            ci_state=ev.ci_state,
-            increment_repair=ev.should_repair,
-            event_kind="dev.guardian_escalated" if ev.escalated else "dev.pr_reconciled",
-        )
+
+        repair_claimed = False
+        if claim_repair and ev.ci_state in ("FAIL", "CONFLICT"):
+            updated, repair_claimed = await asyncio.to_thread(
+                st.claim_guardian_repair_slot,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=rec["id"],
+                ci_state=ev.ci_state,
+            )
+        else:
+            updated = await asyncio.to_thread(
+                st.settle_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=rec["id"],
+                effect_status=rec["effectStatus"],
+                ci_state=ev.ci_state,
+                event_kind="dev.guardian_escalated" if ev.escalated else "dev.pr_reconciled",
+            )
         return {
             "schemaVersion": "1.0",
             "prRecord": updated,
+            "repairClaimed": repair_claimed,
             "evaluation": {
-                "ciState": ev.ci_state,
+                "ciState": updated["ciState"],
                 "failingChecks": list(ev.failing_checks),
+                "missingRequiredChecks": list(ev.missing_required_checks),
+                "observedHeadSha": ev.observed_head_sha,
                 "mergeableState": ev.mergeable_state,
-                "shouldRepair": ev.should_repair,
-                "escalated": ev.escalated,
+                "shouldRepair": repair_claimed if claim_repair else ev.should_repair,
+                "escalated": updated["ciState"] == "ESCALATED_LIMIT_REACHED",
             },
         }

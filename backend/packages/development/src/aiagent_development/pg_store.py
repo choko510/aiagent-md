@@ -396,10 +396,66 @@ class PostgresCycleStore(CycleStorePort):
 
 
 class PreviewBroker:
-    """Short-lived, tenant/owner-scoped, loopback-only Preview lease manager bound to an exact commit SHA."""
+    """Short-lived, tenant/owner/cycle-scoped, loopback-only Preview lease manager bound to an attested preview instance."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
+
+    def register_instance(
+        self,
+        cycle: Cycle,
+        *,
+        target_port: int,
+        process_attestation_sha256: str,
+        runner_kind: str = "isolated_worker",
+    ) -> str:
+        """Register an active isolated preview instance bound to exact (project, cycle, commit, port) (P0-02)."""
+        if cycle.phase != Phase.CODE_READY or cycle.commit is None:
+            raise StateConflict("preview instance requires CODE_READY cycle with immutable commit")
+        if not 1024 <= target_port <= 65535:
+            raise InvalidEvidence("invalid preview port")
+        if runner_kind not in ("isolated_worker", "sandbox_cell"):
+            raise InvalidEvidence("invalid preview runner_kind")
+        if len(process_attestation_sha256) != 64 or any(
+            ch not in "0123456789abcdef" for ch in process_attestation_sha256
+        ):
+            raise InvalidEvidence("invalid process_attestation_sha256")
+        inst_id = uuid7()
+        with self._db.tx(tenant=cycle.scope.tenant_id) as c:
+            if not control.scope_active(c, cycle.scope.tenant_id, cycle.scope.owner_user_id, cycle.scope.workspace_id):
+                raise ScopeDenied("scope inactive")
+            c.execute(
+                "INSERT INTO agent.dev_preview_instances(tenant_id, id, owner_user_id, project_id, cycle_id,"
+                " workspace_id, commit_sha, target_port, runner_kind, process_attestation_sha256, status)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'RUNNING')",
+                (
+                    cycle.scope.tenant_id,
+                    inst_id,
+                    cycle.scope.owner_user_id,
+                    cycle.scope.project_id,
+                    cycle.cycle_id,
+                    cycle.scope.workspace_id,
+                    cycle.commit.commit_sha,
+                    target_port,
+                    runner_kind,
+                    process_attestation_sha256,
+                ),
+            )
+        return inst_id
+
+    def stop_instance(self, tenant_id: str, owner_user_id: str, instance_id: str) -> bool:
+        with self._db.tx(tenant=tenant_id) as c:
+            cur = c.execute(
+                "UPDATE agent.dev_preview_instances SET status='STOPPED', stopped_at=now()"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND status='RUNNING'",
+                (tenant_id, instance_id, owner_user_id),
+            )
+            c.execute(
+                "UPDATE agent.preview_leases SET status='REVOKED', revoked_at=now()"
+                " WHERE tenant_id=%s AND preview_instance_id=%s AND owner_user_id=%s AND status='ACTIVE'",
+                (tenant_id, instance_id, owner_user_id),
+            )
+            return cur.rowcount == 1
 
     def issue_lease(
         self,
@@ -407,6 +463,7 @@ class PreviewBroker:
         *,
         target_port: int,
         ttl_s: int = 120,
+        preview_instance_id: str | None = None,
     ) -> tuple[str, str]:
         if cycle.phase != Phase.CODE_READY or cycle.commit is None:
             raise StateConflict("preview requires CODE_READY cycle with immutable commit")
@@ -419,16 +476,52 @@ class PreviewBroker:
         with self._db.tx(tenant=cycle.scope.tenant_id) as c:
             if not control.scope_active(c, cycle.scope.tenant_id, cycle.scope.owner_user_id, cycle.scope.workspace_id):
                 raise ScopeDenied("scope inactive")
+            if preview_instance_id is not None:
+                inst = c.execute(
+                    "SELECT id FROM agent.dev_preview_instances"
+                    " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND project_id=%s AND cycle_id=%s"
+                    " AND workspace_id=%s AND commit_sha=%s AND target_port=%s AND status='RUNNING'",
+                    (
+                        cycle.scope.tenant_id,
+                        preview_instance_id,
+                        cycle.scope.owner_user_id,
+                        cycle.scope.project_id,
+                        cycle.cycle_id,
+                        cycle.scope.workspace_id,
+                        cycle.commit.commit_sha,
+                        target_port,
+                    ),
+                ).fetchone()
+            else:
+                inst = c.execute(
+                    "SELECT id FROM agent.dev_preview_instances"
+                    " WHERE tenant_id=%s AND owner_user_id=%s AND project_id=%s AND cycle_id=%s"
+                    " AND workspace_id=%s AND commit_sha=%s AND target_port=%s AND status='RUNNING'"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (
+                        cycle.scope.tenant_id,
+                        cycle.scope.owner_user_id,
+                        cycle.scope.project_id,
+                        cycle.cycle_id,
+                        cycle.scope.workspace_id,
+                        cycle.commit.commit_sha,
+                        target_port,
+                    ),
+                ).fetchone()
+            if inst is None:
+                raise ScopeDenied("target_port is not bound to an active attested preview instance")
             c.execute(
                 "INSERT INTO agent.preview_leases(tenant_id, id, owner_user_id, project_id, workspace_id,"
-                " commit_sha, target_port, token_sha256, status, expires_at)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE',%s)",
+                " cycle_id, preview_instance_id, commit_sha, target_port, token_sha256, status, expires_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE',%s)",
                 (
                     cycle.scope.tenant_id,
                     lease_id,
                     cycle.scope.owner_user_id,
                     cycle.scope.project_id,
                     cycle.scope.workspace_id,
+                    cycle.cycle_id,
+                    inst["id"],
                     cycle.commit.commit_sha,
                     target_port,
                     token_hash,
@@ -449,22 +542,39 @@ class PreviewBroker:
             )
         return lease_id, raw_token
 
-    def verify_lease(self, tenant_id: str, owner_user_id: str, lease_id: str, token: str, port: int) -> str:
+    def verify_lease(
+        self,
+        tenant_id: str,
+        owner_user_id: str,
+        lease_id: str,
+        token: str,
+        port: int,
+        *,
+        expected_cycle_id: str | None = None,
+    ) -> str:
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with self._db.tx(tenant=tenant_id) as c:
             row = c.execute(
-                "SELECT commit_sha, target_port, token_sha256, status, expires_at"
-                " FROM agent.preview_leases WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                "SELECT l.commit_sha, l.target_port, l.token_sha256, l.status, l.expires_at, l.cycle_id,"
+                " i.status AS inst_status, i.target_port AS inst_port, i.commit_sha AS inst_sha"
+                " FROM agent.preview_leases l"
+                " JOIN agent.dev_preview_instances i ON i.tenant_id=l.tenant_id AND i.id=l.preview_instance_id"
+                " WHERE l.tenant_id=%s AND l.id=%s AND l.owner_user_id=%s",
                 (tenant_id, lease_id, owner_user_id),
             ).fetchone()
         if (
             row is None
             or row["status"] != "ACTIVE"
+            or row["inst_status"] != "RUNNING"
             or int(row["target_port"]) != port
+            or int(row["inst_port"]) != port
+            or str(row["inst_sha"]) != str(row["commit_sha"])
             or row["expires_at"] <= datetime.now(UTC)
             or not secrets.compare_digest(str(row["token_sha256"]), token_hash)
         ):
             raise ScopeDenied("invalid or expired preview lease")
+        if expected_cycle_id is not None and str(row["cycle_id"] or "") != expected_cycle_id:
+            raise ScopeDenied("preview lease bound to a different cycle")
         return str(row["commit_sha"])
 
     def revoke_lease(self, tenant_id: str, owner_user_id: str, lease_id: str) -> bool:

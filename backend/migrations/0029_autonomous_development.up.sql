@@ -65,8 +65,10 @@ CREATE TABLE agent.dev_pr_records (
   pr_url text,
   idempotency_key text NOT NULL,
   intent_id uuid,
+  git_push_receipt_ref text,
+  required_checks_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   effect_status text NOT NULL DEFAULT 'PENDING' CHECK (effect_status IN ('PENDING', 'CONFIRMED', 'EFFECT_UNKNOWN', 'FAILED')),
-  ci_state text NOT NULL DEFAULT 'UNKNOWN' CHECK (ci_state IN ('UNKNOWN', 'PENDING', 'PASS', 'FAIL', 'CONFLICT', 'ESCALATED_LIMIT_REACHED')),
+  ci_state text NOT NULL DEFAULT 'UNKNOWN' CHECK (ci_state IN ('UNKNOWN', 'PENDING', 'PASS', 'FAIL', 'CONFLICT', 'STALE_HEAD', 'ESCALATED_LIMIT_REACHED')),
   repair_attempts integer NOT NULL DEFAULT 0 CHECK (repair_attempts >= 0),
   max_repair_attempts integer NOT NULL DEFAULT 3 CHECK (max_repair_attempts >= 1),
   last_error_code text,
@@ -75,10 +77,63 @@ CREATE TABLE agent.dev_pr_records (
   PRIMARY KEY (tenant_id, id),
   UNIQUE (tenant_id, idempotency_key),
   FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
+  FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id),
+  FOREIGN KEY (tenant_id, intent_id) REFERENCES agent.tool_intents(tenant_id, id)
+);
+
+CREATE UNIQUE INDEX dev_pr_records_intent_uniq ON agent.dev_pr_records (tenant_id, intent_id) WHERE intent_id IS NOT NULL;
+CREATE INDEX dev_pr_records_project_idx ON agent.dev_pr_records (tenant_id, project_id, created_at DESC);
+
+CREATE TABLE agent.dev_preview_instances (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
+  project_id text NOT NULL,
+  cycle_id text NOT NULL,
+  workspace_id uuid NOT NULL,
+  commit_sha text NOT NULL CHECK (commit_sha ~ '^[a-f0-9]{40,64}$'),
+  target_port integer NOT NULL CHECK (target_port BETWEEN 1024 AND 65535),
+  runner_kind text NOT NULL DEFAULT 'isolated_worker' CHECK (runner_kind IN ('isolated_worker', 'sandbox_cell')),
+  process_attestation_sha256 char(64) NOT NULL CHECK (process_attestation_sha256 ~ '^[a-f0-9]{64}$'),
+  status text NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'STOPPED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  stopped_at timestamptz,
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
+  FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id),
+  FOREIGN KEY (tenant_id, workspace_id) REFERENCES agent.workspaces(tenant_id, id)
+);
+
+CREATE INDEX dev_preview_instances_active_idx
+  ON agent.dev_preview_instances (tenant_id, owner_user_id, project_id, cycle_id, target_port)
+  WHERE status = 'RUNNING';
+
+ALTER TABLE agent.preview_leases
+  ADD COLUMN IF NOT EXISTS cycle_id text,
+  ADD COLUMN IF NOT EXISTS preview_instance_id uuid;
+
+CREATE TABLE agent.dev_review_artifacts (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL,
+  task_id uuid NOT NULL,
+  run_id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
+  project_id text NOT NULL,
+  cycle_id text NOT NULL,
+  reviewer_role text NOT NULL CHECK (reviewer_role IN ('functional', 'security', 'ui-e2e')),
+  target_sha text NOT NULL CHECK (target_sha ~ '^[a-f0-9]{40,64}$'),
+  evidence_sha256 char(64) NOT NULL CHECK (evidence_sha256 ~ '^[a-f0-9]{64}$'),
+  passed boolean NOT NULL,
+  findings_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, task_id, run_id) REFERENCES agent.runs(tenant_id, task_id, id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
   FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id)
 );
 
-CREATE INDEX dev_pr_records_project_idx ON agent.dev_pr_records (tenant_id, project_id, created_at DESC);
+CREATE INDEX dev_review_artifacts_lookup_idx
+  ON agent.dev_review_artifacts (tenant_id, project_id, cycle_id, target_sha, reviewer_role);
 
 CREATE TABLE agent.dev_debug_findings (
   tenant_id uuid NOT NULL,
@@ -106,10 +161,22 @@ CREATE TABLE agent.dev_debug_findings (
 
 CREATE INDEX dev_debug_findings_cycle_idx ON agent.dev_debug_findings (tenant_id, cycle_id, created_at DESC);
 
+-- Optional path + body digest binding on Sentinel egress permits (used by dev_github_pr to prevent permit repurposing).
+ALTER TABLE agent.egress_permits
+  ADD COLUMN IF NOT EXISTS target_path text,
+  ADD COLUMN IF NOT EXISTS body_sha256 char(64) CHECK (body_sha256 IS NULL OR body_sha256 ~ '^[0-9a-f]{64}$');
+
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['dev_projects','dev_design_decisions','dev_pr_records','dev_debug_findings'] LOOP
+  FOREACH t IN ARRAY ARRAY[
+    'dev_projects',
+    'dev_design_decisions',
+    'dev_pr_records',
+    'dev_preview_instances',
+    'dev_review_artifacts',
+    'dev_debug_findings'
+  ] LOOP
     EXECUTE format('ALTER TABLE agent.%I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('REVOKE ALL ON TABLE agent.%I FROM PUBLIC', t);
     EXECUTE format($p$CREATE POLICY api_tenant ON agent.%I TO aiagent_api
@@ -120,7 +187,19 @@ BEGIN
   END LOOP;
 END $$;
 
-GRANT SELECT, INSERT, UPDATE ON agent.dev_projects, agent.dev_design_decisions, agent.dev_pr_records, agent.dev_debug_findings
+GRANT SELECT, INSERT, UPDATE ON
+  agent.dev_projects,
+  agent.dev_design_decisions,
+  agent.dev_pr_records,
+  agent.dev_preview_instances,
+  agent.dev_review_artifacts,
+  agent.dev_debug_findings
   TO aiagent_api, aiagent_runtime, aiagent_tool_gateway;
-GRANT SELECT ON agent.dev_projects, agent.dev_design_decisions, agent.dev_pr_records, agent.dev_debug_findings
+GRANT SELECT ON
+  agent.dev_projects,
+  agent.dev_design_decisions,
+  agent.dev_pr_records,
+  agent.dev_preview_instances,
+  agent.dev_review_artifacts,
+  agent.dev_debug_findings
   TO aiagent_ops;
