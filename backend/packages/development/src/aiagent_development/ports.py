@@ -65,6 +65,11 @@ class GitProviderPort(Protocol):
         A timeout after possibly sending is EffectUnknown, not a safe retry.
         """
 
+    def recover_commit(
+        self, scope: ProjectScope, cycle_id: str, patch: PatchArtifact, intent_ref: str
+    ) -> CommitEvidence:
+        """Revalidate a settled canonical effect without dispatching another Git operation."""
+
     def push(self, scope: ProjectScope, expected_head_sha: str, intent_ref: str) -> str:
         """Push explicitly approved branch only, with remote expected HEAD CAS."""
 

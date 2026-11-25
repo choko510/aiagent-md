@@ -67,9 +67,9 @@ def env(repo: tuple[Path, str]):
     return root, scope, run, auth, scm, sandbox, store, flow
 
 
-def _request(env, *, kind="build", intent="build-1", plan_ref="plan-1"):
+def _request(env, *, kind="build", intent="build-1", plan_ref="plan-1", test_id=None):
     _, scope, run, _, _, _, _, _ = env
-    return ExecutionRequest(scope, run, plan_ref, kind, ("pytest", "-q"), "a" * 64, intent)
+    return ExecutionRequest(scope, run, plan_ref, kind, ("pytest", "-q"), "a" * 64, intent, test_id=test_id)
 
 
 def _prepare(env, cycle="cycle-1", *, tests=("unit", "security")):
@@ -92,7 +92,7 @@ def _test(env, test_id, *, executed=True, exit_code=0, cycle="cycle-1"):
     _, scope, _, _, _, sandbox, _, flow = env
     intent = f"test-{test_id}"
     sandbox.results[intent] = (executed, exit_code if executed else None, test_id)
-    return flow.execute(scope, cycle, _request(env, kind="test", intent=intent))
+    return flow.execute(scope, cycle, _request(env, kind="test", intent=intent, test_id=test_id))
 
 
 def _review(env, role, *, passed=True, finding=None, sha=None):
@@ -258,6 +258,51 @@ def test_missing_required_test_never_ready(env):
     assert _review(env, "ui-e2e").phase == Phase.REVIEWING
 
 
+def test_test_request_and_receipt_must_match_approved_test_id(env):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    with pytest.raises(ScopeDenied, match="explicit test ID"):
+        _request(env, kind="test", intent="missing-id")
+    before = len(sandbox.invocations)
+    with pytest.raises(ScopeDenied, match="not approved"):
+        flow.execute(scope, "cycle-1", _request(env, kind="test", intent="unapproved", test_id="unknown"))
+    assert len(sandbox.invocations) == before
+    sandbox.results["mismatched"] = (True, 0, "security")
+    with pytest.raises(InvalidEvidence, match="mismatches"):
+        flow.execute(scope, "cycle-1", _request(env, kind="test", intent="mismatched", test_id="unit"))
+    assert not flow._load(scope, "cycle-1").tests
+
+
+def test_stale_explicit_execution_target_is_rejected_before_dispatch(env):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    before = len(sandbox.invocations)
+    request = replace(_request(env, kind="test", intent="stale", test_id="unit"), target_commit_sha=scope.base_sha)
+    with pytest.raises(StaleReference, match="execution target"):
+        flow.execute(scope, "cycle-1", request)
+    assert len(sandbox.invocations) == before
+
+
+@pytest.mark.parametrize("timed_out,truncated", [(None, False), (False, None), (True, False), (False, True)])
+def test_incomplete_test_evidence_never_satisfies_review_gate(env, timed_out, truncated):
+    _, scope, _, _, _, sandbox, _, flow = env
+    _prepare(env)
+    original = sandbox.execute
+
+    def incomplete(request):
+        receipt = original(request)
+        return replace(receipt, timed_out=timed_out, truncated=truncated) if request.test_id == "unit" else receipt
+
+    sandbox.execute = incomplete
+    _test(env, "unit")
+    _test(env, "security")
+    _review(env, "functional")
+    _review(env, "security")
+    assert _review(env, "ui-e2e").phase != Phase.CODE_READY
+    with pytest.raises(StateConflict):
+        flow.assert_code_ready(scope, "cycle-1")
+
+
 def test_open_p0_p1_and_false_pass_rejected(env):
     _prepare(env)
     _test(env, "unit")
@@ -294,8 +339,11 @@ def test_cross_tenant_and_workspace_denied(env):
 def test_invalid_mock_evidence_and_duplicate_test_receipt(env):
     _prepare(env)
     _test(env, "unit")
+    sandbox = env[5]
+    before = len(sandbox.invocations)
     with pytest.raises(StateConflict):
         _test(env, "unit")
+    assert len(sandbox.invocations) == before
 
 
 def test_review_unique_role_and_task_required(env):
@@ -387,7 +435,7 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
         flow.create_pr(scope, "cycle-1", intent_ref="pr-1")
     assert flow._load(scope, "cycle-1").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
 
-    # Reconcile unknown commit when remote stayed at parent -> BLOCKED
+    # A parent HEAD cannot prove that a dispatched commit never took effect.
     parent_sha = scm.head(scope)
     scope_rec = replace(scope, base_sha=parent_sha)
     req_rec = ExecutionRequest(scope_rec, run, "plan-1", "build", ("pytest", "-q"), "a" * 64, "build-rec")
@@ -411,9 +459,13 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
     scm_rec.commit_patch = lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("ack lost"))  # type: ignore[method-assign]
     with pytest.raises(EffectUnknown):
         flow_rec.commit(scope_rec, "cycle-rec", message="uncertain", intent_ref="commit-rec")
-    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec", None).phase == Phase.BLOCKED
+    with pytest.raises(EffectUnknown, match="retain unknown"):
+        flow_rec.reconcile_commit(scope_rec, "cycle-rec", None)
+    assert flow_rec._load(scope_rec, "cycle-rec").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow_rec.commit(scope_rec, "cycle-rec", message="blind retry", intent_ref="commit-rec")
 
-    # Reconcile unknown commit when remote actually committed -> COMMITTED
+    # Matching HEAD and an asserted receipt cannot prove the original Intent.
     flow_rec.create("cycle-rec2", scope_rec, run, "change-rec2")
     flow_rec.plan(scope_rec, "cycle-rec2", TaskPlan("plan-1", "change-rec2", ("unit",), 1))
     flow_rec.execute(
@@ -428,4 +480,93 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
     committed_sha = "1" * 40
     scm_rec.heads[(scope_rec.repository, scope_rec.branch, scope_rec.workspace_id)] = committed_sha
     ev = CommitEvidence(parent_sha, committed_sha, "e" * 64, "p-rec2", "recovered-receipt")
-    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev).phase == Phase.COMMITTED
+    with pytest.raises(EffectUnknown, match="canonical commit receipt"):
+        flow_rec.reconcile_commit(scope_rec, "cycle-rec2", ev)
+    assert flow_rec._load(scope_rec, "cycle-rec2").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+
+
+def test_commit_head_lookup_failure_after_dispatch_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("head-failure", scope, run, "change")
+    flow.plan(scope, "head-failure", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "head-failure", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "head-failure", patch, root)
+    original = scm.commit_patch
+
+    def commit_then_break_head(*args, **kwargs):
+        result = original(*args, **kwargs)
+        scm.head = lambda _scope: (_ for _ in ()).throw(OSError("lookup unavailable"))
+        return result
+
+    scm.commit_patch = commit_then_break_head
+    with pytest.raises(EffectUnknown, match="branch verification failed"):
+        flow.commit(scope, "head-failure", message="fixture", intent_ref="commit")
+    assert flow._load(scope, "head-failure").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow.commit(scope, "head-failure", message="fixture", intent_ref="commit")
+
+
+def test_malformed_commit_result_after_dispatch_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("malformed-result", scope, run, "change")
+    flow.plan(scope, "malformed-result", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "malformed-result", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "malformed-result", patch, root)
+    scm.commit_patch = lambda *_args, **_kwargs: None
+    with pytest.raises(EffectUnknown, match="cannot prove target commit"):
+        flow.commit(scope, "malformed-result", message="fixture", intent_ref="commit")
+    assert flow._load(scope, "malformed-result").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+
+
+def test_reported_conflict_after_commit_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("conflict-after-effect", scope, run, "change")
+    flow.plan(scope, "conflict-after-effect", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "conflict-after-effect", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "conflict-after-effect", patch, root)
+    original = scm.commit_patch
+
+    def commit_then_conflict(*args, **kwargs):
+        original(*args, **kwargs)
+        raise StaleReference("reported conflict after an uncertain write")
+
+    scm.commit_patch = commit_then_conflict
+    with pytest.raises(EffectUnknown, match="provider exception"):
+        flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
+    assert scm.head(scope) != scope.base_sha
+    # A later ref reset must not erase the fact that the write may have occurred.
+    scm.heads[(scope.repository, scope.branch, scope.workspace_id)] = scope.base_sha
+    with pytest.raises(EffectUnknown, match="retain unknown"):
+        flow.reconcile_commit(scope, "conflict-after-effect")
+    assert flow._load(scope, "conflict-after-effect").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
+
+
+def test_build_rejects_receipt_for_different_commit(env):
+    _, scope, run, _, _, sandbox, _, flow = env
+    flow.create("cycle-sha", scope, run, "change-1")
+    flow.plan(scope, "cycle-sha", TaskPlan("plan-1", "change-1", ("unit",), run.goal_revision))
+    sandbox.source_sha = "b" * 40 if scope.base_sha != "b" * 40 else "c" * 40
+    with pytest.raises(InvalidEvidence, match="SHA"):
+        flow.execute(scope, "cycle-sha", _request(env))
+
+
+@pytest.mark.parametrize("kind", ["build", "static-check"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_completed_receipt_requires_source_commit(env, kind, exit_code):
+    _, scope, run, _, _, sandbox, _, flow = env
+    sandbox.results["build-1"] = (True, exit_code, None)
+    original = sandbox.execute
+
+    def without_commit(request):
+        return replace(original(request), source_commit_sha=None)
+
+    sandbox.execute = without_commit
+    flow.create("cycle-no-sha", scope, run, "change-1")
+    flow.plan(scope, "cycle-no-sha", TaskPlan("plan-1", "change-1", ("unit",), run.goal_revision))
+    with pytest.raises(InvalidEvidence, match="SHA"):
+        flow.execute(scope, "cycle-no-sha", _request(env, kind=kind))

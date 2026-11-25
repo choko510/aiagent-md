@@ -227,12 +227,20 @@ class SandboxCellExecutor:
         import uuid
 
         from aiagent_core.rpc import RpcClient
-        from aiagent_domain.rpcwire import RpcError
+        from aiagent_domain.rpcwire import RpcAuthError, RpcError
         from aiagent_sandbox.grant import Grant, sign
 
         ctx = self.context.get(effect_key)
         if ctx is None:
             raise ExecutorFailed("no admission context")
+        attempt_id = ctx.get("attempt_id")
+        if (
+            not isinstance(attempt_id, str)
+            or not attempt_id
+            or len(attempt_id) > 128
+            or attempt_id.strip() != attempt_id
+        ):
+            raise ExecutorFailed("missing or invalid tool attempt")
         g = Grant(
             uuid.uuid4().hex,
             ctx["tenant_id"],
@@ -245,25 +253,54 @@ class SandboxCellExecutor:
             self.wall_ms,
             self.memory_bytes,
             int(time.time()) + 120,
+            attempt_id=attempt_id,
+            attempt_binding_version=1,
         )
         client = RpcClient(self.endpoint, "tool_gateway", self.rpc_key, timeout_s=self.wall_ms / 1000 + 30)
         try:
             res = await client.call(
                 "exec.run", {"grant": sign(self.grant_key, g), "argv": args["argv"], "cwdRelative": args["cwdRelative"]}
             )
-        except RpcError as e:
-            raise ExecutorFailed(e.code) from e  # refused before execution (grant/auth)
+        except (RpcError, RpcAuthError) as e:
+            # An RPC failure alone does not establish whether the Cell executed.
+            raise ExecutorUnknown("sandbox RPC outcome unavailable") from e
         except ConnectionRefusedError as e:
             raise ExecutorFailed("cell unavailable") from e
         except (OSError, EOFError, TimeoutError) as e:
             raise ExecutorUnknown(type(e).__name__) from e
         if res.get("status") == "REFUSED":
             raise ExecutorFailed(str(res.get("reason")))
+        if (
+            res.get("status") != "EXITED"
+            or res.get("attemptId") != attempt_id
+            or type(res.get("exitCode")) is not int
+            or type(res.get("timedOut")) is not bool
+            or type(res.get("truncated")) is not bool
+            or not isinstance(res.get("stdout"), str)
+            or not isinstance(res.get("stderr"), str)
+        ):
+            # The command may have run, but its result cannot be trusted.
+            raise ExecutorUnknown("invalid sandbox result")
+        stdout, stderr = res["stdout"], res["stderr"]
+        truncated = res["truncated"] or len(stdout) > 8000 or len(stderr) > 4000
+        if res["timedOut"]:
+            outcome = "TIMED_OUT"
+        elif truncated:
+            outcome = "OUTPUT_LIMIT"
+        elif res["exitCode"] != 0:
+            outcome = "NONZERO_EXIT"
+        else:
+            outcome = "EXITED_ZERO"
+        # DONE/CONFIRMED means the Tool intent settled, not that this command succeeded.
         return {
+            "toolAttemptId": g.attempt_id,
             "exitCode": res["exitCode"],
             "timedOut": res["timedOut"],
-            "stdout": res["stdout"][:8000],
-            "stderr": res["stderr"][:4000],
+            "truncated": truncated,
+            "outcome": outcome,
+            "resourceLimit": "UNKNOWN",
+            "stdout": stdout[:8000],
+            "stderr": stderr[:4000],
         }
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:

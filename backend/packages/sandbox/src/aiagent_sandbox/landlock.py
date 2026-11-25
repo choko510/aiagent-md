@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import stat
 from pathlib import Path
 
 # The Landlock syscall numbers are shared by supported Linux architectures (x86_64/aarch64).
@@ -92,7 +93,7 @@ class _SockFProg(ctypes.Structure):
     _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
 
 
-def block_cross_task_process_access() -> None:
+def block_cross_task_process_access(*, preserve_parent_death: bool = False) -> None:
     """Seccomp-BPF filter inherited across exec: deny same-UID process inspection.
 
     Dumpability is reset on execve of ordinary binaries, so PR_SET_DUMPABLE=0
@@ -103,9 +104,11 @@ def block_cross_task_process_access() -> None:
     if machine == "x86_64":
         arch = 0xC000003E  # AUDIT_ARCH_X86_64
         blocked = (101, 310, 311, 312, 438, 303, 304)
+        prctl_number = 157
     elif machine == "aarch64":
         arch = 0xC00000B7  # AUDIT_ARCH_AARCH64
         blocked = (117, 270, 271, 272, 438, 264, 265)
+        prctl_number = 167
     else:
         raise OSError("unsupported seccomp architecture")
 
@@ -123,6 +126,20 @@ def block_cross_task_process_access() -> None:
             (0x45, 0, 1, 0x40000000),  # BPF_JSET x32 bit -> KILL
             (0x06, 0, 0, 0x80000000),
         ]
+    if preserve_parent_death:
+        # Permit PR_SET_PDEATHSIG only with SIGKILL; an untrusted child must
+        # not clear or weaken the projected launcher's parent-death signal.
+        prog.extend(
+            [
+                (0x15, 0, 5, prctl_number),
+                (0x20, 0, 0, 16),
+                (0x15, 0, 3, 1),
+                (0x20, 0, 0, 24),
+                (0x15, 1, 0, 9),
+                (0x06, 0, 0, 0x00050000 | errno.EPERM),
+                (0x20, 0, 0, 0),
+            ]
+        )
     for number in blocked:
         prog.extend(
             [
@@ -143,16 +160,53 @@ def block_cross_task_process_access() -> None:
         raise OSError(err, os.strerror(err))
 
 
-def restrict_to_workspace(workspace: Path) -> None:
+def _contains_directory(ancestor: os.stat_result, descendant_fd: int) -> bool:
+    """Compare directory ancestry by descriptors, without following symlinks."""
+    current = os.dup(descendant_fd)
+    try:
+        for _ in range(256):
+            info = os.fstat(current)
+            if (info.st_dev, info.st_ino) == (ancestor.st_dev, ancestor.st_ino):
+                return True
+            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            parent_info = os.fstat(parent)
+            if (parent_info.st_dev, parent_info.st_ino) == (info.st_dev, info.st_ino):
+                os.close(parent)
+                return False
+            os.close(current)
+            current = parent
+        raise ValueError("directory depth exceeds isolation limit")
+    finally:
+        os.close(current)
+
+
+def _validate_separate_source(workspace: Path, source_fd: int) -> None:
+    source = os.fstat(source_fd)
+    if not stat.S_ISDIR(source.st_mode):
+        raise ValueError("source descriptor must identify a directory")
+    workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        output = os.fstat(workspace_fd)
+        if _contains_directory(output, source_fd) or _contains_directory(source, workspace_fd):
+            raise ValueError("source and workspace must not overlap")
+    finally:
+        os.close(workspace_fd)
+
+
+def restrict_to_workspace(workspace: Path, *, source_fd: int | None = None) -> None:
     """Invoke in the already-forked child before exec; raises if confinement cannot be applied.
 
     No /proc, parent workspace directory, /root, /run/secrets, or broad /etc access.
     The dynamic loader and Python standard library can read their system runtime paths.
     """
+    if source_fd is not None:
+        _validate_separate_source(workspace, source_fd)
     if os.uname().machine not in ("x86_64", "aarch64"):
         raise OSError("unsupported Landlock syscall architecture")
     libc = ctypes.CDLL(None, use_errno=True)
     abi = _syscall(libc, _SYS_CREATE, ctypes.c_void_p(), ctypes.c_size_t(0), ctypes.c_uint32(_CREATE_VERSION))
+    if source_fd is not None and abi < 3:
+        raise OSError("Landlock ABI 3 required for read-only source")
     handled = _EXECUTE | _READ | _WRITE
     if abi >= 2:
         handled |= _REFER
@@ -181,6 +235,20 @@ def restrict_to_workspace(workspace: Path) -> None:
                 )
             finally:
                 os.close(pfd)
+
+        if source_fd is not None:
+            # A directory descriptor opened by the trusted broker, never by a model.
+            # The source is disjoint from workspace, so the writable rule below
+            # cannot grant write access to the source via Landlock's union semantics.
+            attr = _PathBeneathAttr(_READ, source_fd)
+            _syscall(
+                libc,
+                _SYS_ADD,
+                ctypes.c_int(fd),
+                ctypes.c_int(_RULE_PATH_BENEATH),
+                ctypes.byref(attr),
+                ctypes.c_uint32(0),
+            )
 
         # Executables, standard libraries and runtime files only. Never allow the
         # supervisor's parent cell directory or a sibling workspace.

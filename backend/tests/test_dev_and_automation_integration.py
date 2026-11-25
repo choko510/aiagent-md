@@ -28,6 +28,7 @@ from aiagent_development import (
     CommitEvidence,
     Cycle,
     DevelopmentWorkflow,
+    EffectUnknown,
     ExecutionRequest,
     PatchArtifact,
     Phase,
@@ -86,7 +87,7 @@ class _StubGit(MockGitProvider):
             )
 
 
-def test_development_pg_cycle_repair_review_and_preview_broker(
+def test_development_pg_rejects_unattested_mock_git_and_preview(
     pg: PgEnv, dbs: dict[str, Database], tenant: dict[str, str], api: TestClient, tmp_path
 ) -> None:
     (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -163,6 +164,7 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
             ("pytest", "-q"),
             toolchain,
             f"intent:{c.round_number}:post:unit-1",
+            test_id="unit-1",
         )
         sandbox.results[req.intent_ref] = (True, 0, "unit-1")
         return (req,)
@@ -188,40 +190,42 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
         ),
     )
 
-    final_cycle = runner.run_bounded_factory(
-        cycle_id="cycle-pg-1",
-        scope=proj_scope,
-        run=fence,
-        change_request_ref="cr-1",
-        plan=TaskPlan("plan-1", "cr-1", ("unit-1",), claim.goal_revision),
-        repo_root=tmp_path,
-        build_requests=build_reqs,
-        build_patch=build_patch,
-        test_requests=test_reqs,
-        repair_patch=repair_patch,
-        max_repairs=1,
-    )
-    assert final_cycle.phase == Phase.CODE_READY
-    assert final_cycle.round_number == 2 and state_holder["repaired"] is True
+    # This legacy fixture intentionally uses a fake Git provider. The real PG
+    # store must refuse its unattested result rather than creating CODE_READY.
+    with pytest.raises(EffectUnknown, match="could not be fenced"):
+        runner.run_bounded_factory(
+            cycle_id="cycle-pg-1",
+            scope=proj_scope,
+            run=fence,
+            change_request_ref="cr-1",
+            plan=TaskPlan("plan-1", "cr-1", ("unit-1",), claim.goal_revision),
+            repo_root=tmp_path,
+            build_requests=build_reqs,
+            build_patch=build_patch,
+            test_requests=test_reqs,
+            repair_patch=repair_patch,
+            max_repairs=1,
+        )
+    final_cycle = store.load(proj_scope, "cycle-pg-1")
+    assert final_cycle.phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    assert final_cycle.commit is None and state_holder["repaired"] is False
 
     # Optimistic CAS rejects stale version save
     with pytest.raises(StateConflict, match="CAS mismatch|non-monotonic"):
         store.save(final_cycle, final_cycle)
 
-    # PreviewBroker issues SHA-bound ephemeral lease ONLY for CODE_READY cycle
+    # Unattested Git cannot unlock the PreviewBroker.
     broker = PreviewBroker(dbs["api"])
-    lease_id, raw_tok = broker.issue_lease(final_cycle, target_port=4173, ttl_s=60)
-    assert final_cycle.commit is not None
-    assert broker.verify_lease(scope.tenant_id, scope.user_id, lease_id, raw_tok, 4173) == final_cycle.commit.commit_sha
-    assert broker.revoke_lease(scope.tenant_id, scope.user_id, lease_id) is True
+    with pytest.raises(StateConflict, match="CODE_READY"):
+        broker.issue_lease(final_cycle, target_port=4173, ttl_s=60)
 
-    # Domain events include dev.cycle_committed + dev.preview_leased and stream over SSE with owner isolation
+    # No committed or preview event is emitted for the fake Git response.
     sse = api.get(
         f"/v1/tasks/{created['taskId']}/events/stream", headers={"Authorization": f"Bearer {tenant['token']}"}
     )
     assert sse.status_code == 200
     assert "text/event-stream" in sse.headers["content-type"]
-    assert "dev.cycle_committed" in sse.text and "dev.preview_leased" in sse.text
+    assert "dev.cycle_committed" not in sse.text and "dev.preview_leased" not in sse.text
 
     other = admin.provision_tenant(pg.owner)
     assert (
@@ -230,6 +234,44 @@ def test_development_pg_cycle_repair_review_and_preview_broker(
         ).status_code
         == 404
     )
+
+
+def test_preview_broker_lease_with_synthetic_code_ready_fixture(
+    dbs: dict[str, Database], tenant: dict[str, str], api: TestClient
+) -> None:
+    """Exercise PreviewBroker in isolation; this fixture is not Git or Workflow evidence."""
+    scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
+    created = submit_task(dbs["api"], scope, "preview broker fixture", profile="sandbox")
+    claim = control.claim_run(dbs["runtime"], scope.tenant_id, created["runId"], "preview-fixture")
+    project = ProjectScope(
+        scope.tenant_id,
+        scope.user_id,
+        "preview-fixture",
+        scope.workspace_id,
+        "org/fixture",
+        "feat/fixture",
+        "a" * 40,
+        "1",
+    )
+    run = RunFence(
+        claim.task_id, claim.run_id, claim.goal_revision, claim.lease_epoch, claim.restore_incarnation, claim.worker_ref
+    )
+    fixture = Cycle(
+        "preview-fixture",
+        project,
+        run,
+        Phase.CODE_READY,
+        "fixture",
+        commit=CommitEvidence("a" * 40, "b" * 40, "c" * 64, "synthetic", "synthetic"),
+    )
+    broker = PreviewBroker(dbs["api"])
+    lease, token = broker.issue_lease(fixture, target_port=4173, ttl_s=60)
+    assert broker.verify_lease(scope.tenant_id, scope.user_id, lease, token, 4173) == "b" * 40
+    assert broker.revoke_lease(scope.tenant_id, scope.user_id, lease) is True
+    sse = api.get(
+        f"/v1/tasks/{created['taskId']}/events/stream", headers={"Authorization": f"Bearer {tenant['token']}"}
+    )
+    assert sse.status_code == 200 and "dev.preview_leased" in sse.text
 
 
 def test_automation_pg_quota_wait_multicycle_steer_watch_and_sse(

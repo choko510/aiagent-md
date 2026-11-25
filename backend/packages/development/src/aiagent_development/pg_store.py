@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import secrets
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -97,18 +99,24 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
             diff_sha256=str(commit_raw["diff_sha256"]),
             artifact_ref=str(commit_raw["artifact_ref"]),
             receipt_ref=str(commit_raw["receipt_ref"]),
+            receipt_body_sha256=commit_raw.get("receipt_body_sha256"),
+            receipt_proof_sha256=commit_raw.get("receipt_proof_sha256"),
         )
         if commit_raw is not None
         else None
     )
 
     def _ev(item: dict[str, Any]) -> ExecutionEvidence:
+        if type(item.get("executed")) is not bool or (
+            item.get("exit_code") is not None and type(item.get("exit_code")) is not int
+        ):
+            raise InvalidEvidence("invalid stored execution status")
         return ExecutionEvidence(
             intent_ref=str(item["intent_ref"]),
             run=_deserialize_fence(item["run"]),
             kind=str(item["kind"]),
-            exit_code=int(item["exit_code"]) if item.get("exit_code") is not None else None,
-            executed=bool(item["executed"]),
+            exit_code=item.get("exit_code"),
+            executed=item["executed"],
             artifact_sha256=str(item["artifact_sha256"]),
             toolchain_digest=str(item["toolchain_digest"]),
             stdout=str(item["stdout"]),
@@ -116,6 +124,9 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
             source_commit_sha=str(item["source_commit_sha"]) if item.get("source_commit_sha") is not None else None,
             test_id=str(item["test_id"]) if item.get("test_id") is not None else None,
             receipt_ref=str(item.get("receipt_ref", "")),
+            timed_out=item.get("timed_out") if type(item.get("timed_out")) is bool else None,
+            truncated=item.get("truncated") if type(item.get("truncated")) is bool else None,
+            snapshot_revision=item.get("snapshot_revision"),
         )
 
     tests = tuple(_ev(x) for x in raw.get("tests", []))
@@ -155,6 +166,7 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
         round_number=int(raw.get("round_number", 1)),
         push_receipt=str(raw["push_receipt"]) if raw.get("push_receipt") is not None else None,
         pr_receipt=str(raw["pr_receipt"]) if raw.get("pr_receipt") is not None else None,
+        commit_intent_ref=str(raw["commit_intent_ref"]) if raw.get("commit_intent_ref") is not None else None,
     )
 
 
@@ -273,6 +285,76 @@ class PostgresCycleStore(CycleStorePort):
             raise StateConflict("non-monotonic cycle version")
         payload = _serialize_cycle(updated)
         with self._db.tx(tenant=updated.scope.tenant_id) as c:
+            if old.phase in (Phase.COMMIT_PENDING, Phase.UNKNOWN_EXTERNAL_EFFECT) and updated.phase == Phase.COMMITTED:
+                if (
+                    (old.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and old.commit is not None)
+                    or old.patch is None
+                    or updated.commit is None
+                    or updated.commit.receipt_body_sha256 is None
+                    or updated.commit.receipt_proof_sha256 is None
+                    or not old.commit_intent_ref
+                    or updated != replace(old, version=old.version + 1, phase=Phase.COMMITTED, commit=updated.commit)
+                ):
+                    raise StateConflict("Git recovery authority unavailable")
+                c.execute("SELECT set_config('statement_timeout', '5000ms', true)")
+                c.execute("SELECT set_config('lock_timeout', '5000ms', true)")
+                effect = c.execute(
+                    "SELECT o.id,e.external_receipt_ref FROM agent.git_operations o "
+                    "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                    "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
+                    "JOIN agent.side_effect_records e ON e.tenant_id=i.tenant_id AND e.tool_intent_id=i.id "
+                    "WHERE o.tenant_id=%s AND o.cycle_id=%s AND o.patch_id=%s "
+                    "AND i.task_id=%s AND i.run_id=%s AND i.invocation_key=%s "
+                    "AND i.tool_key='git.commit' AND i.status_code='CONFIRMED' AND a.status_code='CONFIRMED' "
+                    "AND e.outcome_code='CONFIRMED' AND o.state='RECEIPT_PERSISTED'",
+                    (
+                        old.scope.tenant_id,
+                        old.cycle_id,
+                        old.patch.artifact_ref,
+                        old.run.task_id,
+                        old.run.run_id,
+                        old.commit_intent_ref,
+                    ),
+                ).fetchall()
+                if len(effect) != 1 or effect[0]["external_receipt_ref"] != updated.commit.receipt_ref:
+                    raise StateConflict("Git recovery effect unavailable")
+                row = c.execute(
+                    "SELECT * FROM agent.git_operation_fetch(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        old.scope.tenant_id,
+                        old.scope.owner_user_id,
+                        old.scope.workspace_id,
+                        old.run.task_id,
+                        old.run.run_id,
+                        old.run.goal_revision,
+                        old.run.lease_epoch,
+                        old.run.worker_ref,
+                        old.run.restore_incarnation,
+                        effect[0]["id"],
+                    ),
+                ).fetchone()
+                if row is None or "git:" + str(row["receipt_id"]) != updated.commit.receipt_ref:
+                    raise StateConflict("Git recovery receipt unavailable")
+                body_sha = hashlib.sha256(bytes(row["body"])).hexdigest()
+                proof_sha = hashlib.sha256(bytes(row["proof"])).hexdigest()
+                if (
+                    not hmac.compare_digest(body_sha, str(row["body_sha256"]))
+                    or not hmac.compare_digest(proof_sha, str(row["proof_sha256"]))
+                    or not hmac.compare_digest(body_sha, updated.commit.receipt_body_sha256)
+                    or not hmac.compare_digest(proof_sha, updated.commit.receipt_proof_sha256)
+                ):
+                    raise StateConflict("Git recovery receipt digest mismatch")
+                body = json.loads(bytes(row["body"]))
+                if (
+                    body.get("commit") != updated.commit.commit_sha
+                    or body.get("parent") != old.patch.parent_sha
+                    or body.get("patch_id") != old.patch.artifact_ref
+                    or body.get("patch_sha256") != old.patch.diff_sha256
+                    or updated.commit.parent_sha != old.patch.parent_sha
+                    or updated.commit.artifact_ref != old.patch.artifact_ref
+                    or updated.commit.diff_sha256 != old.patch.diff_sha256
+                ):
+                    raise StateConflict("Git recovery receipt mismatch")
             if claim_diff is not None:
                 claimed = c.execute(
                     "INSERT INTO agent.dev_diff_claims(tenant_id, project_id, diff_sha256, cycle_id)"

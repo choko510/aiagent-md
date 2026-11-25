@@ -15,15 +15,21 @@ Transport: authenticated frames (aiagent_domain.rpcwire) over vsock in productio
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
+import logging
+import math
 import os
 import signal
 import sys
+import threading
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aiagent_domain.rpcwire import (
     NonceCache,
@@ -38,6 +44,7 @@ from .grant import GrantError, verify
 from .landlock import block_cross_task_process_access, disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
+log = logging.getLogger("aiagent.sandbox")
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWNET = 0x40000000
 CLONE_NEWPID = 0x20000000
@@ -67,6 +74,105 @@ os._exit(125)
 """
 
 
+# Projected runs additionally fail closed on Supervisor/launcher death. pidfd
+# closes the fork-to-prctl race for PID 1, whose external parent is invisible
+# through getppid() inside its PID namespace.
+_PROJECTED_PID_NAMESPACE_EXEC = """
+import ctypes
+import os
+import select
+import signal
+import sys
+
+try:
+    parent_fd = os.pidfd_open(os.getpid(), 0)
+    pid = os.fork()
+except (OSError, AttributeError):
+    os._exit(125)
+if pid == 0:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        os._exit(125)
+    poller = select.poll()
+    poller.register(parent_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    if poller.poll(0):
+        os._exit(125)
+    os.close(parent_fd)
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError:
+        os._exit(127)
+os.close(parent_fd)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status):
+    os._exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(125)
+"""
+
+
+async def _bounded_output(proc: asyncio.subprocess.Process, wall_seconds: float) -> tuple[bytes, bytes, bool, bool]:
+    """Drain both pipes concurrently with bounded retention; kill on overflow or timeout."""
+    assert proc.stdout is not None and proc.stderr is not None
+    overflow = asyncio.Event()
+    buffers = (bytearray(), bytearray())
+
+    async def drain(stream: asyncio.StreamReader, buf: bytearray) -> None:
+        while chunk := await stream.read(8192):
+            remaining = MAX_OUTPUT - len(buf)
+            buf.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                overflow.set()
+
+    tasks = [asyncio.create_task(drain(proc.stdout, buffers[0])), asyncio.create_task(drain(proc.stderr, buffers[1]))]
+
+    async def complete() -> None:
+        await asyncio.gather(proc.wait(), *tasks)
+
+    finished = asyncio.create_task(complete())
+    wait_overflow = asyncio.create_task(overflow.wait())
+    timed_out = False
+    try:
+        done, _ = await asyncio.wait(
+            {finished, wait_overflow}, timeout=wall_seconds, return_when=asyncio.FIRST_COMPLETED
+        )
+        timed_out = not done
+        if timed_out or overflow.is_set():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        await asyncio.shield(finished)
+    finally:
+        # Also stop children on caller cancellation or unexpected pipe errors.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        wait_overflow.cancel()
+        await asyncio.gather(wait_overflow, return_exceptions=True)
+        await asyncio.gather(finished, *tasks, return_exceptions=True)
+    return bytes(buffers[0]), bytes(buffers[1]), timed_out, overflow.is_set()
+
+
+async def _run_with_revocation(
+    proc: asyncio.subprocess.Process, wall_seconds: float, revoked: asyncio.Event
+) -> tuple[bytes, bytes, bool, bool, bool]:
+    """Kill and reap on revocation; event source must be a trusted authority bridge."""
+    output = asyncio.create_task(_bounded_output(proc, wall_seconds))
+    stopped = asyncio.create_task(revoked.wait())
+    try:
+        await asyncio.wait({output, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if revoked.is_set():
+            output.cancel()
+            await asyncio.gather(output, return_exceptions=True)
+            return b"", b"", False, False, True
+        out, err, timed_out, truncated = await output
+        return out, err, timed_out, truncated, False
+    finally:
+        stopped.cancel()
+        if not output.done():
+            output.cancel()
+        await asyncio.gather(stopped, output, return_exceptions=True)
+
+
 @dataclass
 class Limits:
     cpu_s: int = 30
@@ -87,7 +193,8 @@ class Supervisor:
     cell_uid: int | None = None
     cell_gid: int | None = None
     consumed_path: Path | None = None
-    _consumed: set[str] = field(default_factory=set)
+    _active: dict[str, tuple[str, str, str, asyncio.Event]] = field(default_factory=dict)
+    _heartbeats: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if sys.platform != "linux":
@@ -96,18 +203,50 @@ class Supervisor:
             raise RuntimeError("refusing to run generated code as root: configure an unprivileged cell uid/gid")
         self.root.mkdir(parents=True, exist_ok=True)
         self.consumed_path = self.consumed_path or self.root / ".consumed-grants"
-        if self.consumed_path.exists():
-            self._consumed = set(self.consumed_path.read_text().split())
 
     def _consume(self, gid: str) -> None:
-        if gid in self._consumed:
-            raise GrantError("REPLAYED")
-        self._consumed.add(gid)
+        # The journal is a local replay safeguard, not the canonical Authority.
+        # Serialize independent Supervisor processes and fail closed when busy,
+        # corrupt or too large; never read an unbounded journal into memory.
+        import fcntl
+        import stat
+
         assert self.consumed_path is not None
-        with open(self.consumed_path, "a", encoding="utf-8") as f:
-            f.write(gid + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            fd = os.open(self.consumed_path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "r+b") as journal:
+                try:
+                    fcntl.flock(journal.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise GrantError("REPLAY_JOURNAL_BUSY") from exc
+                info = os.fstat(journal.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or info.st_size > 64 * 1024 * 1024
+                ):
+                    raise GrantError("REPLAY_JOURNAL_INVALID")
+                deadline = time.monotonic() + 1
+                while True:
+                    line = journal.readline(258)
+                    if not line:
+                        break
+                    if time.monotonic() > deadline or len(line) > 257 or not line.endswith(b"\n"):
+                        raise GrantError("REPLAY_JOURNAL_INVALID")
+                    if line[:-1] == gid.encode("ascii"):
+                        raise GrantError("REPLAYED")
+                journal.write(gid.encode("ascii") + b"\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+                parent_fd = os.open(self.consumed_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+        except OSError as exc:
+            raise GrantError("REPLAY_JOURNAL_UNAVAILABLE") from exc
 
     def workspace(self, tenant: str, task: str, cwd_rel: str) -> tuple[Path, Path]:
         ws = (self.root / tenant / task).resolve()
@@ -121,12 +260,40 @@ class Supervisor:
                 os.chown(p, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
         return ws, cwd
 
-    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path) -> Any:
+    def cancel_projected(self, tenant: str, execution: str, attempt: str, binding: str) -> bool:
+        """Signal only the exact active signed execution; not an Authority check."""
+        active = self._active.get(execution)
+        if active is None or active[:3] != (tenant, attempt, binding):
+            return False
+        active[3].set()
+        return True
+
+    def renew_projected(self, tenant: str, execution: str, attempt: str, binding: str) -> bool:
+        active, heartbeat = self._active.get(execution), self._heartbeats.get(execution)
+        if active is None or active[:3] != (tenant, attempt, binding) or heartbeat is None or active[3].is_set():
+            return False
+        deadline, period = heartbeat
+        if time.monotonic() >= deadline:
+            active[3].set()
+            return False
+        self._heartbeats[execution] = (time.monotonic() + period, period)
+        return True
+
+    async def _watch_heartbeat(self, execution: str, revoked: asyncio.Event) -> None:
+        while not revoked.is_set():
+            heartbeat = self._heartbeats.get(execution)
+            if heartbeat is None or time.monotonic() >= heartbeat[0]:
+                revoked.set()
+                return
+            await asyncio.sleep(min(0.1, max(0.001, heartbeat[0] - time.monotonic())))
+
+    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
         import resource
 
         lim = self.limits
         require_netns = self.require_netns
         uid, gid = self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid
+        expected_parent = os.getpid()
 
         def fn() -> None:
             os.setsid()  # new session + process group: the whole tree is killable
@@ -140,7 +307,7 @@ class Supervisor:
             # Filesystem confinement is MANDATORY even in development / when netns is disabled.
             # Parent/cwd validation alone cannot prevent access to another tenant's files.
             try:
-                restrict_to_workspace(workspace)
+                restrict_to_workspace(workspace, source_fd=source_fd)
             except (OSError, ValueError) as e:
                 os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
@@ -159,68 +326,282 @@ class Supervisor:
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
                 disable_dumpability()  # defense in depth; execve resets this alone
-                block_cross_task_process_access()  # inherited by execve and child processes
+                block_cross_task_process_access(preserve_parent_death=source_fd is not None)
             except OSError:
                 os._exit(98)
+            if source_fd is not None:
+                import ctypes
+
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != expected_parent:
+                    os._exit(98)
 
         return fn
 
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
+        return await self._execute(token, argv, cwd_rel, source_fd=None)
+
+    async def _execute(
+        self,
+        token: Any,
+        argv: list[str],
+        cwd_rel: str,
+        *,
+        source_fd: int | None,
+        output_fd: int | None = None,
+        output_path: Path | None = None,
+        source_cwd: bool = False,
+        revoked: asyncio.Event | None = None,
+        heartbeat_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        # source_fd is reserved for a future trusted projection broker. It is
+        # deliberately not accepted from RPC and is not an authorization token.
+        if source_fd is not None:
+            if os.geteuid() != 0 or self.cell_uid in (None, 0):
+                raise GrantError("SOURCE_UID_ISOLATION_UNAVAILABLE")
+            try:
+                if os.fstat(source_fd).st_uid != os.geteuid():
+                    raise GrantError("SOURCE_OWNER_MISMATCH")
+            except OSError as exc:
+                raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
+        if heartbeat_seconds is not None and (
+            source_fd is None or isinstance(heartbeat_seconds, bool) or not 0.1 <= heartbeat_seconds <= 10
+        ):
+            raise GrantError("INVALID_HEARTBEAT")
+        if source_cwd and (source_fd is None or output_fd is None):
+            raise GrantError("SOURCE_CWD_INVALID")
+        if (output_fd is None) != (output_path is None):
+            raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
+        if output_fd is not None and (source_fd is None or output_fd == source_fd or cwd_rel != "."):
+            raise GrantError("OUTPUT_DESCRIPTOR_INVALID")
         g = verify(self.grant_key, token, argv, cwd_rel)
+        if source_fd is not None and g.execution_binding_version != 1:
+            raise GrantError("PROJECTED_BINDING_REQUIRED")
+        if source_fd is None and g.execution_binding_version is not None:
+            raise GrantError("PROJECTED_SOURCE_REQUIRED")
+        if source_fd is not None and heartbeat_seconds is None:
+            raise GrantError("HEARTBEAT_REQUIRED")
         self._consume(g.grant_id)
-        ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
-        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
-        started = time.monotonic()
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            "-S",
-            "-c",
-            _PID_NAMESPACE_EXEC,
-            *argv,
-            cwd=str(cwd),
-            env=env,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws),
-            close_fds=True,
-        )
-        timed_out = False
+        execution = g.execution_id
+        if source_fd is not None:
+            assert execution is not None
+            self._consume("execution:" + execution)
+        if source_fd is not None:
+            assert execution is not None and g.attempt_id is not None and g.execution_binding_sha256 is not None
+            if execution in self._active:
+                raise GrantError("EXECUTION_ALREADY_ACTIVE")
+            revoked = revoked or asyncio.Event()
+            self._active[execution] = (g.tenant_id, g.attempt_id, g.execution_binding_sha256, revoked)
+        heartbeat_task: asyncio.Task[None] | None = None
+        if execution is not None and heartbeat_seconds is not None:
+            self._heartbeats[execution] = (time.monotonic() + heartbeat_seconds, heartbeat_seconds)
+            assert revoked is not None
+            heartbeat_task = asyncio.create_task(self._watch_heartbeat(execution, revoked))
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=g.wall_ms / 1000)
-        except TimeoutError:
-            timed_out = True
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            out, err = await proc.communicate()
-        finally:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)  # no surviving children after the execution ends
-        rc = proc.returncode
-        if rc == 98:
+            if revoked is not None and revoked.is_set():
+                return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
+            if output_path is None:
+                ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+            else:
+                ws = cwd = output_path
+            if output_fd is not None:
+                try:
+                    actual, expected = os.fstat(output_fd), os.stat(cwd, follow_symlinks=False)
+                    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                        raise GrantError("OUTPUT_DESCRIPTOR_MISMATCH")
+                except OSError as exc:
+                    raise GrantError("OUTPUT_DESCRIPTOR_INVALID") from exc
+            if source_cwd:
+                assert source_fd is not None
+                try:
+                    source_path = Path(os.readlink(f"/proc/self/fd/{source_fd}"))
+                    source_actual = os.fstat(source_fd)
+                    source_named = os.stat(source_path, follow_symlinks=False)
+                    if not source_path.is_absolute() or (source_actual.st_dev, source_actual.st_ino) != (
+                        source_named.st_dev,
+                        source_named.st_ino,
+                    ):
+                        raise GrantError("SOURCE_DESCRIPTOR_INVALID")
+                    cwd = source_path
+                except OSError as exc:
+                    raise GrantError("SOURCE_DESCRIPTOR_INVALID") from exc
+            env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(ws), "LANG": "C.UTF-8", "TMPDIR": str(ws)}
+            started = time.monotonic()
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                _PID_NAMESPACE_EXEC if source_fd is None else _PROJECTED_PID_NAMESPACE_EXEC,
+                *argv,
+                cwd=str(cwd),
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                preexec_fn=self._preexec(g.wall_ms, g.memory_bytes, ws, source_fd),
+                close_fds=True,
+                pass_fds=tuple(fd for fd in (source_fd, output_fd) if fd is not None),
+            )
+            if revoked is None:
+                out, err, timed_out, truncated = await _bounded_output(proc, g.wall_ms / 1000)
+            else:
+                out, err, timed_out, truncated, was_revoked = await _run_with_revocation(
+                    proc, g.wall_ms / 1000, revoked
+                )
+                if was_revoked:
+                    return {"status": "REVOKED", "attemptId": g.attempt_id, "executionId": g.execution_id}
+            rc = proc.returncode
+            if rc == 98:
+                return {
+                    "status": "REFUSED",
+                    "reason": "FS_ISOLATION_UNAVAILABLE",
+                    "detail": err[:400].decode("utf-8", "replace"),
+                }
+            if rc == 97:
+                return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
             return {
-                "status": "REFUSED",
-                "reason": "FS_ISOLATION_UNAVAILABLE",
-                "detail": err[:400].decode("utf-8", "replace"),
+                "status": "EXITED",
+                "attemptId": g.attempt_id,
+                "executionId": g.execution_id,
+                "exitCode": rc,
+                "timedOut": timed_out,
+                "wallMs": int((time.monotonic() - started) * 1000),
+                "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
+                "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
+                "truncated": truncated,
             }
-        if rc == 97:
-            return {"status": "REFUSED", "reason": "PID_OR_NETNS_UNAVAILABLE"}
-        return {
-            "status": "EXITED",
-            "exitCode": rc,
-            "timedOut": timed_out,
-            "wallMs": int((time.monotonic() - started) * 1000),
-            "stdout": out[:MAX_OUTPUT].decode("utf-8", "replace"),
-            "stderr": err[:MAX_OUTPUT].decode("utf-8", "replace"),
-            "truncated": len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT,
-        }
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if source_fd is not None and execution is not None:
+                self._heartbeats.pop(execution, None)
+                self._active.pop(execution, None)
+
+    @contextlib.asynccontextmanager
+    async def _execute_and_capture(
+        self,
+        token: Any,
+        argv: list[str],
+        cwd_rel: str,
+        *,
+        source_fd: int,
+        output_parent: Path,
+        binding: dict[str, Any],
+        receipt_key: bytes,
+        private_parent: Path,
+        deadline: float,
+        heartbeat_seconds: float,
+        revoked: asyncio.Event,
+        prepared_output_fd: int | None = None,
+        source_cwd: bool = False,
+    ) -> AsyncIterator[tuple[dict[str, Any], int, bytes]]:
+        """Private prototype: capture/sign only after this Supervisor reports clean exit.
+
+        This does not authenticate runtime image, transport or canonical authority;
+        no RPC endpoint exposes it, and final publication must recheck the DB.
+        """
+        from aiagent_development.code_intelligence.artifact_capture import capture_scip
+
+        from .capture_signing import sign_capture, validate_capture_binding
+        from .projected_output import projected_output, validate_projected_output
+
+        g = verify(self.grant_key, token, argv, cwd_rel)
+        if g.execution_binding_version != 1 or self.cell_uid is None:
+            raise GrantError("PROJECTED_BINDING_REQUIRED")
+        validate_capture_binding(receipt_key, g, binding)
+        if not math.isfinite(deadline) or not time.monotonic() < deadline <= time.monotonic() + 300:
+            raise GrantError("CAPTURE_DEADLINE")
+        assert g.execution_id is not None
+        cell_gid = self.cell_gid if self.cell_gid is not None else self.cell_uid
+        output = (
+            projected_output(output_parent, g, cell_uid=self.cell_uid, cell_gid=cell_gid)
+            if prepared_output_fd is None
+            else contextlib.nullcontext(prepared_output_fd)
+        )
+        with output as output_fd:
+            validate_projected_output(output_parent, g, output_fd, cell_uid=self.cell_uid, cell_gid=cell_gid)
+            output_path = output_parent / g.execution_id
+            result = await self._execute(
+                token,
+                argv,
+                cwd_rel,
+                source_fd=source_fd,
+                output_fd=output_fd,
+                output_path=output_path,
+                source_cwd=source_cwd,
+                revoked=revoked,
+                heartbeat_seconds=heartbeat_seconds,
+            )
+            if (
+                result.get("status") != "EXITED"
+                or type(result.get("exitCode")) is not int
+                or result.get("exitCode") != 0
+                or result.get("timedOut") is not False
+                or result.get("truncated") is not False
+                or revoked.is_set()
+            ):
+                raise GrantError("PROJECTED_EXECUTION_INCOMPLETE")
+            stopped = threading.Event()
+
+            def active() -> bool:
+                return not stopped.is_set() and not revoked.is_set()
+
+            capture = capture_scip(
+                output_fd, private_parent, expected_uid=self.cell_uid, deadline=deadline, active=active
+            )
+
+            def take_capture() -> Any:
+                captured = capture.__enter__()
+                try:
+                    proof = sign_capture(
+                        receipt_key,
+                        g,
+                        binding,
+                        captured.fd,
+                        expected_sha256=captured.sha256,
+                        size=captured.byte_length,
+                        deadline=deadline,
+                        active=active,
+                    )
+                    return captured, proof
+                except BaseException:
+                    capture.__exit__(*sys.exc_info())
+                    raise
+
+            worker = asyncio.create_task(asyncio.to_thread(take_capture))
+            try:
+                captured, proof = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                stopped.set()
+                try:
+                    await worker
+                except Exception:
+                    pass
+                else:
+                    await asyncio.to_thread(capture.__exit__, None, None, None)
+                raise
+            try:
+                if revoked.is_set():
+                    raise GrantError("PROJECTED_EXECUTION_REVOKED")
+                yield result, captured.fd, proof
+            finally:
+                stopped.set()
+                await asyncio.to_thread(capture.__exit__, None, None, None)
 
 
-async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
+async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, source_sessions: Any = None) -> None:
     nonces = NonceCache()
+    connections: set[asyncio.Task[Any]] = set()
 
     async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            connections.add(task)
+        method = ""
+        body: dict[str, Any] = {}
+        claimed_source: Any = None
         try:
             n = decode_length(await r.readexactly(4))
             env = json.loads(await r.readexactly(n))
@@ -230,20 +611,139 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method != "exec.run":
+            if caller != "tool_gateway" or method not in (
+                "exec.run",
+                "exec.cancel",
+                "exec.heartbeat",
+                "source.receive",
+                "source.register",
+                "source.heartbeat",
+                "source.cancel",
+            ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
             try:
-                res = await sup.execute(body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", "")))
+                if method in ("source.receive", "source.register", "source.heartbeat", "source.cancel"):
+                    if source_sessions is None:
+                        raise GrantError("SOURCE_BROKER_UNAVAILABLE")
+                    try:
+                        if method == "source.register":
+                            res = source_sessions.register_authorized(body, sup._consume)
+                            session_tag = hashlib.sha256(res["sessionId"].encode()).hexdigest()[:16]
+                            log.info(
+                                "source registered session=%s execution=%s",
+                                session_tag,
+                                body["ticket"]["payload"]["execution"],
+                            )
+                        elif method == "source.heartbeat":
+                            renewed = source_sessions.renew(body)
+                            if renewed:
+                                sup.renew_projected(
+                                    body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]
+                                )
+                            res = {"renewed": renewed}
+                        elif method == "source.cancel":
+                            if set(body) == {"ticket"}:
+                                scope = source_sessions.cancel_ticket(body, sup._consume)
+                                cancelled = True
+                                sup.cancel_projected(*scope)
+                            else:
+                                cancelled = source_sessions.cancel(body)
+                                if cancelled:
+                                    sup.cancel_projected(
+                                        body["tenantId"], body["executionId"], body["attemptId"], body["bindingSha256"]
+                                    )
+                            res = {"cancelled": cancelled}
+                            if cancelled:
+                                log.info("source session cancellation accepted")
+                        else:
+                            claimed_source = source_sessions.claim(body)
+                            res = await source_sessions.receive(claimed_source, r)
+                    except Exception as exc:
+                        raise GrantError("SOURCE_TRANSFER_REJECTED") from exc
+                elif method in ("exec.cancel", "exec.heartbeat"):
+                    fields = (
+                        body.get("tenantId"),
+                        body.get("executionId"),
+                        body.get("attemptId"),
+                        body.get("bindingSha256"),
+                    )
+                    if set(body) != {"tenantId", "executionId", "attemptId", "bindingSha256"} or not all(
+                        isinstance(value, str) and 1 <= len(value) <= 128 for value in fields
+                    ):
+                        raise GrantError("MALFORMED")
+                    scoped = cast(tuple[str, str, str, str], fields)
+                    if method == "exec.cancel":
+                        res = {"cancelled": sup.cancel_projected(*scoped)}
+                    else:
+                        res = {"renewed": sup.renew_projected(*scoped)}
+                else:
+                    res = await sup.execute(
+                        body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))
+                    )
+                artifact_result: Any = None
+                if method == "source.receive":
+                    from .source_rpc import ArtifactTransfer
+
+                    if isinstance(res, ArtifactTransfer):
+                        artifact_result = res
+                if artifact_result is not None:
+                    from .binary_transfer import MAX_CHUNK, encode_chunks
+
+                    res = artifact_result
+                    if not res.active() or time.monotonic() >= res.deadline:
+                        raise GrantError("SOURCE_TRANSFER_REJECTED")
+                    artifact = res.artifact
+                    frame = {
+                        "type": "artifact",
+                        "data": {
+                            "size": len(artifact.data),
+                            "sha256": hashlib.sha256(artifact.data).hexdigest(),
+                            "proof": base64.b64encode(artifact.proof).decode("ascii"),
+                        },
+                    }
+                    w.write(encode_frame(sign_response(key, nonce, frame)))
+                    for block in encode_chunks(
+                        res.key,
+                        res.binding,
+                        (artifact.data[i : i + MAX_CHUNK] for i in range(0, len(artifact.data), MAX_CHUNK)),
+                    ):
+                        remaining = res.deadline - time.monotonic()
+                        if remaining <= 0 or not res.active():
+                            raise GrantError("SOURCE_TRANSFER_REJECTED")
+                        w.write(block)
+                        draining = asyncio.create_task(w.drain())
+                        try:
+                            while not draining.done():
+                                remaining = res.deadline - time.monotonic()
+                                if remaining <= 0 or not res.active():
+                                    raise GrantError("SOURCE_TRANSFER_REJECTED")
+                                try:
+                                    await asyncio.wait_for(asyncio.shield(draining), timeout=min(remaining, 0.1))
+                                except TimeoutError:
+                                    continue
+                            await draining
+                        finally:
+                            if not draining.done():
+                                draining.cancel()
+                                await asyncio.gather(draining, return_exceptions=True)
+                    session_tag = hashlib.sha256(str(body.get("sessionId", "")).encode()).hexdigest()[:16]
+                    log.info("source artifact transferred session=%s", session_tag)
+                    return
                 frame = {"type": "result", "data": res}
             except GrantError as e:
                 frame = {"type": "error", "code": f"GRANT_{e}"}
             w.write(encode_frame(sign_response(key, nonce, frame)))
             await w.drain()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never log request bodies, argv, keys, source, output or receipts.
+            log.warning("sandbox RPC failed: %s", type(exc).__name__)
         finally:
             w.close()
+            if claimed_source is not None and source_sessions is not None:
+                source_sessions.end(claimed_source)
+            if task is not None:
+                connections.discard(task)
 
     kind, _, rest = endpoint.partition(":")
     if kind == "vsock":
@@ -258,24 +758,149 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str) -> None:
     else:
         host, port = rest.rsplit(":", 1)
         srv = await asyncio.start_server(handle, host, int(port))
-    async with srv:
-        await srv.serve_forever()
+    try:
+        # serve_forever() waits for existing connections on cancellation in
+        # Python 3.12. Cancel handlers first so staged contexts can unwind.
+        await asyncio.Future[None]()
+    finally:
+        srv.close()
+        for connection in tuple(connections):
+            connection.cancel()
+        if connections:
+            await asyncio.gather(*tuple(connections), return_exceptions=True)
+        await srv.wait_closed()
+
+
+def _configured_source_sessions(sup: Supervisor, rpc_key: bytes) -> Any:
+    """Load an explicitly provisioned source broker or leave it disabled.
+
+    This validates local configuration, not VM/image attestation or durable
+    storage. Those production gates remain the operator's responsibility.
+    """
+    mode = os.environ.get("AIAGENT_SANDBOX_SOURCE_MODE", "disabled")
+    if mode == "disabled":
+        return None
+    if mode != "enabled" or os.geteuid() != 0 or sup.cell_uid in (None, 0) or not sup.require_netns:
+        raise RuntimeError("source broker isolation unavailable")
+    import stat
+
+    from aiagent_development.code_intelligence.projection_stage import _open_trusted_parent
+
+    from .scip_execution import scip_registration_factory
+    from .source_rpc import SourceSessions
+
+    def checked_directory(path: Path, mode_bits: int, gid: int | None = None) -> None:
+        if not path.is_absolute() or any(part in (".", "..") for part in path.parts[1:]):
+            raise RuntimeError("source broker directory unavailable")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open("/", flags)
+        try:
+            for part in path.parts[1:]:
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+                ancestor = os.fstat(fd)
+                permissions = stat.S_IMODE(ancestor.st_mode)
+                if ancestor.st_uid != 0 or (permissions & 0o022 and not permissions & stat.S_ISVTX):
+                    raise RuntimeError("source broker directory unavailable")
+            info = os.fstat(fd)
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != mode_bits or (gid is not None and info.st_gid != gid):
+                raise RuntimeError("source broker directory unavailable")
+        finally:
+            os.close(fd)
+
+    def read_key(name: str) -> bytes:
+        path = Path(os.environ[name])
+        if not path.is_absolute():
+            raise RuntimeError("source broker key unavailable")
+        checked_directory(path.parent, 0o700)
+        parent_fd = _open_trusted_parent(path.parent)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
+                    or info.st_size > 4096
+                ):
+                    raise RuntimeError("source broker key unavailable")
+                raw = os.read(fd, 4097)
+                after = os.fstat(fd)
+                if len(raw) != info.st_size or (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    raise RuntimeError("source broker key unavailable")
+                value = bytes.fromhex(raw.decode("ascii").strip())
+                if len(value) < 32:
+                    raise RuntimeError("source broker key unavailable")
+                return value
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent_fd)
+
+    base = Path(os.environ["AIAGENT_SANDBOX_SOURCE_ROOT"])
+    gid = sup.cell_gid if sup.cell_gid is not None else sup.cell_uid
+    assert gid is not None
+    checked_directory(base, 0o710, gid)
+    source, output, capture = (base / name for name in ("source", "output", "capture"))
+    for path in (source, output, capture):
+        checked_directory(path, 0o700)
+    journal = Path(os.environ["AIAGENT_SANDBOX_REPLAY_JOURNAL"])
+    if not journal.is_absolute() or not journal.name:
+        raise RuntimeError("source replay journal unavailable")
+    checked_directory(journal.parent, 0o700)
+    ticket_key = read_key("AIAGENT_SANDBOX_SOURCE_TICKET_KEY_FILE")
+    capture_key = read_key("AIAGENT_SANDBOX_CAPTURE_KEY_FILE")
+    if (
+        read_key("AIAGENT_SANDBOX_GRANT_KEY_FILE") != sup.grant_key
+        or read_key("AIAGENT_SANDBOX_RPC_KEY_FILE") != rpc_key
+    ):
+        raise RuntimeError("source broker key unavailable")
+    if len({sup.grant_key, rpc_key, ticket_key, capture_key}) != 4:
+        raise RuntimeError("source broker keys must be distinct")
+    sup.consumed_path = journal
+    return SourceSessions(
+        source,
+        ticket_key=ticket_key,
+        registration_factory=scip_registration_factory(sup, source, output, capture, capture_key),
+    )
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     key_hex = Path(os.environ["AIAGENT_SANDBOX_GRANT_KEY_FILE"]).read_text().strip()
     rpc = Path(os.environ["AIAGENT_SANDBOX_RPC_KEY_FILE"]).read_text().strip()
     uid = os.environ.get("AIAGENT_SANDBOX_CELL_UID")
+    limits = Limits()
+    if os.environ.get("AIAGENT_SANDBOX_SOURCE_MODE", "disabled") == "enabled":
+        limits.memory_bytes = int(os.environ["AIAGENT_SANDBOX_MEMORY_LIMIT_BYTES"])
+        limits.cpu_s = int(os.environ["AIAGENT_SANDBOX_CPU_LIMIT_SECONDS"])
+        if not 512 * 1024**2 <= limits.memory_bytes <= 8 * 1024**3 or not 1 <= limits.cpu_s <= 300:
+            raise RuntimeError("invalid source broker limits")
     sup = Supervisor(
         Path(os.environ.get("AIAGENT_SANDBOX_ROOT", "/var/lib/aiagent/cells")),
         bytes.fromhex(key_hex),
+        limits=limits,
         require_netns=os.environ.get("AIAGENT_SANDBOX_REQUIRE_NETNS", "1") == "1",
         cell_uid=int(uid) if uid else None,
         cell_gid=int(uid) if uid else None,
     )
+    rpc_key = bytes.fromhex(rpc)
+    source_sessions = _configured_source_sessions(sup, rpc_key)
     asyncio.run(
         serve(
-            sup, {"tool_gateway": bytes.fromhex(rpc)}, os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000")
+            sup,
+            {"tool_gateway": rpc_key},
+            os.environ.get("AIAGENT_SANDBOX_LISTEN", "vsock:4294967295:7000"),
+            source_sessions=source_sessions,
         )
     )
 

@@ -155,11 +155,15 @@ name = "aiagent-development"
 version = "0.1.0"
 source = { editable = "packages/development" }
 dependencies = [
+    { name = "aiagent-domain" },
     { name = "protobuf" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "protobuf", specifier = "==6.33.6" }]
+requires-dist = [
+    { name = "aiagent-domain", editable = "packages/domain" },
+    { name = "protobuf", specifier = "==6.33.6" },
+]
 
 [[package]]
 name = "aiagent-domain"
@@ -244,11 +248,15 @@ name = "aiagent-sandbox"
 version = "0.3.0"
 source = { editable = "packages/sandbox" }
 dependencies = [
+    { name = "aiagent-development" },
     { name = "aiagent-domain" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "aiagent-domain", editable = "packages/domain" }]
+requires-dist = [
+    { name = "aiagent-development", editable = "packages/development" },
+    { name = "aiagent-domain", editable = "packages/domain" },
+]
 
 [[package]]
 name = "aiagent-sentinel"
