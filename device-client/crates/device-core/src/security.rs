@@ -98,6 +98,9 @@ pub fn key_file_path(db_path: &Path) -> PathBuf {
 pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
     let key_path = key_file_path(db_path);
     if key_path.exists() {
+        if !db_path.exists() {
+            return Err("journal database missing for existing key".into());
+        }
         restrict_path_owner_only(&key_path, false)?;
         let raw = fs::read(&key_path).map_err(|e| e.to_string())?;
         return unprotect_key_blob(&raw);

@@ -540,6 +540,26 @@ fn missing_key_for_existing_journal_does_not_generate_a_replacement() {
 }
 
 #[test]
+fn missing_database_for_existing_key_does_not_reset_control() {
+    use aiagent_device_core::{security::key_file_path, ControlRecord};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    journal
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: true,
+            audit: vec![],
+        })
+        .unwrap();
+    drop(journal);
+    std::fs::remove_file(&path).unwrap();
+    assert!(key_file_path(&path).exists());
+    assert!(LocalJournal::open(&path, &scope("A")).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
 fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
     use aiagent_device_core::agent::{
         AndroidAdapterPort, AuthenticatedChannelPort, BuildAdapterPort, ChromeAdapterPort,
