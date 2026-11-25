@@ -16,6 +16,7 @@ dependencies = [
   "aiagent-memory",
   "aiagent-development",
   "aiagent-automation",
+  "aiagent-skills",
 ]
 
 [dependency-groups]
@@ -48,6 +49,7 @@ aiagent-context = { workspace = true }
 aiagent-memory = { workspace = true }
 aiagent-development = { workspace = true }
 aiagent-automation = { workspace = true }
+aiagent-skills = { workspace = true }
 
 [tool.ruff]
 line-length = 120
@@ -80,7 +82,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = ["packages/domain/src", "packages/core/src", "packages/runtime/src", "packages/gateways/src",
              "packages/sentinel/src", "packages/api/src", "packages/sandbox/src",
              "packages/browser/src", "packages/context/src", "packages/memory/src",
-             "packages/development/src", "packages/automation/src"]
+             "packages/development/src", "packages/automation/src", "packages/skills/src"]
 explicit_package_bases = true
 warn_unused_ignores = false
 

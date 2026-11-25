@@ -1,0 +1,163 @@
+# Skill lifecycle (MKT-2) — implementation notes
+
+Status: **IMPLEMENTED_PARTIAL / CODE_READY (unit-tested), runtime wiring NOT_IMPLEMENTED, PostgreSQL path NOT_TESTED here.**
+
+This document records what the branch actually implements. It does not turn the Draft specs into Locked contracts.
+`docs/06-memory-skills/skill-lifecycle.md` remains the authority for the lifecycle intent; this file describes the
+current code and its limits.
+
+## 1. What is implemented
+
+| Concern | Code | Evidence |
+|---|---|---|
+| Bounded SKILL.md frontmatter | `aiagent_skills.frontmatter` | unit tests: object tags, duplicate keys, aliases rejected |
+| Immutable manifest and digests | `aiagent_skills.manifest`, `digest` | unit tests via ingest/content digest |
+| Archive safety | `aiagent_skills.bundle` | traversal, executable, nested archive, symlink, compression-ratio tests |
+| Content quarantine | `aiagent_skills.quarantine` | temp-dir tests with digest re-verification |
+| Deterministic scanner | `aiagent_skills.scanner` | high-severity findings report; PASS is not a safety proof |
+| Capability narrowing | `aiagent_skills.policy` | intersection and forbidden-class tests |
+| Review approval binding | `aiagent_skills.approval` | digest, revision, TTL, and tamper tests |
+| Release/installation state machine | `aiagent_skills.lifecycle` | install/enable/update/rollback/revoke tests |
+| Dependency resolution | `aiagent_skills.dependency`, `SkillRegistry.resolve_dependencies` | required dependency must be enabled; exact resolved versions enter the run pin |
+| Registry orchestration and idempotency | `aiagent_skills.registry` | idempotent replay and conflicting-payload test |
+| Run pins and progressive disclosure | `aiagent_skills.pinning` | pinned catalog, immutable backend, offset/truncation test |
+| Source adapters | `aiagent_skills.sources` | GitHub/ClawHub require an injected `EgressPort`; upload is local |
+| PostgreSQL persistence | `aiagent_skills.pg_store`, migration `0029` | SQL and a `pg`-marked integration test are written; skipped here without a server |
+| Owner-scoped HTTP API | `aiagent_api.skills` | TestClient tests with an in-memory registry |
+| Feature flag / app hook | `aiagent_api.app` | `AIAGENT_SKILLS_ENABLED=1` registers the router |
+
+Skill content is always data. The package has no shell, subprocess, network client, tool executor, or evaluator.
+Source fetches go through an injected egress port, and this branch does not include a production egress adapter.
+
+## 2. Lifecycle and invariants
+
+1. **Discover/resolve** — source adapters pin a publisher identity and a commit/artifact digest. A mutable branch or
+   tag is never accepted as a release identity.
+2. **Quarantine** — the archive is inspected and stored under a SHA-256 content address outside `SKILLS_DIR`.
+3. **Validate** — bounded frontmatter, manifest/file-list verification, content digest, and the deterministic scanner.
+4. **Review** — an approval binds tenant, owner, actor, action, release id, content digest, publisher, requested
+   capability digest, policy revision, scan digest, expected installation revision, and a TTL of at most 24 hours.
+5. **Install** — install never enables. Installation creates an `INSTALLED_DISABLED` record and an audit receipt.
+6. **Enable** — a separate approval binds the exact release and activation revision, then increments
+   `activation_generation`.
+7. **Runtime primitives** — a run pin captures release/content/generation/policy/digests. `load_pinned_body`
+   re-verifies the pinned body from quarantine; the catalog exposes only enabled releases and bodies are disclosed in
+   byte-bounded chunks. The live Agent Runtime is not wired to these primitives (section 6).
+8. **Update/rollback/remove** — each is a separate operation with an expected revision. A failed update restores the
+   prior enabled/disabled activation instead of silently disabling a live Skill.
+9. **Revocation** — moves the release and installation to revoked, removes it from the catalog, and prevents new pins
+   and loads. It does not resurrect an older grant.
+
+Requested capabilities only narrow. Effective capabilities are
+`requested ∩ actor ∩ tenant ∩ run/task ∩ Gateway ∩ approved allowlist`. Classes such as `approval:`, `policy:`,
+`secret:`, `shell:`, `sandbox:`, `gateway:`, `docker:`, and `script:` cannot be requested by a Skill.
+
+## 3. HTTP surface
+
+All routes are owner-scoped and require the existing bearer/session authentication. Mutating routes require
+`Idempotency-Key`; enable/update/rollback/remove require `expectedRevision`. Installation and enablement are always
+separate calls. Errors use stable codes such as `STALE_REVISION`, `STALE_CONTENT_DIGEST`,
+`IDEMPOTENCY_KEY_REQUIRED`, and `SKILL_NOT_FOUND`.
+
+```text
+GET  /v1/skills
+GET  /v1/skills/search?q=
+GET  /v1/extensions/skills/installations
+GET  /v1/extensions/skills/installations/{id}
+GET  /v1/extensions/skills/releases/{id}
+GET  /v1/extensions/skills/releases/{id}/files
+GET  /v1/extensions/skills/releases/{id}/files/{path}
+POST /v1/extensions/skills/ingest                  (raw ZIP body)
+POST /v1/extensions/skills/releases/{id}/install
+POST /v1/extensions/skills/installations/{id}/enable
+POST /v1/extensions/skills/installations/{id}/disable
+POST /v1/extensions/skills/installations/{id}/update
+POST /v1/extensions/skills/installations/{id}/rollback
+POST /v1/extensions/skills/installations/{id}/remove
+POST /v1/extensions/skills/installations/{id}/revoke
+POST /v1/extensions/skills/installations/{id}/pin
+```
+
+The feature is off by default:
+
+```text
+AIAGENT_SKILLS_ENABLED=1
+AIAGENT_SKILL_QUARANTINE_DIR=<private path outside packaged skills>
+AIAGENT_SKILL_POLICY_REVISION=<current policy revision>
+```
+
+File preview is `text/plain`, `X-Content-Type-Options: nosniff`, CSP `sandbox`, and `no-store`. Binary or oversized
+files are refused; HTML is never rendered.
+
+## 4. Database
+
+Migration `0029_skill_lifecycle` adds:
+
+- `skill_releases` (immutable release rows; state/revocation are the only mutations);
+- `skill_installations` (owner-scoped, optimistic version, activation generation);
+- `skill_installation_history` (rollback candidates);
+- `skill_receipts` (idempotency replay);
+- `skill_run_pins` (immutable run-scoped release pins);
+- `skill_audit_events` (append-only; every successful registry operation writes one row).
+
+Every table has RLS enabled and forced, using `current_setting('aiagent.tenant_id')`. Composite
+`(tenant_id, id)` foreign keys prevent cross-tenant references. The API role gets the minimum DML grants; the runtime
+role gets read-only access to releases, installations, and pins.
+
+**Numbering risk:** PR #122 also introduces `0029`. This branch was cut from `origin/main` `53ac14c` before that
+migration merged. If PR #122 merges first, this migration must be renumbered to `0030` and
+`APP_SCHEMA_VERSION` bumped again. Contiguous migration validation must not be weakened.
+
+## 5. Security properties and explicit limits
+
+- Archive inspection rejects traversal, absolute/UNC paths, ADS/colons, NUL/control/format characters, non-NFC names,
+  Windows reserved/trailing-dot names, nested archives, executables and binary magic, symlinks/hardlinks/devices,
+  encrypted entries, duplicate/case-colliding names, `.git`, excessive entries/depth/size, and compression-ratio
+  bombs.
+- YAML is composed without object construction; duplicate keys, unsupported tags, recursive aliases, node/depth limits,
+  and non-finite floats are rejected.
+- Quarantine is content-addressed, written via a staging directory and atomic rename, and re-hashed on read. The
+  runtime/model has no read path to it; only the API owner-scoped preview reads it.
+- Approval and pin checks are constant-time string comparisons and bind exact digests/revisions, preventing TOCTOU
+  between review and enable. A run pin must carry the digest of the release's validated capability request; a caller
+  cannot substitute an arbitrary capability digest.
+- The scanner is heuristic. A passing scan is **not** proof of safety; high-severity findings are review signals.
+  Only structural violations are fail-closed.
+- The API creates the review approval server-side from the authenticated actor and the exact release digest. It does
+  not accept a client-supplied capability set, policy revision, or scan digest. The configured policy revision is a
+  deployment input; a real policy-service revision feed is not implemented here.
+- No Skill is executed. Scripts, package managers, host shells, MCP installation, and remote Git execution are outside
+  this implementation.
+
+## 6. Runtime integration status (important)
+
+The existing runtime still mounts packaged read-only `SKILLS_DIR` at `/skills/` and caches its DeepAgents graph per
+profile. It does **not** yet consume `EnabledSkillCatalog`, `ImmutableSkillBackend`, or `RunSkillPin`. Therefore:
+
+- installing/enabling a Skill through this API does **not** currently change the model's skill catalog or tools;
+- run pins and on-demand disclosure are implemented and tested as library contracts (`SkillRegistry.load_pinned_body`
+  reads the digest-verified quarantine object), but are not injected into a live run;
+- wiring requires a run-scoped graph/backend keyed by tenant, owner, run, and pin, plus a runtime policy revision feed.
+  That is deliberately left as the next integration step rather than faking per-run behavior in a cached graph.
+
+This is the main reason the branch is `IMPLEMENTED_PARTIAL`, not `IMPLEMENTED`.
+
+## 7. Tests and verification
+
+Executed in this branch on Windows:
+
+```text
+uv run pytest packages/skills/tests -q          # 22 passed
+uv run pytest tests/test_skill_api.py -q        # 5 passed
+uv run pytest tests/test_skill_pg.py -q         # skipped here: no PostgreSQL
+uv run ruff check packages/skills packages/api/src/aiagent_api/skills.py
+uv run mypy packages/skills/src packages/api/src/aiagent_api/skills.py
+```
+
+Not executed here: PostgreSQL migration/RLS/concurrency tests, full API lifespan, Docker/VM isolation, GitHub/ClawHub
+network resolution, and any live Agent Runtime run. Those remain unverified and must be run in CI or the deployment
+environment before claiming production readiness.
+
+A deterministic disclosure-budget test (`test_disclosure_benchmark.py`) builds 40 Skills with 16,000-line bodies and
+asserts that the enabled-catalog surface is under 1% of the full body bytes, and that one disclosure slice stays within
+16 KiB. This is a byte-budget regression check, not a measurement of a particular model's tokenizer.

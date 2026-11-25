@@ -53,6 +53,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from .skills import skill_lifecycle_enabled
+
 
 def _parse_keyring_secret(raw_json: str) -> tuple[str, bytes]:
     try:
@@ -505,6 +507,32 @@ def create_app(
     async def _val(_: Request, e: ValidationError) -> JSONResponse:
         return JSONResponse(
             {"error": "INVALID_REQUEST", "fields": [".".join(map(str, x["loc"])) for x in e.errors()]}, status_code=422
+        )
+
+    if skill_lifecycle_enabled():
+        from aiagent_domain.tools import SKILLS_DIR
+        from aiagent_skills.pg_store import PostgresSkillStore
+        from aiagent_skills.quarantine import QuarantineStore
+        from aiagent_skills.registry import SkillRegistry
+
+        from .skills import build_skills_router
+
+        def _skill_registry() -> SkillRegistry:
+            root = Path(
+                os.environ.get("AIAGENT_SKILL_QUARANTINE_DIR", str(Path.home() / ".aiagent" / "skill-quarantine"))
+            ).expanduser()
+            return SkillRegistry(
+                PostgresSkillStore(get_db()),
+                quarantine=QuarantineStore(root, forbidden_roots=(SKILLS_DIR,)),
+            )
+
+        app.include_router(
+            build_skills_router(
+                registry_factory=_skill_registry,
+                scope_dep=scope,
+                policy_revision=os.environ.get("AIAGENT_SKILL_POLICY_REVISION", "policy:default"),
+                enabled=skill_lifecycle_enabled,
+            )
         )
 
     async def body_of(request: Request, model: Any) -> Any:
