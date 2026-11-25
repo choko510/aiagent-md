@@ -48,6 +48,7 @@ _HEAD_FIELDS = frozenset(
     }
 )
 _RESULT_DOMAIN = b"aiagent-git-worker-result-v1\0"
+_RECOVERY_DOMAIN = b"aiagent-git-recovery-read-v1\0"
 _TRANSFER_DOMAIN = b"aiagent-git-patch-transfer-v1\0"
 _HEX = re.compile(r"[a-f0-9]{64}\Z")
 _OID = re.compile(r"[a-f0-9]{40}\Z")
@@ -89,6 +90,14 @@ def sign_git_worker_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]
         raise ValueError("invalid Git worker grant")
     body = canonical_json(payload).encode("utf-8")
     return {"payload": payload, "mac": hmac.new(key, _GRANT_DOMAIN + body, hashlib.sha256).hexdigest()}
+
+
+def sign_git_recovery_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]:
+    """Sign a short-lived read-only recovery request after canonical authorization."""
+    if len(key) < 32 or set(payload) != _FIELDS:
+        raise ValueError("invalid Git recovery grant")
+    body = canonical_json(payload).encode("utf-8")
+    return {"payload": payload, "mac": hmac.new(key, _RECOVERY_DOMAIN + body, hashlib.sha256).hexdigest()}
 
 
 def sign_git_head_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]:
@@ -544,8 +553,69 @@ class GitWorkerService:
         except Exception as exc:
             raise RpcError("GIT_OBJECT_UNAVAILABLE") from exc
 
+    def recover_inspect(self, envelope: Any) -> dict[str, Any]:
+        """Test-only read of confirmed journal and Git objects after worker restart.
 
-def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerService, *, allowed_uid: int) -> RpcServer:
+        This is forensic data, not a signed effect receipt or a state transition.
+        The Gateway must separately authorize the caller and must retain UNKNOWN
+        unless a canonical reconciliation contract validates the complete proof.
+        """
+        try:
+            if config.profile() != "test" or not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+                raise ValueError
+            p, mac = envelope["payload"], envelope["mac"]
+            if (
+                not isinstance(p, dict)
+                or set(p) != _FIELDS
+                or not isinstance(mac, str)
+                or not hmac.compare_digest(mac, sign_git_recovery_grant(self._grant_key, p)["mac"])
+                or p["tenant"] != self._tenant
+                or p["binding"] != self._binding
+                or p["branch"] != self._branch
+                or type(p["expires_at"]) is not int
+                or not time.time() < p["expires_at"] <= time.time() + 10
+            ):
+                raise ValueError
+            prepared = self._journal.read(p["operation"], "prepared")
+            confirmed = self._journal.read(p["operation"], "confirmed")
+            if (
+                {**prepared, "stage": "confirmed"} != confirmed
+                or any(
+                    prepared.get(k) != p[v]
+                    for k, v in (
+                        ("operation", "operation"),
+                        ("attempt", "attempt"),
+                        ("binding", "binding"),
+                        ("branch", "branch"),
+                        ("parent", "parent"),
+                        ("request_sha256", "request_sha256"),
+                    )
+                )
+                or prepared.get("generation") != str(p["generation"])
+            ):
+                raise ValueError
+            commit_body, tree_body, diff_sha = self._worker.inspect_commit(
+                p["parent"], prepared["commit"], prepared["tree"]
+            )
+            if diff_sha != p["patch_sha256"] or time.time() >= p["expires_at"]:
+                raise ValueError
+            return {
+                "operation": p["operation"],
+                "worker_id": self._worker_id,
+                "commit": prepared["commit"],
+                "tree": prepared["tree"],
+                "parent": p["parent"],
+                "diff_sha256": diff_sha,
+                "commit_object": base64.b64encode(commit_body).decode("ascii"),
+                "tree_object": base64.b64encode(tree_body).decode("ascii"),
+            }
+        except Exception as exc:
+            raise RpcError("GIT_RECOVERY_UNAVAILABLE") from exc
+
+
+def build_git_worker_server(
+    endpoint: str, rpc_key: bytes, service: GitWorkerService, *, allowed_uid: int, enable_test_recovery: bool = False
+) -> RpcServer:
     """Explicit opt-in server, requiring external OS isolation and a live guard."""
     import asyncio
 
@@ -587,6 +657,11 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
             task = asyncio.create_task(asyncio.to_thread(service.inspect, body.get("grant")))
         return await task
 
+    async def recover_inspect(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        async with lock:
+            task = asyncio.create_task(asyncio.to_thread(service.recover_inspect, body.get("grant")))
+        return await task
+
     async def head(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(service.head, body.get("grant"))
 
@@ -606,6 +681,10 @@ def build_git_worker_server(endpoint: str, rpc_key: bytes, service: GitWorkerSer
     server.register("git.chunk", chunk, {"tool_gateway"})
     server.register("git.execute", execute, {"tool_gateway"})
     server.register("git.inspect", inspect, {"tool_gateway"})
+    if enable_test_recovery:
+        if config.profile() != "test":
+            raise ValueError("Git recovery inspection is test-only")
+        server.register("git.recovery_inspect", recover_inspect, {"tool_gateway"})
     server.register("git.head", head, {"tool_gateway"})
     server.register("git.heartbeat", heartbeat, {"tool_gateway"})
     server.register("git.cancel", cancel, {"tool_gateway"})

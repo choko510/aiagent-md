@@ -65,6 +65,7 @@ from aiagent_gateways.git_snapshot_promotion import GitSnapshotPromotionUnknown,
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
 from aiagent_sandbox.command_authority import command_template_digest
+from aiagent_sandbox.git_worker_rpc import sign_git_recovery_grant
 from psycopg.types.json import Jsonb
 from stack import wait_port
 from test_cell_e2e import _supervisor_answers
@@ -268,6 +269,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             f"FIXTURE_BINDING={binding}",
             "-e",
             "FIXTURE_GIT_FENCE=1",
+            "-e",
+            f"FIXTURE_GIT_RECOVERY={'1' if scenario == 'worker_crash_after_cas' else '0'}",
             "-e",
             f"FIXTURE_CRASH_AFTER_CAS={'1' if scenario == 'worker_crash_after_cas' else '0'}",
             "-e",
@@ -809,6 +812,73 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     if scenario in ("worker_response_lost", "receipt_response_lost", "worker_crash_after_cas"):
                         assert actual == row["candidate_commit"] and actual != parent
                         assert len(list(journal.glob("*.confirmed"))) == 1
+                    if scenario == "worker_crash_after_cas":
+                        # Explicitly test read-only journal inspection after a
+                        # real container restart. It cannot settle UNKNOWN.
+                        record = dbs["owner"].one(
+                            "SELECT o.*,i.id AS canonical_intent FROM agent.git_operations o "
+                            "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                            "WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                            (claim.tenant_id, call_id),
+                        )
+                        recovery = {
+                            "operation": str(record["id"]),
+                            "tenant": claim.tenant_id,
+                            "owner": claim.owner_user_id,
+                            "task": claim.task_id,
+                            "run": claim.run_id,
+                            "workspace": workspace,
+                            "goal": claim.goal_revision,
+                            "lease": claim.lease_epoch,
+                            "restore": claim.restore_incarnation,
+                            "worker_ref": claim.worker_ref,
+                            "intent": str(record["intent_id"]),
+                            "attempt": str(record["attempt_id"]),
+                            "effect_key": record["effect_key"],
+                            "binding": binding,
+                            "generation": 2,
+                            "branch": "feat/fixture",
+                            "parent": parent,
+                            "patch_id": artifact,
+                            "patch_sha256": digest,
+                            "patch_bytes": len(patch),
+                            "paths": paths,
+                            "message": "approved fixture",
+                            "cycle_id": cycle,
+                            "plan_ref": "plan-fixture",
+                            "request_sha256": record["request_sha256"],
+                            "expires_at": int(time.time()) + 9,
+                        }
+                        restarted = subprocess.run(["docker", "start", name], capture_output=True, text=True)
+                        assert restarted.returncode == 0, restarted.stderr
+                        recover_client = RpcClient(worker_endpoint, "tool_gateway", b"r" * 32, timeout_s=1)
+                        evidence = None
+                        for _ in range(40):
+                            try:
+                                evidence = await recover_client.call(
+                                    "git.recovery_inspect", {"grant": sign_git_recovery_grant(b"g" * 32, recovery)}
+                                )
+                                break
+                            except (OSError, RpcError, asyncio.IncompleteReadError):
+                                await asyncio.sleep(0.1)
+                        assert evidence is not None and evidence["commit"] == actual
+                        assert evidence["parent"] == parent and evidence["diff_sha256"] == digest
+                        with pytest.raises(RpcError):
+                            await recover_client.call(
+                                "git.recovery_inspect", {"grant": {"payload": recovery, "mac": "0" * 64}}
+                            )
+                        with pytest.raises(RpcError):
+                            await recover_client.call(
+                                "git.recovery_inspect",
+                                {"grant": sign_git_recovery_grant(b"g" * 32, {**recovery, "attempt": uuid7()})},
+                            )
+                        after = dbs["owner"].one(
+                            "SELECT o.state,a.status_code FROM agent.git_operations o "
+                            "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
+                            "WHERE o.tenant_id=%s AND o.id=%s",
+                            (claim.tenant_id, record["id"]),
+                        )
+                        assert after["state"] == "CAS_PENDING" and after["status_code"] == "UNKNOWN"
                     if scenario == "receipt_response_lost":
                         receipts = dbs["owner"].one(
                             "SELECT count(*) AS n FROM agent.git_operation_receipts r "

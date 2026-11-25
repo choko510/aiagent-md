@@ -39,7 +39,13 @@ async def main() -> None:
             else None
         ),
     )
-    server = build_git_worker_server("unix:/bridge/worker.sock", b"r" * 32, service, allowed_uid=os.getuid())
+    server = build_git_worker_server(
+        "unix:/bridge/worker.sock",
+        b"r" * 32,
+        service,
+        allowed_uid=os.getuid(),
+        enable_test_recovery=os.environ.get("FIXTURE_GIT_RECOVERY") == "1",
+    )
     await server.start()
     try:
         await asyncio.Event().wait()
