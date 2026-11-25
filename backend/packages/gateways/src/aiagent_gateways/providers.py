@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import uuid
 from collections.abc import AsyncIterator
@@ -65,6 +66,58 @@ def _results(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _call(name: str, **args: Any) -> dict[str, Any]:
     return {"content": "", "tool_calls": [{"name": name, "args": args}]}
+
+
+# A grounded read header is the only source of page metadata. Never infer a fixed page size or page count.
+_READ_PAGE_RE = re.compile(r"@@ lines ([1-9][0-9]*)-([1-9][0-9]*) of ([1-9][0-9]*)(?: \| next offset ([0-9]+))? @@")
+_PAGE_LIMIT_RE = re.compile(r"page[- ]limit(?:=|:)\s*([1-9][0-9]{0,3})")
+
+
+def _fixture_page_limit(first: str) -> int:
+    """Fixture-only small page size for multi-page regression; production reads request 1000 lines."""
+    match = _PAGE_LIMIT_RE.search(first)
+    return min(int(match.group(1)), 1000) if match else 1000
+
+
+def _parse_read_page(content: str) -> tuple[int, int, int, int | None] | None:
+    """Parse and validate one DeepAgents read window: (start, end, total, next offset)."""
+    first_line = content.splitlines()[0] if content else ""
+    match = _READ_PAGE_RE.fullmatch(first_line)
+    if match is None:
+        return None
+    start, end, total = (int(match.group(i)) for i in (1, 2, 3))
+    next_offset = int(match.group(4)) if match.group(4) is not None else None
+    if start > end or end > total:
+        return None
+    if next_offset is None:
+        if end != total:
+            return None
+    elif next_offset != end or end >= total:
+        return None
+    return start, end, total, next_offset
+
+
+def _consume_read_pages(pages: list[dict[str, Any]], start: int) -> tuple[int, int | None, str | None]:
+    """Consume a complete read chain from start; return (next index, resume offset, error)."""
+    if start >= len(pages):
+        return start, None, "missing read_file page"
+    expected_start = 1
+    expected_total: int | None = None
+    for index in range(start, len(pages)):
+        parsed = _parse_read_page(str(pages[index].get("content", "")))
+        if parsed is None:
+            return index, None, "read_file page has invalid window metadata"
+        page_start, _page_end, total, next_offset = parsed
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            return index, None, "read_file pages disagree on total lines"
+        if page_start != expected_start:
+            return index, None, f"read_file page starts at {page_start}, expected {expected_start}"
+        if next_offset is None:
+            return index + 1, None, None
+        expected_start = next_offset + 1
+    return len(pages), expected_start - 1, None
 
 
 def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -> dict[str, Any]:
@@ -151,22 +204,32 @@ def fake_policy(stream: str, messages: list[dict[str, Any]], tools: list[str]) -
                 "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
             )
         path = "/skills/nihongo/SKILL.md"
+        page_limit = _fixture_page_limit(first)
         if not pages:
-            return _call("read_file", file_path=path, offset=0, limit=100)
-        if len(pages) == 1:
-            first_page = str(pages[0].get("content", ""))
-            if not first_page.startswith("@@ lines ") or "next offset 100" not in first_page:
-                return {"content": "error: first skill page rejected"}
-            return _call("read_file", file_path=path, offset=100, limit=1000)
-        if not all(str(m.get("content", "")).startswith("@@ lines ") for m in pages):
-            return {"content": "error: skill page rejected"}
-        if reference is not None and len(pages) == 2:
-            return _call("read_file", file_path=reference[0], offset=0, limit=1000)
-        if reference is not None and reference[1] not in str(pages[2].get("content", "")):
+            return _call("read_file", file_path=path, offset=0, limit=page_limit)
+        skill_end, skill_next, error = _consume_read_pages(pages, 0)
+        if error is not None:
+            return {"content": f"error: {error}"}
+        if skill_next is not None:
+            return _call("read_file", file_path=path, offset=skill_next, limit=page_limit)
+        if reference is None:
+            if skill_end != len(pages):
+                return {"content": "error: unexpected read after SKILL.md"}
+            return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
+        if skill_end == len(pages):
+            return _call("read_file", file_path=reference[0], offset=0, limit=page_limit)
+        ref_end, ref_next, ref_error = _consume_read_pages(pages, skill_end)
+        if ref_error is not None:
+            return {"content": f"error: {ref_error}"}
+        if ref_next is not None:
+            return _call("read_file", file_path=reference[0], offset=ref_next, limit=page_limit)
+        if ref_end != len(pages):
+            return {"content": "error: unexpected read after reference"}
+        ref_text = "".join(str(pages[i].get("content", "")) for i in range(skill_end, ref_end))
+        if reference[1] not in ref_text:
             return {"content": "error: reference rejected"}
-        if reference is not None:
-            return {"content": reference[2]}
-        return {"content": "推敲済み：日本語の文章を読みやすく整えました。"}
+        return {"content": reference[2]}
+
     if "delegate" in first:
         if any(m.get("kind") == "tool" for m in messages):
             return {"content": "done:delegated"}

@@ -450,20 +450,20 @@ def test_t09_subagent_child_result_admitted(stack: Stack, api, t, pg: PgEnv) -> 
     ("goal", "reads", "result"),
     [
         ("nihongo fixture: 今日の天気を教えてください。", 0, "通常会話としてLiteのみで回答しました。"),
-        ("nihongo fixture: 日本語の文章を推敲してください。", 2, "推敲済み：日本語の文章を読みやすく整えました。"),
+        ("nihongo fixture: 日本語の文章を推敲してください。", 1, "推敲済み：日本語の文章を読みやすく整えました。"),
         (
             "nihongo fixture: READMEの技術文書を更新してください。",
-            3,
+            2,
             "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
         ),
         (
             "nihongo fixture: READMEを更新してください。",
-            3,
+            2,
             "更新済み：技術文書の用語と手順を保って読みやすく整えました。",
         ),
         (
             "nihongo fixture: 報告書を作成してください。",
-            3,
+            2,
             "作成済み：書き言葉の段で報告書を整えました。",
         ),
         ("nihongo fixture: このコードとJSONは変更しないでください。", 0, "コードとJSONは変更していません。"),
@@ -495,10 +495,10 @@ def test_t09a_nihongo_lite_and_full_reads_through_real_gateways(
         return
     assert all(text.startswith("@@ lines ") for text in pages)
     assert 'name: "nihongo"' in pages[0]
-    assert "next offset 100" in pages[0]
+    assert "next offset" not in pages[0]  # v3.1.1 SKILL.md fits in one read page
     assert all("next offset" not in text for text in pages[1:])
-    if reads == 3:
-        assert ("# 書き言葉の段" if "報告書" in goal else "# 技術文書") in pages[2]
+    if reads == 2:
+        assert ("# 書き言葉の段" if "報告書" in goal else "# 技術文書") in pages[1]
     assert all("not grounded in HEAD" not in text for text in pages)
 
 
