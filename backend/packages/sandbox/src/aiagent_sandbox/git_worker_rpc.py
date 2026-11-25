@@ -49,6 +49,7 @@ _HEAD_FIELDS = frozenset(
 )
 _RESULT_DOMAIN = b"aiagent-git-worker-result-v1\0"
 _RECOVERY_DOMAIN = b"aiagent-git-recovery-read-v1\0"
+_RECOVERY_ATTEST_DOMAIN = b"aiagent-git-recovery-observation-v1\0"
 _TRANSFER_DOMAIN = b"aiagent-git-patch-transfer-v1\0"
 _HEX = re.compile(r"[a-f0-9]{64}\Z")
 _OID = re.compile(r"[a-f0-9]{40}\Z")
@@ -98,6 +99,18 @@ def sign_git_recovery_grant(key: bytes, payload: dict[str, Any]) -> dict[str, An
         raise ValueError("invalid Git recovery grant")
     body = canonical_json(payload).encode("utf-8")
     return {"payload": payload, "mac": hmac.new(key, _RECOVERY_DOMAIN + body, hashlib.sha256).hexdigest()}
+
+
+def verify_git_recovery_observation(key: bytes, envelope: Any, expected: dict[str, Any]) -> None:
+    """Verify a read-only observation; it is not a canonical success receipt."""
+    if len(key) < 32 or not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+        raise ValueError("Git recovery observation invalid")
+    payload, mac = envelope["payload"], envelope["mac"]
+    if not isinstance(payload, dict) or not isinstance(mac, str) or payload != expected:
+        raise ValueError("Git recovery observation invalid")
+    signature = hmac.new(key, _RECOVERY_ATTEST_DOMAIN + canonical_json(payload).encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(mac, signature):
+        raise ValueError("Git recovery observation invalid")
 
 
 def sign_git_head_grant(key: bytes, payload: dict[str, Any]) -> dict[str, Any]:
@@ -602,6 +615,29 @@ class GitWorkerService:
             prepared_envelope = self._journal.export_prepared(p["operation"])
             confirmed_envelope = self._journal.export_confirmed(p["operation"])
             journal_sha = hashlib.sha256(canonical_json(prepared_envelope).encode()).hexdigest()
+            observation = {
+                "version": 1,
+                "operation": p["operation"],
+                "tenant": p["tenant"],
+                "run": p["run"],
+                "lease": p["lease"],
+                "intent": p["intent"],
+                "attempt": p["attempt"],
+                "binding": p["binding"],
+                "generation": p["generation"],
+                "branch": p["branch"],
+                "parent": p["parent"],
+                "commit": prepared["commit"],
+                "tree": prepared["tree"],
+                "patch_sha256": p["patch_sha256"],
+                "request_sha256": p["request_sha256"],
+                "prepared_journal_sha256": journal_sha,
+                "worker_id": self._worker_id,
+                "expires_at": p["expires_at"],
+            }
+            observation_mac = hmac.new(
+                self._result_key, _RECOVERY_ATTEST_DOMAIN + canonical_json(observation).encode(), hashlib.sha256
+            ).hexdigest()
             return {
                 "operation": p["operation"],
                 "worker_id": self._worker_id,
@@ -612,6 +648,7 @@ class GitWorkerService:
                 "prepared_journal_sha256": journal_sha,
                 "prepared_journal": prepared_envelope,
                 "confirmed_journal": confirmed_envelope,
+                "observation": {"payload": observation, "mac": observation_mac},
                 "commit_object": base64.b64encode(commit_body).decode("ascii"),
                 "tree_object": base64.b64encode(tree_body).decode("ascii"),
             }

@@ -873,6 +873,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             rpc_key=b"r" * 32,
                             grant_key=b"g" * 32,
                             journal_key=b"j" * 32,
+                            result_key=b"s" * 32,
                             worker_id="fixture-worker",
                             deadline=time.monotonic() + 8,
                         )
@@ -887,6 +888,21 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                                 rpc_key=b"r" * 32,
                                 grant_key=b"g" * 32,
                                 journal_key=b"x" * 32,
+                                result_key=b"s" * 32,
+                                worker_id="fixture-worker",
+                                deadline=time.monotonic() + 8,
+                            )
+                        with pytest.raises(GitRecoveryUnavailable):
+                            await inspect_unknown_git_operation(
+                                dbs["tool_gateway"],
+                                claim,
+                                keys,
+                                str(record["id"]),
+                                endpoint=worker_endpoint,
+                                rpc_key=b"r" * 32,
+                                grant_key=b"g" * 32,
+                                journal_key=b"j" * 32,
+                                result_key=b"x" * 32,
                                 worker_id="fixture-worker",
                                 deadline=time.monotonic() + 8,
                             )
@@ -900,6 +916,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                                 rpc_key=b"r" * 32,
                                 grant_key=b"g" * 32,
                                 journal_key=b"j" * 32,
+                                result_key=b"s" * 32,
                                 worker_id="fixture-worker",
                                 deadline=time.monotonic() + 8,
                             )
@@ -914,6 +931,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                                 rpc_key=b"r" * 32,
                                 grant_key=b"g" * 32,
                                 journal_key=b"j" * 32,
+                                result_key=b"s" * 32,
                                 worker_id="fixture-worker",
                                 deadline=time.monotonic() + 8,
                             )

@@ -18,7 +18,7 @@ from aiagent_core.db import Database
 from aiagent_core.rpc import RpcClient
 from aiagent_domain import canonical_json, is_uuid7
 from aiagent_sandbox.git_operation_journal import verify_confirmed_journal, verify_prepared_journal
-from aiagent_sandbox.git_worker_rpc import sign_git_recovery_grant
+from aiagent_sandbox.git_worker_rpc import sign_git_recovery_grant, verify_git_recovery_observation
 
 from .context_keys import KeyRing
 from .git_patch_artifacts import fetch_git_patch
@@ -72,6 +72,7 @@ async def inspect_unknown_git_operation(
     rpc_key: bytes,
     grant_key: bytes,
     journal_key: bytes,
+    result_key: bytes,
     worker_id: str,
     deadline: float,
 ) -> GitRecoveryObservation:
@@ -83,7 +84,8 @@ async def inspect_unknown_git_operation(
         or len(rpc_key) < 32
         or len(grant_key) < 32
         or len(journal_key) < 32
-        or len({rpc_key, grant_key, journal_key}) != 3
+        or len(result_key) < 32
+        or len({rpc_key, grant_key, journal_key, result_key}) != 4
         or not worker_id
         or not time.monotonic() < deadline <= time.monotonic() + 10
     ):
@@ -166,6 +168,7 @@ async def inspect_unknown_git_operation(
                 "prepared_journal_sha256",
                 "prepared_journal",
                 "confirmed_journal",
+                "observation",
             }
             or response["operation"] != operation
             or response["worker_id"] != worker_id
@@ -195,6 +198,27 @@ async def inspect_unknown_git_operation(
         ):
             raise ValueError("Git recovery journal mismatch")
         verify_confirmed_journal(journal_key, response["confirmed_journal"], journal)
+        expected_observation = {
+            "version": 1,
+            "operation": operation,
+            "tenant": claim.tenant_id,
+            "run": claim.run_id,
+            "lease": claim.lease_epoch,
+            "intent": str(row["intent_id"]),
+            "attempt": str(row["attempt_id"]),
+            "binding": str(row["binding_id"]),
+            "generation": int(row["binding_generation"]),
+            "branch": str(row["branch"]),
+            "parent": str(row["parent_sha"]),
+            "commit": str(row["candidate_commit"]),
+            "tree": str(row["candidate_tree"]),
+            "patch_sha256": str(row["patch_sha256"]),
+            "request_sha256": str(row["request_sha256"]),
+            "prepared_journal_sha256": str(row["prepared_journal_sha256"]),
+            "worker_id": worker_id,
+            "expires_at": payload["expires_at"],
+        }
+        verify_git_recovery_observation(result_key, response["observation"], expected_observation)
         commit = base64.b64decode(response["commit_object"], validate=True)
         tree = base64.b64decode(response["tree_object"], validate=True)
         if not 1 <= len(commit) <= 1024 * 1024 or not 1 <= len(tree) <= 1024 * 1024:
@@ -233,6 +257,7 @@ async def inspect_unknown_git_operation(
                 )
             )
             or time.monotonic() >= deadline
+            or time.time() >= payload["expires_at"]
         ):
             raise ValueError("Git recovery scope changed")
         return GitRecoveryObservation(
