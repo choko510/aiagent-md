@@ -6,6 +6,9 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,99 @@ from aiagent_sandbox.git_operation_journal import (
     verify_confirmed_journal,
     verify_prepared_journal,
 )
+
+
+def test_journal_capacity_fails_closed_and_preserves_evidence_after_restart(tmp_path: Path):
+    directory = tmp_path / "journal"
+    directory.mkdir(mode=0o700)
+    operation, attempt, binding = uuid7(), uuid7(), uuid7()
+    request, parent, commit, tree = "a" * 64, "1" * 40, "2" * 40, "3" * 40
+    journal = GitOperationJournal(directory.resolve(), b"j" * 32, max_records=3)
+    try:
+        journal.admit(operation, request, attempt, binding, 1, "feat/fixture")
+        journal.prepare(operation, request, parent, commit, tree)
+        journal.confirm(operation, request, parent, commit, tree)
+        with pytest.raises(GitJournalError, match="capacity"):
+            journal.admit(uuid7(), request, attempt, binding, 1, "feat/fixture")
+    finally:
+        journal.close()
+    journal = GitOperationJournal(directory.resolve(), b"j" * 32, max_records=3)
+    try:
+        assert journal.read(operation, "confirmed")["commit"] == commit
+        with pytest.raises(GitJournalError, match="capacity"):
+            journal.admit(uuid7(), request, attempt, binding, 1, "feat/fixture")
+        assert len(list(directory.iterdir())) == 3
+    finally:
+        journal.close()
+
+
+def test_journal_capacity_serializes_competing_workers(tmp_path: Path):
+    directory = tmp_path / "journal"
+    directory.mkdir(mode=0o700)
+    attempt, binding = uuid7(), uuid7()
+    barrier = threading.Barrier(8, timeout=5)
+
+    def compete(_index):
+        journal = GitOperationJournal(directory.resolve(), b"j" * 32, max_records=3)
+        try:
+            operation = uuid7()
+            barrier.wait()
+            try:
+                journal.admit(operation, "a" * 64, attempt, binding, 1, "feat/fixture")
+            except GitJournalError:
+                return None
+            return operation
+        finally:
+            journal.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(compete, range(8)))
+    admitted = [operation for operation in outcomes if operation is not None]
+    assert 1 <= len(admitted) <= 3
+    assert len(list(directory.iterdir())) == len(admitted)
+    journal = GitOperationJournal(directory.resolve(), b"j" * 32, max_records=3)
+    try:
+        assert all(journal.read(operation, "admitted")["attempt"] == attempt for operation in admitted)
+    finally:
+        journal.close()
+
+
+def test_journal_capacity_lock_is_shared_across_processes(tmp_path: Path):
+    fcntl = pytest.importorskip("fcntl")
+    directory = tmp_path / "journal"
+    directory.mkdir(mode=0o700)
+    lock_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    script = """\
+import sys
+from pathlib import Path
+from aiagent_domain import uuid7
+from aiagent_sandbox.git_operation_journal import GitJournalError, GitOperationJournal
+journal = GitOperationJournal(Path(sys.argv[1]), b'j' * 32, max_records=3)
+try:
+    try:
+        journal.admit(uuid7(), 'a' * 64, uuid7(), uuid7(), 1, 'feat/fixture')
+    except GitJournalError:
+        sys.exit(0)
+    sys.exit(1)
+finally:
+    journal.close()
+"""
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(  # noqa: S603 - fixed fixture code and a private pytest directory
+            [sys.executable, "-c", script, str(directory)], capture_output=True, timeout=10, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        assert list(directory.iterdir()) == []
+    finally:
+        os.close(lock_fd)
+    journal = GitOperationJournal(directory.resolve(), b"j" * 32, max_records=3)
+    try:
+        operation = uuid7()
+        journal.admit(operation, "a" * 64, uuid7(), uuid7(), 1, "feat/fixture")
+        assert journal.read(operation, "admitted")["operation"] == operation
+    finally:
+        journal.close()
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:

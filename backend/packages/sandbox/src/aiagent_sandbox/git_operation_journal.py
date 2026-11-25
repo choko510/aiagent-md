@@ -22,6 +22,7 @@ from aiagent_domain import canonical_json, is_uuid7
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _OID = re.compile(r"[a-f0-9]{40}\Z")
 _DOMAIN = b"aiagent-git-operation-journal-v1\0"
+_MAX_RECORDS = 12_000
 
 
 class GitJournalError(RuntimeError):
@@ -110,8 +111,13 @@ def verify_prepared_journal(
 class GitOperationJournal:
     """One-shot records in an externally provisioned, persistent private directory."""
 
-    def __init__(self, directory: Path, key: bytes) -> None:
-        if sys.platform != "linux" or len(key) < 32:
+    def __init__(self, directory: Path, key: bytes, *, max_records: int = _MAX_RECORDS) -> None:
+        if (
+            sys.platform != "linux"
+            or len(key) < 32
+            or type(max_records) is not int
+            or not 3 <= max_records <= _MAX_RECORDS
+        ):
             raise GitJournalError("journal unavailable")
         try:
             fd = _open_trusted_parent(directory)
@@ -121,7 +127,7 @@ class GitOperationJournal:
                 raise GitJournalError("journal directory is not private")
         except OSError as exc:
             raise GitJournalError("journal unavailable") from exc
-        self._fd, self._key = fd, key
+        self._fd, self._key, self._max_records = fd, key, max_records
 
     def close(self) -> None:
         if self._fd >= 0:
@@ -141,7 +147,22 @@ class GitOperationJournal:
         data = canonical_json({"payload": payload, "mac": proof}).encode("utf-8")
         if len(data) > 4096:
             raise GitJournalError("journal record too large")
+        import fcntl
+
+        lock_fd = -1
         try:
+            # Every writer opens its own directory description so flock also
+            # serializes threads and distinct worker processes. A contended or
+            # full journal fails closed; no prior replay evidence is removed.
+            lock_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(lock_fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                raise GitJournalError("journal directory is not private")
+            with os.scandir(lock_fd) as entries:
+                for count, _entry in enumerate(entries, start=1):
+                    if count >= self._max_records:
+                        raise GitJournalError("journal capacity exhausted")
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self._fd)
             try:
                 view = memoryview(data)
@@ -157,6 +178,9 @@ class GitOperationJournal:
         except OSError as exc:
             # A partial record intentionally remains as a replay fence.
             raise GitJournalError("journal write failed or operation already exists") from exc
+        finally:
+            if lock_fd >= 0:
+                os.close(lock_fd)
 
     def read(self, operation: str, stage: str) -> dict[str, Any]:
         name = self._name(operation, stage)
