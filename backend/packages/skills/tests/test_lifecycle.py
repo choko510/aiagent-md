@@ -376,6 +376,42 @@ def test_update_rollback_and_revoke(tmp_path: Path) -> None:
         )
 
 
+def test_update_cannot_change_skill_name(tmp_path: Path) -> None:
+    reg, store, _ = registry(tmp_path)
+    release_id = ingest(reg, make_zip({"SKILL.md": skill_md(name="skill-a")}))
+    installation_id = install_and_enable(reg, store, release_id)
+    other = ingest(reg, make_zip({"SKILL.md": skill_md(name="skill-b")}))
+    installation = store.get_installation(TENANT, installation_id)
+    target = store.get_release(TENANT, other)
+    capability = capability_digest(validate_requested(target.manifest.requested_capabilities))
+    approval = make_approval(
+        tenant_id=TENANT,
+        owner_user_id=OWNER,
+        actor_user_id=OWNER,
+        action="update",
+        release=target,
+        capability_digest_value=capability,
+        policy_revision="policy:1",
+        request_id="cross-name",
+        expected_installation_revision=installation.record_version,
+    )
+    with pytest.raises(SkillError, match="different Skill name"):
+        reg.update(
+            tenant_id=TENANT,
+            owner_user_id=OWNER,
+            actor_user_id=OWNER,
+            installation_id=installation_id,
+            target_release_id=other,
+            approval=approval,
+            capability_digest_value=capability,
+            policy_revision="policy:1",
+            expected_revision=installation.record_version,
+            enable_after=True,
+            request_id="cross-name",
+        )
+    assert store.get_installation(TENANT, installation_id).release_id == release_id
+
+
 def test_install_cannot_cross_owner(tmp_path: Path) -> None:
     reg, store, _ = registry(tmp_path)
     release_id = ingest(reg, make_zip({"SKILL.md": skill_md()}))

@@ -514,6 +514,8 @@ class SkillRegistry:
             target = self.store.get_release(tenant_id, target_release_id)
             if target.owner_user_id not in (None, owner_user_id):
                 raise SkillScopeViolation("release belongs to another owner")
+            if target.manifest.name != installation.skill_name:
+                raise LifecycleConflict("update target has a different Skill name")
             if target.state is ReleaseState.REVOKED:
                 raise ReleaseRevoked("release is revoked")
             if target.scan is not None:
@@ -593,6 +595,8 @@ class SkillRegistry:
             target = self.store.get_release(tenant_id, target_release_id)
             if target.owner_user_id not in (None, owner_user_id):
                 raise SkillScopeViolation("release belongs to another owner")
+            if target.manifest.name != installation.skill_name:
+                raise LifecycleConflict("rollback target has a different Skill name")
             if target.id == installation.release_id:
                 raise LifecycleConflict("installation already points at the rollback target")
             if target.scan is not None:

@@ -147,7 +147,7 @@ This is the main reason the branch is `IMPLEMENTED_PARTIAL`, not `IMPLEMENTED`.
 Executed in this branch on Windows:
 
 ```text
-uv run pytest packages/skills/tests -q          # 22 passed
+uv run pytest packages/skills/tests -q          # 23 passed
 uv run pytest tests/test_skill_api.py -q        # 5 passed
 uv run pytest tests/test_skill_pg.py -q         # skipped here: no PostgreSQL
 uv run ruff check packages/skills packages/api/src/aiagent_api/skills.py
