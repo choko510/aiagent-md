@@ -181,17 +181,27 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
     assert static_reqs[0].argv == ("ruff", "check", "pkg_a")
     assert static_reqs[0].test_id is None
 
-    # 7. Truncated OR mismatched-commit/test_id sandbox evidence fails closed even if exit_code==0
+    # 7. Truncated, wrong-commit, wrong-test, wrong-RunFence, or unverified-receipt evidence fails closed (P2-12/R2-12)
+    other_run = RunFence("task-1", "run-1", 1, 2, 0)
+
     class _MismatchedSandbox:
-        def __init__(self, *, truncate: bool = False, wrong_commit: bool = False, wrong_test: bool = False) -> None:
+        def __init__(
+            self,
+            *,
+            truncate: bool = False,
+            wrong_commit: bool = False,
+            wrong_test: bool = False,
+            wrong_run: bool = False,
+        ) -> None:
             self.truncate = truncate
             self.wrong_commit = wrong_commit
             self.wrong_test = wrong_test
+            self.wrong_run = wrong_run
 
         def execute(self, request: ExecutionRequest) -> ExecutionEvidence:
             return ExecutionEvidence(
                 intent_ref=request.intent_ref,
-                run=request.run,
+                run=other_run if self.wrong_run else request.run,
                 kind=request.kind,
                 exit_code=0,
                 executed=True,
@@ -210,6 +220,7 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
         _MismatchedSandbox(truncate=True),
         _MismatchedSandbox(wrong_commit=True),
         _MismatchedSandbox(wrong_test=True),
+        _MismatchedSandbox(wrong_run=True),
     ):
         res_bad = AdaptiveTestingGate(bad_sb).run_gate(
             scope=scope,
@@ -222,6 +233,17 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
         )
         assert res_bad.impacted_status == "FAILED"
         assert res_bad.overall_passed is False
+
+    res_bad_receipt = AdaptiveTestingGate(_RecordingSandbox(), receipt_verifier=lambda _req, _ev: False).run_gate(
+        scope=scope,
+        run=run,
+        plan=plan,
+        adaptive_plan=ad_plan,
+        toolchain_digest=tc_digest,
+        intent_prefix="g4",
+        target_commit_sha=sha,
+    )
+    assert res_bad_receipt.impacted_status == "FAILED" and res_bad_receipt.overall_passed is False
 
 
 def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> None:
@@ -289,6 +311,19 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
     )
     with pytest.raises(InvalidEvidence, match="must differ"):
         ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=same_sha_post)
+
+    # R2-12: Reject mismatched RunFence between pre/post or returned evidence, and unverified receipts
+    other_run = RunFence("task-1", "run-1", 1, 2, 0)
+    wrong_fence_post = ExecutionRequest(
+        scope, other_run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "test_bug", sha_post
+    )
+    with pytest.raises(InvalidEvidence, match="RunFence"):
+        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_fence_post)
+
+    with pytest.raises(InvalidEvidence, match="mismatched request bindings"):
+        ReproductionLab(sb, receipt_verifier=lambda _req, _ev: False).verify_pair(
+            test_id="test_bug", pre_request=pre_req, post_request=post_req
+        )
 
     # 3. P1-08: Pre-fix pytest collection/environment error (exit_code=5) MUST NOT count as bug reproduction
     sb_env = _CommitAwareSandbox({"repro-pre": 5, "repro-post": 0})
@@ -546,14 +581,45 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
     )
     assert ev_conf.ci_state == "CONFLICT" and ev_conf.should_repair is True
 
-    # PrGuardian paginates check-runs and reads commit statuses
+    # R2-08: Empty required_checks OR commit_status_ok=False MUST fail closed as UNKNOWN (never PASS)
+    ev_no_req = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        expected_head_sha=sha,
+        required_checks=(),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_no_req.ci_state == "UNKNOWN"
+
+    ev_status_err = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        commit_status_payload=None,
+        commit_status_ok=False,
+        expected_head_sha=sha,
+        required_checks=("static",),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_status_err.ci_state == "UNKNOWN"
+
+    # PrGuardian paginates check-runs, reads branch protection required checks, and reads commit statuses
     seen_paths: list[str] = []
 
     def _fake_read(scope: ProjectScope, intent_ref: str, path: str) -> tuple[int, dict[str, object]]:
         del scope, intent_ref
         seen_paths.append(path)
         if path.endswith("/pulls/9"):
-            return 200, {"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}}
+            return 200, {"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}, "base": {"ref": "main"}}
+        if path.endswith("/branches/main/protection/required_status_checks"):
+            return 200, {"contexts": ["legacy/ci"], "checks": [{"context": "required-last"}]}
         if "check-runs?per_page=100&page=1" in path:
             return 200, {
                 "total_count": 101,
@@ -576,8 +642,9 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
         head_sha=sha,
         repair_attempts=0,
         max_repair_attempts=2,
-        required_checks=("required-last", "legacy/ci"),
+        required_checks=(),
     )
     assert ev_paged.ci_state == "PASS"
     assert any("page=2" in p for p in seen_paths)
+    assert any("protection/required_status_checks" in p for p in seen_paths)
     assert any(p.endswith("/status") for p in seen_paths)

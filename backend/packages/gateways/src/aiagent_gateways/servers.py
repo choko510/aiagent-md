@@ -135,7 +135,23 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
         )
 
     async def reconcile(caller: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await gw.reconcile(str(body["tenantId"]), str(body["intentId"]))
+        owner_id = str(body["ownerUserId"]) if caller == "api" else None
+        if caller == "api" and not owner_id:
+            raise RpcError("BAD_REQUEST")
+        return await gw.reconcile(str(body["tenantId"]), str(body["intentId"]), owner_user_id=owner_id)
+
+    async def dev_pr_dispatch(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        args = body.get("args")
+        if not isinstance(args, dict):
+            raise RpcError("BAD_REQUEST")
+        return await gw.dispatch_approved_dev_pr(
+            tenant_id=str(body["tenantId"]),
+            owner_user_id=str(body["ownerUserId"]),
+            workspace_id=str(body["workspaceId"]),
+            intent_id=str(body["intentId"]),
+            expected_args=args,
+        )
 
     srv.register("tool.submit", submit, {"runtime"})
     if gw._development_git_enabled:
@@ -144,7 +160,8 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
             raise ValueError("development Git RPC requires a separate caller key")
         srv.register("tool.development_git_commit", submit_development_git, {"development"})
     srv.register("tool.record_internal", record_internal, {"runtime"})
-    srv.register("tool.reconcile", reconcile, {"ops"})
+    srv.register("tool.reconcile", reconcile, {"ops", "api"})
+    srv.register("tool.dev_pr_dispatch", dev_pr_dispatch, {"api"})
     return srv
 
 

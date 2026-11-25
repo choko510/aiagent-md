@@ -5,6 +5,7 @@ ALTER TABLE agent.egress_permits
   DROP COLUMN IF EXISTS target_path;
 
 ALTER TABLE agent.preview_leases
+  DROP COLUMN IF EXISTS instance_generation,
   DROP COLUMN IF EXISTS preview_instance_id,
   DROP COLUMN IF EXISTS cycle_id;
 
@@ -13,4 +14,5 @@ DROP TABLE IF EXISTS agent.dev_review_artifacts;
 DROP TABLE IF EXISTS agent.dev_preview_instances;
 DROP TABLE IF EXISTS agent.dev_pr_records;
 DROP TABLE IF EXISTS agent.dev_design_decisions;
+DROP FUNCTION IF EXISTS agent.verify_dev_repository_binding(uuid, uuid, uuid, uuid, text, text);
 DROP TABLE IF EXISTS agent.dev_projects;

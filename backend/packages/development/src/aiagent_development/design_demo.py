@@ -34,6 +34,7 @@ class DevelopmentPreferences:
     expert_advisor_enabled: bool = False
     review_roles: tuple[str, str, str] = ("functional", "security", "ui-e2e")
     release_policy: str = "PR_AFTER_APPROVED_SCOPE"
+    required_checks: tuple[str, ...] = ()
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any] | None) -> DevelopmentPreferences:
@@ -59,12 +60,22 @@ class DevelopmentPreferences:
         if not isinstance(expert, bool):
             raise InvalidEvidence("expertAdvisorEnabled must be boolean")
 
+        raw_checks = data.get("requiredChecks") or []
+        if (
+            not isinstance(raw_checks, list)
+            or len(raw_checks) > 50
+            or any(not isinstance(item, str) or not item.strip() or len(item.strip()) > 128 for item in raw_checks)
+        ):
+            raise InvalidEvidence("requiredChecks must be a list of non-empty check names")
+        req_checks = tuple(dict.fromkeys(item.strip() for item in raw_checks))
+
         return cls(
             design_policy=dp,
             demo_acceptance_policy=dap,
             style_candidates=raw_count,
             expert_advisor_enabled=expert,
             release_policy=release,
+            required_checks=req_checks,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,6 +86,7 @@ class DevelopmentPreferences:
             "expertAdvisorEnabled": self.expert_advisor_enabled,
             "reviewRoles": list(self.review_roles),
             "releasePolicy": self.release_policy,
+            "requiredChecks": list(self.required_checks),
         }
 
 

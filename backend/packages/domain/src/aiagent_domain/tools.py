@@ -205,13 +205,17 @@ TOOLS: dict[str, ToolSpec] = {
         "Create or inspect a Pull Request via Sentinel-enforced GitHub API egress. Irreversible write requires owner approval; never merges.",
         _obj(
             {
+                "projectId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"},
+                "cycleId": {"type": "string", "minLength": 1, "maxLength": 128},
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
                 "branch": {"type": "string", "minLength": 1, "maxLength": 200},
                 "headSha": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+                "baseBranch": {"type": "string", "minLength": 1, "maxLength": 200},
                 "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                "body": {"type": "string", "maxLength": 2000},
                 "draft": {"type": "boolean"},
             },
-            ["repository", "branch", "headSha", "title"],
+            ["projectId", "cycleId", "repository", "branch", "headSha", "baseBranch", "title", "body", "draft"],
         ),
         "external_irreversible",
         True,
@@ -225,6 +229,7 @@ PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
     "default": ("search", "send_message"),
     "anthropic": ("search", "send_message"),
     "sandbox": ("search", "sandbox_exec"),
+    "development": ("search", "sandbox_exec", "dev_github_pr"),
     "research": ("search", "http_fetch", "send_message"),
     "browser": ("search", "http_fetch", "browser_navigate", "browser_click", "browser_submit"),
 }

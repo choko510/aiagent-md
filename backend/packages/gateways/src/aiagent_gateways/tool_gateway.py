@@ -620,9 +620,12 @@ class ToolGateway:
             dest_fn = getattr(executor, "destination_for", None)
             if callable(dest_tool_fn):
                 try:
-                    dest = dest_tool_fn(tool, args, bound_form=bound_form)
+                    dest = dest_tool_fn(tool, args, bound_form=bound_form, claim=claim)
                 except TypeError:
-                    dest = dest_tool_fn(tool, args)
+                    try:
+                        dest = dest_tool_fn(tool, args, bound_form=bound_form)
+                    except TypeError:
+                        dest = dest_tool_fn(tool, args)
             else:
                 dest = dest_fn(args) if callable(dest_fn) else executor.destination()
         except ExecutorFailed as e:
@@ -674,6 +677,16 @@ class ToolGateway:
                 except RpcError as e:
                     raise ExecutorFailed(f"sentinel:{e.code}") from e
 
+            async def _issue_reconcile_permit(hop_dest: Destination) -> str:
+                if self.sentinel is None:
+                    raise ExecutorFailed("egress requires Sentinel")
+                try:
+                    return await asyncio.to_thread(
+                        self.sentinel.authorize_reconcile, claim.tenant_id, intent["id"], hop_dest
+                    )
+                except RpcError as e:
+                    raise ExecutorFailed(f"sentinel:{e.code}") from e
+
             executor.context[effect_key] = {
                 "tool": tool,
                 "tenant_id": claim.tenant_id,
@@ -686,6 +699,7 @@ class ToolGateway:
                 "lease_epoch": claim.lease_epoch,
                 "worker_ref": claim.worker_ref,
                 "permit_issuer": _issue_hop_permit,
+                "reconcile_permit_issuer": _issue_reconcile_permit,
                 "bound_form": bound_form,
             }
         if tool == "git.commit":
@@ -885,16 +899,82 @@ class ToolGateway:
             )
         return {**o, "content": entry_content}
 
-    # ------------------------------------------------------------------ reconciliation (operator)
-    async def reconcile(self, tenant_id: str, intent_id: str) -> dict[str, Any]:
-        initial = self.db.one("SELECT * FROM agent.tool_intents WHERE tenant_id=%s AND id=%s", (tenant_id, intent_id))
+    async def dispatch_approved_dev_pr(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        workspace_id: str,
+        intent_id: str,
+        expected_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Dispatch an already-proposed `dev_github_pr` intent through canonical ToolGateway.submit (R2-04/R2-09)."""
+        if not is_uuid7(intent_id):
+            raise RpcError("BAD_REQUEST")
+        with self.db.conn() as c:
+            row = c.execute(
+                "SELECT i.task_id, i.run_id, i.tool_key, i.invocation_key, i.request_sha256, i.safe_arguments_json,"
+                " i.goal_revision AS intent_goal_rev, r.lease_epoch, r.lease_owner_ref, r.restore_incarnation,"
+                " t.owner_user_id, t.workspace_id, t.goal_revision"
+                " FROM agent.tool_intents i"
+                " JOIN agent.runs r ON r.tenant_id=i.tenant_id AND r.id=i.run_id"
+                " JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+                " WHERE i.tenant_id=%s AND i.id=%s",
+                (tenant_id, intent_id),
+            ).fetchone()
+        if (
+            row is None
+            or str(row["tool_key"]) != "dev_github_pr"
+            or str(row["owner_user_id"]) != owner_user_id
+            or str(row["workspace_id"]) != workspace_id
+            or not row["lease_owner_ref"]
+        ):
+            raise RpcError("DENIED", "dev_github_pr intent out of scope or inactive")
+        expected_sha = sha256_hex({"tool": "dev_github_pr", "args": expected_args})
+        if dict(row["safe_arguments_json"] or {}) != expected_args or str(row["request_sha256"]) != expected_sha:
+            raise RpcError("INTENT_CONFLICT", "dev_github_pr arguments mismatch approved tool_intent")
+        claim = Claim(
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            task_id=str(row["task_id"]),
+            run_id=str(row["run_id"]),
+            lease_epoch=int(row["lease_epoch"]),
+            goal_revision=int(row["goal_revision"]),
+            worker_ref=str(row["lease_owner_ref"]),
+            restore_incarnation=int(row["restore_incarnation"]),
+        )
+        return await self.submit(claim, str(row["invocation_key"]), "dev_github_pr", expected_args)
+
+    # ------------------------------------------------------------------ reconciliation (operator / api)
+    async def reconcile(self, tenant_id: str, intent_id: str, *, owner_user_id: str | None = None) -> dict[str, Any]:
+        initial = self.db.one(
+            "SELECT i.*, t.owner_user_id, se.outcome_code AS side_effect_outcome"
+            " FROM agent.tool_intents i"
+            " JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+            " LEFT JOIN agent.side_effect_records se ON se.tenant_id=i.tenant_id AND se.tool_intent_id=i.id"
+            " WHERE i.tenant_id=%s AND i.id=%s",
+            (tenant_id, intent_id),
+        )
         if initial is None:
+            raise RpcError("NOT_FOUND")
+        if owner_user_id is not None and str(initial["owner_user_id"]) != owner_user_id:
             raise RpcError("NOT_FOUND")
         if initial["status_code"] not in ("UNKNOWN", "SENDING"):
             return {"status": initial["status_code"]}
-        executor = self.executors.get(TOOLS[initial["tool_key"]].executor)
+        spec = TOOLS[initial["tool_key"]]
+        if spec.risk_class != "read" and initial.get("side_effect_outcome") not in ("SENDING", "UNKNOWN"):
+            return {"status": initial["status_code"]}
+        executor = self.executors.get(spec.executor)
         permit = None
-        dest = executor.destination() if executor else None
+        dest_reconcile_fn = getattr(executor, "destination_for_reconcile", None) if executor else None
+        try:
+            dest = (
+                dest_reconcile_fn(tenant_id, initial)
+                if callable(dest_reconcile_fn)
+                else (executor.destination() if executor else None)
+            )
+        except ExecutorFailed:
+            return {"status": "UNKNOWN"}
         if dest is not None and self.sentinel is not None:
             permit = await asyncio.to_thread(self.sentinel.authorize_reconcile, tenant_id, intent_id, dest)
         answer = await executor.query(f"{tenant_id}:{intent_id}", permit) if executor else None
@@ -904,13 +984,25 @@ class ToolGateway:
         if not isinstance(answer, dict) or answer.get("sent") is not True or not valid_receipt(answer.get("receipt")):
             return {"status": "UNKNOWN"}
         status, effect = "CONFIRMED", "RECONCILED_SENT"
-        result = {"receipt": answer["receipt"]}
+        result: dict[str, Any] = {"receipt": answer["receipt"]}
         # Command reconciliation may restore only the redacted fields derived
         # from its signature-verified canonical receipt. Other executors keep
         # the original receipt-only reconciliation contract.
         from .command_dispatch import AuthorizedCommandExecutor
+        from .dev_github_executor import DevGitHubPrExecutor
 
-        if isinstance(executor, AuthorizedCommandExecutor):
+        if isinstance(executor, DevGitHubPrExecutor):
+            pr_res = answer.get("prResult")
+            if (
+                not isinstance(pr_res, dict)
+                or not isinstance(pr_res.get("prNumber"), int)
+                or pr_res["prNumber"] < 1
+                or not isinstance(pr_res.get("prUrl"), str)
+                or not pr_res["prUrl"]
+            ):
+                return {"status": "UNKNOWN"}
+            result.update(pr_res)
+        elif isinstance(executor, AuthorizedCommandExecutor):
             command = answer.get("commandResult")
             if not isinstance(command, dict) or set(command) != {
                 "toolAttemptId",

@@ -17,8 +17,9 @@ Hardens P1-03, P1-06, P1-07, and P2-10:
 
 from __future__ import annotations
 
+import hashlib
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -33,6 +34,7 @@ from .browser_debugger import DebugReport
 from .contracts import (
     InvalidEvidence,
     ProjectScope,
+    ReviewFinding,
     ReviewVerdict,
     RunFence,
     ScopeDenied,
@@ -91,6 +93,8 @@ def _demo_binding_digest(
     design_revision: int,
     selected_candidate_id: str | None,
     candidates: list[Any],
+    demo_artifact_ref: str | None = None,
+    demo_artifact_sha256: str | None = None,
 ) -> str:
     return sha256_hex(
         {
@@ -99,7 +103,51 @@ def _demo_binding_digest(
             "goalRevision": goal_revision,
             "designRevision": design_revision,
             "selectedCandidateId": selected_candidate_id or "",
+            "demoArtifactRef": demo_artifact_ref or "",
+            "demoArtifactSha256": demo_artifact_sha256 or "",
             "candidates": candidates,
+        }
+    )
+
+
+def _normalize_review_findings(findings: Sequence[Mapping[str, Any] | ReviewFinding]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for item in findings:
+        if isinstance(item, ReviewFinding):
+            fid, sev, st = item.finding_id, item.severity, item.status
+        else:
+            fid = str(item.get("findingId") or item.get("finding_id") or "").strip()
+            sev = str(item.get("severity") or "").strip()
+            st = str(item.get("status") or "").strip()
+        if not fid or sev not in ("P0", "P1", "P2") or st not in ("OPEN", "RESOLVED", "UNVERIFIED"):
+            raise InvalidEvidence("invalid review finding entry")
+        out.append({"findingId": fid, "severity": sev, "status": st})
+    return out
+
+
+def _review_verdict_digest(
+    *,
+    cycle_id: str,
+    project_id: str,
+    task_id: str,
+    run_id: str,
+    reviewer_role: str,
+    target_sha: str,
+    passed: bool,
+    findings: list[dict[str, str]],
+    evidence_sha256: str,
+) -> str:
+    return sha256_hex(
+        {
+            "cycleId": cycle_id,
+            "projectId": project_id,
+            "taskId": task_id,
+            "runId": run_id,
+            "reviewerRole": reviewer_role,
+            "targetSha": target_sha,
+            "passed": bool(passed),
+            "findings": findings,
+            "evidenceSha256": evidence_sha256,
         }
     )
 
@@ -135,6 +183,8 @@ def _design_dto(row: dict[str, Any]) -> dict[str, Any]:
         "recommendedCandidateId": str(row["recommended_candidate_id"]) if row.get("recommended_candidate_id") else None,
         "selectedCandidateId": str(row["selected_candidate_id"]) if row.get("selected_candidate_id") else None,
         "demoDecision": str(row["demo_decision"]),
+        "demoArtifactRef": str(row["demo_artifact_ref"]) if row.get("demo_artifact_ref") else None,
+        "demoArtifactSha256": str(row["demo_artifact_sha256"]) if row.get("demo_artifact_sha256") else None,
         "demoSnapshotDigest": str(row["demo_snapshot_digest"]) if row.get("demo_snapshot_digest") else None,
         "feedback": str(row["feedback"]) if row.get("feedback") else None,
         "decidedAt": row["decided_at"].isoformat() if row.get("decided_at") else None,
@@ -193,12 +243,76 @@ def _debug_dto(row: dict[str, Any]) -> dict[str, Any]:
 
 
 class PostgresReviewAttestationPort(ReviewAttestationPort):
-    """Verifies independent SUCCEEDED reviewer Run + persisted Review Evidence Artifact (P1-07)."""
+    """Verifies independent SUCCEEDED reviewer Run + full persisted Review Artifact & Findings digest (P1-07 / R2-07)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def assert_verified(self, scope: ProjectScope, builder_run: RunFence, verdict: ReviewVerdict) -> None:
+    def load_verified_verdict(
+        self,
+        scope: ProjectScope,
+        builder_run: RunFence,
+        *,
+        cycle_id: str,
+        artifact_id: str,
+    ) -> ReviewVerdict:
+        """Reconstruct authoritative ReviewVerdict (with ALL persisted findings) directly from attested DB artifact (R2-07)."""
+        if not is_uuid7(artifact_id):
+            raise InvalidEvidence("reviewer artifact_id must be a persisted dev_review_artifacts uuid7")
+        with self._db.tx(tenant=scope.tenant_id) as c:
+            row = c.execute(
+                "SELECT a.id, a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id,"
+                " a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256,"
+                " a.passed, a.findings_json, t.workspace_id, r.status_code"
+                " FROM agent.dev_review_artifacts a"
+                " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
+                " JOIN agent.runs r ON r.tenant_id=a.tenant_id AND r.task_id=a.task_id AND r.id=a.run_id"
+                " WHERE a.tenant_id=%s AND a.id=%s",
+                (scope.tenant_id, artifact_id),
+            ).fetchone()
+        if (
+            row is None
+            or str(row["task_id"]) == builder_run.task_id
+            or str(row["owner_user_id"]) != scope.owner_user_id
+            or str(row["workspace_id"]) != scope.workspace_id
+            or str(row["project_id"]) != scope.project_id
+            or str(row["cycle_id"]) != cycle_id
+            or str(row["status_code"]) != "SUCCEEDED"
+        ):
+            raise ScopeDenied("review artifact missing, out of scope, self-reviewed, or reviewer run did not SUCCEED")
+        raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
+        norm_findings = _normalize_review_findings(raw_findings)
+        expected_digest = _review_verdict_digest(
+            cycle_id=str(row["cycle_id"]),
+            project_id=str(row["project_id"]),
+            task_id=str(row["task_id"]),
+            run_id=str(row["run_id"]),
+            reviewer_role=str(row["reviewer_role"]),
+            target_sha=str(row["target_sha"]),
+            passed=bool(row["passed"]),
+            findings=norm_findings,
+            evidence_sha256=str(row["evidence_sha256"]),
+        )
+        if str(row["verdict_digest_sha256"]) != expected_digest:
+            raise ScopeDenied("review artifact verdict digest mismatch")
+        findings_tuple = tuple(ReviewFinding(f["findingId"], f["severity"], f["status"]) for f in norm_findings)
+        return ReviewVerdict(
+            reviewer_task_id=str(row["task_id"]),
+            reviewer_role=str(row["reviewer_role"]),
+            target_sha=str(row["target_sha"]),
+            passed=bool(row["passed"]),
+            evidence_ref=str(row["id"]),
+            findings=findings_tuple,
+        )
+
+    def assert_verified(
+        self,
+        scope: ProjectScope,
+        builder_run: RunFence,
+        verdict: ReviewVerdict,
+        *,
+        cycle_id: str | None = None,
+    ) -> None:
         require_sha(verdict.target_sha)
         if not verdict.reviewer_task_id or verdict.reviewer_task_id == builder_run.task_id:
             raise ScopeDenied("independent reviewer task required (self-review forbidden)")
@@ -209,8 +323,9 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
 
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
-                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.reviewer_role,"
-                " a.target_sha, a.passed, t.workspace_id, r.status_code"
+                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id, a.reviewer_role,"
+                " a.target_sha, a.evidence_sha256, a.verdict_digest_sha256, a.passed, a.findings_json,"
+                " t.workspace_id, r.status_code"
                 " FROM agent.dev_review_artifacts a"
                 " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
                 " JOIN agent.runs r ON r.tenant_id=a.tenant_id AND r.task_id=a.task_id AND r.id=a.run_id"
@@ -223,12 +338,31 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 or str(row["owner_user_id"]) != scope.owner_user_id
                 or str(row["workspace_id"]) != scope.workspace_id
                 or str(row["project_id"]) != scope.project_id
+                or (cycle_id is not None and str(row["cycle_id"]) != cycle_id)
                 or str(row["reviewer_role"]) != verdict.reviewer_role
                 or str(row["target_sha"]) != verdict.target_sha
                 or bool(row["passed"]) != verdict.passed
                 or str(row["status_code"]) != "SUCCEEDED"
             ):
                 raise ScopeDenied("review artifact missing, mismatched, or reviewer run did not SUCCEED")
+            raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
+            norm_stored = _normalize_review_findings(raw_findings)
+            expected_digest = _review_verdict_digest(
+                cycle_id=str(row["cycle_id"]),
+                project_id=str(row["project_id"]),
+                task_id=str(row["task_id"]),
+                run_id=str(row["run_id"]),
+                reviewer_role=str(row["reviewer_role"]),
+                target_sha=str(row["target_sha"]),
+                passed=bool(row["passed"]),
+                findings=norm_stored,
+                evidence_sha256=str(row["evidence_sha256"]),
+            )
+            if str(row["verdict_digest_sha256"]) != expected_digest:
+                raise ScopeDenied("review artifact verdict digest mismatch")
+            norm_submitted = _normalize_review_findings(verdict.findings)
+            if norm_submitted != norm_stored:
+                raise ScopeDenied("submitted ReviewVerdict findings do not match persisted review artifact")
 
 
 class PostgresDevStore:
@@ -274,6 +408,14 @@ class PostgresDevStore:
             with self._db.tx(tenant=tenant_id) as c:
                 if not control.scope_active(c, tenant_id, owner_user_id, workspace_id):
                     raise ScopeDenied("workspace scope inactive")
+                if repository_binding_id is not None:
+                    # R2-02: verify binding belongs to (tenant, owner, workspace, repository) and is active
+                    bound = c.execute(
+                        "SELECT * FROM agent.verify_dev_repository_binding(%s,%s,%s,%s,%s,NULL)",
+                        (tenant_id, owner_user_id, workspace_id, repository_binding_id, repository),
+                    ).fetchone()
+                    if bound is None:
+                        raise ScopeDenied("REPOSITORY_BINDING_UNAUTHORIZED")
                 row = c.execute(
                     "INSERT INTO agent.dev_projects(tenant_id, id, owner_user_id, workspace_id, name,"
                     " repository, default_branch, framework, repository_binding_id, github_api_base,"
@@ -318,7 +460,7 @@ class PostgresDevStore:
             ).fetchone()
         return _project_dto(dict(row)) if row is not None else None
 
-    # ------------------------------------------------------------------ Review Evidence Artifacts (P1-07)
+    # ------------------------------------------------------------------ Review Evidence Artifacts (P1-07 / R2-07)
     def record_review_artifact(
         self,
         *,
@@ -330,20 +472,52 @@ class PostgresDevStore:
         run_id: str,
         reviewer_role: str,
         target_sha: str,
-        evidence_sha256: str,
         passed: bool,
-        findings: Sequence[dict[str, Any]] = (),
+        evidence_payload: Mapping[str, Any] | bytes | None = None,
+        evidence_sha256: str | None = None,
+        findings: Sequence[Mapping[str, Any]] = (),
     ) -> str:
         require_sha(target_sha)
-        require_digest(evidence_sha256)
         if reviewer_role not in ("functional", "security", "ui-e2e"):
             raise InvalidEvidence("invalid reviewer_role")
+        if evidence_payload is not None:
+            computed_sha = (
+                hashlib.sha256(evidence_payload).hexdigest()
+                if isinstance(evidence_payload, (bytes, bytearray))
+                else sha256_hex(dict(evidence_payload))
+            )
+            if evidence_sha256 is not None and evidence_sha256 != computed_sha:
+                raise InvalidEvidence("evidence_sha256 does not match evidence_payload")
+            resolved_sha = computed_sha
+        elif evidence_sha256 is not None:
+            require_digest(evidence_sha256)
+            resolved_sha = evidence_sha256
+        else:
+            raise InvalidEvidence("evidence_payload or evidence_sha256 is required")
+
+        norm_findings = _normalize_review_findings(findings)
+        if passed and any(
+            f["severity"] in ("P0", "P1") and f["status"] in ("OPEN", "UNVERIFIED") for f in norm_findings
+        ):
+            raise InvalidEvidence("cannot record passed=True review artifact with open/unverified P0 or P1 findings")
+        verdict_digest = _review_verdict_digest(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            task_id=task_id,
+            run_id=run_id,
+            reviewer_role=reviewer_role,
+            target_sha=target_sha,
+            passed=bool(passed),
+            findings=norm_findings,
+            evidence_sha256=resolved_sha,
+        )
         art_id = uuid7()
         with self._db.tx(tenant=tenant_id) as c:
             c.execute(
                 "INSERT INTO agent.dev_review_artifacts(tenant_id, id, task_id, run_id, owner_user_id,"
-                " project_id, cycle_id, reviewer_role, target_sha, evidence_sha256, passed, findings_json)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " project_id, cycle_id, reviewer_role, target_sha, evidence_sha256, verdict_digest_sha256,"
+                " passed, findings_json)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     tenant_id,
                     art_id,
@@ -354,9 +528,10 @@ class PostgresDevStore:
                     cycle_id,
                     reviewer_role,
                     target_sha,
-                    evidence_sha256,
+                    resolved_sha,
+                    verdict_digest,
                     bool(passed),
-                    Jsonb(list(findings)),
+                    Jsonb(norm_findings),
                 ),
             )
         return art_id
@@ -454,12 +629,14 @@ class PostgresDevStore:
             raise InvalidEvidence("recommendedCandidateId not in candidates")
 
         with self._db.tx(tenant=tenant_id) as c:
-            # Lock order: dev_cycles -> dev_design_decisions
+            # Lock order: tasks -> dev_cycles -> dev_design_decisions (R2-11 live goal_revision verification)
             cy = c.execute(
-                "SELECT c.project_id, c.task_id, c.run_id, c.cycle_json, p.preferences_json"
+                "SELECT c.project_id, c.task_id, c.run_id, c.cycle_json, p.preferences_json,"
+                " t.goal_revision AS live_goal_revision"
                 " FROM agent.dev_cycles c"
                 " JOIN agent.dev_projects p ON p.tenant_id=c.tenant_id AND p.id=c.project_id"
-                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s FOR UPDATE OF c",
+                " JOIN agent.tasks t ON t.tenant_id=c.tenant_id AND t.id=c.task_id"
+                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s FOR UPDATE OF c FOR SHARE OF t",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cy is None:
@@ -484,6 +661,8 @@ class PostgresDevStore:
                 str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
             )
             goal_rev = max(1, int(run_obj.get("goal_revision", 1)))
+            if int(cy["live_goal_revision"]) != goal_rev:
+                raise StateConflict("STALE_GOAL_REVISION: task goal changed since cycle started")
             rec_id = recommended_candidate_id or (normalized[0]["candidateId"] if dp == "AUTO_RECOMMEND" else None)
             did = uuid7()
             digest = _demo_binding_digest(
@@ -537,12 +716,17 @@ class PostgresDevStore:
         design_revision: int,
         selected_candidate_id: str,
         feedback: str | None = None,
+        demo_artifact_ref: str | None = None,
+        demo_artifact_sha256: str | None = None,
     ) -> dict[str, Any]:
+        if demo_artifact_sha256 is not None:
+            require_digest(demo_artifact_sha256)
         with self._db.tx(tenant=tenant_id) as c:
-            # Lock order: dev_cycles -> dev_design_decisions (serialized with create_design_proposal & demo_decision)
             cy_row = c.execute(
-                "SELECT task_id, run_id, cycle_json FROM agent.dev_cycles"
-                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
+                "SELECT c.task_id, c.run_id, c.cycle_json, t.goal_revision AS live_goal_revision"
+                " FROM agent.dev_cycles c"
+                " JOIN agent.tasks t ON t.tenant_id=c.tenant_id AND t.id=c.task_id"
+                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s FOR UPDATE OF c FOR SHARE OF t",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cy_row is None:
@@ -557,14 +741,32 @@ class PostgresDevStore:
                 raise ScopeDenied("design proposal not found")
             if int(cur_row["design_revision"]) != design_revision:
                 raise StateConflict("stale design_revision")
+            if int(cy_row["live_goal_revision"]) != int(cur_row["goal_revision"]):
+                raise StateConflict("STALE_GOAL_REVISION: task goal changed since design proposal")
             cands = list(cur_row["candidates_json"]) if isinstance(cur_row["candidates_json"], list) else []
-            if selected_candidate_id not in {str(x.get("candidateId")) for x in cands if isinstance(x, dict)}:
+            matched_cand = next(
+                (x for x in cands if isinstance(x, dict) and str(x.get("candidateId")) == selected_candidate_id),
+                None,
+            )
+            if matched_cand is None:
                 raise InvalidEvidence("selectedCandidateId not found in design revision")
 
             cj = dict(cy_row["cycle_json"]) if isinstance(cy_row["cycle_json"], dict) else {}
             raw_commit = cj.get("commit")
             commit_sha = (
                 str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
+            )
+            art_ref = (
+                redact_dev_text(demo_artifact_ref.strip(), limit=256)
+                if demo_artifact_ref and demo_artifact_ref.strip()
+                else str(matched_cand.get("fixtureRef") or "")
+            )
+            art_sha = demo_artifact_sha256 or sha256_hex(
+                {
+                    "candidate": matched_cand,
+                    "commitSha": commit_sha or "",
+                    "artifactRef": art_ref,
+                }
             )
             new_digest = _demo_binding_digest(
                 cycle_id=cycle_id,
@@ -573,15 +775,18 @@ class PostgresDevStore:
                 design_revision=design_revision,
                 selected_candidate_id=selected_candidate_id,
                 candidates=cands,
+                demo_artifact_ref=art_ref,
+                demo_artifact_sha256=art_sha,
             )
             clean_fb = redact_dev_text(feedback, limit=500) if feedback else None
-            # P1-06: selecting or changing candidate ALWAYS resets demo_decision to PENDING & binds new digest!
+            # P1-06 / R2-11: selecting or changing candidate ALWAYS resets demo_decision to PENDING & binds artifact!
             updated = c.execute(
                 "UPDATE agent.dev_design_decisions"
                 " SET selected_candidate_id=%s, demo_decision='PENDING', decided_at=NULL,"
+                " demo_artifact_ref=%s, demo_artifact_sha256=%s,"
                 " demo_snapshot_digest=%s, feedback=%s, updated_at=now()"
                 " WHERE tenant_id=%s AND id=%s RETURNING *",
-                (selected_candidate_id, new_digest, clean_fb, tenant_id, cur_row["id"]),
+                (selected_candidate_id, art_ref, art_sha, new_digest, clean_fb, tenant_id, cur_row["id"]),
             ).fetchone()
             append_event(
                 c,
@@ -593,6 +798,7 @@ class PostgresDevStore:
                     "cycleId": cycle_id,
                     "designRevision": design_revision,
                     "candidateId": selected_candidate_id,
+                    "demoArtifactSha256": art_sha,
                     "demoSnapshotDigest": new_digest,
                 },
                 actor={"type": "user", "id": owner_user_id},
@@ -620,8 +826,10 @@ class PostgresDevStore:
 
         with self._db.tx(tenant=tenant_id) as c:
             cy_row = c.execute(
-                "SELECT task_id, run_id, cycle_json FROM agent.dev_cycles"
-                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
+                "SELECT c.task_id, c.run_id, c.cycle_json, t.goal_revision AS live_goal_revision"
+                " FROM agent.dev_cycles c"
+                " JOIN agent.tasks t ON t.tenant_id=c.tenant_id AND t.id=c.task_id"
+                " WHERE c.tenant_id=%s AND c.id=%s AND c.owner_user_id=%s FOR UPDATE OF c FOR SHARE OF t",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cy_row is None:
@@ -636,9 +844,11 @@ class PostgresDevStore:
                 raise ScopeDenied("design proposal not found")
             if int(cur_row["design_revision"]) != design_revision:
                 raise StateConflict("stale design_revision")
+            if int(cy_row["live_goal_revision"]) != int(cur_row["goal_revision"]):
+                raise StateConflict("STALE_GOAL_REVISION: task goal changed before demo decision")
             if decision == "APPROVED" and not cur_row["selected_candidate_id"]:
                 raise StateConflict("must select a design candidate before approving demo")
-            # Re-verify digest against live cycle commit, goal_revision, selected_candidate_id & candidates!
+            # Re-verify digest against live cycle commit, live goal_revision, selected candidate & rendered demo artifact!
             cj = dict(cy_row["cycle_json"]) if isinstance(cy_row["cycle_json"], dict) else {}
             raw_commit = cj.get("commit")
             commit_sha = (
@@ -648,15 +858,19 @@ class PostgresDevStore:
             expected_digest = _demo_binding_digest(
                 cycle_id=cycle_id,
                 commit_sha=commit_sha,
-                goal_revision=int(cur_row["goal_revision"]),
+                goal_revision=int(cy_row["live_goal_revision"]),
                 design_revision=design_revision,
                 selected_candidate_id=str(cur_row["selected_candidate_id"])
                 if cur_row["selected_candidate_id"]
                 else None,
                 candidates=cands,
+                demo_artifact_ref=str(cur_row["demo_artifact_ref"]) if cur_row.get("demo_artifact_ref") else None,
+                demo_artifact_sha256=str(cur_row["demo_artifact_sha256"])
+                if cur_row.get("demo_artifact_sha256")
+                else None,
             )
             if demo_snapshot_digest != expected_digest or str(cur_row["demo_snapshot_digest"] or "") != expected_digest:
-                raise StateConflict("demoSnapshotDigest mismatch with current design/commit state")
+                raise StateConflict("demoSnapshotDigest mismatch with current design/commit/artifact state")
             clean_fb = redact_dev_text(feedback, limit=500) if feedback else None
             updated = c.execute(
                 "UPDATE agent.dev_design_decisions"
@@ -777,27 +991,18 @@ class PostgresDevStore:
         required_checks: Sequence[str] = (),
         max_repair_attempts: int = 3,
     ) -> tuple[dict[str, Any], bool]:
-        """Atomically acquire single-dispatch right per BOTH idempotency_key AND intent_id (P1-03)."""
+        """Concurrency-safe atomic reservation per BOTH idempotency_key AND intent_id via ON CONFLICT DO NOTHING (R2-13)."""
         require_sha(head_sha)
         if not idempotency_key.strip() or not is_uuid7(intent_id):
             raise InvalidEvidence("idempotency_key and uuid7 intent_id are required")
+        rid = uuid7()
         with self._db.tx(tenant=tenant_id) as c:
-            existing = c.execute(
-                "SELECT * FROM agent.dev_pr_records"
-                " WHERE tenant_id=%s AND (idempotency_key=%s OR intent_id=%s)"
-                " FOR UPDATE",
-                (tenant_id, idempotency_key, intent_id),
-            ).fetchone()
-            if existing is not None:
-                if str(existing["owner_user_id"]) != owner_user_id:
-                    raise ScopeDenied("pr record belongs to another owner")
-                return _pr_dto(dict(existing)), False
-            rid = uuid7()
             row = c.execute(
                 "INSERT INTO agent.dev_pr_records(tenant_id, id, owner_user_id, project_id, cycle_id,"
                 " repository, branch, head_sha, idempotency_key, intent_id, git_push_receipt_ref,"
                 " required_checks_json, effect_status, max_repair_attempts)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s) RETURNING *",
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)"
+                " ON CONFLICT DO NOTHING RETURNING *",
                 (
                     tenant_id,
                     rid,
@@ -814,8 +1019,19 @@ class PostgresDevStore:
                     max(1, min(max_repair_attempts, 10)),
                 ),
             ).fetchone()
-        assert row is not None
-        return _pr_dto(dict(row)), True
+            if row is not None:
+                return _pr_dto(dict(row)), True
+            existing = c.execute(
+                "SELECT * FROM agent.dev_pr_records"
+                " WHERE tenant_id=%s AND (idempotency_key=%s OR intent_id=%s)"
+                " ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
+                (tenant_id, idempotency_key, intent_id),
+            ).fetchone()
+            if existing is None:
+                raise StateConflict("concurrent pr reservation conflict")
+            if str(existing["owner_user_id"]) != owner_user_id:
+                raise ScopeDenied("pr record belongs to another owner")
+            return _pr_dto(dict(existing)), False
 
     def settle_pr_record(
         self,

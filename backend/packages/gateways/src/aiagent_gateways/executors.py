@@ -59,6 +59,8 @@ class Destination:
     host: str
     port: int
     method: str
+    target_path: str | None = None
+    body_sha256: str | None = None
 
 
 class Executor(Protocol):
@@ -352,4 +354,8 @@ def from_env(db: Any = None) -> dict[str, Executor]:
         grant = secret("AIAGENT_SANDBOX_GRANT_KEY")
         assert rpc is not None and grant is not None
         out["sandbox_cell"] = SandboxCellExecutor(cell, bytes.fromhex(rpc.reveal()), bytes.fromhex(grant.reveal()))
+    if db is not None:
+        from .dev_github_executor import DevGitHubPrExecutor
+
+        out["dev_github_pr"] = DevGitHubPrExecutor(db, proxy=proxy_url)
     return out

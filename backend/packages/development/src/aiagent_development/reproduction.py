@@ -10,12 +10,14 @@ Hardens P1-08:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .contracts import ExecutionEvidence, ExecutionRequest, InvalidEvidence
 from .ports import SandboxExecutionPort
 
 _NON_FAILURE_ENV_EXIT_CODES = frozenset({2, 3, 4, 5})
+ReceiptVerifier = Callable[[ExecutionRequest, ExecutionEvidence], bool]
 
 
 @dataclass(frozen=True)
@@ -36,15 +38,24 @@ def _is_clean_complete(ev: ExecutionEvidence) -> bool:
     return ev.executed and ev.timed_out is False and ev.truncated is False
 
 
-def _matches_request(req: ExecutionRequest, ev: ExecutionEvidence, expected_test_id: str) -> bool:
-    return (
-        ev.intent_ref == req.intent_ref
-        and ev.kind == "test"
-        and ev.test_id == expected_test_id
-        and ev.toolchain_digest == req.toolchain_digest
-        and ev.source_commit_sha == req.target_commit_sha
-        and bool(ev.receipt_ref and ev.receipt_ref.strip())
-    )
+def _matches_request(
+    req: ExecutionRequest,
+    ev: ExecutionEvidence,
+    expected_test_id: str,
+    receipt_verifier: ReceiptVerifier | None = None,
+) -> bool:
+    """Verify full RunFence, intent_ref, kind, test_id, toolchain, commit SHA, and receipt attestation (P1-08/R2-12)."""
+    if (
+        ev.run != req.run
+        or ev.intent_ref != req.intent_ref
+        or ev.kind != "test"
+        or ev.test_id != expected_test_id
+        or ev.toolchain_digest != req.toolchain_digest
+        or ev.source_commit_sha != req.target_commit_sha
+        or not (ev.receipt_ref and ev.receipt_ref.strip())
+    ):
+        return False
+    return receipt_verifier is None or receipt_verifier(req, ev)
 
 
 def _validate_pair_requests(
@@ -62,6 +73,10 @@ def _validate_pair_requests(
         raise InvalidEvidence("pre and post requests must use identical toolchain_digest")
     if pre_request.plan_ref != post_request.plan_ref:
         raise InvalidEvidence("pre and post requests must share identical plan_ref")
+    if pre_request.run != post_request.run:
+        raise InvalidEvidence("pre and post requests must share identical RunFence")
+    if pre_request.snapshot_revision != post_request.snapshot_revision:
+        raise InvalidEvidence("pre and post requests must share identical snapshot_revision")
     p1, p2 = pre_request.project, post_request.project
     if (p1.tenant_id, p1.owner_user_id, p1.project_id, p1.workspace_id, p1.repository, p1.branch) != (
         p2.tenant_id,
@@ -82,8 +97,9 @@ def _validate_pair_requests(
 class ReproductionLab:
     """Runs failure-then-fix verification pairs inside an isolated Execution Cell."""
 
-    def __init__(self, sandbox: SandboxExecutionPort) -> None:
+    def __init__(self, sandbox: SandboxExecutionPort, *, receipt_verifier: ReceiptVerifier | None = None) -> None:
         self._sandbox = sandbox
+        self._receipt_verifier = receipt_verifier
 
     def verify_pair(  # noqa: PLR0911
         self,
@@ -108,7 +124,7 @@ class ReproductionLab:
                 else replace(pre_request, intent_ref=f"{pre_request.intent_ref}:iter:{i}")
             )
             ev = self._sandbox.execute(req_i)
-            if not _matches_request(req_i, ev, test_id):
+            if not _matches_request(req_i, ev, test_id, self._receipt_verifier):
                 raise InvalidEvidence("pre-fix execution evidence mismatched request bindings")
             if ev.receipt_ref in seen_receipts:
                 return ReproductionProof(
@@ -133,7 +149,7 @@ class ReproductionLab:
                 else replace(post_request, intent_ref=f"{post_request.intent_ref}:iter:{i}")
             )
             ev = self._sandbox.execute(req_i)
-            if not _matches_request(req_i, ev, test_id):
+            if not _matches_request(req_i, ev, test_id, self._receipt_verifier):
                 raise InvalidEvidence("post-fix execution evidence mismatched request bindings")
             if ev.receipt_ref in seen_receipts:
                 return ReproductionProof(

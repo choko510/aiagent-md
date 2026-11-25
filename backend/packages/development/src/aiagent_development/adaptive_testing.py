@@ -12,7 +12,7 @@ Hardens P2-12:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -24,6 +24,7 @@ from .contracts import ExecutionEvidence, ExecutionRequest, ProjectScope, RunFen
 from .ports import SandboxExecutionPort
 
 _MANDATORY_FALLBACK_SUFFIXES = frozenset({".sql", ".yml", ".yaml", ".toml", ".json", ".ts", ".tsx"})
+ReceiptVerifier = Callable[[ExecutionRequest, ExecutionEvidence], bool]
 
 
 @dataclass(frozen=True)
@@ -50,16 +51,22 @@ def _evidence_matches_and_passed(
     ev: ExecutionEvidence,
     *,
     expected_commit_sha: str | None,
+    receipt_verifier: ReceiptVerifier | None = None,
 ) -> bool:
-    if not (ev.executed and ev.exit_code == 0 and ev.timed_out is False and ev.truncated is False):
-        return False
-    if ev.intent_ref != req.intent_ref or ev.toolchain_digest != req.toolchain_digest or ev.kind != req.kind:
-        return False
-    if ev.test_id != req.test_id:
-        return False
-    if expected_commit_sha is not None and ev.source_commit_sha != expected_commit_sha:
-        return False
-    return bool(ev.receipt_ref and ev.receipt_ref.strip())
+    basic_ok = (
+        ev.executed
+        and ev.exit_code == 0
+        and ev.timed_out is False
+        and ev.truncated is False
+        and ev.run == req.run
+        and ev.intent_ref == req.intent_ref
+        and ev.toolchain_digest == req.toolchain_digest
+        and ev.kind == req.kind
+        and ev.test_id == req.test_id
+        and (expected_commit_sha is None or ev.source_commit_sha == expected_commit_sha)
+        and bool(ev.receipt_ref and ev.receipt_ref.strip())
+    )
+    return basic_ok and (receipt_verifier is None or receipt_verifier(req, ev))
 
 
 def plan_adaptive_tests(
@@ -112,8 +119,9 @@ def plan_adaptive_tests(
 class AdaptiveTestingGate:
     """Runs fast impacted checks and mandatory checks separately inside an isolated Sandbox Cell."""
 
-    def __init__(self, sandbox: SandboxExecutionPort) -> None:
+    def __init__(self, sandbox: SandboxExecutionPort, *, receipt_verifier: ReceiptVerifier | None = None) -> None:
         self._sandbox = sandbox
+        self._receipt_verifier = receipt_verifier
 
     def run_gate(
         self,
@@ -125,6 +133,7 @@ class AdaptiveTestingGate:
         toolchain_digest: str,
         intent_prefix: str,
         target_commit_sha: str | None = None,
+        snapshot_revision: int | None = None,
         test_command: Sequence[str] | None = None,
         static_command: Sequence[str] | None = None,
         run_mandatory: bool = True,
@@ -149,10 +158,13 @@ class AdaptiveTestingGate:
                 intent_ref=f"{intent_prefix}:imp:{idx}:{digest[:16]}",
                 test_id=target,
                 target_commit_sha=target_commit_sha,
+                snapshot_revision=snapshot_revision,
             )
             ev = self._sandbox.execute(req)
             impacted_ev.append(ev)
-            if not _evidence_matches_and_passed(req, ev, expected_commit_sha=target_commit_sha):
+            if not _evidence_matches_and_passed(
+                req, ev, expected_commit_sha=target_commit_sha, receipt_verifier=self._receipt_verifier
+            ):
                 impacted_ok = False
 
         impacted_status = "PASSED" if (impacted_ev and impacted_ok) else "FAILED"
@@ -173,10 +185,13 @@ class AdaptiveTestingGate:
                     intent_ref=f"{intent_prefix}:man:{idx}:{digest[:16]}",
                     test_id=None if is_static else m_target,
                     target_commit_sha=target_commit_sha,
+                    snapshot_revision=snapshot_revision,
                 )
                 ev = self._sandbox.execute(req)
                 mandatory_ev.append(ev)
-                if not _evidence_matches_and_passed(req, ev, expected_commit_sha=target_commit_sha):
+                if not _evidence_matches_and_passed(
+                    req, ev, expected_commit_sha=target_commit_sha, receipt_verifier=self._receipt_verifier
+                ):
                     mandatory_ok = False
             mandatory_status = "PASSED" if (mandatory_ev and mandatory_ok) else "FAILED"
         else:

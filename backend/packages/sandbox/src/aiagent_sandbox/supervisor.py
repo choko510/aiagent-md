@@ -173,6 +173,28 @@ async def _run_with_revocation(
         await asyncio.gather(stopped, output, return_exceptions=True)
 
 
+def _collect_browser_ro_paths() -> tuple[tuple[Path, ...], Path]:
+    extra_ro: list[Path] = []
+    for candidate in (
+        Path(sys.prefix).resolve(),
+        Path(sys.base_prefix).resolve(),
+        Path(sys.executable).resolve().parent.parent,
+        Path(__file__).resolve().parents[4],
+    ):
+        if candidate.exists():
+            extra_ro.append(candidate)
+    pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or str(Path.home() / ".cache" / "ms-playwright")
+    pw_dir = Path(pw_path).resolve()
+    if pw_dir.exists():
+        extra_ro.append(pw_dir)
+    for sys_path_entry in sys.path:
+        if sys_path_entry:
+            sp = Path(sys_path_entry).resolve()
+            if sp.exists() and sp != Path("/"):
+                extra_ro.append(sp)
+    return tuple(dict.fromkeys(extra_ro)), pw_dir
+
+
 @dataclass
 class Limits:
     cpu_s: int = 30
@@ -287,7 +309,17 @@ class Supervisor:
                 return
             await asyncio.sleep(min(0.1, max(0.001, heartbeat[0] - time.monotonic())))
 
-    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
+    def _preexec(
+        self,
+        wall_ms: int,
+        memory_bytes: int,
+        workspace: Path,
+        source_fd: int | None = None,
+        *,
+        extra_ro_exec_paths: tuple[Path, ...] = (),
+        extra_rw_files: tuple[Path, ...] = (),
+        browser_mode: bool = False,
+    ) -> Any:
         import resource
 
         lim = self.limits
@@ -297,17 +329,26 @@ class Supervisor:
 
         def fn() -> None:
             os.setsid()  # new session + process group: the whole tree is killable
-            resource.setrlimit(resource.RLIMIT_CPU, (lim.cpu_s, lim.cpu_s))
-            mem = min(memory_bytes, lim.memory_bytes)
-            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
-            resource.setrlimit(resource.RLIMIT_NPROC, (lim.nproc, lim.nproc))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (lim.nofile, lim.nofile))
+            resource.setrlimit(resource.RLIMIT_CPU, (max(lim.cpu_s, 60) if browser_mode else lim.cpu_s,) * 2)
+            if not browser_mode:
+                mem = min(memory_bytes, lim.memory_bytes)
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                resource.setrlimit(resource.RLIMIT_NPROC, (lim.nproc, lim.nproc))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (lim.nofile, lim.nofile))
+            else:
+                resource.setrlimit(resource.RLIMIT_NPROC, (max(lim.nproc, 256), max(lim.nproc, 256)))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (max(lim.nofile, 1024), max(lim.nofile, 1024)))
             resource.setrlimit(resource.RLIMIT_FSIZE, (lim.fsize_bytes, lim.fsize_bytes))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             # Filesystem confinement is MANDATORY even in development / when netns is disabled.
             # Parent/cwd validation alone cannot prevent access to another tenant's files.
             try:
-                restrict_to_workspace(workspace, source_fd=source_fd)
+                restrict_to_workspace(
+                    workspace,
+                    source_fd=source_fd,
+                    extra_ro_exec_paths=extra_ro_exec_paths,
+                    extra_rw_files=extra_rw_files,
+                )
             except (OSError, ValueError) as e:
                 os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
@@ -322,6 +363,25 @@ class Supervisor:
                 os.unshare(CLONE_NEWUSER | CLONE_NEWPID | (CLONE_NEWNET if require_netns else 0))
             except (OSError, AttributeError):
                 os._exit(97)  # fail closed: mandatory PID namespace unavailable
+            if browser_mode and require_netns:
+                # Inside the fresh CLONE_NEWNET + CLONE_NEWUSER namespace (before execve drops namespace caps),
+                # bring up the child's PRIVATE `lo` interface so Chromium can reach ONLY the local Unix bridge.
+                # No external interface or host loopback exists in this netns.
+                import fcntl
+                import socket as _socket
+                import struct
+
+                _lo_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                try:
+                    _ifreq = struct.pack("16sH14s", b"lo", 0, b"")
+                    _res = fcntl.ioctl(_lo_sock.fileno(), 0x8913, _ifreq)  # SIOCGIFFLAGS
+                    _flags = struct.unpack("16sH14s", _res)[1]
+                    if not (_flags & 0x1):  # IFF_UP
+                        fcntl.ioctl(_lo_sock.fileno(), 0x8914, struct.pack("16sH14s", b"lo", _flags | 0x1, b""))
+                except OSError:
+                    os._exit(96)
+                finally:
+                    _lo_sock.close()
             # setuid and the NEWUSER transition may reset dumpability. Sibling
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
@@ -337,6 +397,125 @@ class Supervisor:
                     os._exit(98)
 
         return fn
+
+    async def debug_preview(
+        self,
+        token: Any,
+        argv: list[str],
+        cwd_rel: str,
+        *,
+        target_port: int,
+        target_url: str,
+        commit_sha: str,
+    ) -> dict[str, Any]:
+        """Run Browser Debugger inside full Sandbox Cell isolation (Landlock + UID + USER/PID/NET namespaces) (R2-01).
+
+        Because the child runs in a fresh CLONE_NEWNET network namespace with ZERO external routes and ZERO
+        visibility into host loopback ports, the Supervisor opens a single-target Unix domain socket bridge
+        inside the task workspace forwarding EXCLUSIVELY to host 127.0.0.1:<target_port>.
+        """
+        if type(target_port) is not int or not 1024 <= target_port <= 65535:
+            raise GrantError("INVALID_PREVIEW_PORT")
+        g = verify(self.grant_key, token, argv, cwd_rel)
+        self._consume(g.grant_id)
+        ws, cwd = self.workspace(g.tenant_id, g.task_id, cwd_rel)
+        tmp_dir = ws / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        # Keep AF_UNIX path short (<108 bytes Linux sun_path limit); Landlock grants access ONLY to this exact socket file.
+        bridge_sock = Path("/tmp") / f"aiag-prv-{g.grant_id[:16]}.sock"  # noqa: S108
+        if bridge_sock.exists():
+            bridge_sock.unlink()
+
+        async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while chunk := await src.read(16384):
+                    dst.write(chunk)
+                    await dst.drain()
+            except (OSError, asyncio.CancelledError):
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    dst.close()
+
+        async def _bridge_conn(ur: asyncio.StreamReader, uw: asyncio.StreamWriter) -> None:
+            try:
+                tr, tw = await asyncio.open_connection("127.0.0.1", target_port)
+            except OSError:
+                uw.close()
+                return
+            t1 = asyncio.create_task(_pipe(ur, tw))
+            t2 = asyncio.create_task(_pipe(tr, uw))
+            await asyncio.gather(t1, t2, return_exceptions=True)
+
+        bridge_srv = await asyncio.start_unix_server(_bridge_conn, path=str(bridge_sock))
+        if self.cell_uid is not None and os.geteuid() == 0:
+            os.chown(bridge_sock, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
+            os.chmod(bridge_sock, 0o600)
+        else:
+            os.chmod(bridge_sock, 0o600)
+
+        extra_ro_paths, pw_dir = await asyncio.to_thread(_collect_browser_ro_paths)
+
+        clean_env: dict[str, str] = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(ws),
+            "TMPDIR": str(tmp_dir),
+            "XDG_CONFIG_HOME": str(tmp_dir),
+            "XDG_CACHE_HOME": str(tmp_dir),
+            "PLAYWRIGHT_BROWSERS_PATH": str(pw_dir),
+            "OPENSSL_CONF": "/dev/null",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if os.environ.get("PYTHONPATH"):
+            clean_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        worker_cmd = [
+            sys.executable,
+            "-m",
+            "aiagent_development.browser_debug_worker",
+            "--bridge-sock",
+            str(bridge_sock),
+        ]
+        bootstrap = [sys.executable, "-c", _PID_NAMESPACE_EXEC, *worker_cmd]
+        payload = json.dumps({"targetUrl": target_url, "leasedPort": target_port, "commitSha": commit_sha}).encode(
+            "utf-8"
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *bootstrap,
+                cwd=str(cwd),
+                env=clean_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                preexec_fn=self._preexec(
+                    g.wall_ms,
+                    g.memory_bytes,
+                    ws,
+                    extra_ro_exec_paths=extra_ro_paths,
+                    extra_rw_files=(bridge_sock,),
+                    browser_mode=True,
+                ),
+            )
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+            proc.stdin.close()
+            out, err, timed_out, truncated = await _bounded_output(proc, max(g.wall_ms / 1000.0, 15.0))
+            return {
+                "status": "EXITED",
+                "attemptId": g.attempt_id,
+                "exitCode": proc.returncode if proc.returncode is not None else -1,
+                "timedOut": timed_out,
+                "truncated": truncated,
+                "stdout": out.decode("utf-8", "replace"),
+                "stderr": err.decode("utf-8", "replace"),
+            }
+        finally:
+            bridge_srv.close()
+            await bridge_srv.wait_closed()
+            with contextlib.suppress(OSError):
+                bridge_sock.unlink()
 
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
         return await self._execute(token, argv, cwd_rel, source_fd=None)
@@ -611,14 +790,20 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method not in (
-                "exec.run",
-                "exec.cancel",
-                "exec.heartbeat",
-                "source.receive",
-                "source.register",
-                "source.heartbeat",
-                "source.cancel",
+            if (
+                caller not in ("tool_gateway", "api")
+                or (caller == "api" and method != "preview.debug")
+                or method
+                not in (
+                    "exec.run",
+                    "exec.cancel",
+                    "exec.heartbeat",
+                    "preview.debug",
+                    "source.receive",
+                    "source.register",
+                    "source.heartbeat",
+                    "source.cancel",
+                )
             ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
@@ -677,6 +862,15 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                         res = {"cancelled": sup.cancel_projected(*scoped)}
                     else:
                         res = {"renewed": sup.renew_projected(*scoped)}
+                elif method == "preview.debug":
+                    res = await sup.debug_preview(
+                        body.get("grant"),
+                        list(body.get("argv", [])),
+                        str(body.get("cwdRelative", "")),
+                        target_port=int(body["targetPort"]),
+                        target_url=str(body["targetUrl"]),
+                        commit_sha=str(body["commitSha"]),
+                    )
                 else:
                     res = await sup.execute(
                         body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))

@@ -193,7 +193,13 @@ def _validate_separate_source(workspace: Path, source_fd: int) -> None:
         os.close(workspace_fd)
 
 
-def restrict_to_workspace(workspace: Path, *, source_fd: int | None = None) -> None:
+def restrict_to_workspace(
+    workspace: Path,
+    *,
+    source_fd: int | None = None,
+    extra_ro_exec_paths: tuple[Path, ...] = (),
+    extra_rw_files: tuple[Path, ...] = (),
+) -> None:
     """Invoke in the already-forked child before exec; raises if confinement cannot be applied.
 
     No /proc, parent workspace directory, /root, /run/secrets, or broad /etc access.
@@ -254,8 +260,23 @@ def restrict_to_workspace(workspace: Path, *, source_fd: int | None = None) -> N
         # supervisor's parent cell directory or a sibling workspace.
         for system in ("/usr", "/bin", "/lib", "/lib64", "/sbin"):
             allow(Path(system), _READ | _EXECUTE)
-        for runtime_file in ("/etc/ld.so.cache", "/etc/localtime", "/dev/null", "/dev/urandom"):
-            allow(Path(runtime_file), _READ_FILE | _WRITE_FILE)
+        for extra_ro in extra_ro_exec_paths:
+            allow(extra_ro, _READ | _EXECUTE)
+        for extra_rw in extra_rw_files:
+            allow(extra_rw, _READ_FILE | _WRITE_FILE)
+        for runtime_file in (
+            "/etc/ld.so.cache",
+            "/etc/localtime",
+            "/etc/fonts",
+            "/dev/null",
+            "/dev/urandom",
+            "/dev/zero",
+        ):
+            p_rt = Path(runtime_file)
+            if p_rt.is_dir():
+                allow(p_rt, _READ)
+            else:
+                allow(p_rt, _READ_FILE | _WRITE_FILE)
         rights = _READ | _WRITE | _EXECUTE
         if abi >= 2:
             rights |= _REFER

@@ -20,10 +20,48 @@ CREATE TABLE agent.dev_projects (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, id),
   UNIQUE (tenant_id, workspace_id, repository, default_branch),
-  FOREIGN KEY (tenant_id, workspace_id) REFERENCES agent.workspaces(tenant_id, id)
+  FOREIGN KEY (tenant_id, workspace_id) REFERENCES agent.workspaces(tenant_id, id),
+  FOREIGN KEY (tenant_id, workspace_id, repository_binding_id)
+    REFERENCES agent.repository_bindings(tenant_id, workspace_id, id)
 );
 
 CREATE INDEX dev_projects_owner_idx ON agent.dev_projects (tenant_id, owner_user_id, created_at DESC);
+
+-- Narrow SECURITY DEFINER authority helper verifying an active operator-provisioned repository_binding
+-- without granting raw SELECT on agent.repository_bindings to least-privilege API/Sentinel roles (R2-02).
+CREATE FUNCTION agent.verify_dev_repository_binding(
+  p_tenant uuid,
+  p_owner uuid,
+  p_workspace uuid,
+  p_binding uuid,
+  p_repository text,
+  p_branch text DEFAULT NULL
+) RETURNS TABLE(
+  binding_id uuid,
+  binding_generation bigint,
+  approved_commit text,
+  approved_branch text,
+  repository_ref text
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+BEGIN
+  IF NOT agent.scope_active(p_tenant, p_owner, p_workspace) THEN
+    RETURN;
+  END IF;
+  RETURN QUERY
+  SELECT b.id, b.generation, b.approved_commit, b.approved_branch, b.repository_ref
+    FROM agent.repository_bindings b
+   WHERE b.tenant_id = p_tenant
+     AND b.id = p_binding
+     AND b.owner_user_id = p_owner
+     AND b.workspace_id = p_workspace
+     AND b.repository_ref = p_repository
+     AND b.active = true
+     AND (p_branch IS NULL OR b.approved_branch IS NULL OR b.approved_branch = p_branch);
+END $$;
+REVOKE ALL ON FUNCTION agent.verify_dev_repository_binding(uuid, uuid, uuid, uuid, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.verify_dev_repository_binding(uuid, uuid, uuid, uuid, text, text)
+  TO aiagent_api, aiagent_tool_gateway, aiagent_sentinel, aiagent_ops;
 
 CREATE TABLE agent.dev_design_decisions (
   tenant_id uuid NOT NULL,
@@ -39,6 +77,8 @@ CREATE TABLE agent.dev_design_decisions (
   recommended_candidate_id text,
   selected_candidate_id text,
   demo_decision text NOT NULL DEFAULT 'PENDING' CHECK (demo_decision IN ('PENDING', 'APPROVED', 'REVISION_REQUESTED', 'REJECTED')),
+  demo_artifact_ref text,
+  demo_artifact_sha256 char(64) CHECK (demo_artifact_sha256 IS NULL OR demo_artifact_sha256 ~ '^[a-f0-9]{64}$'),
   demo_snapshot_digest char(64) CHECK (demo_snapshot_digest IS NULL OR demo_snapshot_digest ~ '^[a-f0-9]{64}$'),
   feedback text,
   decided_at timestamptz,
@@ -93,8 +133,11 @@ CREATE TABLE agent.dev_preview_instances (
   workspace_id uuid NOT NULL,
   commit_sha text NOT NULL CHECK (commit_sha ~ '^[a-f0-9]{40,64}$'),
   target_port integer NOT NULL CHECK (target_port BETWEEN 1024 AND 65535),
-  runner_kind text NOT NULL DEFAULT 'isolated_worker' CHECK (runner_kind IN ('isolated_worker', 'sandbox_cell')),
+  runner_kind text NOT NULL DEFAULT 'sandbox_cell' CHECK (runner_kind IN ('isolated_worker', 'sandbox_cell')),
   process_attestation_sha256 char(64) NOT NULL CHECK (process_attestation_sha256 ~ '^[a-f0-9]{64}$'),
+  generation bigint NOT NULL DEFAULT 1 CHECK (generation >= 1),
+  launch_receipt_hmac char(64) NOT NULL CHECK (launch_receipt_hmac ~ '^[0-9a-f]{64}$'),
+  heartbeat_expires_at timestamptz NOT NULL,
   status text NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'STOPPED')),
   created_at timestamptz NOT NULL DEFAULT now(),
   stopped_at timestamptz,
@@ -110,7 +153,8 @@ CREATE INDEX dev_preview_instances_active_idx
 
 ALTER TABLE agent.preview_leases
   ADD COLUMN IF NOT EXISTS cycle_id text,
-  ADD COLUMN IF NOT EXISTS preview_instance_id uuid;
+  ADD COLUMN IF NOT EXISTS preview_instance_id uuid,
+  ADD COLUMN IF NOT EXISTS instance_generation bigint NOT NULL DEFAULT 1;
 
 CREATE TABLE agent.dev_review_artifacts (
   tenant_id uuid NOT NULL,
@@ -123,6 +167,7 @@ CREATE TABLE agent.dev_review_artifacts (
   reviewer_role text NOT NULL CHECK (reviewer_role IN ('functional', 'security', 'ui-e2e')),
   target_sha text NOT NULL CHECK (target_sha ~ '^[a-f0-9]{40,64}$'),
   evidence_sha256 char(64) NOT NULL CHECK (evidence_sha256 ~ '^[a-f0-9]{64}$'),
+  verdict_digest_sha256 char(64) NOT NULL CHECK (verdict_digest_sha256 ~ '^[a-f0-9]{64}$'),
   passed boolean NOT NULL,
   findings_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -161,7 +206,7 @@ CREATE TABLE agent.dev_debug_findings (
 
 CREATE INDEX dev_debug_findings_cycle_idx ON agent.dev_debug_findings (tenant_id, cycle_id, created_at DESC);
 
--- Optional path + body digest binding on Sentinel egress permits (used by dev_github_pr to prevent permit repurposing).
+-- Optional path + body digest binding on Sentinel egress permits (derived server-side for dev_github_pr).
 ALTER TABLE agent.egress_permits
   ADD COLUMN IF NOT EXISTS target_path text,
   ADD COLUMN IF NOT EXISTS body_sha256 char(64) CHECK (body_sha256 IS NULL OR body_sha256 ~ '^[0-9a-f]{64}$');

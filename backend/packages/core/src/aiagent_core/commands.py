@@ -17,6 +17,7 @@ from .events import append_event, enqueue_run_job
 DEFAULT_MODELS = {
     "default": ["fake-gateway"],
     "sandbox": ["fake-gateway"],
+    "development": ["fake-gateway"],
     "browser": ["fake-gateway"],
     "research": ["fake-gateway"],
     "anthropic": ["claude-sonnet-5-5"],

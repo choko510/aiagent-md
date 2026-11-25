@@ -1,8 +1,10 @@
-"""DEV-11 PR Guardian: strict HEAD-verified CI/conflict evaluation + Sentinel-routed pagination.
+"""DEV-11 PR Guardian: strict HEAD-verified CI/conflict evaluation + Sentinel-routed pagination (P1-09 / R2-08).
 
-Hardens P1-09:
+Hardens P1-09 & R2-08:
 - Refuses PASS if live PR head.sha != expected_head_sha (returns STALE_HEAD).
-- Paginates check-runs and inspects GitHub commit statuses; returns UNKNOWN if pagination is incomplete.
+- Paginates check-runs and inspects GitHub commit statuses; returns UNKNOWN if pagination OR status API fails.
+- Requires an authoritative non-empty `required_checks` set (from project policy and/or GitHub Branch Protection
+  required_status_checks); refuses PASS when no authoritative required check policy is available.
 - Treats unknown conclusion values, mergeable=None / unknown / blocked, neutral/skipped-only checks,
   or missing required_checks fail-closed as PENDING or UNKNOWN (never PASS).
 """
@@ -38,6 +40,7 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
     check_runs_payload: dict[str, Any],
     expected_head_sha: str | None = None,
     commit_status_payload: dict[str, Any] | None = None,
+    commit_status_ok: bool = True,
     required_checks: Sequence[str] = (),
     repair_attempts: int,
     max_repair_attempts: int,
@@ -104,9 +107,13 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
         elif conclusion not in _KNOWN_CONCLUSIONS:
             unknown_conclusion = True
 
-    if commit_status_payload is not None:
-        statuses = commit_status_payload.get("statuses") or []
-        if isinstance(statuses, list):
+    if not commit_status_ok:
+        unknown_conclusion = True
+    elif commit_status_payload is not None:
+        statuses = commit_status_payload.get("statuses")
+        if not isinstance(statuses, list):
+            unknown_conclusion = True
+        else:
             for st_item in statuses:
                 if not isinstance(st_item, dict):
                     unknown_conclusion = True
@@ -134,7 +141,8 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             escalated=exhausted,
         )
 
-    missing_req = tuple(req for req in required_checks if req not in succeeded_names)
+    clean_required = tuple(dict.fromkeys(r.strip() for r in required_checks if r and r.strip()))
+    missing_req = tuple(req for req in clean_required if req not in succeeded_names)
     if pending or mergeable is None or mergeable_state == "unknown":
         return GuardianEvaluation(
             ci_state="PENDING",
@@ -146,7 +154,8 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             escalated=False,
         )
 
-    if unknown_conclusion or missing_req or mergeable_state == "blocked" or not succeeded_names:
+    # R2-08: Never return PASS without a non-empty authoritative required check policy or with incomplete status API.
+    if unknown_conclusion or not clean_required or missing_req or mergeable_state == "blocked" or not succeeded_names:
         return GuardianEvaluation(
             ci_state="UNKNOWN",
             failing_checks=(),
@@ -169,10 +178,35 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
 
 
 class PrGuardian:
-    """Inspects PR, paginated check-runs, and commit statuses via a Sentinel-routed read-only GET transport."""
+    """Inspects PR, paginated check-runs, commit statuses, and branch protection via Sentinel GET transport."""
 
     def __init__(self, read_transport: Callable[[ProjectScope, str, str], tuple[int, dict[str, Any]]]) -> None:
         self._read = read_transport
+
+    def _fetch_branch_protection_checks(
+        self, scope: ProjectScope, intent_ref: str, base_branch: str | None
+    ) -> tuple[tuple[str, ...], bool]:
+        if not base_branch:
+            return (), True
+        st, data = self._read(
+            scope,
+            intent_ref,
+            f"/repos/{scope.repository}/branches/{base_branch}/protection/required_status_checks",
+        )
+        if st == 404:
+            return (), True
+        if st != 200 or not isinstance(data, dict):
+            return (), False
+        names: list[str] = []
+        raw_contexts = data.get("contexts")
+        if isinstance(raw_contexts, list):
+            names.extend(str(x).strip() for x in raw_contexts if isinstance(x, str) and x.strip())
+        raw_checks = data.get("checks")
+        if isinstance(raw_checks, list):
+            for item in raw_checks:
+                if isinstance(item, dict) and isinstance(item.get("context"), str) and item["context"].strip():
+                    names.append(item["context"].strip())
+        return tuple(dict.fromkeys(names)), True
 
     def inspect_pr(
         self,
@@ -184,6 +218,7 @@ class PrGuardian:
         repair_attempts: int,
         max_repair_attempts: int,
         required_checks: Sequence[str] = (),
+        base_branch: str | None = None,
     ) -> GuardianEvaluation:
         if pr_number < 1:
             raise ScopeDenied("invalid pr_number")
@@ -192,9 +227,18 @@ class PrGuardian:
         if st_pr != 200:
             return GuardianEvaluation("UNKNOWN", (), tuple(required_checks), None, "unknown", False, False)
 
+        resolved_base = base_branch
+        if not resolved_base and isinstance(pr_data.get("base"), dict):
+            raw_ref = pr_data["base"].get("ref")
+            if isinstance(raw_ref, str) and raw_ref.strip():
+                resolved_base = raw_ref.strip()
+
+        bp_checks, bp_ok = self._fetch_branch_protection_checks(scope, intent_ref, resolved_base)
+        merged_required = tuple(dict.fromkeys([*required_checks, *bp_checks]))
+
         all_runs: list[dict[str, Any]] = []
         total_count: int | None = None
-        pagination_complete = True
+        pagination_complete = bp_ok
         for page in range(1, _MAX_CHECK_PAGES + 1):
             st_chk, chk_data = self._read(
                 scope,
@@ -218,8 +262,7 @@ class PrGuardian:
                 pagination_complete = False
 
         st_status, status_data = self._read(scope, intent_ref, f"/repos/{scope.repository}/commits/{head_sha}/status")
-        commit_status = status_data if st_status == 200 else None
-
+        status_ok = st_status == 200 and isinstance(status_data, dict)
         return evaluate_pr_checks(
             pr_payload=pr_data,
             check_runs_payload={
@@ -227,8 +270,9 @@ class PrGuardian:
                 "check_runs": all_runs,
             },
             expected_head_sha=head_sha,
-            commit_status_payload=commit_status,
-            required_checks=required_checks,
+            commit_status_payload=status_data if status_ok else None,
+            commit_status_ok=status_ok,
+            required_checks=merged_required,
             repair_attempts=repair_attempts,
             max_repair_attempts=max_repair_attempts,
             pagination_complete=pagination_complete,

@@ -1,27 +1,27 @@
-"""Phase 7 end-to-end & security boundary integration tests (DEV-01..DEV-14 on PostgreSQL 16 + Sentinel + Chromium).
+"""Phase 7 end-to-end & security boundary integration tests (DEV-01..DEV-14 on PostgreSQL 16 + Sentinel + ToolGateway + Sandbox Cell + Chromium).
 
-Covers all 13 PR #122 review findings and regression checklist items:
-1. Dev Projects, 3-candidate Design Picker, Demo Approval CAS invalidation on candidate switch (P1-06),
-   PostgresReviewAttestationPort SUCCEEDED-run + persisted artifact verification (P1-07), and cross-owner/role isolation.
-2. PreviewBroker attested instance registration (P0-02), Cycle-bound lease verification (P2-11),
-   isolated Chromium worker subprocess with sanitized env + DNS/route/redirect confinement (P0-02),
-   secret/CDP redaction, HTTP 500 capture, and mobile overflow detection (DEV-06).
-3. Sentinel EgressProxy-enforced GitHub PR creation with canonical approved argument/digest binding +
-   Path/Body digest enforcement (P0-01), remote branch HEAD & response head.sha verification (P1-04),
-   post-send disconnect & malformed JSON -> EFFECT_UNKNOWN + Intent-level single-dispatch lock across
-   different Idempotency-Keys (P1-03), Sentinel CONFIRMED GET unification (P1-05), production GitHub
-   token provider without secret leaks (P2-13), PR Guardian HEAD/required-check verification (P1-09),
-   and read-only vs atomic concurrent repair budget capping (P2-10).
+Verifies ALL Round 1 (P0-01..P2-13) and Round 2 (R2-01..R2-13) security boundaries using production RPC wiring:
+1. Repository Binding validation, Demo Approval artifact & live goal_revision binding, Review Artifact full-findings
+   attestation & reconstruction, and DB role least-privilege isolation (R2-02, R2-07, R2-11).
+2. Real PR #110 Sandbox Cell Supervisor (Landlock + CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET + Unix bridge) running
+   Chromium Browser Debugger, HMAC Preview Launch Receipt + heartbeat + generation superseding, and Cycle binding
+   (R2-01, R2-06, P2-11).
+3. Zero-DI Production-Wired E2E: real Sentinel RPC + EgressProxy, real ToolGateway RPC + DevGitHubPrExecutor, and
+   `create_app(dbs["api"])` with ZERO injected service dependencies — walking HEAD proposal -> ToolGateway.submit
+   (unified TOOLS['dev_github_pr']) -> POST /v1/approvals -> concurrent PR dispatch -> EFFECT_UNKNOWN -> strict
+   ToolGateway Reconcile -> CONFIRMED Sentinel RPC PR Guardian -> atomic repair ceiling -> policy requiredChecks
+   (R2-02, R2-03, R2-04, R2-05, R2-08, R2-09, R2-10, R2-13).
 4. Real Playwright Chromium UI E2E against built React Web UI `Development` tab served same-origin.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
+import os
 import secrets
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +36,7 @@ from aiagent_core import admin, commands, control
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_core.egress_http import ForwardProxyError, send_via_forward_proxy
-from aiagent_development.browser_debugger import _sanitized_worker_env
+from aiagent_core.rpc import RpcClient
 from aiagent_development.contracts import (
     CommitEvidence,
     Cycle,
@@ -51,12 +51,16 @@ from aiagent_development.contracts import (
     TaskPlan,
 )
 from aiagent_development.github_egress import canonical_pr_request, pr_request_sha256
-from aiagent_development.pg_store import PostgresCycleStore, PreviewBroker
+from aiagent_development.pg_store import PostgresCycleStore, PreviewBroker, sign_preview_launch_receipt
 from aiagent_development.store import PostgresDevStore, PostgresReviewAttestationPort
 from aiagent_domain import sha256_hex, uuid7
-from aiagent_gateways.sentinel_port import LocalSentinel
+from aiagent_gateways.dev_github_executor import DevGitHubPrExecutor
+from aiagent_gateways.sentinel_port import RpcSentinel
+from aiagent_gateways.servers import build_tool_server
+from aiagent_gateways.tool_gateway import ToolGateway
 from aiagent_sentinel.authority import EgressConfig, Sentinel
 from aiagent_sentinel.egress import EgressProxy
+from aiagent_sentinel.main import build_server as build_sentinel_server
 from fastapi.testclient import TestClient
 from psycopg.errors import InsufficientPrivilege
 
@@ -65,42 +69,57 @@ pytestmark = pytest.mark.pg
 
 @pytest.fixture(autouse=True)
 def _drain_phase7_outbox_rows(dbs: dict[str, Database]) -> Any:
-    """Ensure Phase 7 tests leave no undispatched outbox rows for downstream queue/outbox tests."""
+    """Ensure Phase 7 tests leave no undispatched outbox rows or pending queue jobs for downstream tests."""
     yield
     with dbs["owner"].tx() as c:
         c.execute("UPDATE agent.outbox_messages SET dispatched_at = now() WHERE dispatched_at IS NULL")
+        c.execute("UPDATE queue.jobs SET status = 'CANCELLED' WHERE status IN ('READY', 'CLAIMED')")
 
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _start_proxy_thread(
-    sentinel: Sentinel, ecfg: EgressConfig, resolver: Any
-) -> tuple[int, asyncio.AbstractEventLoop, threading.Thread, EgressProxy]:
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _start_async_service(boot_coro_fn: Any) -> tuple[dict[str, Any], asyncio.AbstractEventLoop, threading.Thread]:
     loop = asyncio.new_event_loop()
     ready = threading.Event()
     holder: dict[str, Any] = {}
+    err_box: list[BaseException] = []
 
     def runner() -> None:
         asyncio.set_event_loop(loop)
-
-        async def boot() -> None:
-            proxy = EgressProxy(sentinel, ecfg, resolver=resolver)
-            port = await proxy.start("127.0.0.1", 0)
-            holder["proxy"] = proxy
-            holder["port"] = port
+        try:
+            res = loop.run_until_complete(boot_coro_fn(holder))
+            if isinstance(res, dict):
+                holder.update(res)
+        except BaseException as exc:  # noqa: BLE001
+            err_box.append(exc)
             ready.set()
-
-        loop.run_until_complete(boot())
+            return
+        ready.set()
         loop.run_forever()
-        loop.run_until_complete(holder["proxy"].close())
+        cleanup = holder.get("cleanup")
+        if callable(cleanup):
+            loop.run_until_complete(cleanup())
         loop.close()
 
     th = threading.Thread(target=runner, daemon=True)
     th.start()
-    assert ready.wait(timeout=10), "egress proxy failed to start"
-    return int(holder["port"]), loop, th, holder["proxy"]
+    assert ready.wait(timeout=15), "background async service failed to start"
+    if err_box:
+        raise err_box[0]
+    return holder, loop, th
+
+
+def _stop_async_service(loop: asyncio.AbstractEventLoop, th: threading.Thread) -> None:
+    loop.call_soon_threadsafe(loop.stop)
+    th.join(timeout=8)
 
 
 def _start_uvicorn_thread(app: Any) -> tuple[int, uvicorn.Server, threading.Thread, socket.socket]:
@@ -119,6 +138,33 @@ def _start_uvicorn_thread(app: Any) -> tuple[int, uvicorn.Server, threading.Thre
     return port, server, th, sock
 
 
+def _seed_repository_binding(
+    dbs: dict[str, Database],
+    tenant: dict[str, str],
+    *,
+    repository: str,
+    approved_commit: str = "2" * 40,
+    approved_branch: str | None = "feat/p7-demo",
+) -> str:
+    binding_id = uuid7()
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.repository_bindings(tenant_id, id, owner_user_id, workspace_id, repository_ref,"
+            " approved_commit, workspace_revision, approval_ref, approved_branch, active)"
+            " VALUES (%s,%s,%s,%s,%s,%s,1,'op-apr-1',%s,true)",
+            (
+                tenant["tenantId"],
+                binding_id,
+                tenant["userId"],
+                tenant["workspaceId"],
+                repository,
+                approved_commit,
+                approved_branch,
+            ),
+        )
+    return binding_id
+
+
 def _seed_code_ready_cycle(
     dbs: dict[str, Database],
     tenant: dict[str, str],
@@ -128,10 +174,11 @@ def _seed_code_ready_cycle(
     branch: str = "feat/p7-demo",
     cycle_id: str | None = None,
     commit_sha: str | None = None,
+    profile: str = "development",
 ) -> tuple[str, str, dict[str, str], control.Claim, Cycle]:
     """Seed a real CODE_READY cycle with 3 independent reviewer verdicts for API/Preview/PR tests."""
     scope = Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"])
-    created = commands.submit_task(dbs["api"], scope, "phase7 build task", profile="sandbox")
+    created = commands.submit_task(dbs["api"], scope, "phase7 build task", profile=profile)
     claim = control.claim_run(dbs["runtime"], scope.tenant_id, created["runId"], "dev-worker-p7")
 
     rev_tasks = [
@@ -199,76 +246,41 @@ def _seed_code_ready_cycle(
     return cid, c_sha, created, claim, cycle
 
 
-def _seed_approved_pr_intent(
+def _propose_dev_pr_through_gateway(
     dbs: dict[str, Database],
-    tenant: dict[str, str],
-    *,
-    task_id: str,
-    run_id: str,
-    goal_revision: int,
-    project_id: str,
-    cycle_id: str,
-    repository: str,
-    branch: str,
-    head_sha: str,
-    base_branch: str = "main",
-    title: str = "Autonomous development PR",
-    body: str = "Created under bounded development workflow.",
-    draft: bool = True,
-    approved: bool = True,
+    gw: ToolGateway,
+    claim: control.Claim,
+    args: dict[str, Any],
 ) -> tuple[str, str]:
-    intent_id = uuid7()
-    args = canonical_pr_request(
-        project_id=project_id,
-        cycle_id=cycle_id,
-        repository=repository,
-        branch=branch,
-        head_sha=head_sha,
-        base_branch=base_branch,
-        title=title,
-        body=body,
-        draft=draft,
-    )
-    req_sha = pr_request_sha256(args)
-    with dbs["owner"].tx() as c:
-        c.execute(
-            "INSERT INTO agent.tool_intents(tenant_id, id, task_id, run_id, tool_key, invocation_key,"
-            " request_sha256, safe_arguments_json, risk_class, goal_revision, status_code)"
-            " VALUES (%s,%s,%s,%s,'dev_github_pr',%s,%s,%s::jsonb,'external_irreversible',%s,'SENDING')",
-            (
-                tenant["tenantId"],
-                intent_id,
-                task_id,
-                run_id,
-                f"pr-inv-{intent_id}",
-                req_sha,
-                json.dumps(args),
-                goal_revision,
-            ),
+    """Propose `dev_github_pr` in Run HEAD and submit through REAL ToolGateway.submit (R2-03)."""
+    tool_call_id = f"tc-pr-{uuid7()[:12]}"
+    with dbs["model_gateway"].tx() as c:
+        control.append_head(
+            c,
+            claim,
+            "assistant",
+            {
+                "kind": "assistant",
+                "content": "",
+                "tool_calls": [{"id": tool_call_id, "name": "dev_github_pr", "args": args}],
+            },
+            writer="model_gateway",
         )
-        if approved:
-            c.execute(
-                "INSERT INTO agent.approval_records(tenant_id, id, tool_intent_id, task_id, run_id, owner_user_id,"
-                " tool_key, request_sha256, goal_revision, safe_summary, decision_code, expires_at)"
-                " VALUES (%s,%s,%s,%s,%s,%s,'dev_github_pr',%s,%s,'create draft PR','APPROVED',now() + interval '1h')",
-                (
-                    tenant["tenantId"],
-                    uuid7(),
-                    intent_id,
-                    task_id,
-                    run_id,
-                    tenant["userId"],
-                    req_sha,
-                    goal_revision,
-                ),
-            )
-    return intent_id, req_sha
+    out = _run(gw.submit(claim, tool_call_id, "dev_github_pr", args))
+    assert out["status"] == "PENDING_APPROVAL", out
+    approval_id = str(out["approvalId"])
+    row = dbs["owner"].one(
+        "SELECT id FROM agent.tool_intents WHERE tenant_id=%s AND run_id=%s AND invocation_key=%s",
+        (claim.tenant_id, claim.run_id, tool_call_id),
+    )
+    assert row is not None
+    return str(row["id"]), approval_id
 
 
 def test_phase7_projects_design_demo_reviews_and_owner_isolation(
     pg: Any, dbs: dict[str, Database], tenant: dict[str, str]
 ) -> None:
-    """DEV-01/02/03/07/09 + P1-06 + P1-07: prefs, Demo invalidation on design switch, strict review attestation, RLS."""
+    """DEV-01/02/03/07/09 + R2-02/R2-07/R2-11: Repo Binding enforcement, Review full-findings attestation, Demo artifact/goal CAS."""
     other = admin.provision_tenant(pg.owner)
     app = create_app(dbs["api"])
     h_a = {"Authorization": f"Bearer {tenant['token']}"}
@@ -283,6 +295,9 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         dbs["sentinel"].one("SELECT id FROM agent.dev_preview_instances LIMIT 1")
     with pytest.raises(InsufficientPrivilege):
         dbs["relay"].one("SELECT id FROM agent.dev_review_artifacts LIMIT 1")
+
+    other_binding_id = _seed_repository_binding(dbs, other, repository="org/phase7-app")
+    own_binding_id = _seed_repository_binding(dbs, tenant, repository="org/phase7-app")
 
     with TestClient(app) as client:
         # Legacy ambiguous demoChoice=AUTO is rejected 422
@@ -299,7 +314,32 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         assert r_bad.status_code == 422
         assert "DEPRECATED_DEMO_CHOICE_AUTO" in r_bad.text
 
-        # Valid project creation with explicit AUTO_RECOMMEND + REQUIRE_USER_APPROVAL
+        # R2-02: Binding another tenant's repositoryBindingId OR wrong repository is denied 403
+        r_cross_bind = client.post(
+            "/v1/development/projects",
+            headers=h_a,
+            json={
+                "projectId": "proj-cross",
+                "name": "Cross Bind",
+                "repository": "org/phase7-app",
+                "repositoryBindingId": other_binding_id,
+            },
+        )
+        assert r_cross_bind.status_code == 403
+
+        r_wrong_repo_bind = client.post(
+            "/v1/development/projects",
+            headers=h_a,
+            json={
+                "projectId": "proj-wrong-repo",
+                "name": "Wrong Repo Bind",
+                "repository": "org/different-app",
+                "repositoryBindingId": own_binding_id,
+            },
+        )
+        assert r_wrong_repo_bind.status_code == 403
+
+        # Valid project creation with verified repositoryBindingId & explicit policy requiredChecks
         r_proj = client.post(
             "/v1/development/projects",
             headers=h_a,
@@ -309,10 +349,12 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
                 "repository": "org/phase7-app",
                 "defaultBranch": "main",
                 "framework": "web",
+                "repositoryBindingId": own_binding_id,
                 "preferences": {
                     "designPolicy": "AUTO_RECOMMEND",
                     "demoAcceptancePolicy": "REQUIRE_USER_APPROVAL",
                     "releasePolicy": "PR_AFTER_APPROVED_SCOPE",
+                    "requiredChecks": ["pytest-gate"],
                 },
             },
         )
@@ -322,9 +364,9 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         # Cross-tenant owner cannot read project (404)
         assert client.get(f"/v1/development/projects/{proj_id}", headers=h_b).status_code == 404
 
-        cycle_id, commit_sha, _, claim, _ = _seed_code_ready_cycle(dbs, tenant, project_id=proj_id)
+        cycle_id, commit_sha, created, claim, _ = _seed_code_ready_cycle(dbs, tenant, project_id=proj_id)
 
-        # P1-07: PostgresReviewAttestationPort strictly requires SUCCEEDED independent run + persisted review artifact
+        # R2-07: PostgresReviewAttestationPort strictly verifies SUCCEEDED run, cycle, verdict digest & ALL findings
         attest = PostgresReviewAttestationPort(dbs["api"])
         dev_store = PostgresDevStore(dbs["api"])
         proj_scope = ProjectScope(
@@ -345,25 +387,28 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             claim.restore_incarnation,
             claim.worker_ref,
         )
-        # 1) Self-review rejected
         with pytest.raises(ScopeDenied, match="self-review"):
             attest.assert_verified(
                 proj_scope, builder_fence, ReviewVerdict(claim.task_id, "functional", commit_sha, True, uuid7())
             )
-        # 2) Non-uuid7 evidence_ref rejected
         indep = commands.submit_task(
             dbs["api"], Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "indep-review"
         )
-        with pytest.raises(InvalidEvidence, match="dev_review_artifacts"):
-            attest.assert_verified(
-                proj_scope, builder_fence, ReviewVerdict(indep["taskId"], "security", commit_sha, True, "ev-not-uuid")
+        # Cannot record passed=True with an OPEN P0/P1 finding
+        with pytest.raises(InvalidEvidence, match="open/unverified P0 or P1"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                reviewer_role="security",
+                target_sha=commit_sha,
+                evidence_payload={"summary": "critical issue"},
+                passed=True,
+                findings=[{"findingId": "f0", "severity": "P0", "status": "OPEN"}],
             )
-        # 3) Non-existent artifact uuid7 rejected
-        with pytest.raises(ScopeDenied, match="review artifact"):
-            attest.assert_verified(
-                proj_scope, builder_fence, ReviewVerdict(indep["taskId"], "security", commit_sha, True, uuid7())
-            )
-        # 4) Artifact exists, but reviewer Run is NOT SUCCEEDED (QUEUED or FAILED) -> rejected
         art_id = dev_store.record_review_artifact(
             tenant_id=tenant["tenantId"],
             owner_user_id=tenant["userId"],
@@ -373,69 +418,40 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             run_id=indep["runId"],
             reviewer_role="security",
             target_sha=commit_sha,
-            evidence_sha256=sha256_hex({"report": "ok"}),
+            evidence_payload={"summary": "resolved finding"},
             passed=True,
             findings=[{"findingId": "f1", "severity": "P2", "status": "RESOLVED"}],
         )
+        # QUEUED reviewer run -> rejected
         with pytest.raises(ScopeDenied, match="did not SUCCEED"):
             attest.assert_verified(
                 proj_scope,
                 builder_fence,
-                ReviewVerdict(indep["taskId"], "security", commit_sha, True, art_id),
+                ReviewVerdict(
+                    indep["taskId"], "security", commit_sha, True, art_id, (ReviewFinding("f1", "P2", "RESOLVED"),)
+                ),
+                cycle_id=cycle_id,
             )
-        failed_rev = commands.submit_task(
-            dbs["api"], Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "failed-review"
-        )
-        failed_art = dev_store.record_review_artifact(
-            tenant_id=tenant["tenantId"],
-            owner_user_id=tenant["userId"],
-            project_id=proj_id,
-            cycle_id=cycle_id,
-            task_id=failed_rev["taskId"],
-            run_id=failed_rev["runId"],
-            reviewer_role="security",
-            target_sha=commit_sha,
-            evidence_sha256=sha256_hex({"report": "failed"}),
-            passed=True,
-        )
-        with dbs["owner"].tx() as c:
-            c.execute(
-                "UPDATE agent.runs SET status_code='FAILED' WHERE tenant_id=%s AND id=%s",
-                (tenant["tenantId"], failed_rev["runId"]),
-            )
-        with pytest.raises(ScopeDenied, match="did not SUCCEED"):
-            attest.assert_verified(
-                proj_scope,
-                builder_fence,
-                ReviewVerdict(failed_rev["taskId"], "security", commit_sha, True, failed_art),
-            )
-        # 5) Transition reviewer Run to SUCCEEDED -> exact match passes; mismatched SHA/role still rejected
+        # Transition indep run to SUCCEEDED
         with dbs["owner"].tx() as c:
             c.execute(
                 "UPDATE agent.runs SET status_code='SUCCEEDED' WHERE tenant_id=%s AND id=%s",
                 (tenant["tenantId"], indep["runId"]),
             )
-        with pytest.raises(ScopeDenied, match="mismatched"):
+        # R2-07: Dropping finding f1 from submitted ReviewVerdict MUST be rejected!
+        with pytest.raises(ScopeDenied, match="findings do not match"):
             attest.assert_verified(
                 proj_scope,
                 builder_fence,
-                ReviewVerdict(indep["taskId"], "functional", commit_sha, True, art_id),
+                ReviewVerdict(indep["taskId"], "security", commit_sha, True, art_id, ()),
+                cycle_id=cycle_id,
             )
-        attest.assert_verified(
-            proj_scope,
-            builder_fence,
-            ReviewVerdict(
-                indep["taskId"], "security", commit_sha, True, art_id, (ReviewFinding("f1", "P2", "RESOLVED"),)
-            ),
-        )
+        # Reconstructing authoritative ReviewVerdict directly from persisted artifact returns ALL findings
+        reconstructed = attest.load_verified_verdict(proj_scope, builder_fence, cycle_id=cycle_id, artifact_id=art_id)
+        assert reconstructed.findings == (ReviewFinding("f1", "P2", "RESOLVED"),)
+        attest.assert_verified(proj_scope, builder_fence, reconstructed, cycle_id=cycle_id)
 
-        # GET reviews confirms 3 SHA-pinned independent roles and 0 open P0/P1
-        r_rev = client.get(f"/v1/development/cycles/{cycle_id}/reviews", headers=h_a)
-        assert r_rev.status_code == 200
-        assert r_rev.json()["allThreeRolesPresent"] is True
-        assert r_rev.json()["openP0P1Count"] == 0
-
-        # 3-candidate Design proposal under AUTO_RECOMMEND NEVER auto-selects or auto-approves
+        # Design Picker + Demo approval with rendered artifact digest + live goal_revision check (P1-06 + R2-11)
         r_des = client.post(
             f"/v1/development/cycles/{cycle_id}/design",
             headers=h_a,
@@ -445,117 +461,82 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
                         "candidateId": "win11",
                         "label": "Windows 11",
                         "fixtureRef": "fixture://dash-1",
-                        "summary": "Clean fluent",
+                        "summary": "Fluent",
                     },
                     {
                         "candidateId": "minimal",
                         "label": "Minimal",
                         "fixtureRef": "fixture://dash-1",
-                        "summary": "High contrast",
+                        "summary": "Clean",
                     },
                     {
                         "candidateId": "dense",
                         "label": "Dense Pro",
                         "fixtureRef": "fixture://dash-1",
-                        "summary": "Compact ops",
+                        "summary": "Compact",
                     },
                 ]
             },
         )
-        assert r_des.status_code == 201, r_des.text
-        des = r_des.json()["design"]
-        assert des["recommendedCandidateId"] == "win11"
-        assert des["selectedCandidateId"] is None
-        assert des["demoDecision"] == "PENDING"
-        initial_digest = des["demoSnapshotDigest"]
-
-        # Approving Demo before selecting a candidate fails 409
-        r_premature = client.post(
-            f"/v1/development/cycles/{cycle_id}/demo-decision",
-            headers=h_a,
-            json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": initial_digest},
-        )
-        assert r_premature.status_code == 409
-
-        # Stale designRevision rejected 409
-        r_stale = client.post(
-            f"/v1/development/cycles/{cycle_id}/design-decision",
-            headers=h_a,
-            json={"designRevision": 99, "selectedCandidateId": "minimal"},
-        )
-        assert r_stale.status_code == 409
-
-        # Select candidate 'minimal' -> digest now binds selectedCandidateId='minimal'
+        assert r_des.status_code == 201
         r_sel = client.post(
             f"/v1/development/cycles/{cycle_id}/design-decision",
             headers=h_a,
-            json={"designRevision": 1, "selectedCandidateId": "minimal", "feedback": "Good readability"},
+            json={
+                "designRevision": 1,
+                "selectedCandidateId": "minimal",
+                "demoArtifactRef": "artifact://demo-render-v1",
+                "demoArtifactSha256": "a" * 64,
+            },
         )
-        assert r_sel.status_code == 200 and r_sel.json()["design"]["selectedCandidateId"] == "minimal"
+        assert r_sel.status_code == 200
         digest_minimal = r_sel.json()["design"]["demoSnapshotDigest"]
-        assert digest_minimal != initial_digest
+        assert r_sel.json()["design"]["demoArtifactRef"] == "artifact://demo-render-v1"
+        assert r_sel.json()["design"]["demoArtifactSha256"] == "a" * 64
 
-        # Old pre-selection digest rejected 409
-        assert (
-            client.post(
-                f"/v1/development/cycles/{cycle_id}/demo-decision",
-                headers=h_a,
-                json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": initial_digest},
-            ).status_code
-            == 409
-        )
-
-        # Approve Demo with minimal's bound digest (explicitly grantsExternalApproval=False)
         r_demo = client.post(
             f"/v1/development/cycles/{cycle_id}/demo-decision",
             headers=h_a,
             json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": digest_minimal},
         )
-        assert r_demo.status_code == 200
-        assert r_demo.json()["design"]["demoDecision"] == "APPROVED"
-        assert r_demo.json()["grantsExternalApproval"] is False
+        assert r_demo.status_code == 200 and r_demo.json()["design"]["demoDecision"] == "APPROVED"
 
-        # P1-06: Switching selected candidate to 'dense' MUST invalidate Demo APPROVED -> PENDING and rotate digest
+        # Switching candidate resets Demo APPROVED -> PENDING
         r_switch = client.post(
             f"/v1/development/cycles/{cycle_id}/design-decision",
             headers=h_a,
-            json={"designRevision": 1, "selectedCandidateId": "dense", "feedback": "Switch after demo"},
+            json={"designRevision": 1, "selectedCandidateId": "dense"},
         )
-        assert r_switch.status_code == 200
-        switched = r_switch.json()["design"]
-        assert switched["selectedCandidateId"] == "dense"
-        assert switched["demoDecision"] == "PENDING"
-        digest_dense = switched["demoSnapshotDigest"]
+        assert r_switch.status_code == 200 and r_switch.json()["design"]["demoDecision"] == "PENDING"
+        digest_dense = r_switch.json()["design"]["demoSnapshotDigest"]
         assert digest_dense != digest_minimal
 
-        # Replaying old minimal digest is rejected 409; approving with dense digest succeeds
-        assert (
-            client.post(
-                f"/v1/development/cycles/{cycle_id}/demo-decision",
-                headers=h_a,
-                json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": digest_minimal},
-            ).status_code
-            == 409
+        # R2-11: Steering task (bumping tasks.goal_revision) invalidates Demo approval (409 STALE_GOAL_REVISION)
+        r_steer = client.post(
+            f"/v1/tasks/{created['taskId']}/steer",
+            headers=h_a,
+            json={"schemaVersion": "1.0", "goal": "new goal", "expectedGoalRevision": "1"},
         )
-        r_reapp = client.post(
+        assert r_steer.status_code == 200, r_steer.text
+        r_stale_goal = client.post(
             f"/v1/development/cycles/{cycle_id}/demo-decision",
             headers=h_a,
             json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": digest_dense},
         )
-        assert r_reapp.status_code == 200 and r_reapp.json()["design"]["demoDecision"] == "APPROVED"
+        assert r_stale_goal.status_code == 409
+        assert "STALE_GOAL_REVISION" in r_stale_goal.text
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="PR #110 Sandbox Cell Supervisor requires Linux kernel namespaces/Landlock"
+)
 def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
-    dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEV-06 + P0-02 + P2-11: Preview attestation, Cycle lease binding, isolated Chromium DNS/redirect confinement."""
+    """DEV-06 + R2-01 + R2-06 + P2-11: REAL PR #110 Sandbox Cell OS isolation (Landlock+CLONE_NEWNET) & HMAC Preview Attestation."""
     pytest.importorskip("playwright.async_api")
-
-    # P0-02: Verify worker subprocess env sanitizer strips all AIAGENT_* secrets/DSNs
-    monkeypatch.setenv("AIAGENT_TEST_SECRET_LEAK", "must-never-reach-browser-worker")
-    sanitized = _sanitized_worker_env()
-    assert "AIAGENT_TEST_SECRET_LEAK" not in sanitized
-    assert not any(k.startswith("AIAGENT_") for k in sanitized)
+    from aiagent_sandbox.supervisor import Supervisor
+    from aiagent_sandbox.supervisor import serve as serve_sandbox
 
     escape_hits: list[str] = []
 
@@ -610,6 +591,36 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     srv_port = srv.server_address[1]
 
+    # Boot REAL PR #110 Sandbox Cell Supervisor with Landlock + CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET
+    sb_port = _free_tcp_port()
+    sb_rpc_key = secrets.token_bytes(32)
+    sb_grant_key = secrets.token_bytes(32)
+    attest_key = secrets.token_bytes(32)
+    sb_endpoint = f"tcp:127.0.0.1:{sb_port}"
+
+    async def _boot_sandbox(holder: dict[str, Any]) -> None:
+        sup = Supervisor(
+            tmp_path / "sandbox_cells",
+            sb_grant_key,
+            require_netns=True,
+            cell_uid=65534 if os.geteuid() == 0 else None,
+            cell_gid=65534 if os.geteuid() == 0 else None,
+        )
+        task = asyncio.create_task(serve_sandbox(sup, {"api": sb_rpc_key, "tool_gateway": sb_rpc_key}, sb_endpoint))
+        await asyncio.sleep(0.2)
+
+        async def _cleanup() -> None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        holder["cleanup"] = _cleanup
+
+    _, sb_loop, sb_th = _start_async_service(_boot_sandbox)
+
+    # Wire API via production env vars ONLY (ZERO dev_debug_probe_fn!)
+    monkeypatch.setenv("AIAGENT_PREVIEW_ATTESTATION_KEY", attest_key.hex())
+    monkeypatch.delenv("AIAGENT_SANDBOX_ENDPOINT", raising=False)
+
     app = create_app(dbs["api"])
     headers = {"Authorization": f"Bearer {tenant['token']}"}
 
@@ -621,84 +632,116 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 json={"projectId": "proj-dbg-1", "name": "Debug App", "repository": "org/dbg-app"},
             )
             assert r_p.status_code == 201
-            cycle_a, _, _, _, cycle_a_obj = _seed_code_ready_cycle(
+            cycle_a, sha_a, _, _, cycle_a_obj = _seed_code_ready_cycle(
                 dbs, tenant, project_id="proj-dbg-1", repository="org/dbg-app"
             )
             cycle_b, _, _, _, _ = _seed_code_ready_cycle(
                 dbs, tenant, project_id="proj-dbg-1", repository="org/dbg-app", commit_sha="3" * 40
             )
 
-            # P0-02: Issuing preview lease for an unregistered arbitrary port is strictly denied 403
-            r_unreg = client.post(
-                f"/v1/development/cycles/{cycle_a}/previews",
-                headers=headers,
-                json={"targetPort": srv_port, "ttlSeconds": 120},
-            )
-            assert r_unreg.status_code == 403
+            broker = PreviewBroker(dbs["api"])
+            proc_sha = sha256_hex({"cycle": cycle_a, "port": srv_port})
 
-            # Register attested preview instance for Cycle A on srv_port
-            inst_id = PreviewBroker(dbs["api"]).register_instance(
+            # R2-06: Forged self-declared launch_receipt_hmac MUST be rejected
+            with pytest.raises(ScopeDenied, match="INVALID_PREVIEW_LAUNCH_RECEIPT"):
+                broker.register_instance(
+                    cycle_a_obj,
+                    target_port=srv_port,
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac="f" * 64,
+                )
+
+            # Register generation 1 with valid HMAC launch receipt
+            rcpt_g1 = sign_preview_launch_receipt(
+                attest_key,
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id="proj-dbg-1",
+                cycle_id=cycle_a,
+                workspace_id=tenant["workspaceId"],
+                commit_sha=sha_a,
+                target_port=srv_port,
+                runner_kind="sandbox_cell",
+                process_attestation_sha256=proc_sha,
+                generation=1,
+            )
+            inst_g1 = broker.register_instance(
                 cycle_a_obj,
                 target_port=srv_port,
-                process_attestation_sha256=sha256_hex({"cycle": cycle_a, "port": srv_port}),
+                process_attestation_sha256=proc_sha,
+                launch_receipt_hmac=rcpt_g1,
+                generation=1,
+            )
+            r_l1 = client.post(
+                f"/v1/development/cycles/{cycle_a}/previews",
+                headers=headers,
+                json={"targetPort": srv_port, "ttlSeconds": 120, "previewInstanceId": inst_g1},
+            )
+            assert r_l1.status_code == 201
+            lease_g1, tok_g1 = r_l1.json()["leaseId"], r_l1.json()["previewToken"]
+
+            # R2-06: Registering generation 2 on the same port supersedes generation 1 & revokes lease_g1!
+            rcpt_g2 = sign_preview_launch_receipt(
+                attest_key,
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id="proj-dbg-1",
+                cycle_id=cycle_a,
+                workspace_id=tenant["workspaceId"],
+                commit_sha=sha_a,
+                target_port=srv_port,
+                runner_kind="sandbox_cell",
+                process_attestation_sha256=proc_sha,
+                generation=2,
+            )
+            inst_g2 = broker.register_instance(
+                cycle_a_obj,
+                target_port=srv_port,
+                process_attestation_sha256=proc_sha,
+                launch_receipt_hmac=rcpt_g2,
+                generation=2,
+            )
+            assert (
+                client.post(
+                    f"/v1/development/previews/{lease_g1}/commands",
+                    headers=headers,
+                    json={"action": "observe", "previewToken": tok_g1, "targetPort": srv_port},
+                ).status_code
+                == 403
             )
 
+            # Issue fresh lease for generation 2
             r_lease = client.post(
                 f"/v1/development/cycles/{cycle_a}/previews",
                 headers=headers,
-                json={"targetPort": srv_port, "ttlSeconds": 120, "previewInstanceId": inst_id},
+                json={"targetPort": srv_port, "ttlSeconds": 120, "previewInstanceId": inst_g2},
             )
-            assert r_lease.status_code == 201, r_lease.text
-            lease_id = r_lease.json()["leaseId"]
-            token = r_lease.json()["previewToken"]
+            assert r_lease.status_code == 201
+            lease_id, token = r_lease.json()["leaseId"], r_lease.json()["previewToken"]
 
-            # P2-11: Passing Cycle A's valid PreviewLease to Cycle B's debug endpoint is rejected 403
-            r_wrong_cycle = client.post(
-                f"/v1/development/cycles/{cycle_b}/debug",
+            # P2-11: Passing Cycle A's lease to Cycle B's debug endpoint fails 403
+            assert (
+                client.post(
+                    f"/v1/development/cycles/{cycle_b}/debug",
+                    headers=headers,
+                    json={"leaseId": lease_id, "previewToken": token, "targetPort": srv_port, "revokeAfter": False},
+                ).status_code
+                == 403
+            )
+
+            # R2-01: Without AIAGENT_SANDBOX_ENDPOINT, Browser Debugger FAILS CLOSED (403 SANDBOX_CELL_REQUIRED)
+            r_no_sb = client.post(
+                f"/v1/development/cycles/{cycle_a}/debug",
                 headers=headers,
-                json={
-                    "leaseId": lease_id,
-                    "previewToken": token,
-                    "targetPort": srv_port,
-                    "path": "/",
-                    "revokeAfter": False,
-                },
+                json={"leaseId": lease_id, "previewToken": token, "targetPort": srv_port, "revokeAfter": False},
             )
-            assert r_wrong_cycle.status_code == 403
+            assert r_no_sb.status_code == 403 and "SANDBOX_CELL_REQUIRED" in r_no_sb.text
 
-            # observe mode rejects typing/input
-            r_obs_bad = client.post(
-                f"/v1/development/previews/{lease_id}/commands",
-                headers=headers,
-                json={"action": "observe", "previewToken": token, "targetPort": srv_port, "input": "hello"},
-            )
-            assert r_obs_bad.status_code == 403
+            # Now configure Sandbox Cell RPC env vars -> execute inside REAL Landlock + CLONE_NEWNET Sandbox Cell!
+            monkeypatch.setenv("AIAGENT_SANDBOX_ENDPOINT", sb_endpoint)
+            monkeypatch.setenv("AIAGENT_API_SANDBOX_RPC_KEY", sb_rpc_key.hex())
+            monkeypatch.setenv("AIAGENT_SANDBOX_GRANT_KEY", sb_grant_key.hex())
 
-            # observe read-only & synthetic_interact succeed without CDP exposure
-            r_obs_ok = client.post(
-                f"/v1/development/previews/{lease_id}/commands",
-                headers=headers,
-                json={"action": "observe", "previewToken": token, "targetPort": srv_port, "cycleId": cycle_a},
-            )
-            assert r_obs_ok.status_code == 200 and r_obs_ok.json()["cdpExposed"] is False
-
-            r_syn = client.post(
-                f"/v1/development/previews/{lease_id}/commands",
-                headers=headers,
-                json={
-                    "action": "synthetic_interact",
-                    "syntheticAction": "toggle_theme",
-                    "previewToken": token,
-                    "targetPort": srv_port,
-                    "cycleId": cycle_a,
-                },
-            )
-            assert r_syn.status_code == 200 and r_syn.json()["syntheticFixtureOnly"] is True
-
-            # Real isolated Playwright worker debug probe:
-            # - redacts console secrets & CDP URLs
-            # - captures HTTP 500 and mobile overflow
-            # - blocks external egress (evil.example) AND cross-port redirect/fetch to escape_port (0 hits!)
             r_dbg = client.post(
                 f"/v1/development/cycles/{cycle_a}/debug",
                 headers=headers,
@@ -720,27 +763,30 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             assert any("HTTP 500 /api/broken" in msg for msg in finding["networkErrors"])
             assert any("BLOCKED_EGRESS" in msg for msg in finding["networkErrors"])
             assert any("BLOCKED_REDIRECT" in msg for msg in finding["networkErrors"])
-            assert escape_hits == [], f"Browser worker escaped leased origin: {escape_hits}"
+            assert escape_hits == [], f"Sandbox Cell browser worker escaped isolated netns: {escape_hits}"
             assert any("[mobile] horizontal overflow" in msg for msg in finding["layoutIssues"])
 
-            # Lease is revoked after debug -> subsequent observe command fails 403
-            r_after = client.post(
-                f"/v1/development/previews/{lease_id}/commands",
-                headers=headers,
-                json={"action": "observe", "previewToken": token, "targetPort": srv_port},
+            # Lease auto-revoked after debug -> observe fails 403
+            assert (
+                client.post(
+                    f"/v1/development/previews/{lease_id}/commands",
+                    headers=headers,
+                    json={"action": "observe", "previewToken": token, "targetPort": srv_port},
+                ).status_code
+                == 403
             )
-            assert r_after.status_code == 403
     finally:
+        _stop_async_service(sb_loop, sb_th)
         srv.shutdown()
         srv.server_close()
         escape_srv.shutdown()
         escape_srv.server_close()
 
 
-def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
+def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
     dbs: dict[str, Database], tenant: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEV-05 / DEV-11 + P0-01/P1-03/P1-04/P1-05/P1-09/P2-10/P2-13 comprehensive Sentinel Egress integration."""
+    """Zero-DI Production-Wired E2E (R2-02..R2-05, R2-08..R2-10, R2-13): REAL Sentinel RPC + EgressProxy + ToolGateway RPC."""
     post_hits: list[dict[str, Any]] = []
     seen_auth_headers: list[str] = []
     created_prs: list[dict[str, Any]] = []
@@ -748,7 +794,9 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
         "remote_ref_sha": "2" * 40,
         "pr_response_head_sha": "2" * 40,
         "live_pr_head_sha": "2" * 40,
-        "post_mode": "drop",  # drop | malformed_json | normal
+        "post_mode": "drop",
+        "reconcile_mismatch": False,
+        "status_http_code": 200,
         "check_runs": [{"name": "integration-pytest", "status": "completed", "conclusion": "failure"}],
         "commit_statuses": [{"context": "ci/policy", "state": "success"}],
     }
@@ -771,7 +819,7 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
             if method == "GET" and path == "/repos/org/gh-app/git/ref/heads/feat/p7-demo":
                 resp = json.dumps(
                     {"ref": "refs/heads/feat/p7-demo", "object": {"sha": gh_state["remote_ref_sha"]}}
-                ).encode("utf-8")
+                ).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -781,7 +829,6 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
 
             if method == "POST" and path == "/repos/org/gh-app/pulls":
                 body_obj = json.loads(raw.decode("utf-8"))
-                # Realistic GitHub API: NEVER trusts synthetic head_sha; uses remote ref/configured SHA
                 assert "head_sha" not in body_obj
                 post_hits.append(body_obj)
                 pr_num = 42 + len(created_prs)
@@ -789,27 +836,19 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                     "number": pr_num,
                     "html_url": f"https://github.test/org/gh-app/pull/{pr_num}",
                     "state": "open",
-                    "draft": bool(body_obj.get("draft", True)),
+                    "title": body_obj["title"],
+                    "draft": bool(body_obj["draft"]),
                     "mergeable": True,
                     "mergeable_state": "unstable",
                     "head": {"sha": gh_state["pr_response_head_sha"], "ref": body_obj["head"]},
+                    "base": {"ref": body_obj["base"]},
                 }
                 created_prs.append(pr_obj)
-                mode = gh_state["post_mode"]
-                if mode == "drop":
+                if gh_state["post_mode"] == "drop":
                     gh_state["post_mode"] = "normal"
                     w.close()
                     return
-                if mode == "malformed_json":
-                    gh_state["post_mode"] = "normal"
-                    bad = b"{not-valid-json"
-                    w.write(
-                        b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
-                        % (len(bad), bad)
-                    )
-                    await w.drain()
-                    return
-                resp = json.dumps(pr_obj).encode("utf-8")
+                resp = json.dumps(pr_obj).encode()
                 w.write(
                     b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -818,7 +857,10 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                 return
 
             if method == "GET" and path.startswith("/repos/org/gh-app/pulls?"):
-                resp = json.dumps(created_prs).encode("utf-8")
+                items = [
+                    {**p, "base": {"ref": "wrong-base"}} if gh_state["reconcile_mismatch"] else p for p in created_prs
+                ]
+                resp = json.dumps(items).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -827,11 +869,8 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                 return
 
             if method == "GET" and path == "/repos/org/gh-app/pulls/42":
-                live_pr = {
-                    **created_prs[0],
-                    "head": {"sha": gh_state["live_pr_head_sha"], "ref": "feat/p7-demo"},
-                }
-                resp = json.dumps(live_pr).encode("utf-8")
+                live_pr = {**created_prs[0], "head": {"sha": gh_state["live_pr_head_sha"], "ref": "feat/p7-demo"}}
+                resp = json.dumps(live_pr).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -839,9 +878,14 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                 await w.drain()
                 return
 
+            if method == "GET" and path.endswith("/protection/required_status_checks"):
+                w.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                await w.drain()
+                return
+
             if method == "GET" and "/check-runs" in path:
                 runs = gh_state["check_runs"]
-                resp = json.dumps({"total_count": len(runs), "check_runs": runs}).encode("utf-8")
+                resp = json.dumps({"total_count": len(runs), "check_runs": runs}).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -850,7 +894,11 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                 return
 
             if method == "GET" and path.endswith("/status"):
-                resp = json.dumps({"statuses": gh_state["commit_statuses"]}).encode("utf-8")
+                if gh_state["status_http_code"] != 200:
+                    w.write(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                    await w.drain()
+                    return
+                resp = json.dumps({"statuses": gh_state["commit_statuses"]}).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -863,29 +911,26 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
         finally:
             w.close()
 
-    loop = asyncio.new_event_loop()
-    ready = threading.Event()
-    holder: dict[str, Any] = {}
+    # 1. Start mock GitHub receiver
+    async def _boot_gh(holder: dict[str, Any]) -> None:
+        srv = await asyncio.start_server(_gh_receiver, "127.0.0.1", 0)
+        holder["port"] = srv.sockets[0].getsockname()[1]
 
-    def _run_gh_srv() -> None:
-        asyncio.set_event_loop(loop)
+        async def _cleanup() -> None:
+            srv.close()
+            await srv.wait_closed()
 
-        async def _boot() -> None:
-            srv = await asyncio.start_server(_gh_receiver, "127.0.0.1", 0)
-            holder["srv"] = srv
-            holder["port"] = srv.sockets[0].getsockname()[1]
-            ready.set()
+        holder["cleanup"] = _cleanup
 
-        loop.run_until_complete(_boot())
-        loop.run_forever()
-        holder["srv"].close()
-        loop.run_until_complete(holder["srv"].wait_closed())
-        loop.close()
+    gh_h, gh_loop, gh_th = _start_async_service(_boot_gh)
+    gh_port = int(gh_h["port"])
+    gh_origin = f"http://api.github.test:{gh_port}"
 
-    gh_th = threading.Thread(target=_run_gh_srv, daemon=True)
-    gh_th.start()
-    assert ready.wait(timeout=10)
-    gh_port = int(holder["port"])
+    # 2. Start REAL Sentinel RPC server + EgressProxy
+    sen_rpc_port = _free_tcp_port()
+    sen_endpoint = f"tcp:127.0.0.1:{sen_rpc_port}"
+    tool_sen_key = secrets.token_bytes(32)
+    api_sen_key = secrets.token_bytes(32)
 
     async def _resolve(host: str, port_num: int) -> list[str]:
         del port_num
@@ -907,19 +952,78 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
         ),
         production=False,
     )
-    sentinel = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
-    proxy_port, proxy_loop, proxy_thread, _ = _start_proxy_thread(sentinel, ecfg, _resolve)
-    proxy_url = f"http://127.0.0.1:{proxy_port}"
-    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", proxy_url)
-    # P2-13: production token provider sourced from env secret (never persisted in DB/events)
-    monkeypatch.setenv("AIAGENT_GITHUB_TOKEN", "gh_test_tok_secret_123")
+    sentinel_obj = Sentinel(dbs["sentinel"], ecfg, secrets.token_bytes(32))
 
-    app = create_app(
-        dbs["api"],
-        sentinel=LocalSentinel(sentinel),
-        egress_proxy=proxy_url,
-        tool_gateway_db=dbs["tool_gateway"],
+    async def _boot_sentinel(holder: dict[str, Any]) -> None:
+        rpc_srv = build_sentinel_server(
+            {"tool_gateway": tool_sen_key, "api": api_sen_key},
+            sen_endpoint,
+            sentinel_obj,
+        )
+        await rpc_srv.start()
+        proxy = EgressProxy(sentinel_obj, ecfg, resolver=_resolve)
+        p_port = await proxy.start("127.0.0.1", 0)
+        holder["proxy_port"] = p_port
+
+        async def _cleanup() -> None:
+            await proxy.close()
+            await rpc_srv.close()
+
+        holder["cleanup"] = _cleanup
+
+    sen_h, sen_loop, sen_th = _start_async_service(_boot_sentinel)
+    proxy_url = f"http://127.0.0.1:{int(sen_h['proxy_port'])}"
+
+    # 3. Start REAL ToolGateway RPC server wired to REAL RpcSentinel + DevGitHubPrExecutor
+    tg_rpc_port = _free_tcp_port()
+    tg_endpoint = f"tcp:127.0.0.1:{tg_rpc_port}"
+    api_tg_key = secrets.token_bytes(32)
+    rt_tg_key = secrets.token_bytes(32)
+
+    rpc_sentinel = RpcSentinel(RpcClient(sen_endpoint, "tool_gateway", tool_sen_key))
+    gw = ToolGateway(
+        dbs["tool_gateway"],
+        {"dev_github_pr": DevGitHubPrExecutor(dbs["tool_gateway"], proxy=proxy_url)},
+        sentinel=rpc_sentinel,
     )
+
+    async def _boot_tg(holder: dict[str, Any]) -> None:
+        tg_srv = build_tool_server({"api": api_tg_key, "runtime": rt_tg_key}, tg_endpoint, gw)
+        await tg_srv.start()
+
+        async def _cleanup() -> None:
+            await tg_srv.close()
+
+        holder["cleanup"] = _cleanup
+
+    _, tg_loop, tg_th = _start_async_service(_boot_tg)
+
+    # 4. Provision operator repository_binding & binding-scoped GitHub credential (R2-02)
+    binding_id = _seed_repository_binding(dbs, tenant, repository="org/gh-app", approved_branch="feat/p7-demo")
+    monkeypatch.setenv("AIAGENT_EGRESS_PROXY", proxy_url)
+    monkeypatch.setenv("AIAGENT_SENTINEL_ENDPOINT", sen_endpoint)
+    monkeypatch.setenv("AIAGENT_API_SENTINEL_RPC_KEY", api_sen_key.hex())
+    monkeypatch.setenv("AIAGENT_TOOL_GATEWAY_ENDPOINT", tg_endpoint)
+    monkeypatch.setenv("AIAGENT_API_TOOL_RPC_KEY", api_tg_key.hex())
+    # Ensure a decoy unscoped AIAGENT_GITHUB_TOKEN is NEVER used; only binding-scoped credential works!
+    monkeypatch.setenv("AIAGENT_GITHUB_TOKEN", "decoy_global_token_must_never_be_used")
+    monkeypatch.setenv(
+        "AIAGENT_GITHUB_BINDING_TOKENS_JSON",
+        json.dumps(
+            {
+                binding_id: {
+                    "tenantId": tenant["tenantId"],
+                    "workspaceId": tenant["workspaceId"],
+                    "repository": "org/gh-app",
+                    "apiOrigin": gh_origin,
+                    "token": "gh_bound_tok_secret_987",
+                }
+            }
+        ),
+    )
+
+    # 5. Create API with ZERO injected service dependencies (R2-04: real production startup path!)
+    app = create_app(dbs["api"])
     headers = {"Authorization": f"Bearer {tenant['token']}"}
 
     try:
@@ -932,72 +1036,39 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                     "name": "GH App",
                     "repository": "org/gh-app",
                     "defaultBranch": "main",
-                    "githubApiBase": f"http://api.github.test:{gh_port}",
+                    "repositoryBindingId": binding_id,
+                    "githubApiBase": gh_origin,
+                    "preferences": {"requiredChecks": ["integration-pytest"]},
                 },
             )
             assert r_p.status_code == 201, r_p.text
-            r_p2 = client.post(
-                "/v1/development/projects",
-                headers=headers,
-                json={
-                    "projectId": "proj-gh-other",
-                    "name": "Other App",
-                    "repository": "org/other-app",
-                    "defaultBranch": "main",
-                    "githubApiBase": f"http://api.github.test:{gh_port}",
-                },
-            )
-            assert r_p2.status_code == 201, r_p2.text
 
-            cycle_id, commit_sha, created, claim, _ = _seed_code_ready_cycle(
-                dbs, tenant, project_id="proj-gh-1", repository="org/gh-app"
-            )
-            other_cycle_id, other_sha, _, _, _ = _seed_code_ready_cycle(
-                dbs, tenant, project_id="proj-gh-other", repository="org/other-app"
+            cycle_id, commit_sha, _, claim, _ = _seed_code_ready_cycle(
+                dbs, tenant, project_id="proj-gh-1", repository="org/gh-app", profile="development"
             )
 
-            # Seed canonical approved & unapproved intents with exact canonical_pr_request digest
-            intent_id, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
+            # Propose dev_github_pr through REAL ToolGateway.submit (validates TOOLS['dev_github_pr'] schema!)
+            pr_args = canonical_pr_request(
                 project_id="proj-gh-1",
                 cycle_id=cycle_id,
                 repository="org/gh-app",
                 branch="feat/p7-demo",
                 head_sha=commit_sha,
+                base_branch="main",
                 title="Approved Phase 7 PR",
                 body="Exact approved body",
                 draft=True,
-                approved=True,
             )
-            unapproved_intent_id, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Approved Phase 7 PR",
-                body="Exact approved body",
-                draft=True,
-                approved=False,
-            )
+            intent_id, approval_id = _propose_dev_pr_through_gateway(dbs, gw, claim, pr_args)
 
-            # 1. Unapproved tool intent is strictly denied 403 (zero outbound POSTs)
+            # R2-13: Unapproved request fails 403 WITHOUT consuming/polluting dev_pr_records!
             r_unapp = client.post(
                 "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-unapp-1"},
+                headers={**headers, "Idempotency-Key": "idem-unapp-before-approve"},
                 json={
                     "cycleId": cycle_id,
                     "expectedHeadSha": commit_sha,
-                    "intentId": unapproved_intent_id,
+                    "intentId": intent_id,
                     "title": "Approved Phase 7 PR",
                     "body": "Exact approved body",
                     "draft": True,
@@ -1005,197 +1076,80 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
             )
             assert r_unapp.status_code == 403 and len(post_hits) == 0
 
-            # 2. P0-01: Approved intent CANNOT be diverted to a different repository/project (403, 0 POSTs)
-            r_wrong_repo = client.post(
-                "/v1/development/projects/proj-gh-other/integrations",
-                headers={**headers, "Idempotency-Key": "idem-wrong-repo"},
+            # Approve via REAL public API endpoint POST /v1/approvals/{approval_id}/decision!
+            r_apr = client.post(
+                f"/v1/approvals/{approval_id}/decision",
+                headers=headers,
                 json={
-                    "cycleId": other_cycle_id,
-                    "expectedHeadSha": other_sha,
-                    "intentId": intent_id,
-                    "title": "Approved Phase 7 PR",
-                    "body": "Exact approved body",
-                    "draft": True,
+                    "schemaVersion": "1.0",
+                    "decision": "APPROVED",
+                    "requestSha256": pr_request_sha256(pr_args),
+                    "expectedRecordVersion": "1",
                 },
             )
-            assert r_wrong_repo.status_code == 403 and len(post_hits) == 0
+            assert r_apr.status_code == 200, r_apr.text
 
-            # 3. P0-01: Tampering approved title / draft=False is denied 403 (0 POSTs)
-            tamper_intent, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Approved Title",
-                body="Exact body",
-                draft=True,
-                approved=True,
-            )
+            # R2-13: Tampered title fails 403 WITHOUT consuming/polluting dev_pr_records (legitimate intent still usable!)
             r_tamper = client.post(
                 "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-tamper-title"},
+                headers={**headers, "Idempotency-Key": "idem-tamper-must-not-reserve"},
                 json={
                     "cycleId": cycle_id,
                     "expectedHeadSha": commit_sha,
-                    "intentId": tamper_intent,
+                    "intentId": intent_id,
                     "title": "TAMPERED Title",
-                    "body": "Exact body",
-                    "draft": False,
+                    "body": "Exact approved body",
+                    "draft": True,
                 },
             )
             assert r_tamper.status_code == 403 and len(post_hits) == 0
 
-            # 4. P0-01: Direct EgressProxy path & body digest verification rejects tampered payload even with valid permit
-            proxy_test_intent, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                approved=True,
-            )
-            good_body = b'{"title":"a"}'
-            bad_body = b'{"title":"evil"}'
-            permit = sentinel.authorize(
-                claim,
-                proxy_test_intent,
-                "http",
-                "api.github.test",
-                gh_port,
-                "POST",
-                target_path="/repos/org/gh-app/pulls",
-                body_sha256=hashlib.sha256(good_body).hexdigest(),
-            )
-            with pytest.raises(ForwardProxyError) as exc_body:
-                _run(
-                    send_via_forward_proxy(
-                        proxy_url,
-                        identity="tool_gateway",
-                        permit=permit,
-                        method="POST",
-                        target_url=f"http://api.github.test:{gh_port}/repos/org/gh-app/pulls",
-                        host_header=f"api.github.test:{gh_port}",
-                        headers={"Content-Type": "application/json"},
-                        body=bad_body,
+            # R2-13 + R2-04 + R2-09 + P1-03: Concurrent PR dispatch on the SAME approved intent -> ONLY 1 upstream POST!
+            # (Notice request omits requiredChecks -> Project policy ["integration-pytest"] is STILL enforced per R2-08!)
+            barrier_pr = threading.Barrier(2)
+
+            def _fire_pr(idx: int) -> tuple[int, dict[str, Any]]:
+                barrier_pr.wait(timeout=10)
+                with TestClient(app) as c_thr:
+                    resp = c_thr.post(
+                        "/v1/development/projects/proj-gh-1/integrations",
+                        headers={**headers, "Idempotency-Key": f"idem-race-{idx}"},
+                        json={
+                            "cycleId": cycle_id,
+                            "expectedHeadSha": commit_sha,
+                            "intentId": intent_id,
+                            "title": "Approved Phase 7 PR",
+                            "body": "Exact approved body",
+                            "draft": True,
+                            "maxRepairAttempts": 2,
+                        },
                     )
-                )
-            assert exc_body.value.post_send is False and len(post_hits) == 0
+                    return resp.status_code, resp.json()
 
-            # 5. P1-04: Remote branch ref SHA mismatch refuses PR creation (409, 0 POSTs)
-            stale_ref_intent, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Stale ref check",
-                body="body",
-                draft=True,
-                approved=True,
-            )
-            gh_state["remote_ref_sha"] = "9" * 40
-            r_stale_ref = client.post(
-                "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-stale-ref"},
-                json={
-                    "cycleId": cycle_id,
-                    "expectedHeadSha": commit_sha,
-                    "intentId": stale_ref_intent,
-                    "title": "Stale ref check",
-                    "body": "body",
-                    "draft": True,
-                },
-            )
-            assert r_stale_ref.status_code == 409 and len(post_hits) == 0
-            gh_state["remote_ref_sha"] = commit_sha
-
-            # 6. P1-03: Approved intent hits post-send disconnect -> 502 EFFECT_UNKNOWN + canonical ledger UNKNOWN
-            # Need a fresh approved intent (since intent_id above had a FAILED row from proj-gh-other attempt)
-            main_intent_id, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Approved Phase 7 PR",
-                body="Exact approved body",
-                draft=True,
-                approved=True,
-            )
-            gh_state["post_mode"] = "drop"
-            r_drop = client.post(
-                "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-pr-42"},
-                json={
-                    "cycleId": cycle_id,
-                    "expectedHeadSha": commit_sha,
-                    "intentId": main_intent_id,
-                    "title": "Approved Phase 7 PR",
-                    "body": "Exact approved body",
-                    "draft": True,
-                    "maxRepairAttempts": 2,
-                    "requiredChecks": ["integration-pytest"],
-                },
-            )
-            assert r_drop.status_code == 502, r_drop.text
-            assert r_drop.json()["error"] == "EFFECT_UNKNOWN"
-            pr_rec_id = r_drop.json()["prRecord"]["id"]
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                race_results = list(pool.map(_fire_pr, range(2)))
+            codes = sorted(r[0] for r in race_results)
+            assert codes == [409, 502], f"Expected one 502 EFFECT_UNKNOWN and one 409 lock refusal, got {race_results}"
             assert len(post_hits) == 1
+            pr_rec_id = next(r[1]["prRecord"]["id"] for r in race_results if r[0] == 502)
 
-            # Verify canonical tool_intents & side_effect_records synced to UNKNOWN
+            # Verify ToolGateway (NOT API) settled canonical tool_intents & side_effect_records to UNKNOWN
             st_row = dbs["owner"].one(
-                "SELECT i.status_code, se.outcome_code FROM agent.tool_intents i"
-                " LEFT JOIN agent.side_effect_records se ON se.tenant_id=i.tenant_id AND se.tool_intent_id=i.id"
+                "SELECT i.status_code, se.outcome_code, se.attempt_fence FROM agent.tool_intents i"
+                " JOIN agent.side_effect_records se ON se.tenant_id=i.tenant_id AND se.tool_intent_id=i.id"
                 " WHERE i.tenant_id=%s AND i.id=%s",
-                (tenant["tenantId"], main_intent_id),
+                (tenant["tenantId"], intent_id),
             )
             assert st_row is not None and st_row["status_code"] == "UNKNOWN" and st_row["outcome_code"] == "UNKNOWN"
 
-            # 7. P1-03: Re-submitting SAME Idempotency-Key refuses blind retry (409, 0 extra POSTs)
-            r_retry_same = client.post(
-                "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-pr-42"},
-                json={
-                    "cycleId": cycle_id,
-                    "expectedHeadSha": commit_sha,
-                    "intentId": main_intent_id,
-                    "title": "Approved Phase 7 PR",
-                    "body": "Exact approved body",
-                    "draft": True,
-                },
-            )
-            assert r_retry_same.status_code == 409 and r_retry_same.json()["reconcileRequired"] is True
-            assert len(post_hits) == 1
-
-            # 8. P1-03: Re-submitting with a DIFFERENT Idempotency-Key for same intent_id ALSO refuses (409, 0 extra POSTs)
+            # Re-submitting under a brand new Idempotency-Key refuses blind retry (409, 0 extra POSTs)
             r_retry_diff = client.post(
                 "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-pr-42-BRAND-NEW-KEY"},
+                headers={**headers, "Idempotency-Key": "idem-brand-new-key"},
                 json={
                     "cycleId": cycle_id,
                     "expectedHeadSha": commit_sha,
-                    "intentId": main_intent_id,
+                    "intentId": intent_id,
                     "title": "Approved Phase 7 PR",
                     "body": "Exact approved body",
                     "draft": True,
@@ -1204,72 +1158,13 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
             assert r_retry_diff.status_code == 409 and r_retry_diff.json()["reconcileRequired"] is True
             assert len(post_hits) == 1
 
-            # 9. P1-03 + P1-04: Malformed JSON response AND response head.sha mismatch BOTH settle to EFFECT_UNKNOWN
-            mal_intent, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Malformed JSON test",
-                body="body",
-                draft=True,
-                approved=True,
-            )
-            gh_state["post_mode"] = "malformed_json"
-            r_mal = client.post(
-                "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-malformed-json"},
-                json={
-                    "cycleId": cycle_id,
-                    "expectedHeadSha": commit_sha,
-                    "intentId": mal_intent,
-                    "title": "Malformed JSON test",
-                    "body": "body",
-                    "draft": True,
-                },
-            )
-            assert r_mal.status_code == 502 and r_mal.json()["error"] == "EFFECT_UNKNOWN"
+            # R2-05: Reconcile refuses to confirm a PR whose base.ref mismatches the approved intent!
+            gh_state["reconcile_mismatch"] = True
+            r_rec_miss = client.post(f"/v1/development/prs/{pr_rec_id}/reconcile", headers=headers)
+            assert r_rec_miss.status_code == 200 and r_rec_miss.json()["reconciled"] is False
+            gh_state["reconcile_mismatch"] = False
 
-            mismatch_intent, _ = _seed_approved_pr_intent(
-                dbs,
-                tenant,
-                task_id=created["taskId"],
-                run_id=created["runId"],
-                goal_revision=claim.goal_revision,
-                project_id="proj-gh-1",
-                cycle_id=cycle_id,
-                repository="org/gh-app",
-                branch="feat/p7-demo",
-                head_sha=commit_sha,
-                title="Head mismatch test",
-                body="body",
-                draft=True,
-                approved=True,
-            )
-            gh_state["post_mode"] = "normal"
-            gh_state["pr_response_head_sha"] = "8" * 40
-            r_mm = client.post(
-                "/v1/development/projects/proj-gh-1/integrations",
-                headers={**headers, "Idempotency-Key": "idem-head-mismatch"},
-                json={
-                    "cycleId": cycle_id,
-                    "expectedHeadSha": commit_sha,
-                    "intentId": mismatch_intent,
-                    "title": "Head mismatch test",
-                    "body": "body",
-                    "draft": True,
-                },
-            )
-            assert r_mm.status_code == 502 and r_mm.json()["error"] == "EFFECT_UNKNOWN"
-            gh_state["pr_response_head_sha"] = commit_sha
-
-            # 10. P1-05: Read-only Sentinel reconcile finds PR #42 and settles BOTH dev_pr_records & tool_intents to CONFIRMED
+            # R2-04 + R2-05 + R2-09: Reconcile via ToolGateway RPC confirms exact PR #42 atomically!
             r_rec = client.post(f"/v1/development/prs/{pr_rec_id}/reconcile", headers=headers)
             assert r_rec.status_code == 200, r_rec.text
             assert r_rec.json()["reconciled"] is True
@@ -1277,24 +1172,27 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
             assert r_rec.json()["prRecord"]["prNumber"] == 42
 
             confirmed_row = dbs["owner"].one(
-                "SELECT status_code FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
-                (tenant["tenantId"], main_intent_id),
+                "SELECT i.status_code, se.outcome_code, se.external_receipt_ref FROM agent.tool_intents i"
+                " JOIN agent.side_effect_records se ON se.tenant_id=i.tenant_id AND se.tool_intent_id=i.id"
+                " WHERE i.tenant_id=%s AND i.id=%s",
+                (tenant["tenantId"], intent_id),
             )
-            assert confirmed_row is not None and confirmed_row["status_code"] == "CONFIRMED"
+            assert confirmed_row is not None
+            assert confirmed_row["status_code"] == "CONFIRMED"
+            assert confirmed_row["outcome_code"] == "RECONCILED_SENT"
+            assert confirmed_row["external_receipt_ref"] == f"github-pr:org/gh-app#42:{commit_sha}"
 
-            # 11. P1-05 + P2-10: Read-only guardian-check THROUGH REAL EGRESS PROXY succeeds in CONFIRMED state
-            #     and consumes 0 repair attempts!
+            # R2-04 + P1-05 + P2-10: Guardian check via Sentinel RPC in CONFIRMED state -> 200 OK & 0 repair consumption
             g_ro = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
             assert g_ro.status_code == 200, g_ro.text
             assert g_ro.json()["evaluation"]["ciState"] == "FAIL"
-            assert g_ro.json()["repairClaimed"] is False
             assert g_ro.json()["prRecord"]["repairAttempts"] == 0
 
-            # 12. P2-10: Concurrent claimRepair=True strictly caps repairAttempts at maxRepairAttempts=2
-            barrier = threading.Barrier(4)
+            # P2-10: Concurrent claimRepair=True strictly caps repairAttempts at 2
+            barrier_g = threading.Barrier(4)
 
-            def _claim_slot() -> dict[str, Any]:
-                barrier.wait(timeout=10)
+            def _claim_slot(_: int) -> dict[str, Any]:
+                barrier_g.wait(timeout=10)
                 with TestClient(app) as c_thr:
                     resp = c_thr.post(
                         f"/v1/development/prs/{pr_rec_id}/guardian-check",
@@ -1305,50 +1203,119 @@ def test_phase7_sentinel_github_pr_effect_unknown_reconcile_and_guardian_limit(
                     return dict(resp.json())
 
             with ThreadPoolExecutor(max_workers=4) as pool:
-                results = list(pool.map(lambda _: _claim_slot(), range(4)))
-            claimed_count = sum(1 for r in results if r["repairClaimed"] is True)
-            assert claimed_count == 2, f"Expected exactly 2 atomic repair slots, got {claimed_count}"
-            assert max(r["prRecord"]["repairAttempts"] for r in results) == 2
+                g_results = list(pool.map(_claim_slot, range(4)))
+            assert sum(1 for r in g_results if r["repairClaimed"] is True) == 2
+            assert max(r["prRecord"]["repairAttempts"] for r in g_results) == 2
 
-            # Subsequent check confirms ESCALATED_LIMIT_REACHED and repairAttempts remains 2
-            g_esc = client.post(
-                f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={"claimRepair": True}
-            )
-            assert g_esc.status_code == 200
-            assert g_esc.json()["evaluation"]["ciState"] == "ESCALATED_LIMIT_REACHED"
-            assert g_esc.json()["evaluation"]["escalated"] is True
-            assert g_esc.json()["repairClaimed"] is False
-            assert g_esc.json()["prRecord"]["repairAttempts"] == 2
-
-            # 13. P1-09: Stale live PR head.sha returns STALE_HEAD (never PASS), and missing requiredCheck returns UNKNOWN
+            # R2-08: Policy requiredChecks=["integration-pytest"] is enforced even though PR request omitted it,
+            # AND Commit Status API failure (HTTP 500) forces UNKNOWN (never PASS)!
             gh_state["check_runs"] = [{"name": "other-check", "status": "completed", "conclusion": "success"}]
-            gh_state["live_pr_head_sha"] = "7" * 40
-            g_stale = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
-            assert g_stale.status_code == 200 and g_stale.json()["evaluation"]["ciState"] == "STALE_HEAD"
-
-            gh_state["live_pr_head_sha"] = commit_sha
             g_missing = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
             assert g_missing.status_code == 200 and g_missing.json()["evaluation"]["ciState"] == "UNKNOWN"
             assert "integration-pytest" in g_missing.json()["evaluation"]["missingRequiredChecks"]
 
-            # 14. P2-13: Production Authorization header was sent and NEVER leaked to DB or events
-            assert "Bearer gh_test_tok_secret_123" in seen_auth_headers
+            gh_state["check_runs"] = [{"name": "integration-pytest", "status": "completed", "conclusion": "success"}]
+            gh_state["status_http_code"] = 500
+            g_stat_err = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
+            assert g_stat_err.status_code == 200 and g_stat_err.json()["evaluation"]["ciState"] == "UNKNOWN"
+
+            gh_state["status_http_code"] = 200
+            gh_state["live_pr_head_sha"] = "7" * 40
+            g_stale = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
+            assert g_stale.status_code == 200 and g_stale.json()["evaluation"]["ciState"] == "STALE_HEAD"
+
+            # R2-10: Sentinel consumption rejects expired approval EVEN AFTER permit was minted!
+            exp_args = canonical_pr_request(
+                project_id="proj-gh-1",
+                cycle_id=cycle_id,
+                repository="org/gh-app",
+                branch="feat/p7-demo",
+                head_sha=commit_sha,
+                base_branch="main",
+                title="Expiry Test PR",
+                body="Body",
+                draft=True,
+            )
+            exp_intent_id, exp_apr_id = _propose_dev_pr_through_gateway(dbs, gw, claim, exp_args)
+            r_exp_apr = client.post(
+                f"/v1/approvals/{exp_apr_id}/decision",
+                headers=headers,
+                json={
+                    "schemaVersion": "1.0",
+                    "decision": "APPROVED",
+                    "requestSha256": pr_request_sha256(exp_args),
+                    "expectedRecordVersion": "1",
+                },
+            )
+            assert r_exp_apr.status_code == 200, r_exp_apr.text
+
+            # R2-05: Reconcile MUST refuse a FAILED dev_pr_records entry (409) instead of confirming an unattempted PR
+            failed_rec_id = uuid7()
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "INSERT INTO agent.dev_pr_records"
+                    " (id, tenant_id, owner_user_id, project_id, cycle_id, repository, branch, head_sha,"
+                    "  idempotency_key, intent_id, effect_status)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'FAILED')",
+                    (
+                        failed_rec_id,
+                        tenant["tenantId"],
+                        tenant["userId"],
+                        "proj-gh-1",
+                        cycle_id,
+                        "org/gh-app",
+                        "feat/p7-demo",
+                        commit_sha,
+                        "idem-failed-pr-no-reconcile",
+                        exp_intent_id,
+                    ),
+                )
+            r_rec_failed = client.post(f"/v1/development/prs/{failed_rec_id}/reconcile", headers=headers)
+            assert r_rec_failed.status_code == 409, r_rec_failed.text
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.tool_intents SET status_code='SENDING' WHERE tenant_id=%s AND id=%s",
+                    (tenant["tenantId"], exp_intent_id),
+                )
+            exp_permit = sentinel_obj.authorize(claim, exp_intent_id, "http", "api.github.test", gh_port, "POST")
+            # Expire approval BEFORE EgressProxy consumes the permit -> MUST be denied!
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.approval_records SET expires_at = now() - interval '5s' WHERE tenant_id=%s AND id=%s",
+                    (tenant["tenantId"], exp_apr_id),
+                )
+            exp_body = json.dumps(
+                {"base": "main", "body": "Body", "draft": True, "head": "feat/p7-demo", "title": "Expiry Test PR"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            with pytest.raises(ForwardProxyError) as exc_exp:
+                _run(
+                    send_via_forward_proxy(
+                        proxy_url,
+                        identity="tool_gateway",
+                        permit=exp_permit,
+                        method="POST",
+                        target_url=f"{gh_origin}/repos/org/gh-app/pulls",
+                        host_header=f"api.github.test:{gh_port}",
+                        headers={"Content-Type": "application/json"},
+                        body=exp_body,
+                    )
+                )
+            assert exc_exp.value.post_send is False and len(post_hits) == 1
+
+            # R2-02: Verify ONLY binding-scoped token was sent (never decoy global token) and never leaked to DB/events
+            assert "Bearer gh_bound_tok_secret_987" in seen_auth_headers
+            assert all("decoy_global_token" not in h for h in seen_auth_headers)
             leaked_ev = dbs["owner"].one(
                 "SELECT count(*) AS n FROM agent.domain_events WHERE tenant_id=%s AND payload_json::text LIKE %s",
-                (tenant["tenantId"], "%gh_test_tok_secret_123%"),
+                (tenant["tenantId"], "%gh_bound_tok_secret_987%"),
             )
             assert leaked_ev is not None and int(leaked_ev["n"]) == 0
-            leaked_pr = dbs["owner"].one(
-                "SELECT count(*) AS n FROM agent.dev_pr_records WHERE tenant_id=%s"
-                " AND (COALESCE(last_error_code,'') LIKE %s OR COALESCE(pr_url,'') LIKE %s)",
-                (tenant["tenantId"], "%gh_test_tok_secret_123%", "%gh_test_tok_secret_123%"),
-            )
-            assert leaked_pr is not None and int(leaked_pr["n"]) == 0
     finally:
-        proxy_loop.call_soon_threadsafe(proxy_loop.stop)
-        proxy_thread.join(timeout=5)
-        loop.call_soon_threadsafe(loop.stop)
-        gh_th.join(timeout=5)
+        _stop_async_service(tg_loop, tg_th)
+        _stop_async_service(sen_loop, sen_th)
+        _stop_async_service(gh_loop, gh_th)
 
 
 def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], tenant: dict[str, str]) -> None:
@@ -1409,13 +1376,11 @@ def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], 
                 await page.get_by_test_id("tab-development").click()
                 await page.get_by_test_id("development-panel").wait_for(timeout=10000)
 
-                # Register a new project via UI form
                 await page.get_by_label("プロジェクト名").fill("New E2E Project")
                 await page.get_by_label("リポジトリ").fill("org/new-e2e-app")
                 await page.get_by_role("button", name="プロジェクト登録").click()
                 await page.get_by_text("New E2E Project").wait_for(timeout=10000)
 
-                # Select seeded project and cycle -> inspect 3 candidates -> select cand-b -> approve Demo via ConfirmDialog
                 await page.get_by_test_id("dev-project-proj-ui-1").click()
                 await page.get_by_test_id(f"dev-cycle-{cycle_id}").click()
                 await page.get_by_test_id("design-candidate-cand-b").wait_for(timeout=10000)

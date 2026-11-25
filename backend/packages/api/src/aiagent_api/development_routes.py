@@ -1,24 +1,29 @@
 """DEV-09 FastAPI routes for Autonomous Software Development (Projects, Cycles, Design/Demo, Previews, Debug, PRs).
 
-Hardened against PR #122 review findings (P0-01, P0-02, P1-03..09, P2-10..13):
-- Binds Preview Leases strictly to registered attested `dev_preview_instances` + exact Cycle ID.
-- Runs Browser Debugger exclusively via isolated worker subprocess with DNS & redirect confinement.
-- Binds PR creation to canonical approved tool_intents / approval_records + Sentinel Path/Body digest
-  + remote branch HEAD verification + response head.sha verification + Intent-level single-dispatch lock.
-- PR Guardian read-only inspection never burns repair budget; atomic `claimRepair=True` slot acquisition
-  prevents concurrent repair ceiling overruns.
+Hardened against PR #122 Round 1 & Round 2 reviews (R2-01..R2-13):
+- Zero Tool Gateway DB credentials in API: mutating PR dispatches and reconciliations route exclusively through
+  authenticated ToolGateway RPC (`AIAGENT_TOOL_GATEWAY_ENDPOINT` + `AIAGENT_API_TOOL_RPC_KEY`), while PR Guardian
+  reads route exclusively through authenticated Sentinel RPC (`AIAGENT_SENTINEL_ENDPOINT` + `AIAGENT_API_SENTINEL_RPC_KEY`).
+- Browser Debugger routes strictly through PR #110 OS-isolated Sandbox Cell (`preview.debug` RPC + signed Grant).
+- Repository Binding is verified in PostgreSQL (`agent.verify_dev_repository_binding`) before project creation or PR dispatch.
+- Preflight intent & approval validation runs BEFORE `begin_pr_record` so invalid/tampered requests never consume an intent.
+- Reconcile refuses `FAILED` records and delegates strictly to ToolGateway's canonical CAS reconciler.
+- Required CI checks are derived authoritatively from Project policy + GitHub Branch Protection.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from typing import Any
 
+from aiagent_core import config
 from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_core.events import append_event
+from aiagent_core.rpc import RpcClient
 from aiagent_development.browser_debugger import AutonomousBrowserDebugger
 from aiagent_development.contracts import (
     DevelopmentError,
@@ -31,11 +36,12 @@ from aiagent_development.contracts import (
     StateConflict,
     require_sha,
 )
-from aiagent_development.github_egress import GitHubEgressClient, default_github_token_provider
+from aiagent_development.github_egress import GitHubReadClient, canonical_pr_request, pr_request_sha256
 from aiagent_development.pg_store import PostgresCycleStore, PreviewBroker
 from aiagent_development.pr_guardian import PrGuardian
 from aiagent_development.store import PostgresDevStore
 from aiagent_domain import is_uuid7
+from aiagent_domain.rpcwire import RpcError
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -65,6 +71,14 @@ def _raise_dev_http(exc: DevelopmentError) -> None:
     raise HTTPException(400, detail={"error": str(exc)}) from None
 
 
+def _resolve_tool_gateway_rpc() -> RpcClient:
+    endpoint = (os.environ.get("AIAGENT_TOOL_GATEWAY_ENDPOINT") or "").strip()
+    key = config.secret("AIAGENT_API_TOOL_RPC_KEY", required=False)
+    if not endpoint or key is None:
+        raise HTTPException(503, detail={"error": "TOOL_GATEWAY_RPC_UNAVAILABLE"})
+    return RpcClient(endpoint, "api", bytes.fromhex(key.reveal().strip()), timeout_s=35.0)
+
+
 def register_development_routes(
     app: FastAPI,
     *,
@@ -74,7 +88,7 @@ def register_development_routes(
     egress_proxy: str | None = None,
     dev_github_client: Any = None,
     dev_debug_probe_fn: Any = None,
-    tool_gateway_db: Database | None = None,
+    tool_gateway: Any = None,
 ) -> None:
     def _store() -> PostgresDevStore:
         return PostgresDevStore(get_db())
@@ -82,18 +96,58 @@ def register_development_routes(
     def _previews() -> PreviewBroker:
         return PreviewBroker(get_db())
 
-    def _github_client(github_api_base: str, *, repository_binding_id: str | None = None) -> Any:
+    def _github_reader(github_api_base: str, *, repository_binding_id: str | None) -> Any:
         if dev_github_client is not None:
             return dev_github_client
-        return GitHubEgressClient(
+        return GitHubReadClient(
             db=get_db(),
-            sentinel=sentinel,
             github_api_base=github_api_base,
+            repository_binding_id=repository_binding_id,
+            sentinel=sentinel,
             egress_proxy=egress_proxy,
-            token_provider=lambda repo: default_github_token_provider(
-                repo, repository_binding_id=repository_binding_id
-            ),
-            tool_gateway_db=tool_gateway_db,
+        )
+
+    async def _dispatch_pr_via_gateway(
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        workspace_id: str,
+        intent_id: str,
+        expected_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_gateway is not None:
+            return dict(
+                await tool_gateway.dispatch_approved_dev_pr(
+                    tenant_id=tenant_id,
+                    owner_user_id=owner_user_id,
+                    workspace_id=workspace_id,
+                    intent_id=intent_id,
+                    expected_args=expected_args,
+                )
+            )
+        cli = _resolve_tool_gateway_rpc()
+        return dict(
+            await cli.call(
+                "tool.dev_pr_dispatch",
+                {
+                    "tenantId": tenant_id,
+                    "ownerUserId": owner_user_id,
+                    "workspaceId": workspace_id,
+                    "intentId": intent_id,
+                    "args": expected_args,
+                },
+            )
+        )
+
+    async def _reconcile_via_gateway(*, tenant_id: str, owner_user_id: str, intent_id: str) -> dict[str, Any]:
+        if tool_gateway is not None:
+            return dict(await tool_gateway.reconcile(tenant_id, intent_id, owner_user_id=owner_user_id))
+        cli = _resolve_tool_gateway_rpc()
+        return dict(
+            await cli.call(
+                "tool.reconcile",
+                {"tenantId": tenant_id, "ownerUserId": owner_user_id, "intentId": intent_id},
+            )
         )
 
     # ------------------------------------------------------------------ Projects
@@ -198,7 +252,7 @@ def register_development_routes(
             "reviews": pinned,
         }
 
-    # ------------------------------------------------------------------ Design Picker & Demo Approval (DEV-03)
+    # ------------------------------------------------------------------ Design Picker & Demo Approval (DEV-03 / R2-11)
     @app.post("/v1/development/cycles/{cycle_id}/design", status_code=201)
     async def create_dev_design(cycle_id: str, request: Request, s: Scope = Depends(scope_dep)) -> dict[str, Any]:  # noqa: B008
         body = await _parse_json_obj(request)
@@ -243,6 +297,8 @@ def register_development_routes(
                 design_revision=raw_rev,
                 selected_candidate_id=cid,
                 feedback=body.get("feedback"),
+                demo_artifact_ref=body.get("demoArtifactRef"),
+                demo_artifact_sha256=body.get("demoArtifactSha256"),
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
@@ -275,7 +331,7 @@ def register_development_routes(
             "grantsExternalApproval": False,
         }
 
-    # ------------------------------------------------------------------ Preview Leases & Browser Debug (DEV-06 / P0-02 / P2-11)
+    # ------------------------------------------------------------------ Preview Leases & Browser Debug (DEV-06 / R2-01 / R2-06)
     @app.post("/v1/development/cycles/{cycle_id}/previews", status_code=201)
     async def issue_dev_preview(cycle_id: str, request: Request, s: Scope = Depends(scope_dep)) -> dict[str, Any]:  # noqa: B008
         body = await _parse_json_obj(request)
@@ -405,6 +461,11 @@ def register_development_routes(
             raise HTTPException(422, detail={"error": "LEASE_TOKEN_AND_PORT_REQUIRED"})
         if not isinstance(revoke_after, bool):
             raise HTTPException(422, detail={"error": "REVOKE_AFTER_MUST_BE_BOOLEAN"})
+        cy_dto = await asyncio.to_thread(
+            _store().get_cycle, tenant_id=s.tenant_id, owner_user_id=s.user_id, cycle_id=cycle_id
+        )
+        if cy_dto is None:
+            raise HTTPException(404)
         dbg = AutonomousBrowserDebugger(_previews())
         try:
             report = await asyncio.to_thread(
@@ -415,6 +476,8 @@ def register_development_routes(
                 lease_id=lease_id,
                 token=token,
                 port=raw_port,
+                task_id=cy_dto["taskId"],
+                run_id=cy_dto["runId"],
                 path=path,
                 revoke_after=revoke_after,
                 probe_fn=dev_debug_probe_fn,
@@ -447,7 +510,7 @@ def register_development_routes(
         )
         return {"schemaVersion": "1.0", "items": items}
 
-    # ------------------------------------------------------------------ PR Integrations, Reconcile & Guardian (DEV-05 / DEV-11)
+    # ------------------------------------------------------------------ PR Integrations, Reconcile & Guardian (R2-02..R2-13)
     @app.get("/v1/development/projects/{project_id}/integration-receipts")
     async def list_dev_integration_receipts(
         project_id: str,
@@ -506,6 +569,118 @@ def register_development_routes(
         if cycle["phase"] != "CODE_READY" or cycle["commitSha"] != expected_head_sha:
             raise HTTPException(409, detail={"error": "CYCLE_NOT_CODE_READY_OR_HEAD_MISMATCH"})
 
+        expected_args = canonical_pr_request(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            repository=proj["repository"],
+            branch=cycle["branch"],
+            head_sha=expected_head_sha,
+            base_branch=proj["defaultBranch"],
+            title=title,
+            body=pr_body,
+            draft=draft,
+        )
+        expected_sha = pr_request_sha256(expected_args)
+
+        # R2-02 + R2-13: Preflight binding & approved intent check BEFORE reserving dev_pr_records so invalid/tampered
+        # requests NEVER consume or poison the intent slot!
+        def _preflight() -> dict[str, Any] | None:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                prior = c.execute(
+                    "SELECT * FROM agent.dev_pr_records"
+                    " WHERE tenant_id=%s AND (idempotency_key=%s OR intent_id=%s)"
+                    " ORDER BY created_at ASC LIMIT 1",
+                    (s.tenant_id, idem_key, intent_id),
+                ).fetchone()
+                if prior is not None:
+                    if str(prior["owner_user_id"]) != s.user_id:
+                        raise ScopeDenied("pr record belongs to another owner")
+                    return {"existing": dict(prior)}
+                if not proj.get("repositoryBindingId"):
+                    raise ScopeDenied("REPOSITORY_BINDING_REQUIRED")
+                bound = c.execute(
+                    "SELECT * FROM agent.verify_dev_repository_binding(%s,%s,%s,%s,%s,%s)",
+                    (
+                        s.tenant_id,
+                        s.user_id,
+                        s.workspace_id,
+                        proj["repositoryBindingId"],
+                        proj["repository"],
+                        cycle["branch"],
+                    ),
+                ).fetchone()
+                if bound is None:
+                    raise ScopeDenied("REPOSITORY_BINDING_UNAUTHORIZED")
+                it = c.execute(
+                    "SELECT i.task_id, i.run_id, i.tool_key, i.status_code, i.request_sha256,"
+                    " i.safe_arguments_json, i.goal_revision AS intent_goal_rev,"
+                    " t.owner_user_id, t.workspace_id, t.goal_revision,"
+                    " a.decision_code, a.owner_user_id AS apr_owner, a.request_sha256 AS apr_sha,"
+                    " a.goal_revision AS apr_goal, (a.expires_at > now()) AS apr_alive"
+                    " FROM agent.tool_intents i"
+                    " JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+                    " LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id AND a.tool_intent_id=i.id"
+                    " WHERE i.tenant_id=%s AND i.id=%s",
+                    (s.tenant_id, intent_id),
+                ).fetchone()
+                if (
+                    it is None
+                    or str(it["tool_key"]) != "dev_github_pr"
+                    or str(it["owner_user_id"]) != s.user_id
+                    or str(it["workspace_id"]) != s.workspace_id
+                    or str(it["task_id"]) != cycle["taskId"]
+                    or str(it["run_id"]) != cycle["runId"]
+                    or int(it["intent_goal_rev"]) != cycle["goalRevision"]
+                    or int(it["goal_revision"]) != cycle["goalRevision"]
+                ):
+                    raise ScopeDenied("tool intent missing or out of cycle scope")
+                if str(it["status_code"]) == "UNKNOWN":
+                    raise EffectUnknown("tool intent is UNKNOWN; reconcile before retry")
+                safe_args = dict(it["safe_arguments_json"]) if isinstance(it["safe_arguments_json"], dict) else {}
+                if safe_args != expected_args or str(it["request_sha256"]) != expected_sha:
+                    raise ScopeDenied("PR request arguments or digest mismatch approved tool_intent")
+                if (
+                    str(it["decision_code"] or "") != "APPROVED"
+                    or not it["apr_alive"]
+                    or str(it["apr_owner"] or "") != s.user_id
+                    or str(it["apr_sha"] or "") != expected_sha
+                    or int(it["apr_goal"] or 0) != cycle["goalRevision"]
+                ):
+                    raise ScopeDenied("explicit owner approval required or expired for GitHub PR creation")
+            return None
+
+        try:
+            pre = await asyncio.to_thread(_preflight)
+        except DevelopmentError as exc:
+            _raise_dev_http(exc)
+
+        if pre is not None:
+            prior_rec = await asyncio.to_thread(
+                st.get_pr_record, tenant_id=s.tenant_id, owner_user_id=s.user_id, record_id=str(pre["existing"]["id"])
+            )
+            assert prior_rec is not None
+            if prior_rec["effectStatus"] in ("EFFECT_UNKNOWN", "PENDING"):
+                return JSONResponse(
+                    {
+                        "schemaVersion": "1.0",
+                        "error": "EFFECT_UNKNOWN",
+                        "prRecord": prior_rec,
+                        "reconcileRequired": True,
+                    },
+                    status_code=409,
+                )
+            if prior_rec["effectStatus"] == "FAILED":
+                raise HTTPException(409, detail={"error": "INTENT_ALREADY_FAILED", "prRecord": prior_rec})
+            return {"schemaVersion": "1.0", "prRecord": prior_rec, "idempotentReplay": True}
+
+        # R2-08: Required CI checks are union of authoritative project policy + stricter request checks
+        policy_checks = [
+            str(x).strip()
+            for x in (proj.get("preferences", {}).get("requiredChecks") or [])
+            if isinstance(x, str) and x.strip()
+        ]
+        merged_req_checks = list(dict.fromkeys([*policy_checks, *(x.strip() for x in raw_req_checks)]))
+
         try:
             record, created = await asyncio.to_thread(
                 st.begin_pr_record,
@@ -519,7 +694,7 @@ def register_development_routes(
                 idempotency_key=idem_key,
                 intent_id=intent_id,
                 git_push_receipt_ref=cycle.get("pushReceipt"),
-                required_checks=raw_req_checks,
+                required_checks=merged_req_checks,
                 max_repair_attempts=max_repairs,
             )
         except DevelopmentError as exc:
@@ -534,66 +709,89 @@ def register_development_routes(
                 raise HTTPException(409, detail={"error": "INTENT_ALREADY_FAILED", "prRecord": record})
             return {"schemaVersion": "1.0", "prRecord": record, "idempotentReplay": True}
 
-        proj_scope = ProjectScope(
-            tenant_id=s.tenant_id,
-            owner_user_id=s.user_id,
-            project_id=project_id,
-            workspace_id=s.workspace_id,
-            repository=proj["repository"],
-            branch=cycle["branch"],
-            base_sha=cycle["baseSha"],
-            workspace_revision="1",
-        )
-        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
         try:
-            created_pr = await asyncio.to_thread(
-                gh.create_pull_request,
-                scope=proj_scope,
-                cycle_id=cycle_id,
-                task_id=cycle["taskId"],
-                run_id=cycle["runId"],
-                goal_revision=cycle["goalRevision"],
-                head_sha=expected_head_sha,
+            gw_outcome = await _dispatch_pr_via_gateway(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                workspace_id=s.workspace_id,
                 intent_id=intent_id,
-                base_branch=proj["defaultBranch"],
-                title=title,
-                body=pr_body,
-                draft=draft,
+                expected_args=expected_args,
             )
-            settled = await asyncio.to_thread(
-                st.settle_pr_record,
-                tenant_id=s.tenant_id,
-                owner_user_id=s.user_id,
-                record_id=record["id"],
-                effect_status="CONFIRMED",
-                pr_number=created_pr.get("prNumber"),
-                pr_url=created_pr.get("prUrl"),
-                ci_state="PENDING",
-            )
-            return {"schemaVersion": "1.0", "prRecord": settled}
-        except EffectUnknown as exc:
-            unknown_rec = await asyncio.to_thread(
-                st.settle_pr_record,
-                tenant_id=s.tenant_id,
-                owner_user_id=s.user_id,
-                record_id=record["id"],
-                effect_status="EFFECT_UNKNOWN",
-                last_error_code=str(exc)[:120],
-            )
-            return JSONResponse(
-                {"schemaVersion": "1.0", "error": "EFFECT_UNKNOWN", "prRecord": unknown_rec, "reconcileRequired": True},
-                status_code=502,
-            )
-        except DevelopmentError as exc:
+        except RpcError as exc:
             await asyncio.to_thread(
                 st.settle_pr_record,
                 tenant_id=s.tenant_id,
                 owner_user_id=s.user_id,
                 record_id=record["id"],
                 effect_status="FAILED",
-                last_error_code=str(exc)[:120],
+                last_error_code=f"gateway:{exc.code}"[:120],
             )
-            _raise_dev_http(exc)
+            status_code = 409 if exc.code in ("INTENT_CONFLICT", "FENCED", "STALE_GOAL") else 403
+            raise HTTPException(status_code, detail={"error": exc.code}) from None
+        except HTTPException:
+            await asyncio.to_thread(
+                st.settle_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=record["id"],
+                effect_status="FAILED",
+                last_error_code="TOOL_GATEWAY_RPC_UNAVAILABLE",
+            )
+            raise
+        except Exception as exc:
+            unknown_rec = await asyncio.to_thread(
+                st.settle_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=record["id"],
+                effect_status="EFFECT_UNKNOWN",
+                last_error_code=f"gateway_io:{type(exc).__name__}"[:120],
+            )
+            return JSONResponse(
+                {"schemaVersion": "1.0", "error": "EFFECT_UNKNOWN", "prRecord": unknown_rec, "reconcileRequired": True},
+                status_code=502,
+            )
+
+        gw_status = str(gw_outcome.get("status") or "")
+        gw_result = dict(gw_outcome.get("result") or {})
+        if gw_status == "CONFIRMED":
+            settled = await asyncio.to_thread(
+                st.settle_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=record["id"],
+                effect_status="CONFIRMED",
+                pr_number=gw_result.get("prNumber"),
+                pr_url=gw_result.get("prUrl"),
+                ci_state="PENDING",
+            )
+            return {"schemaVersion": "1.0", "prRecord": settled}
+        if gw_status == "UNKNOWN":
+            unknown_rec = await asyncio.to_thread(
+                st.settle_pr_record,
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
+                record_id=record["id"],
+                effect_status="EFFECT_UNKNOWN",
+                last_error_code=str(gw_result.get("note") or "EFFECT_UNKNOWN")[:120],
+            )
+            return JSONResponse(
+                {"schemaVersion": "1.0", "error": "EFFECT_UNKNOWN", "prRecord": unknown_rec, "reconcileRequired": True},
+                status_code=502,
+            )
+
+        err_msg = str(gw_result.get("error") or gw_status or "DISPATCH_FAILED")[:120]
+        await asyncio.to_thread(
+            st.settle_pr_record,
+            tenant_id=s.tenant_id,
+            owner_user_id=s.user_id,
+            record_id=record["id"],
+            effect_status="FAILED",
+            last_error_code=err_msg,
+        )
+        if "STALE_REMOTE_HEAD" in err_msg or gw_status in ("STALE_GOAL", "EXPIRED"):
+            raise HTTPException(409, detail={"error": err_msg})
+        raise HTTPException(403, detail={"error": err_msg})
 
     @app.post("/v1/development/prs/{pr_record_id}/reconcile")
     async def reconcile_dev_pr(pr_record_id: str, s: Scope = Depends(scope_dep)) -> dict[str, Any]:  # noqa: B008
@@ -605,41 +803,48 @@ def register_development_routes(
         )
         if rec is None:
             raise HTTPException(404)
-        proj = await asyncio.to_thread(
-            st.get_project, tenant_id=s.tenant_id, owner_user_id=s.user_id, project_id=rec["projectId"]
-        )
-        if proj is None or not rec["intentId"]:
+        if not rec["intentId"]:
             raise HTTPException(409, detail={"error": "PR_RECONCILE_SCOPE_MISSING"})
-        proj_scope = ProjectScope(
-            tenant_id=s.tenant_id,
-            owner_user_id=s.user_id,
-            project_id=rec["projectId"],
-            workspace_id=s.workspace_id,
-            repository=rec["repository"],
-            branch=rec["branch"],
-            base_sha=rec["headSha"],
-            workspace_revision="1",
-        )
-        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
+        # R2-05: Never reconcile FAILED records; only reconcile legitimately dispatched PENDING / EFFECT_UNKNOWN records.
+        if rec["effectStatus"] == "FAILED":
+            raise HTTPException(409, detail={"error": "PR_RECORD_FAILED_NOT_RECONCILABLE"})
+        if rec["effectStatus"] == "CONFIRMED":
+            return {"schemaVersion": "1.0", "reconciled": True, "prRecord": rec}
+
         try:
-            found = await asyncio.to_thread(
-                gh.reconcile_pull_request,
-                scope=proj_scope,
-                head_sha=rec["headSha"],
+            rec_out = await _reconcile_via_gateway(
+                tenant_id=s.tenant_id,
+                owner_user_id=s.user_id,
                 intent_id=rec["intentId"],
             )
-        except DevelopmentError as exc:
-            _raise_dev_http(exc)
-        if found is None:
+        except RpcError as exc:
+            raise HTTPException(409 if exc.code == "NOT_IN_HEAD" else 403, detail={"error": exc.code}) from None
+
+        if str(rec_out.get("status") or "") != "CONFIRMED":
             return {"schemaVersion": "1.0", "reconciled": False, "prRecord": rec}
+
+        # Read canonical receipt & PR metadata settled by ToolGateway into tool_intents.result_json
+        def _read_settled_intent() -> dict[str, Any] | None:
+            with get_db().tx(tenant=s.tenant_id) as c:
+                row = c.execute(
+                    "SELECT status_code, result_json FROM agent.tool_intents WHERE tenant_id=%s AND id=%s",
+                    (s.tenant_id, rec["intentId"]),
+                ).fetchone()
+                return dict(row) if row is not None else None
+
+        it_row = await asyncio.to_thread(_read_settled_intent)
+        res_json = dict(it_row["result_json"] or {}) if it_row and isinstance(it_row.get("result_json"), dict) else {}
+        if it_row is None or str(it_row["status_code"]) != "CONFIRMED" or not res_json.get("prNumber"):
+            return {"schemaVersion": "1.0", "reconciled": False, "prRecord": rec}
+
         updated = await asyncio.to_thread(
             st.settle_pr_record,
             tenant_id=s.tenant_id,
             owner_user_id=s.user_id,
             record_id=rec["id"],
             effect_status="CONFIRMED",
-            pr_number=found.get("prNumber"),
-            pr_url=found.get("prUrl"),
+            pr_number=int(res_json["prNumber"]),
+            pr_url=str(res_json.get("prUrl") or ""),
             ci_state="PENDING",
             event_kind="dev.pr_reconciled",
         )
@@ -680,8 +885,14 @@ def register_development_routes(
             base_sha=rec["headSha"],
             workspace_revision="1",
         )
-        gh = _github_client(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
-        guardian = PrGuardian(gh.read_get)
+        policy_checks = [
+            str(x).strip()
+            for x in (proj.get("preferences", {}).get("requiredChecks") or [])
+            if isinstance(x, str) and x.strip()
+        ]
+        effective_required_checks = list(dict.fromkeys([*policy_checks, *rec["requiredChecks"]]))
+        gh_reader = _github_reader(proj["githubApiBase"] or "", repository_binding_id=proj.get("repositoryBindingId"))
+        guardian = PrGuardian(gh_reader.read_get)
         try:
             ev = await asyncio.to_thread(
                 guardian.inspect_pr,
@@ -691,7 +902,8 @@ def register_development_routes(
                 head_sha=rec["headSha"],
                 repair_attempts=rec["repairAttempts"],
                 max_repair_attempts=rec["maxRepairAttempts"],
-                required_checks=rec["requiredChecks"],
+                required_checks=effective_required_checks,
+                base_branch=proj["defaultBranch"],
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
