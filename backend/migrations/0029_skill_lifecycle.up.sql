@@ -116,7 +116,9 @@ BEGIN
   END LOOP;
 END $$;
 
-GRANT SELECT, INSERT, UPDATE ON agent.skill_releases, agent.skill_installations TO aiagent_api;
+GRANT SELECT, INSERT ON agent.skill_releases TO aiagent_api;
+GRANT UPDATE (state, revoked_at) ON agent.skill_releases TO aiagent_api;
+GRANT SELECT, INSERT, UPDATE ON agent.skill_installations TO aiagent_api;
 GRANT SELECT, INSERT ON agent.skill_receipts, agent.skill_installation_history, agent.skill_run_pins TO aiagent_api;
 GRANT INSERT ON agent.skill_audit_events TO aiagent_api;
 GRANT SELECT ON agent.skill_releases, agent.skill_installations, agent.skill_run_pins TO aiagent_runtime;
