@@ -1,9 +1,17 @@
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
+use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
-const ENC_PREFIX: &str = "enc:v1:";
+const LEGACY_PREFIX: &str = "enc:v1:";
+const AEAD_PREFIX: &str = "enc:v2:";
+#[cfg(windows)]
 const KEY_ENTROPY: &[u8] = b"aiagent-device-journal-key-v1";
 
 pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
@@ -93,6 +101,11 @@ pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
         restrict_path_owner_only(&key_path, false)?;
         let raw = fs::read(&key_path).map_err(|e| e.to_string())?;
         return unprotect_key_blob(&raw);
+    }
+    // Never replace a lost key for an existing journal: doing so can conceal
+    // existing control state and make its encrypted records unrecoverable.
+    if db_path.exists() {
+        return Err("journal key missing for existing database".into());
     }
     let key: [u8; 32] = random_bytes()?;
     let protected = protect_key_blob(&key)?;
@@ -201,7 +214,8 @@ fn build_aad(scope_hash: &str, label: &str, nonce: &[u8; 16], ciphertext: &[u8])
     msg
 }
 
-pub fn seal_payload(
+#[cfg(test)]
+pub(crate) fn seal_legacy_payload(
     master_key: &[u8; 32],
     scope_hash: &str,
     label: &str,
@@ -214,21 +228,21 @@ pub fn seal_payload(
     let aad = build_aad(scope_hash, label, &nonce, &ciphertext);
     let tag = hmac_sha256(&mac_key, &aad);
     Ok(format!(
-        "{ENC_PREFIX}{}:{}:{}",
+        "{LEGACY_PREFIX}{}:{}:{}",
         encode_hex(&nonce),
         encode_hex(&tag),
         encode_hex(&ciphertext)
     ))
 }
 
-pub fn open_payload(
+fn open_legacy_payload(
     master_key: &[u8; 32],
     scope_hash: &str,
     label: &str,
     encoded: &str,
 ) -> Result<Vec<u8>, String> {
     let rest = encoded
-        .strip_prefix(ENC_PREFIX)
+        .strip_prefix(LEGACY_PREFIX)
         .ok_or_else(|| "unencrypted or unsupported journal payload".to_string())?;
     let mut parts = rest.splitn(3, ':');
     let nonce_hex = parts.next().ok_or("missing journal nonce")?;
@@ -256,6 +270,88 @@ pub fn open_payload(
         return Err("journal integrity check failed".into());
     }
     Ok(ctr_xor(&enc_key, &nonce, &ciphertext))
+}
+
+/// Encrypt new records with a scope-bound key and a random 192-bit XChaCha nonce.
+/// The legacy construction is read only and exists solely for migration.
+pub fn seal_payload(
+    master_key: &[u8; 32],
+    scope_hash: &str,
+    label: &str,
+    plaintext: &[u8],
+) -> Result<String, String> {
+    let aad = aead_context(scope_hash, label)?;
+    let key = Zeroizing::new(aead_key(master_key, &aad)?);
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let nonce: [u8; 24] = random_bytes()?;
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "journal encryption failed")?;
+    Ok(format!(
+        "{AEAD_PREFIX}{}:{}",
+        encode_hex(&nonce),
+        encode_hex(&ciphertext)
+    ))
+}
+
+pub fn open_payload(
+    master_key: &[u8; 32],
+    scope_hash: &str,
+    label: &str,
+    encoded: &str,
+) -> Result<Vec<u8>, String> {
+    if encoded.starts_with(LEGACY_PREFIX) {
+        return open_legacy_payload(master_key, scope_hash, label, encoded);
+    }
+    let rest = encoded
+        .strip_prefix(AEAD_PREFIX)
+        .ok_or_else(|| "unencrypted or unsupported journal payload".to_string())?;
+    let (nonce_hex, ciphertext_hex) = rest.split_once(':').ok_or("invalid journal payload")?;
+    let nonce = decode_hex(nonce_hex)?;
+    if nonce.len() != 24 {
+        return Err("invalid journal nonce length".into());
+    }
+    let ciphertext = decode_hex(ciphertext_hex)?;
+    let aad = aead_context(scope_hash, label)?;
+    let key = Zeroizing::new(aead_key(master_key, &aad)?);
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "journal integrity check failed".into())
+}
+
+pub(crate) fn is_legacy_payload(encoded: &str) -> bool {
+    encoded.starts_with(LEGACY_PREFIX)
+}
+
+fn aead_context(scope_hash: &str, label: &str) -> Result<Vec<u8>, String> {
+    let mut context = b"aiagent-journal-control-v2".to_vec();
+    for part in [scope_hash, label] {
+        let len = u32::try_from(part.len()).map_err(|_| "journal context too long")?;
+        context.extend_from_slice(&len.to_be_bytes());
+        context.extend_from_slice(part.as_bytes());
+    }
+    Ok(context)
+}
+
+fn aead_key(master_key: &[u8; 32], context: &[u8]) -> Result<[u8; 32], String> {
+    let hk = Hkdf::<Sha256>::new(Some(b"aiagent-journal-aead-v2"), master_key);
+    let mut key = [0; 32];
+    hk.expand(context, &mut key)
+        .map_err(|_| "journal key derivation failed")?;
+    Ok(key)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

@@ -502,7 +502,9 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
 
     let key = load_or_create_journal_key(&path).unwrap();
     let sealed = seal_payload(&key, &scope("A").namespace(), "local_control", b"[\"ok\"]").unwrap();
+    assert!(sealed.starts_with("enc:v2:"));
     assert!(open_payload(&key, &scope("B").namespace(), "local_control", &sealed).is_err());
+    assert!(open_payload(&key, &scope("A").namespace(), "different_label", &sealed).is_err());
     let mut tampered = sealed.clone();
     let last = tampered.pop().unwrap();
     tampered.push(if last == '0' { '1' } else { '0' });
@@ -514,6 +516,27 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
         "[\"plain\"]"
     )
     .is_err());
+}
+
+#[test]
+fn missing_key_for_existing_journal_does_not_generate_a_replacement() {
+    use aiagent_device_core::security::key_file_path;
+    use aiagent_device_core::ControlRecord;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    journal
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: true,
+            audit: vec![],
+        })
+        .unwrap();
+    drop(journal);
+    let key_path = key_file_path(&path);
+    std::fs::remove_file(&key_path).unwrap();
+    assert!(LocalJournal::open(&path, &scope("A")).is_err());
+    assert!(!key_path.exists());
 }
 
 #[test]

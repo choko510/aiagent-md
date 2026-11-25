@@ -1,15 +1,17 @@
 use crate::protocol::Scope;
 use crate::security::{
-    load_or_create_journal_key, open_payload, restrict_path_owner_only, seal_payload,
+    is_legacy_payload, load_or_create_journal_key, open_payload, restrict_path_owner_only,
+    seal_payload,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use zeroize::Zeroize;
 
 /// STARTED is durable before mock adapter execution. It is UNKNOWN after recovery.
-/// Sensitive local_control payloads (`audit_json`) are sealed with HMAC-SHA256 + SHA256-CTR
-/// keyed by a DPAPI-protected (Windows) or 0o600 (Unix) keyfile, and journal files enforce owner-only OS ACLs.
+/// The control envelope uses versioned AEAD. Legacy ciphertext is read only for migration.
+/// This simulator is not a production key store or an authenticated whole-database journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectState {
     Started,
@@ -65,6 +67,12 @@ pub struct LocalJournal {
     scope_hash: String,
     master_key: [u8; 32],
     db_path: PathBuf,
+}
+
+impl Drop for LocalJournal {
+    fn drop(&mut self) {
+        self.master_key.zeroize();
+    }
 }
 
 fn companion_path(db_path: &Path, suffix: &str) -> PathBuf {
@@ -178,11 +186,16 @@ impl LocalJournal {
                     {
                         return Err("tampered local_control flags or unsupported version".into());
                     }
-                    return Ok(ControlRecord {
+                    let record = ControlRecord {
                         stopped: envelope.stopped,
                         revoked: envelope.revoked,
                         audit: envelope.audit,
-                    });
+                    };
+                    self.migrate_control_if_legacy(stopped, revoked, &sealed_audit, &record)?;
+                    return Ok(record);
+                }
+                if !is_legacy_payload(&sealed_audit) {
+                    return Err("invalid control envelope".into());
                 }
                 // Legacy v1 rows sealed only `Vec<String>` audit entries; plaintext stopped/revoked columns
                 // were not HMAC-covered. Migrate without bricking the client, NEVER trusting plaintext stopped=0.
@@ -198,11 +211,13 @@ impl LocalJournal {
                 {
                     legacy_audit.push(Self::LEGACY_MIGRATED_MARKER.into());
                 }
-                Ok(ControlRecord {
+                let record = ControlRecord {
                     stopped: true,
                     revoked: effective_revoked,
                     audit: legacy_audit,
-                })
+                };
+                self.migrate_control_if_legacy(stopped, revoked, &sealed_audit, &record)?;
+                Ok(record)
             }
             None => Ok(ControlRecord {
                 stopped: false,
@@ -210,6 +225,38 @@ impl LocalJournal {
                 audit: default_audit,
             }),
         }
+    }
+
+    // The conditional update commits both flags and the authenticated payload atomically.
+    // Concurrent changes must be re-read, never overwritten.
+    fn migrate_control_if_legacy(
+        &self,
+        stopped: i64,
+        revoked: i64,
+        original: &str,
+        record: &ControlRecord,
+    ) -> Result<(), String> {
+        if !is_legacy_payload(original) {
+            return Ok(());
+        }
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: record.stopped,
+            revoked: record.revoked,
+            audit: record.audit.clone(),
+        };
+        let json = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        let sealed = seal_payload(&self.master_key, &self.scope_hash, "local_control", &json)?;
+        let changed = self.conn.execute(
+            "UPDATE local_control SET stopped=?1, revoked=?2, audit_json=?3 WHERE scope_hash=?4 AND stopped=?5 AND revoked=?6 AND audit_json=?7",
+            params![i64::from(record.stopped), i64::from(record.revoked), sealed,
+                    self.scope_hash, stopped, revoked, original],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("journal migration concurrent modification".into());
+        }
+        restrict_db_companions(&self.db_path)?;
+        Ok(())
     }
 
     pub fn owner_confirm_clear_legacy_stop(
@@ -223,12 +270,61 @@ impl LocalJournal {
         if rec.revoked {
             return Err("CANNOT_RECOVER_REVOKED_DEVICE".into());
         }
-        if !rec.audit.iter().any(|e| e == Self::LEGACY_MIGRATED_MARKER) {
+        let legacy = rec
+            .audit
+            .iter()
+            .rposition(|e| e == Self::LEGACY_MIGRATED_MARKER);
+        let recovered = rec
+            .audit
+            .iter()
+            .rposition(|e| e == "OWNER_CONFIRMED_LEGACY_STOP_RESET");
+        if legacy.is_none() || recovered.is_some_and(|position| Some(position) > legacy) {
             return Err("NOT_A_LEGACY_MIGRATED_STOP".into());
+        }
+        // Bind the explicit recovery to the exact authenticated row just read.
+        let (stopped, revoked, original): (i64, i64, String) = self
+            .conn
+            .query_row(
+                "SELECT stopped, revoked, audit_json FROM local_control WHERE scope_hash=?1",
+                params![self.scope_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let raw = open_payload(
+            &self.master_key,
+            &self.scope_hash,
+            "local_control",
+            &original,
+        )?;
+        let current: SealedControlPayload =
+            serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        if current.v != 2
+            || stopped != 1
+            || revoked != 0
+            || !current.stopped
+            || current.revoked
+            || current.audit != rec.audit
+        {
+            return Err("journal recovery concurrent modification".into());
         }
         rec.stopped = false;
         rec.audit.push("OWNER_CONFIRMED_LEGACY_STOP_RESET".into());
-        self.save_control(&rec)?;
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: false,
+            revoked: false,
+            audit: rec.audit.clone(),
+        };
+        let json = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        let sealed = seal_payload(&self.master_key, &self.scope_hash, "local_control", &json)?;
+        let changed = self.conn.execute(
+            "UPDATE local_control SET stopped=0, audit_json=?1 WHERE scope_hash=?2 AND stopped=1 AND revoked=0 AND audit_json=?3",
+            params![sealed, self.scope_hash, original],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("journal recovery concurrent modification".into());
+        }
+        restrict_db_companions(&self.db_path)?;
         Ok(rec)
     }
 
@@ -246,14 +342,17 @@ impl LocalJournal {
             "local_control",
             audit_json.as_bytes(),
         )?;
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json)
                  VALUES(?1, ?2, ?3, ?4)
                  ON CONFLICT(scope_hash) DO UPDATE SET
                    stopped=excluded.stopped,
                    revoked=excluded.revoked,
-                   audit_json=excluded.audit_json",
+                   audit_json=excluded.audit_json
+                 WHERE local_control.stopped <= excluded.stopped
+                   AND local_control.revoked <= excluded.revoked",
                 params![
                     self.scope_hash,
                     i64::from(record.stopped),
@@ -262,6 +361,9 @@ impl LocalJournal {
                 ],
             )
             .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("control stop or revoke cannot be cleared by save".into());
+        }
         restrict_db_companions(&self.db_path)?;
         Ok(())
     }
@@ -455,7 +557,7 @@ mod tests {
             serde_json::to_string(&vec!["LOCAL_STOP: legacy entry".to_string()]).unwrap();
         let (scope_hash, legacy_sealed) = {
             let j = LocalJournal::open(&db_path, &scope).unwrap();
-            let sealed = seal_payload(
+            let sealed = crate::security::seal_legacy_payload(
                 &j.master_key,
                 &j.scope_hash,
                 "local_control",
@@ -484,6 +586,16 @@ mod tests {
             .audit
             .iter()
             .any(|e| e == LocalJournal::LEGACY_MIGRATED_MARKER));
+        let (stopped, revoked, sealed): (i64, i64, String) = reopened
+            .conn
+            .query_row(
+                "SELECT stopped, revoked, audit_json FROM local_control WHERE scope_hash=?1",
+                params![reopened.scope_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((stopped, revoked), (1, 0));
+        assert!(sealed.starts_with("enc:v2:"));
 
         // Wrong owner confirmation phrase fails closed
         assert_eq!(
@@ -504,6 +616,18 @@ mod tests {
             .audit
             .iter()
             .any(|e| e == "OWNER_CONFIRMED_LEGACY_STOP_RESET"));
+        reopened
+            .save_control(&ControlRecord {
+                stopped: true,
+                ..reloaded
+            })
+            .unwrap();
+        assert_eq!(
+            reopened
+                .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
+                .unwrap_err(),
+            "NOT_A_LEGACY_MIGRATED_STOP"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -527,7 +651,7 @@ mod tests {
             serde_json::to_string(&vec!["LOCAL_REVOKE: device revoked".to_string()]).unwrap();
         let (scope_hash, legacy_sealed) = {
             let j = LocalJournal::open(&db_path, &scope).unwrap();
-            let sealed = seal_payload(
+            let sealed = crate::security::seal_legacy_payload(
                 &j.master_key,
                 &j.scope_hash,
                 "local_control",
@@ -549,6 +673,15 @@ mod tests {
         let migrated = reopened.load_control(vec![]).unwrap();
         assert!(migrated.stopped);
         assert!(migrated.revoked);
+        let sealed: String = reopened
+            .conn
+            .query_row(
+                "SELECT audit_json FROM local_control WHERE scope_hash=?1",
+                params![reopened.scope_hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sealed.starts_with("enc:v2:"));
         assert_eq!(
             reopened
                 .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
@@ -556,5 +689,104 @@ mod tests {
             "CANNOT_RECOVER_REVOKED_DEVICE"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn interrupted_or_corrupt_legacy_migration_never_clears_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let journal = LocalJournal::open(&path, &scope).unwrap();
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: true,
+            revoked: true,
+            audit: vec!["revoke".into()],
+        };
+        let original = crate::security::seal_legacy_payload(
+            &journal.master_key,
+            &journal.scope_hash,
+            "local_control",
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        journal
+            .conn
+            .execute(
+                "INSERT INTO local_control VALUES(?1,1,1,?2)",
+                params![journal.scope_hash, original],
+            )
+            .unwrap();
+        journal.conn.execute_batch(
+            "CREATE TRIGGER fail_migration BEFORE UPDATE ON local_control BEGIN SELECT RAISE(ABORT,'injected'); END;"
+        ).unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        let unchanged: String = journal
+            .conn
+            .query_row("SELECT audit_json FROM local_control", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(unchanged, original);
+        journal
+            .conn
+            .execute_batch("DROP TRIGGER fail_migration")
+            .unwrap();
+        let mut tampered = original.clone();
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == '0' { '1' } else { '0' });
+        journal
+            .conn
+            .execute("UPDATE local_control SET audit_json=?1", params![tampered])
+            .unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        journal
+            .conn
+            .execute("UPDATE local_control SET audit_json=?1", params![original])
+            .unwrap();
+        drop(journal);
+        let reopened = LocalJournal::open(&path, &scope).unwrap();
+        let restored = reopened.load_control(vec![]).unwrap();
+        assert!(restored.stopped && restored.revoked);
+        let migrated: String = reopened
+            .conn
+            .query_row("SELECT audit_json FROM local_control", [], |row| row.get(0))
+            .unwrap();
+        assert!(migrated.starts_with("enc:v2:"));
+    }
+
+    #[test]
+    fn stale_writer_cannot_clear_stop_or_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut first = LocalJournal::open(&path, &scope).unwrap();
+        let mut stale = LocalJournal::open(&path, &scope).unwrap();
+        first
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec!["revoke".into()],
+            })
+            .unwrap();
+        assert!(stale
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
+        let record = stale.load_control(vec![]).unwrap();
+        assert!(record.stopped && record.revoked);
     }
 }
