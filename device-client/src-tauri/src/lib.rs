@@ -251,8 +251,9 @@ fn stop_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, Str
             agent.stop();
         }
         state.audit.push("LOCAL_STOP: 新規操作を停止".into());
-        state.persist_control()?;
     }
+    // A previous persistence attempt may have failed after setting the in-memory flag.
+    state.persist_control()?;
     Ok(state.snapshot())
 }
 
@@ -269,8 +270,8 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
         state
             .audit
             .push("LOCAL_REVOKE: 端末ペアリング・ローカル操作を無効化".into());
-        state.persist_control()?;
     }
+    state.persist_control()?;
     Ok(state.snapshot())
 }
 
@@ -494,11 +495,14 @@ mod tests {
             build_root: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
-        state.pair_cloud(cfg, fence, adapters).unwrap();
+        assert_eq!(
+            state.pair_cloud(cfg, fence, adapters),
+            Err("AUTHENTICATED_TRANSPORT_UNAVAILABLE")
+        );
         let permit = make_start_permit(&req, &grant, "p-1", 200);
         assert_eq!(
             state.execute_admitted_action(&req, &grant, Some(permit), 100),
-            Decision::LocalCompleted
+            Decision::Denied("UNPAIRED")
         );
         state.stopped = true;
         if let Some(a) = state.agent.as_mut() {

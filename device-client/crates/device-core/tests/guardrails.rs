@@ -518,53 +518,48 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
 
 #[test]
 fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
-    use aiagent_device_core::agent::AuthenticatedChannelPort;
+    use aiagent_device_core::agent::{
+        AndroidAdapterPort, AuthenticatedChannelPort, BuildAdapterPort, ChromeAdapterPort,
+        CuaAdapterPort, Delivery,
+    };
     use aiagent_device_core::mock::mock_grant;
     use aiagent_device_core::{
         make_start_permit, CloudPairingConfig, LocalAdapters, TlsAuthenticatedChannel,
     };
 
-    let bad_http = CloudPairingConfig {
-        endpoint: "http://insecure.local/ws".into(),
-        ca_pin_sha256: "a".repeat(64),
-        client_cert_present: true,
-        tls_handshake_verified: true,
-    };
-    assert!(bad_http.validate().is_err());
-
-    let no_mtls = CloudPairingConfig {
-        endpoint: "wss://control.aiagent.example/ws".into(),
-        ca_pin_sha256: "a".repeat(64),
-        client_cert_present: false,
-        tls_handshake_verified: true,
-    };
-    assert!(no_mtls.validate().is_err());
-
-    let mut ch = TlsAuthenticatedChannel::unpaired();
-    assert!(!ch.online());
-    let valid_cfg = CloudPairingConfig {
+    let cfg = CloudPairingConfig {
         endpoint: "wss://control.aiagent.example/ws".into(),
         ca_pin_sha256: "b".repeat(64),
         client_cert_present: true,
         tls_handshake_verified: true,
     };
-    ch.pair(valid_cfg).unwrap();
-    assert!(ch.online());
+    let mut invalid = cfg.clone();
+    invalid.endpoint = "http://insecure.local/ws".into();
+    assert!(invalid.validate().is_err());
+    invalid = cfg.clone();
+    invalid.client_cert_present = false;
+    assert!(invalid.validate().is_err());
+    let mut ch = TlsAuthenticatedChannel::unpaired();
+    assert_eq!(
+        ch.pair(cfg.clone()),
+        Err("AUTHENTICATED_TRANSPORT_UNAVAILABLE")
+    );
+    // Even direct field assignment and a fabricated permit cannot create authority.
+    ch.config = Some(cfg);
+    let req = request("A", "d1", Operation::DesktopClick);
+    let grant = mock_grant(&req, "g1", 200);
+    ch.active_permit = Some(make_start_permit(&req, &grant, "p1", 200));
+    assert!(!ch.online());
+    assert!(ch.authorize_start(&req, &grant, 100).is_none());
 
     let dir = tempdir().unwrap();
-    let ws = dir.path().join("demo-ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let adapters = LocalAdapters {
+    std::fs::create_dir(dir.path().join("demo-ws")).unwrap();
+    let mut adapters = LocalAdapters {
         build_root: Some(dir.path().to_path_buf()),
         adb_probe_enabled: true,
-        chrome_native_host_connected: false,
-        desktop_accessibility_ready: false,
+        chrome_native_host_connected: true,
+        desktop_accessibility_ready: true,
         executed_count: 0,
-    };
-    let pol = LocalPolicy {
-        allow_mock_build: true,
-        allow_mock_android: true,
-        ..Default::default()
     };
     let build_req = ActionRequest::new(
         scope("A"),
@@ -577,21 +572,35 @@ fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
         },
         b"cargo test".to_vec(),
     );
-    let build_grant = mock_grant(&build_req, "g1", 200);
-    ch.active_permit = Some(make_start_permit(&build_req, &build_grant, "p1", 200));
-
-    let j = LocalJournal::open(&dir.path().join("j.db"), &scope("A")).unwrap();
-    let mut agent = Agent::new(scope("A"), fence(), ch, adapters, pol, j);
-    assert_eq!(
-        agent.execute(&build_req, &build_grant, 100),
-        Decision::LocalCompleted
+    let android_req = ActionRequest::new(
+        scope("A"),
+        fence(),
+        "a1".into(),
+        Epoch(7),
+        Operation::AndroidInstall,
+        Target::Android {
+            serial: "device-1".into(),
+            package_id: "example.app".into(),
+        },
+        vec![],
     );
-    assert_eq!(agent.adapters.executed_count, 1);
-
-    // Without live OS UIA / Chrome extension / ADB serial attached, execution fails closed.
-    let desktop_req = request("A", "d1", Operation::DesktopClick);
-    agent.policy.desktop_apps.insert("mock.notepad".into());
-    let dg = mock_grant(&desktop_req, "g2", 200);
-    agent.channel.active_permit = Some(make_start_permit(&desktop_req, &dg, "p2", 200));
-    assert_eq!(agent.execute(&desktop_req, &dg, 100), Decision::Failed);
+    let browser_req = ActionRequest::new(
+        scope("A"),
+        fence(),
+        "c1".into(),
+        Epoch(7),
+        Operation::BrowserClick,
+        Target::Browser {
+            origin: "https://example.com".into(),
+            profile_id: "profile-1".into(),
+            tab_id: "tab-1".into(),
+            document_generation: "doc-1".into(),
+        },
+        vec![],
+    );
+    assert_eq!(adapters.desktop(&req), Delivery::Failed);
+    assert_eq!(adapters.chrome(&browser_req), Delivery::Failed);
+    assert_eq!(adapters.build(&build_req), Delivery::Failed);
+    assert_eq!(adapters.android(&android_req), Delivery::Failed);
+    assert_eq!(adapters.executed_count, 0);
 }

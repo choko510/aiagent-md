@@ -1,0 +1,11 @@
+# Local Device Client: implementation audit
+
+Baseline: `53ac14c5376509cef0293ed236bd417a6c8d2f6e` (origin/main). This is an implementation audit, not a specification lock or production approval.
+
+- The existing `TlsAuthenticatedChannel` accepted caller-supplied handshake and client-certificate booleans. No TLS handshake, certificate validation, device proof of possession, or signed server permit was performed. The placeholder now refuses pairing and never reports online or issues a permit. The legacy fields remain solely for compatibility pending replacement by a real transport.
+- The former `LocalAdapters` reported success on flags or the existence of a directory and invoked `adb` through PATH. None proved the requested OS, browser, build or Android operation occurred. These adapters now return failure and launch no process. Simulator `MockAdapters` remain separate and do not establish native behavior.
+- The journal is a simulator: only the control envelope is sealed using a custom construction, Unix stores its key as plaintext in a mode-restricted file, and the key is shared across journal scopes. The legacy format and stop/revoke recovery require a versioned, integrity-checked migration to a standard AEAD and appropriate OS key storage before real enrollment or operation. No such migration is asserted here.
+- Tauri and agent currently share a process; there is no authenticated owner-bound IPC. Pairing, signed grants, online start authorization, device gateway, semantic effect barrier, historical receipt reconciliation, native adapters and production isolation remain unimplemented. A mock `START_PERMIT` is not evidence of cloud authorization.
+- PR #122 is open and reserves migration 0029; its changes include Tool Gateway, Sentinel, API and development integration. This slice adds no database migration or shared backend change. Separate integration and current merge-order verification are required.
+
+Tests of the mock state machine are partial LDC coverage, not LDC-T01 through LDC-T32 acceptance. Real TLS/WSS, real device I/O, GUI, Android, production VM isolation, performance and end-to-end tests remain NOT RUN. Features must remain disabled until their individual security and acceptance gates are implemented and verified.

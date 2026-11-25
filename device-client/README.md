@@ -1,6 +1,6 @@
 # Device Client — LDC-1 Mock slice
 
-Windows-first Rust Device Agent core + Tauri 2 offline simulator. This is **NOT** a paired or production-operable device client. No Cloud Gateway, TLS, pairing, Cua process, Chrome extension, build execution or ADB call exists. The UI has no real action command. There is no hardcoded key, cookie, user profile collection, privileged local server or active network listener.
+Windows-first Rust Device Agent core + Tauri 2 offline simulator. This is **NOT** a paired or production-operable device client. No Cloud Gateway, TLS, pairing, Cua process, Chrome extension, build execution or ADB operation exists. The placeholder channel always rejects pairing and reports offline, even when its legacy configuration flags claim a verified handshake. Placeholder local adapters always fail without spawning a process. There is no hardcoded key, cookie, user profile collection, privileged local server or active network listener.
 
 ## Build / test (Codex CLI handoff)
 
@@ -30,7 +30,7 @@ CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd d
 - `AuthenticatedChannelPort`, `CuaAdapterPort`, `ChromeAdapterPort`, `BuildAdapterPort`, `AndroidAdapterPort` exist as **interfaces**. Only no-effect mocks exist.
 - Model-controlled argument bytes are SHA-256 hashed, the full operation/target/fence is bound to the journal fingerprint, grants and START_PERMIT must agree on scope/epoch/intent/target/digest and be fresh. All JSON epochs use canonical signed-int64 decimal strings.
 - LocalJournal writes STARTED + consumed Permit in a single IMMEDIATE SQLite transaction, uses WAL + synchronous FULL; crash recovery marks remaining STARTED UNKNOWN. No blind retry and no claim of exact-once delivery or Cloud success.
-- The metadata-only SQLite mock journal is **not encrypted and not suitable for production**; per-owner OS-protected key storage, secure file permissions on Windows, genuine signed server grants and authenticated live connection are not implemented. Never store sensitive payload bytes in this journal.
+- The simulator journal encrypts some fields using a custom legacy construction, with a DPAPI-protected key on Windows and a plaintext owner-restricted key file on Unix. This is **not a production cryptographic design**. Other metadata remains visible. A reviewed AEAD format, safe versioned migration and a secure platform key store are required before production; never store sensitive payloads in this journal.
 - Local policy uses a positive allowlist for simulated non-browser desktop targets and separate browser Origin grants; Build/ADB are disabled unless explicitly enabled in a **test-only** policy. Unknown target changes must be rejected by future native adapters.
 - Durable Cloud receipt reconciliation, semanticEffectKey barrier, handoff CAS, Tauri-to-separate-Agent owner-bound IPC, cryptographic permit validation and revocation propagation remain **AI-07/shared contract integration tasks**. No real driver path can be enabled before these gates.
 
@@ -40,4 +40,4 @@ CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd d
 
 Manual Windows Mock GUI tests: launch -> verify disabled real actions -> Stop -> verify disabled controls and audit -> close -> restart (in-memory UI state resets; real secure persistence is not implemented). Mark each actual run PASS/FAIL/NOT_RUN; never infer PASS from a successful PR or a documentation statement. Host lacking Windows/macOS/USB must record `BLOCKED_HOST_UNAVAILABLE`.
 
-Status at submission: **IMPLEMENTED / TESTS_NOT_RUN** unless separate CI run and SHA are recorded. Only promote to `CODE_READY` after core unit tests and Tauri build succeed. `HOST_VERIFIED` / `PRODUCTION_READY` are not asserted.
+The simulator is incomplete. A successful build or simulator test does not establish the production LDC acceptance criteria, `CODE_READY`, `HOST_VERIFIED`, or `PRODUCTION_READY`.
