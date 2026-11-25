@@ -120,12 +120,12 @@ def new_installation(
     )
 
 
+# begin/finish pairs are persisted once, at finish, so they share one record_version bump.
 def finish_install(installation: SkillInstallation, *, now: str) -> SkillInstallation:
     assert_installation_transition(installation.effective, InstallationState.INSTALLED_DISABLED)
     return replace(
         installation,
         effective=InstallationState.INSTALLED_DISABLED,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
@@ -162,7 +162,6 @@ def finish_enable(installation: SkillInstallation, *, now: str) -> SkillInstalla
         desired=DesiredState.ENABLED,
         effective=InstallationState.ENABLED,
         activation_generation=installation.activation_generation + 1,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
@@ -230,7 +229,6 @@ def finish_update(
         activation_generation=installation.activation_generation + (1 if enable else 0),
         policy_revision=policy_revision,
         approved_release_digest=target.content_digest,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
@@ -249,7 +247,6 @@ def abort_update(
         installation,
         desired=DesiredState.ENABLED if restore is InstallationState.ENABLED else DesiredState.DISABLED,
         effective=restore,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
@@ -297,7 +294,6 @@ def finish_rollback(
         effective=effective,
         activation_generation=installation.activation_generation + (1 if reenable else 0),
         approved_release_digest=target.content_digest,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
@@ -321,7 +317,6 @@ def finish_remove(installation: SkillInstallation, *, now: str) -> SkillInstalla
         installation,
         desired=DesiredState.DISABLED,
         effective=InstallationState.REMOVED,
-        record_version=installation.record_version + 1,
         updated_at=now,
     )
 
