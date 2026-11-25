@@ -1,0 +1,19 @@
+[package]
+name = "aiagent-device-transport"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Server-verified outbound WSS transport for the device agent"
+
+[dependencies]
+futures-util = { version = "0.3", features = ["sink"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["net", "time"] }
+tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+url = "2"
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

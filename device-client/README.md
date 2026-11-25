@@ -1,6 +1,6 @@
 # Device Client — LDC-1 Mock slice
 
-Windows-first Rust Device Agent core + Tauri 2 offline simulator. This is **NOT** a paired or production-operable device client. No Cloud Gateway, TLS, pairing, Cua process, Chrome extension, build execution or ADB operation exists. The placeholder channel always rejects pairing and reports offline, even when its legacy configuration flags claim a verified handshake. Placeholder local adapters always fail without spawning a process. There is no hardcoded key, cookie, user profile collection, privileged local server or active network listener.
+Windows-first Rust Device Agent core + Tauri 2 offline simulator. This is **NOT** a paired or production-operable device client. A separate outbound WSS library verifies server certificates and hostnames; it is not yet wired to a Device Gateway or the simulator. Pairing, device authentication, Cua process, Chrome extension, build execution and ADB operations are not implemented. The placeholder channel always rejects pairing and reports offline, even when its legacy configuration flags claim a verified handshake. Placeholder local adapters always fail without spawning a process. There is no hardcoded key, cookie, user profile collection, privileged local server or active network listener.
 
 ## Build / test (Codex CLI handoff)
 
@@ -14,7 +14,7 @@ cargo --version
 cargo run -p aiagent-device-desktop
 ```
 
-WSL2 (core tests; requires Rust toolchain and SQLite C build support):
+WSL2 (core and TLS/WSS transport tests; requires Rust, clippy, rustfmt and SQLite C build support):
 
 ```bash
 cd device-client
@@ -23,7 +23,7 @@ bash ci/verify.sh
 
 Run on Windows in an ordinary interactive user session. Tauri 2 Windows builds require installed Rust MSVC toolchain, WebView2 and applicable Windows SDK/MSVC tools. Do **not** install or run any Cua/BrowserMCP/ADB service for this mock test. On Windows, test app launch, the status UNPAIRED_OFFLINE, disabled Pair/Operate controls, Local Stop, Mock Revocation and local audit rows. No real device effects should occur. If compilation fails, capture first error and OS/toolchain versions; do not switch to admin or disable Windows security.
 
-CI handoff to AI-07: add a shared-workflow job on `windows-latest` running `cd device-client; cargo test --workspace; cargo check --workspace`. Linux-only core test: `cargo test -p aiagent-device-core`. Tauri Linux build requires native GTK/WebKit packages; a macOS build is not macOS TCC/real-device verification. Run `cargo fmt --all` before final review; the script runs tests/compile, not formatting. Lockfile generation/pinning and dependency licence audit also belong to an actual toolchain-enabled job, not claimed here.
+The device workflow runs the Windows workspace checks and Linux core/transport checks. Tauri Linux builds require native GTK/WebKit packages; a macOS build is not macOS TCC/real-device verification. `Cargo.lock` pins resolved dependencies. Dependency and licence audits, installer signing, and native GUI verification are separate gates and are not claimed here.
 
 ## Trust boundary / status
 
