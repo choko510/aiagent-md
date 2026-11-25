@@ -295,7 +295,7 @@ class DevelopmentWorkflow:
     def reconcile_commit(
         self, scope: ProjectScope, cycle_id: str, observed_commit: CommitEvidence | None = None
     ) -> Cycle:
-        """Resolve UNKNOWN_EXTERNAL_EFFECT deterministically from current remote/git head evidence."""
+        """Inspect an unknown commit without inferring the outcome from the current Git head."""
         c = self._load(scope, cycle_id)
         self._phase(c, Phase.UNKNOWN_EXTERNAL_EFFECT)
         if c.patch is None:
@@ -315,7 +315,9 @@ class DevelopmentWorkflow:
             # verifier and the original Intent/Attempt binding are available.
             raise EffectUnknown("canonical commit receipt verification unavailable")
         if head == c.patch.parent_sha:
-            return self._save(c, replace(c, version=c.version + 1, phase=Phase.BLOCKED))
+            # The ref may have advanced and later moved back. Its present value
+            # cannot establish that the original operation did not take effect.
+            raise EffectUnknown("canonical commit outcome unavailable; retain unknown")
         raise StaleReference("remote branch state does not match pre-commit parent SHA")
 
     def assert_code_ready(self, scope: ProjectScope, cycle_id: str) -> Cycle:

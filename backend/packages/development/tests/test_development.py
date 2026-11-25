@@ -435,7 +435,7 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
         flow.create_pr(scope, "cycle-1", intent_ref="pr-1")
     assert flow._load(scope, "cycle-1").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
 
-    # Reconcile unknown commit when remote stayed at parent -> BLOCKED
+    # A parent HEAD cannot prove that a dispatched commit never took effect.
     parent_sha = scm.head(scope)
     scope_rec = replace(scope, base_sha=parent_sha)
     req_rec = ExecutionRequest(scope_rec, run, "plan-1", "build", ("pytest", "-q"), "a" * 64, "build-rec")
@@ -459,7 +459,11 @@ def test_push_pr_persistence_unknown_reconciliation_and_manifest_collision(env):
     scm_rec.commit_patch = lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("ack lost"))  # type: ignore[method-assign]
     with pytest.raises(EffectUnknown):
         flow_rec.commit(scope_rec, "cycle-rec", message="uncertain", intent_ref="commit-rec")
-    assert flow_rec.reconcile_commit(scope_rec, "cycle-rec", None).phase == Phase.BLOCKED
+    with pytest.raises(EffectUnknown, match="retain unknown"):
+        flow_rec.reconcile_commit(scope_rec, "cycle-rec", None)
+    assert flow_rec._load(scope_rec, "cycle-rec").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow_rec.commit(scope_rec, "cycle-rec", message="blind retry", intent_ref="commit-rec")
 
     # Matching HEAD and an asserted receipt cannot prove the original Intent.
     flow_rec.create("cycle-rec2", scope_rec, run, "change-rec2")
