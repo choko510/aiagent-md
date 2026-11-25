@@ -91,6 +91,7 @@ pytestmark = [
         "goal_changed_before_admission",
         "worker_response_lost",
         "receipt_response_lost",
+        "worker_crash_after_cas",
         "workflow_commit",
         "workflow_nonzero",
         "workflow_timeout",
@@ -268,6 +269,8 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             "-e",
             "FIXTURE_GIT_FENCE=1",
             "-e",
+            f"FIXTURE_CRASH_AFTER_CAS={'1' if scenario == 'worker_crash_after_cas' else '0'}",
+            "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             "-e",
             "PYTHONPATH=/w/.linuxdeps:/w/packages/domain/src:/w/packages/core/src:/w/packages/development/src:/w/packages/sandbox/src",
@@ -344,6 +347,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 "workflow_truncation",
                 "worker_response_lost",
                 "receipt_response_lost",
+                "worker_crash_after_cas",
             ):
                 original_handler = fence_server.methods["git.enter_cas"].handler
 
@@ -774,7 +778,12 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 if scenario != "success":
                     assert result["status"] == "UNKNOWN", result
                     actual = run("rev-parse", "refs/heads/feat/fixture").decode().strip()
-                    if scenario not in ("cancel_after_cas_admission", "worker_response_lost", "receipt_response_lost"):
+                    if scenario not in (
+                        "cancel_after_cas_admission",
+                        "worker_response_lost",
+                        "receipt_response_lost",
+                        "worker_crash_after_cas",
+                    ):
                         assert actual == parent
                     row = dbs["owner"].one(
                         "SELECT o.state,o.candidate_commit,a.status_code AS attempt_status FROM agent.git_operations o "
@@ -787,11 +796,17 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         "RECEIPT_PERSISTED"
                         if scenario == "receipt_response_lost"
                         else "CAS_PENDING"
-                        if scenario in ("admission_response_lost", "cancel_after_cas_admission", "worker_response_lost")
+                        if scenario
+                        in (
+                            "admission_response_lost",
+                            "cancel_after_cas_admission",
+                            "worker_response_lost",
+                            "worker_crash_after_cas",
+                        )
                         else "ADMITTED"
                     )
                     assert row["state"] == expected_state and row["attempt_status"] == "UNKNOWN"
-                    if scenario in ("worker_response_lost", "receipt_response_lost"):
+                    if scenario in ("worker_response_lost", "receipt_response_lost", "worker_crash_after_cas"):
                         assert actual == row["candidate_commit"] and actual != parent
                         assert len(list(journal.glob("*.confirmed"))) == 1
                     if scenario == "receipt_response_lost":
@@ -803,7 +818,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert receipts["n"] == 1
-                    if scenario in ("cancel_after_cas_admission", "worker_response_lost"):
+                    if scenario in ("cancel_after_cas_admission", "worker_response_lost", "worker_crash_after_cas"):
                         assert actual in (parent, row["candidate_commit"])
                         receipts = dbs["owner"].one(
                             "SELECT count(*) AS n FROM agent.git_operation_receipts r "
@@ -813,7 +828,12 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             (claim.tenant_id, call_id),
                         )
                         assert receipts["n"] == 0
-                    if scenario in ("admission_response_lost", "worker_response_lost", "receipt_response_lost"):
+                    if scenario in (
+                        "admission_response_lost",
+                        "worker_response_lost",
+                        "receipt_response_lost",
+                        "worker_crash_after_cas",
+                    ):
                         replay = await client.call("tool.development_git_commit", body)
                         assert replay["status"] == "UNKNOWN"
                         count = dbs["owner"].one(

@@ -14,6 +14,14 @@ from aiagent_sandbox.git_worker_rpc import GitWorkerAuthority, GitWorkerService,
 
 async def main() -> None:
     journal = GitOperationJournal(Path("/journal"), b"j" * 32)
+    if os.environ.get("FIXTURE_CRASH_AFTER_CAS") == "1":
+        original_confirm = journal.confirm
+
+        def crash_after_confirm(*args: object) -> None:
+            original_confirm(*args)  # type: ignore[arg-type]
+            os._exit(137)
+
+        journal.confirm = crash_after_confirm  # type: ignore[method-assign]
     service = GitWorkerService(
         IsolatedGitCommitWorker(Path("/repo"), Path("/usr/bin/git"), "feat/fixture"),
         journal,
