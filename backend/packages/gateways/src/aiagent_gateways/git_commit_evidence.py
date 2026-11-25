@@ -103,7 +103,7 @@ class GitCommitEvidenceReader:
             raise EffectUnknown("Git receipt unavailable")
         try:
             attempt, artifact = self._settled(scope, operation_id, receipt_id, deadline)
-            payload, _ = self._receipts.fetch(operation_id, receipt_id, deadline=deadline)
+            payload, body_sha, proof_sha = self._receipts.fetch_with_proof(operation_id, receipt_id, deadline=deadline)
             if (
                 artifact != patch.artifact_ref
                 or payload.get("attempt") != attempt
@@ -118,7 +118,13 @@ class GitCommitEvidenceReader:
             if self._settled(scope, operation_id, receipt_id, deadline) != (attempt, artifact):
                 raise ValueError("Git effect changed")
             return CommitEvidence(
-                patch.parent_sha, payload["commit"], patch.diff_sha256, patch.artifact_ref, "git:" + receipt_id
+                patch.parent_sha,
+                payload["commit"],
+                patch.diff_sha256,
+                patch.artifact_ref,
+                "git:" + receipt_id,
+                body_sha,
+                proof_sha,
             )
         except Exception as exc:
             raise EffectUnknown("Git receipt requires reconciliation") from exc

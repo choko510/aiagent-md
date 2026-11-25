@@ -250,6 +250,10 @@ class GitReceiptStore:
             raise GitReceiptError("Git receipt persistence requires reconciliation") from exc
 
     def fetch(self, operation: str, receipt_id: str, *, deadline: float) -> tuple[dict[str, Any], str]:
+        payload, body_sha, _proof_sha = self.fetch_with_proof(operation, receipt_id, deadline=deadline)
+        return payload, body_sha
+
+    def fetch_with_proof(self, operation: str, receipt_id: str, *, deadline: float) -> tuple[dict[str, Any], str, str]:
         if not is_uuid7(receipt_id) or not time.monotonic() < deadline <= time.monotonic() + 60:
             raise GitReceiptError("Git receipt unavailable")
         try:
@@ -278,6 +282,6 @@ class GitReceiptStore:
                 or not hmac.compare_digest(proof, verified_proof)
             ):
                 raise ValueError
-            return result, hashlib.sha256(body).hexdigest()
+            return result, hashlib.sha256(body).hexdigest(), hashlib.sha256(proof).hexdigest()
         except Exception as exc:
             raise GitReceiptError("Git receipt unavailable or invalid") from exc

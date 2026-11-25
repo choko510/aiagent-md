@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -224,7 +225,16 @@ class DevelopmentWorkflow:
         ):
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider evidence cannot prove target commit; reconcile")
-        return self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.COMMITTED, commit=result))
+        try:
+            return self._save(
+                pending, replace(pending, version=pending.version + 1, phase=Phase.COMMITTED, commit=result)
+            )
+        except Exception as exc:
+            # The ref may already have moved, including when the DB response is
+            # lost. A version-fenced best effort keeps the outcome ambiguous.
+            with suppress(Exception):
+                self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
+            raise EffectUnknown("commit result could not be fenced; reconcile") from exc
 
     def review(self, scope: ProjectScope, cycle_id: str, verdict: ReviewVerdict) -> Cycle:
         c = self._load(scope, cycle_id)

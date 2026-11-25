@@ -238,6 +238,8 @@ class CommitEvidence:
     diff_sha256: str
     artifact_ref: str
     receipt_ref: str
+    receipt_body_sha256: str | None = None
+    receipt_proof_sha256: str | None = None
 
     def __post_init__(self) -> None:
         require_sha(self.parent_sha)
@@ -245,6 +247,11 @@ class CommitEvidence:
         require_digest(self.diff_sha256)
         if self.commit_sha == self.parent_sha or not self.artifact_ref or not self.receipt_ref:
             raise InvalidEvidence("invalid commit evidence")
+        if (self.receipt_body_sha256 is None) != (self.receipt_proof_sha256 is None):
+            raise InvalidEvidence("incomplete commit receipt digest")
+        if self.receipt_body_sha256 is not None and self.receipt_proof_sha256 is not None:
+            require_digest(self.receipt_body_sha256)
+            require_digest(self.receipt_proof_sha256)
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 from dataclasses import asdict, replace
@@ -98,6 +99,8 @@ def _deserialize_cycle(raw: dict[str, Any]) -> Cycle:
             diff_sha256=str(commit_raw["diff_sha256"]),
             artifact_ref=str(commit_raw["artifact_ref"]),
             receipt_ref=str(commit_raw["receipt_ref"]),
+            receipt_body_sha256=commit_raw.get("receipt_body_sha256"),
+            receipt_proof_sha256=commit_raw.get("receipt_proof_sha256"),
         )
         if commit_raw is not None
         else None
@@ -282,11 +285,13 @@ class PostgresCycleStore(CycleStorePort):
             raise StateConflict("non-monotonic cycle version")
         payload = _serialize_cycle(updated)
         with self._db.tx(tenant=updated.scope.tenant_id) as c:
-            if old.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and updated.phase == Phase.COMMITTED:
+            if old.phase in (Phase.COMMIT_PENDING, Phase.UNKNOWN_EXTERNAL_EFFECT) and updated.phase == Phase.COMMITTED:
                 if (
-                    old.commit is not None
+                    (old.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and old.commit is not None)
                     or old.patch is None
                     or updated.commit is None
+                    or updated.commit.receipt_body_sha256 is None
+                    or updated.commit.receipt_proof_sha256 is None
                     or not old.commit_intent_ref
                     or updated != replace(old, version=old.version + 1, phase=Phase.COMMITTED, commit=updated.commit)
                 ):
@@ -296,10 +301,11 @@ class PostgresCycleStore(CycleStorePort):
                 effect = c.execute(
                     "SELECT o.id,e.external_receipt_ref FROM agent.git_operations o "
                     "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                    "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
                     "JOIN agent.side_effect_records e ON e.tenant_id=i.tenant_id AND e.tool_intent_id=i.id "
                     "WHERE o.tenant_id=%s AND o.cycle_id=%s AND o.patch_id=%s "
                     "AND i.task_id=%s AND i.run_id=%s AND i.invocation_key=%s "
-                    "AND i.tool_key='git.commit' AND i.status_code='CONFIRMED' "
+                    "AND i.tool_key='git.commit' AND i.status_code='CONFIRMED' AND a.status_code='CONFIRMED' "
                     "AND e.outcome_code='CONFIRMED' AND o.state='RECEIPT_PERSISTED'",
                     (
                         old.scope.tenant_id,
@@ -329,6 +335,15 @@ class PostgresCycleStore(CycleStorePort):
                 ).fetchone()
                 if row is None or "git:" + str(row["receipt_id"]) != updated.commit.receipt_ref:
                     raise StateConflict("Git recovery receipt unavailable")
+                body_sha = hashlib.sha256(bytes(row["body"])).hexdigest()
+                proof_sha = hashlib.sha256(bytes(row["proof"])).hexdigest()
+                if (
+                    not hmac.compare_digest(body_sha, str(row["body_sha256"]))
+                    or not hmac.compare_digest(proof_sha, str(row["proof_sha256"]))
+                    or not hmac.compare_digest(body_sha, updated.commit.receipt_body_sha256)
+                    or not hmac.compare_digest(proof_sha, updated.commit.receipt_proof_sha256)
+                ):
+                    raise StateConflict("Git recovery receipt digest mismatch")
                 body = json.loads(bytes(row["body"]))
                 if (
                     body.get("commit") != updated.commit.commit_sha
