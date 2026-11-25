@@ -62,6 +62,102 @@ def _scope(db: Database, claim: Claim, workspace: str, operation: str, deadline:
         return dict(row)
 
 
+def verify_recovery_proof(
+    response: dict[str, Any],
+    row: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    journal_key: bytes,
+    result_key: bytes,
+    worker_id: str,
+) -> None:
+    """Authenticate journal, worker observation, Git objects and canonical scope."""
+    operation = payload["operation"]
+    if (
+        set(response)
+        != {
+            "operation",
+            "worker_id",
+            "commit",
+            "tree",
+            "parent",
+            "diff_sha256",
+            "commit_object",
+            "tree_object",
+            "prepared_journal_sha256",
+            "prepared_journal",
+            "confirmed_journal",
+            "observation",
+        }
+        or response["operation"] != operation
+        or response["worker_id"] != worker_id
+        or response["commit"] != row["candidate_commit"]
+        or response["tree"] != row["candidate_tree"]
+        or response["parent"] != row["parent_sha"]
+        or response["diff_sha256"] != row["patch_sha256"]
+        or response["prepared_journal_sha256"] != row["prepared_journal_sha256"]
+    ):
+        raise ValueError("Git recovery evidence mismatch")
+    journal = verify_prepared_journal(
+        journal_key,
+        response["prepared_journal"],
+        operation=operation,
+        attempt=str(row["attempt_id"]),
+        binding=str(row["binding_id"]),
+        generation=int(row["binding_generation"]),
+        branch=str(row["branch"]),
+        request_sha256=str(row["request_sha256"]),
+        parent=str(row["parent_sha"]),
+    )
+    if (
+        journal["commit"] != row["candidate_commit"]
+        or journal["tree"] != row["candidate_tree"]
+        or hashlib.sha256(canonical_json(response["prepared_journal"]).encode()).hexdigest()
+        != row["prepared_journal_sha256"]
+    ):
+        raise ValueError("Git recovery journal mismatch")
+    verify_confirmed_journal(journal_key, response["confirmed_journal"], journal)
+    expected_observation = {
+        "version": 1,
+        "operation": operation,
+        "tenant": payload["tenant"],
+        "run": payload["run"],
+        "lease": payload["lease"],
+        "intent": str(row["intent_id"]),
+        "attempt": str(row["attempt_id"]),
+        "binding": str(row["binding_id"]),
+        "generation": int(row["binding_generation"]),
+        "branch": str(row["branch"]),
+        "parent": str(row["parent_sha"]),
+        "commit": str(row["candidate_commit"]),
+        "tree": str(row["candidate_tree"]),
+        "patch_sha256": str(row["patch_sha256"]),
+        "request_sha256": str(row["request_sha256"]),
+        "prepared_journal_sha256": str(row["prepared_journal_sha256"]),
+        "worker_id": worker_id,
+        "expires_at": payload["expires_at"],
+    }
+    verify_git_recovery_observation(result_key, response["observation"], expected_observation)
+    commit = base64.b64decode(response["commit_object"], validate=True)
+    tree = base64.b64decode(response["tree_object"], validate=True)
+    if not 1 <= len(commit) <= 1024 * 1024 or not 1 <= len(tree) <= 1024 * 1024:
+        raise ValueError("Git recovery objects too large")
+
+    def oid(kind: bytes, content: bytes) -> str:
+        return hashlib.sha1(
+            kind + b" " + str(len(content)).encode("ascii") + b"\0" + content, usedforsecurity=False
+        ).hexdigest()
+
+    headers = commit.split(b"\n\n", 1)[0].splitlines()
+    if (
+        oid(b"commit", commit) != row["candidate_commit"]
+        or oid(b"tree", tree) != row["candidate_tree"]
+        or [line[5:] for line in headers if line.startswith(b"tree ")] != [str(row["candidate_tree"]).encode("ascii")]
+        or [line[7:] for line in headers if line.startswith(b"parent ")] != [str(row["parent_sha"]).encode("ascii")]
+    ):
+        raise ValueError("Git recovery object mismatch")
+
+
 async def inspect_unknown_git_operation(
     db: Database,
     claim: Claim,
@@ -154,90 +250,9 @@ async def inspect_unknown_git_operation(
         response = await RpcClient(
             endpoint, "tool_gateway", rpc_key, timeout_s=max(0.1, deadline - time.monotonic())
         ).call("git.recovery_inspect", {"grant": sign_git_recovery_grant(grant_key, payload)})
-        if (
-            set(response)
-            != {
-                "operation",
-                "worker_id",
-                "commit",
-                "tree",
-                "parent",
-                "diff_sha256",
-                "commit_object",
-                "tree_object",
-                "prepared_journal_sha256",
-                "prepared_journal",
-                "confirmed_journal",
-                "observation",
-            }
-            or response["operation"] != operation
-            or response["worker_id"] != worker_id
-            or response["commit"] != row["candidate_commit"]
-            or response["tree"] != row["candidate_tree"]
-            or response["parent"] != row["parent_sha"]
-            or response["diff_sha256"] != row["patch_sha256"]
-            or response["prepared_journal_sha256"] != row["prepared_journal_sha256"]
-        ):
-            raise ValueError("Git recovery evidence mismatch")
-        journal = verify_prepared_journal(
-            journal_key,
-            response["prepared_journal"],
-            operation=operation,
-            attempt=str(row["attempt_id"]),
-            binding=str(row["binding_id"]),
-            generation=int(row["binding_generation"]),
-            branch=str(row["branch"]),
-            request_sha256=str(row["request_sha256"]),
-            parent=str(row["parent_sha"]),
+        verify_recovery_proof(
+            response, row, payload, journal_key=journal_key, result_key=result_key, worker_id=worker_id
         )
-        if (
-            journal["commit"] != row["candidate_commit"]
-            or journal["tree"] != row["candidate_tree"]
-            or hashlib.sha256(canonical_json(response["prepared_journal"]).encode()).hexdigest()
-            != row["prepared_journal_sha256"]
-        ):
-            raise ValueError("Git recovery journal mismatch")
-        verify_confirmed_journal(journal_key, response["confirmed_journal"], journal)
-        expected_observation = {
-            "version": 1,
-            "operation": operation,
-            "tenant": claim.tenant_id,
-            "run": claim.run_id,
-            "lease": claim.lease_epoch,
-            "intent": str(row["intent_id"]),
-            "attempt": str(row["attempt_id"]),
-            "binding": str(row["binding_id"]),
-            "generation": int(row["binding_generation"]),
-            "branch": str(row["branch"]),
-            "parent": str(row["parent_sha"]),
-            "commit": str(row["candidate_commit"]),
-            "tree": str(row["candidate_tree"]),
-            "patch_sha256": str(row["patch_sha256"]),
-            "request_sha256": str(row["request_sha256"]),
-            "prepared_journal_sha256": str(row["prepared_journal_sha256"]),
-            "worker_id": worker_id,
-            "expires_at": payload["expires_at"],
-        }
-        verify_git_recovery_observation(result_key, response["observation"], expected_observation)
-        commit = base64.b64decode(response["commit_object"], validate=True)
-        tree = base64.b64decode(response["tree_object"], validate=True)
-        if not 1 <= len(commit) <= 1024 * 1024 or not 1 <= len(tree) <= 1024 * 1024:
-            raise ValueError("Git recovery objects too large")
-
-        def oid(kind: bytes, content: bytes) -> str:
-            return hashlib.sha1(
-                kind + b" " + str(len(content)).encode("ascii") + b"\0" + content, usedforsecurity=False
-            ).hexdigest()
-
-        headers = commit.split(b"\n\n", 1)[0].splitlines()
-        if (
-            oid(b"commit", commit) != row["candidate_commit"]
-            or oid(b"tree", tree) != row["candidate_tree"]
-            or [line[5:] for line in headers if line.startswith(b"tree ")]
-            != [str(row["candidate_tree"]).encode("ascii")]
-            or [line[7:] for line in headers if line.startswith(b"parent ")] != [str(row["parent_sha"]).encode("ascii")]
-        ):
-            raise ValueError("Git recovery object mismatch")
         again = await asyncio.to_thread(_scope, db, claim, payload["workspace"], operation, deadline)
         if (
             any(

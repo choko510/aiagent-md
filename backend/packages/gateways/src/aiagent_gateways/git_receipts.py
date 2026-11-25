@@ -43,6 +43,7 @@ class GitReceiptStore:
         worker_id: str,
         object_verifier: GitObjectVerifier,
         require_fenced: bool = False,
+        recovery_journal_key: bytes | None = None,
     ) -> None:
         if (
             config.profile() == "production"
@@ -51,11 +52,58 @@ class GitReceiptStore:
             or object_verifier is None
             or type(require_fenced) is not bool
             or (config.profile() != "test" and not require_fenced)
+            or (
+                recovery_journal_key is not None
+                and (config.profile() != "test" or len(recovery_journal_key) < 32 or recovery_journal_key == result_key)
+            )
         ):
             raise ValueError("Git receipt verification unavailable")
         self._db, self._claim, self._keys = db, claim, keys
         self._result_key, self._worker_id, self._objects = result_key, worker_id, object_verifier
         self._require_fenced = require_fenced
+        self._recovery_journal_key = recovery_journal_key
+
+    def _confirmed_recovery_scope(self, operation: str, workspace: str, deadline: float) -> dict[str, Any]:
+        """Lock and recheck the settled effect; inspection alone cannot settle UNKNOWN."""
+        claim = self._claim
+        with self._db.tx(tenant=claim.tenant_id) as c:
+            ms = max(1, int((deadline - time.monotonic()) * 1000))
+            c.execute("SELECT set_config('statement_timeout', %s, true)", (f"{ms}ms",))
+            c.execute("SELECT set_config('lock_timeout', %s, true)", (f"{ms}ms",))
+            receipt = c.execute(
+                "SELECT * FROM agent.git_operation_fetch(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                self._scope(workspace, operation),
+            ).fetchone()
+            row = c.execute(
+                "SELECT o.* FROM agent.git_operations o JOIN agent.tool_intents i "
+                "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
+                "JOIN agent.side_effect_records e ON e.tenant_id=i.tenant_id AND e.tool_intent_id=i.id "
+                "JOIN agent.dev_cycles d ON d.tenant_id=o.tenant_id AND d.id=o.cycle_id "
+                "WHERE o.tenant_id=%s AND o.id=%s AND o.state='RECEIPT_PERSISTED' "
+                "AND i.status_code='CONFIRMED' AND a.status_code='CONFIRMED' AND e.outcome_code='CONFIRMED' "
+                "AND d.phase IN ('UNKNOWN_EXTERNAL_EFFECT','COMMITTED') "
+                "AND d.cycle_json->>'commit_intent_ref'=i.invocation_key",
+                (claim.tenant_id, operation),
+            ).fetchone()
+            if (
+                row is None
+                or receipt is None
+                or not hmac.compare_digest(
+                    hashlib.sha256(bytes(receipt["body"])).hexdigest(), str(receipt["body_sha256"])
+                )
+                or not hmac.compare_digest(
+                    hashlib.sha256(bytes(receipt["proof"])).hexdigest(), str(receipt["proof_sha256"])
+                )
+                or time.monotonic() >= deadline
+            ):
+                raise ValueError("Git confirmed recovery unavailable")
+            return {
+                **dict(row),
+                "_receipt_id": str(receipt["receipt_id"]),
+                "_body_sha256": str(receipt["body_sha256"]),
+                "_proof_sha256": str(receipt["proof_sha256"]),
+            }
 
     def _scope(self, workspace: str, operation: str) -> tuple[object, ...]:
         c = self._claim
@@ -142,7 +190,28 @@ class GitReceiptStore:
             )
             if verified["patch_bytes"] != len(patch.data) or verified["paths"] != list(patch.paths):
                 raise ValueError
-            self._objects.verify(verified, patch, deadline=deadline)
+            try:
+                self._objects.verify(verified, patch, deadline=deadline)
+            except Exception:
+                recover = getattr(self._objects, "verify_recovery", None)
+                if fresh or self._recovery_journal_key is None or not callable(recover):
+                    raise
+                before = self._confirmed_recovery_scope(operation, workspace, deadline)
+                if (
+                    before["_body_sha256"] != hashlib.sha256(canonical_json(verified).encode("utf-8")).hexdigest()
+                    or before["_proof_sha256"] != hashlib.sha256(proof.encode("ascii")).hexdigest()
+                ):
+                    raise ValueError("Git confirmed recovery receipt changed") from None
+                recover(
+                    verified,
+                    patch,
+                    before,
+                    journal_key=self._recovery_journal_key,
+                    result_key=self._result_key,
+                    deadline=deadline,
+                )
+                if self._confirmed_recovery_scope(operation, workspace, deadline) != before:
+                    raise ValueError("Git confirmed recovery scope changed") from None
             body = canonical_json(verified).encode("utf-8")
             return workspace, body, proof.encode("ascii")
         except Exception as exc:

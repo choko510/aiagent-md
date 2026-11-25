@@ -8,10 +8,12 @@ import hashlib
 import time
 from typing import Any
 
+from aiagent_core import config
 from aiagent_core.rpc import RpcClient
-from aiagent_sandbox.git_worker_rpc import sign_git_worker_grant
+from aiagent_sandbox.git_worker_rpc import sign_git_recovery_grant, sign_git_worker_grant
 
 from .git_patch_artifacts import VerifiedGitPatch
+from .git_recovery_inspection import verify_recovery_proof
 
 _EXTRA = frozenset({"commit", "tree", "cas", "worker_id"})
 
@@ -82,3 +84,47 @@ class RpcGitObjectVerifier:
                 raise ValueError
         except Exception as exc:
             raise ValueError("Git object verification unavailable") from exc
+
+    def verify_recovery(
+        self,
+        result: dict[str, Any],
+        patch: VerifiedGitPatch,
+        row: dict[str, Any],
+        *,
+        journal_key: bytes,
+        result_key: bytes,
+        deadline: float,
+    ) -> None:
+        """Authenticate read-only restart evidence; never authorize another CAS."""
+        try:
+            if (
+                config.profile() != "test"
+                or len(journal_key) < 32
+                or len(result_key) < 32
+                or len({self._rpc_key, self._grant_key, journal_key, result_key}) != 4
+                or not time.monotonic() < deadline <= time.monotonic() + 60
+                or result["patch_sha256"] != patch.digest
+                or result["commit"] != row["candidate_commit"]
+                or result["tree"] != row["candidate_tree"]
+            ):
+                raise ValueError
+            payload = {k: v for k, v in result.items() if k not in _EXTRA}
+            payload["expires_at"] = int(time.time()) + min(5, max(1, int(deadline - time.monotonic())))
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise ValueError("Git recovery verification requires a worker thread")
+            response = asyncio.run(
+                RpcClient(
+                    self._endpoint, "tool_gateway", self._rpc_key, timeout_s=max(0.1, deadline - time.monotonic())
+                ).call("git.recovery_inspect", {"grant": sign_git_recovery_grant(self._grant_key, payload)})
+            )
+            verify_recovery_proof(
+                response, row, payload, journal_key=journal_key, result_key=result_key, worker_id=self._worker_id
+            )
+            if time.monotonic() >= deadline or time.time() >= payload["expires_at"]:
+                raise ValueError
+        except Exception as exc:
+            raise ValueError("Git recovery object verification unavailable") from exc

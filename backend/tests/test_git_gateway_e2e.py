@@ -104,6 +104,11 @@ pytestmark = [
         "workflow_recovery_concurrent",
         "workflow_recovery_uncertain",
         "workflow_recovery_tamper",
+        "workflow_recovery_restart",
+        "workflow_restart_wrong_key",
+        "workflow_restart_tamper",
+        "workflow_restart_revoke",
+        "workflow_restart_receipt_changed",
         "workflow_nonzero",
         "workflow_timeout",
         "workflow_truncation",
@@ -280,7 +285,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             "-e",
             "FIXTURE_GIT_FENCE=1",
             "-e",
-            f"FIXTURE_GIT_RECOVERY={'1' if scenario == 'worker_crash_after_cas' else '0'}",
+            f"FIXTURE_GIT_RECOVERY={'1' if scenario in ('worker_crash_after_cas', 'workflow_recovery_restart', 'workflow_restart_wrong_key', 'workflow_restart_tamper', 'workflow_restart_revoke', 'workflow_restart_receipt_changed') else '0'}",
             "-e",
             f"FIXTURE_CRASH_AFTER_CAS={'1' if scenario == 'worker_crash_after_cas' else '0'}",
             "-e",
@@ -360,6 +365,11 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                 "workflow_recovery_concurrent",
                 "workflow_recovery_uncertain",
                 "workflow_recovery_tamper",
+                "workflow_recovery_restart",
+                "workflow_restart_wrong_key",
+                "workflow_restart_tamper",
+                "workflow_restart_revoke",
+                "workflow_restart_receipt_changed",
                 "workflow_nonzero",
                 "workflow_timeout",
                 "workflow_truncation",
@@ -516,6 +526,19 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         worker_id="fixture-worker",
                         object_verifier=RpcGitObjectVerifier(worker_endpoint, b"r" * 32, b"g" * 32, "fixture-worker"),
                         require_fenced=True,
+                        recovery_journal_key=(
+                            b"x" * 32
+                            if scenario == "workflow_restart_wrong_key"
+                            else b"j" * 32
+                            if scenario
+                            in (
+                                "workflow_recovery_restart",
+                                "workflow_restart_tamper",
+                                "workflow_restart_revoke",
+                                "workflow_restart_receipt_changed",
+                            )
+                            else None
+                        ),
                     )
                     provider = ToolGatewayGitProvider(
                         dbs["tool_gateway"],
@@ -568,6 +591,11 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         "workflow_recovery_cancel",
                         "workflow_recovery_concurrent",
                         "workflow_recovery_tamper",
+                        "workflow_recovery_restart",
+                        "workflow_restart_wrong_key",
+                        "workflow_restart_tamper",
+                        "workflow_restart_revoke",
+                        "workflow_restart_receipt_changed",
                     ):
                         original_commit = provider.commit_patch
 
@@ -582,6 +610,73 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             )
                         unknown = await asyncio.to_thread(cycle_store.load, scope, cycle)
                         assert unknown.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and unknown.commit_intent_ref == call_id
+                        if scenario in (
+                            "workflow_recovery_restart",
+                            "workflow_restart_wrong_key",
+                            "workflow_restart_tamper",
+                            "workflow_restart_revoke",
+                            "workflow_restart_receipt_changed",
+                        ):
+                            restarted = await asyncio.to_thread(
+                                subprocess.run,
+                                ["docker", "restart", "--time", "1", name],
+                                capture_output=True,
+                                text=True,
+                            )
+                            assert restarted.returncode == 0, restarted.stderr
+                            for _ in range(50):
+                                try:
+                                    await asyncio.to_thread(head_reader, scope, deadline=time.monotonic() + 2)
+                                    break
+                                except Exception:
+                                    await asyncio.sleep(0.1)
+                            else:
+                                pytest.fail("Git worker did not restart")
+                            if scenario == "workflow_restart_tamper":
+                                record = dbs["owner"].one(
+                                    "SELECT o.id FROM agent.git_operations o JOIN agent.tool_intents i "
+                                    "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                                    "WHERE i.tenant_id=%s AND i.invocation_key=%s",
+                                    (claim.tenant_id, call_id),
+                                )
+                                (journal / (str(record["id"]) + ".confirmed")).write_bytes(b"tampered journal")
+                            if scenario in ("workflow_restart_wrong_key", "workflow_restart_tamper"):
+                                with pytest.raises(EffectUnknown):
+                                    await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                                assert (
+                                    await asyncio.to_thread(cycle_store.load, scope, cycle)
+                                ).phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+                                return
+                            if scenario in ("workflow_restart_revoke", "workflow_restart_receipt_changed"):
+                                verifier = receipt_store._objects
+                                original_recovery = verifier.verify_recovery
+
+                                def revoke_after_proof(*args, **kwargs):
+                                    result = original_recovery(*args, **kwargs)
+                                    if scenario == "workflow_restart_revoke":
+                                        commands.cancel(
+                                            dbs["api"],
+                                            Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                                            claim.task_id,
+                                        )
+                                    else:
+                                        dbs["owner"].one(
+                                            "UPDATE agent.git_operation_receipts r SET body=r.body || %s::bytea "
+                                            "FROM agent.git_operations o JOIN agent.tool_intents i "
+                                            "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                                            "WHERE r.tenant_id=o.tenant_id AND r.operation_id=o.id "
+                                            "AND i.tenant_id=%s AND i.invocation_key=%s RETURNING r.receipt_id",
+                                            (b" ", claim.tenant_id, call_id),
+                                        )
+                                    return result
+
+                                monkeypatch.setattr(verifier, "verify_recovery", revoke_after_proof)
+                                with pytest.raises(EffectUnknown):
+                                    await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                                assert (
+                                    await asyncio.to_thread(cycle_store.load, scope, cycle)
+                                ).phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+                                return
                         if scenario == "workflow_recovery_tamper":
                             dbs["owner"].one(
                                 "UPDATE agent.git_operation_receipts r SET body=r.body || %s::bytea "
@@ -919,6 +1014,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                                     "workflow_commit",
                                     "workflow_response_lost",
                                     "workflow_recovery_concurrent",
+                                    "workflow_recovery_restart",
                                     "workflow_nonzero",
                                 )
                                 else evidence.exit_code is not None
@@ -933,6 +1029,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             "workflow_commit",
                             "workflow_response_lost",
                             "workflow_recovery_concurrent",
+                            "workflow_recovery_restart",
                         ):
                             assert not DevelopmentWorkflow._gate(restored, ())
                         with pytest.raises(StateConflict):
