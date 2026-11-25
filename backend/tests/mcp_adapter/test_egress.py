@@ -183,3 +183,24 @@ async def test_httpx_transport_forces_requests_through_egress() -> None:
     assert len(egress.calls) == 1
     assert egress.calls[0].target.url == "https://mcp.example.com/mcp"
     assert egress.calls[0].body
+
+
+async def test_httpx_transport_rejects_oversized_request_before_send() -> None:
+    egress = FakeEgress()
+
+    async def permit_for(request: EgressRequest) -> str:
+        return "permit-9"
+
+    transport = EgressHttpTransport(
+        egress,
+        permit_for=permit_for,
+        allowed_origins=frozenset({"https://mcp.example.com:443"}),
+        max_bytes=1024,
+        timeout_s=2.0,
+        max_request_bytes=32,
+    )
+    async with httpx2.AsyncClient(transport=transport, follow_redirects=False, trust_env=False) as client:
+        with pytest.raises(McpError) as err:
+            await client.post("https://mcp.example.com/mcp", content=b"x" * 64)
+    assert err.value.code is ErrorCode.BYTES_LIMIT_EXCEEDED
+    assert egress.calls == []

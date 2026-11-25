@@ -11,7 +11,7 @@ From `backend`:
 ```powershell
 $env:PYTHONPATH='packages/mcp_adapter/src;packages/gateways/src;.'
 .venv\Scripts\python.exe -m pytest tests/mcp_adapter -q
-# 55 passed
+# 56 passed
 
 .venv\Scripts\python.exe -m ruff check packages/mcp_adapter/src tests/mcp_adapter
 # All checks passed
@@ -33,11 +33,11 @@ credential refusal. This is loopback-only and uses the `AIAGENT_PROFILE=test` es
 | `test_registry.py` | 8 | CAS publish, stale generation, TTL, immutable run pin, revoke, explicit re-enable, schema/risk/policy mismatch denial |
 | `test_discovery.py` | 8 | multi-page opaque cursors, cursor loop, duplicate names, tool cap, malformed schema, list_changed invalidation, concurrent refresh |
 | `test_normalization.py` | 6 | text caps/control chars, binary hashing, resource links, `isError`, output schema mismatch, structured-content cap |
-| `test_egress.py` | 7 | absolute-form request, permit header, origin allowlist, denial proof, truncated/oversized response, timeout classification |
+| `test_egress.py` | 8 | absolute-form request, permit header, origin allowlist, denial proof, truncated/oversized response, oversized request, timeout classification |
 | `test_executor.py` | 8 | pinned ref/argument digest, scope mismatch, read vs write uncertainty, permit requirement, no auto-retry, receipt mapping |
 | `test_sdk_protocol.py` | 5 | real initialize/list/call, credential header, stale credential refusal, admitted permit override, SDK session-loss classification |
 | `test_session_manager.py` | 5 | feature flag, disabled/revoked provider, missing credential, credential handoff, call-slot concurrency |
-| **Total** | **55** | |
+| **Total** | **56** | |
 
 ## 3. Canonical MCP-T coverage
 

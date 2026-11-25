@@ -405,6 +405,7 @@ class EgressHttpTransport(httpx2.AsyncBaseTransport):
         max_bytes: int,
         timeout_s: float,
         allow_loopback: bool = False,
+        max_request_bytes: int = 1024 * 1024,
     ) -> None:
         super().__init__()
         self._egress = egress
@@ -413,12 +414,15 @@ class EgressHttpTransport(httpx2.AsyncBaseTransport):
         self._max_bytes = max_bytes
         self._timeout_s = timeout_s
         self._allow_loopback = allow_loopback
+        self._max_request_bytes = max_request_bytes
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         target = parse_target(str(request.url), allow_loopback=self._allow_loopback)
         if target.origin not in self._allowed:
             raise McpError(ErrorCode.EGRESS_DENIED, "origin_not_allowlisted")
         body = await request.aread()
+        if len(body) > self._max_request_bytes:
+            raise McpError(ErrorCode.BYTES_LIMIT_EXCEEDED, "request_body_too_large")
         headers = tuple((name.decode("latin-1"), value.decode("latin-1")) for name, value in request.headers.raw)
         egress_request = EgressRequest(
             method=request.method.upper(),

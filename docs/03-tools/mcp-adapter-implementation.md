@@ -132,7 +132,7 @@ PostgreSQL tests for tenant/owner isolation, CAS publish, TTL expiry and pinned-
 | Connect/TLS/HTTP timeout before send | `CONNECT_FAILED` / `CONNECT_TIMEOUT` | FAILED |
 | Timeout or reset after request bytes may have been sent | `TRANSPORT_TIMEOUT` / `TRANSPORT_RESET`, `effect_uncertain=true` | UNKNOWN |
 | HTTP 404/session lost after call | `HTTP_SESSION_LOST`, `effect_uncertain=true` | UNKNOWN |
-| Server returns `isError:true` | normalized `status="tool_error"`; not automatically "no effect" | may still be UNKNOWN if transport ambiguous |
+| Server returns `isError:true` | normalized `status="TOOL_ERROR"`; not automatically "no effect" | may still be UNKNOWN if transport ambiguous |
 | Output schema mismatch | `OUTPUT_SCHEMA_MISMATCH`; no false business success | UNKNOWN when a write may have happened |
 | Cancellation by the caller | propagate cancellation; do not convert a remote cancel into success | UNKNOWN if the write may have been sent |
 
@@ -153,16 +153,18 @@ refusal through the adapter transport. They do not contact an external service.
 
 ## 8. Test evidence
 
-`55` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
+`56` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
 `docs/11-qa/mcp-adapter-verification.md`. This is local execution evidence only; it is not a production
 verification or a remote-provider certification.
 
 ## 9. Known limitations / follow-ups
 
-- Gateway registration and tenant-scoped dynamic tool surface (blocked as described in `4).
+- Gateway registration and tenant-scoped dynamic tool surface (blocked as described in §4).
 - PostgreSQL snapshot/policy persistence, RLS and migration (blocked on PR #122).
 - Real `tools/list_changed` SSE delivery through a streaming proxy is not yet exercised; the current
   notification test uses a callback and the loopback server is configured with JSON responses.
+  `EgressHttpTransport` buffers a complete response, so it cannot hold a long-lived GET SSE stream;
+  a streaming egress connector is required for real server-initiated notifications.
 - No real remote MCP/OAuth provider was contacted. The current egress path is absolute-form HTTP without
   TLS termination; a production HTTPS connector is a prerequisite. OAuth refresh/revocation and
   provider-specific reconciliation are not verified.

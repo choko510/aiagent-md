@@ -206,6 +206,7 @@ class SdkStreamableHttpTransport:
             max_bytes=limits.max_response_bytes,
             timeout_s=limits.call_timeout_s,
             allow_loopback=provider.allow_loopback_for_tests,
+            max_request_bytes=limits.max_request_bytes,
         )
         timeout = httpx2.Timeout(
             connect=limits.connect_timeout_s,

@@ -24,6 +24,7 @@ MAX_PAGES = 64
 MAX_TOOLS = 128
 MAX_LISTING_BYTES = 1024 * 1024
 MAX_SCHEMA_BYTES = 64 * 1024
+MAX_REQUEST_BYTES = 1024 * 1024
 MAX_REQUEST_SECONDS = 60.0
 MAX_LIST_SECONDS = 30.0
 MAX_CALL_SECONDS = 300.0
@@ -58,6 +59,7 @@ class AdapterLimits(BaseModel):
     max_tools: int = Field(default=MAX_TOOLS, ge=1, le=MAX_TOOLS)
     max_listing_bytes: int = Field(default=MAX_LISTING_BYTES, ge=1024, le=MAX_LISTING_BYTES)
     max_schema_bytes: int = Field(default=MAX_SCHEMA_BYTES, ge=1024, le=MAX_SCHEMA_BYTES)
+    max_request_bytes: int = Field(default=MAX_REQUEST_BYTES, ge=1024, le=MAX_REQUEST_BYTES)
     max_schema_depth: int = Field(default=24, ge=1, le=64)
     max_properties: int = Field(default=256, ge=1, le=1024)
     max_regex_length: int = Field(default=512, ge=1, le=2048)

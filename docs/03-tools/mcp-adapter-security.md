@@ -18,6 +18,8 @@
    reviewed TLS-terminating egress connector. Until then, this is a loopback/HTTP test slice only.
    The admitted Gateway permit is handed into the transport and spent for that call; the transport does not
    mint a fresh provider-scoped permit (`test_sdk_protocol` / `test_executor`).
+   Request bodies are bounded by `AdapterLimits.max_request_bytes` before egress; oversized calls fail
+   before any byte is sent.
 4. **All calls through the Tool Gateway.** `McpToolExecutor` accepts only an already-admitted `effect_key`,
    a pinned `ToolRef`, a permit, and arguments whose canonical digest matches the admitted request. It
    cannot be invoked safely by the runtime directly.

@@ -84,7 +84,7 @@ implemented as stored state or API in this change.
 
 | Stage | Gate |
 |---|---|
-| Local tests | 55 adapter tests pass (this change) |
+| Local tests | 56 adapter tests pass (this change) |
 | Staging shadow | real provider, no write tools; verify TLS/auth/list/call/read normalization |
 | Staging writes | approval + ledger + UNKNOWN reconciliation; kill/restart test |
 | Multi-tenant | PostgreSQL RLS test, tenant-filtered model surface, cross-tenant denial test |
