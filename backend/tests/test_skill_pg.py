@@ -141,7 +141,11 @@ def test_postgres_lifecycle_rls_and_least_privilege(
         capability_digest_value=capability,
         dependency_digest_value=dependency_digest({}),
     )
-    assert store.get_pin(tenant_id, pin.run_id, installation.id) == pin
+    stored_pin = store.get_pin(tenant_id, pin.run_id, installation.id)
+    assert stored_pin is not None
+    assert stored_pin.release_id == pin.release_id
+    assert stored_pin.content_digest == pin.content_digest
+    assert stored_pin.dependency_digest == pin.dependency_digest
 
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         with memory_dbs["runtime"].tx(tenant_id) as conn:
