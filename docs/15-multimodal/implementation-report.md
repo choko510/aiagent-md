@@ -1,0 +1,192 @@
+# Safe Multimodal Ingestion — 実装ノート（2026-11-25）
+
+対象仕様: [multimodal-ingestion.md](multimodal-ingestion.md)
+実装ブランチ: `feat/multimodal-ingestion`
+
+この文書は「何を実装し、何を実際に実行し、何がまだ検証できていないか」を分けて記録する。仕様の記述や単体テストの成功を、実環境の安全性検証（Verified）に読み替えない。
+
+## 1. 実装した範囲
+
+### 1.1 Pythonパッケージ
+
+`backend/packages/multimodal/src/aiagent_multimodal/`
+
+- 契約: `MmiSource`, `MmiSourceLocator`, `MmiCandidate`, `MmiRequestV1`, `MmiOutcomeV1`, `canonical_parse_key`
+- 入口: チャンク分割アップロード、owner-scoped quarantine blob、長さ・SHA-256・magic 検証
+- 形式検出: PDF/PNG/JPEG/WebP/ZIP-OOXML/CSV/TSV/plain text。拡張子ではなく magic と内部構造を使う
+- ゲート: ZIP Slip・traversal・absolute/UNC/drive/ADS/NUL・symlink/hardlink/device・重複名（NFKC + casefold）・nested archive・ZIP64 anomaly・CRC・ratio/entry/total/depth budget
+- XMLゲート: DTD/ENTITY/XXE/XInclude/external relationship を拒否。strict expat と node/depth/text budget
+- Parser: PDF native text/table + optional OCR、PNG/JPEG/WebP metadata + optional local OCR、厳格 CSV/TSV、allowlisted XLSX OOXML、DOCX/PPTX logical locator
+- 正規化: 金額・日付・数量。税条件不明は effective price を unknown にし、0円や推測値で埋めない
+- 独立検証: 元バイトを再読し、CSV byte span、sheet/cell、office block、PDF page text、image metadata を照合。不一致・owner失効・digest不一致は anchored にしない
+- 文脈: untrusted タグ付き chunk、根拠候補だけを使う決定的 extractive answer、citation
+- 永続化: `agent.mmi_upload_sessions`, `agent.mmi_upload_chunks`, `agent.mmi_artifacts`, `agent.mmi_parse_jobs`（RLS + lease CAS）
+- Service: upload → parse job → lease claim → re-detect → parse → verify → CAS commit → retrieve/ask/revoke
+
+### 1.2 API
+
+`backend/packages/api/src/aiagent_api/multimodal_api.py` を `create_app()` に接続した。
+
+- `GET /v1/multimodal/capabilities`
+- `POST /v1/multimodal/uploads`
+- `PUT /v1/multimodal/uploads/{upload_id}/chunks/{index}`
+- `POST /v1/multimodal/uploads/{upload_id}/complete`
+- `GET/DELETE /v1/multimodal/artifacts/{artifact_id}`
+- `POST /v1/multimodal/artifacts/{artifact_id}/jobs`
+- `POST /v1/multimodal/jobs/{job_id}/run`
+- `GET /v1/multimodal/jobs/{job_id}`
+- `POST /v1/multimodal/jobs/{job_id}/cancel`
+- `GET /v1/multimodal/artifacts/{artifact_id}/context`
+- `POST /v1/multimodal/artifacts/{artifact_id}/answer`
+- `GET /v1/multimodal/jobs/{job_id}/citations`
+
+認証は既存のBearerまたはHttpOnly Cookieセッション。状態変更は既存CSRF検証を通る。他ownerのartifactは403。
+
+### 1.3 Web UI
+
+`web/src/MultimodalView.tsx` を追加し、Control Consoleと並ぶ「Multimodal」タブから実行できる。
+
+- ブラウザでファイルを選択し、`crypto.subtle` でSHA-256を計算
+- 512 KiBずつ順次アップロードし、チャンクごとのSHA-256を送る
+- 完了後にparse jobを作成・実行
+- detected format、quarantine state、job status、warning、missing field を表示
+- 抽出候補と independent verification の結果、page/record/cell/slide の locator を表示
+- 決定的grounded answerとcitationを表示
+- `parserIsolation` が `in_process_dev` の場合は、検証済みの隔離境界ではない旨を常時表示
+
+## 2. 実行境界（重要）
+
+### 2.1 実装済み
+
+- `ParserExecutor` Protocol と `Pipeline`
+- API/Service は executor 未設定時に fail closed（`POLICY_DENIED`）。信頼済みruntimeへの暗黙fallbackはしない
+- `InProcessParserExecutor` は開発・テスト専用。`AIAGENT_MMI_ALLOW_INPROCESS=1` かつ production 以外でのみ有効
+- stale lease（owner/epoch不一致）の結果はcommitしない
+- 同一parse keyのcanonical化、idempotent upload replay
+- parser build digest と入力digestの照合
+- 完了commit後にadmissionだけ失敗した場合、blobを消さずに再実行でadmissionを修復する
+
+### 2.2 未実装（Verifiedではない）
+
+- 非root・read-only rootfs・no-network・seccomp/AppArmor/Landlock・cgroup CPU/RSS/PID/disk・FD上限を備えた**実parser jail**
+- 別guest kernelのUntrusted Execution VMでの実行
+- parser workerのOS-level kill/cleanupの実測
+- 悪性PDF/OOXML/画像の実corpusによるresource exhaustion試験
+- 外部vision gateway（privacy gate・予算予約・provider retention確認を含む）
+- Agent Task の Tool Gateway から `ingest_file_readonly` を呼ぶ経路
+
+現時点のgrounded answerは、Task AgentのLLMではなく、検証済み候補だけを使う決定的処理である。これは「Agent Runtime経由の回答」ではない。Task Tool Gatewayへの登録は仕様15-01 §12の提案段階のままで、実装していない。
+
+## 3. 設計判断と理由
+
+### 3.1 migration 0029 の衝突
+
+- 最新 `origin/main` のmigrationは `0028` まで。
+- PR #122（Autonomous Development / Phase 7）が `0029` を主張している。
+- 本ブランチは仕様の連番規約に従い `0029_multimodal_ingestion` を追加した。
+- **merge順序により片方の番号を振り直す必要がある。** 本PRでは勝手にrenumberせず、衝突をここに記録する。
+- 本ブランチのDBテストは、このリポジトリの作業ツリーで `0029` まで適用した専用DBで実行した。
+
+### 3.2 nested archive を拒否
+
+ZIP内ZIPを許可すると、外側のentry/total/depth budgetを満たしても内側で再帰的に増幅できる。仕様のdepth budgetだけに依存せず、nested archiveは `BAD_ARCHIVE` で拒否する。必要な業務要件が出た場合は、展開を別job・別budget・別quotaに分離してから許可する。
+
+### 3.3 optional dependency
+
+- coreの必須動作はstdlibのみ。
+- PDF native text/table は `pdfplumber` optional extra。未導入時は `PDF_TEXT_EXTRACTION_UNAVAILABLE` を付けたpartial resultにし、本文を捏造しない。
+- 画像decodeはPillow optional。OCRは固定Tesseract binaryがある場合だけ動く。
+- optional extraは実行環境の供給網・image digest・language pack digestの対象であり、自動downloadはしない。
+
+### 3.4 0幅bbox
+
+PDFフォントに幅情報がない場合、pdfminerが同じx座標のglyph boxを返すことがある。bboxを正規化するとzero widthになり契約違反になるため、その場合はbboxをunknownにし、page/line locatorだけ残す。citationの座標を捏造しない。
+
+### 3.5 OCR confidence
+
+OCR confidenceは「認識器の自己申告」であり真実ではない。confidenceが低い候補はestimated扱いにし、独立検証に失敗した値をanchoredにしない。未検出fieldはunknownのまま返す。
+
+## 4. 実行した検証
+
+環境: Windows、Python 3.12、portable PostgreSQL 16（127.0.0.1:55432）、Node.js。
+
+### 4.1 Pythonテスト
+
+```powershell
+$env:AIAGENT_TEST_PG_URL='postgresql://postgres@127.0.0.1:55432/postgres'
+$env:PYTHONPATH='packages/multimodal/src'
+.\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
+```
+
+結果: `31 passed in 2.69s`
+
+内訳:
+
+- core 22: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract。PDF tableは未試験
+- service 6: upload→parse→retrieve→ask、digest mismatch、revoke、stale lease、executor未設定のfail closed、完了commit後のadmission失敗からの再実行修復
+- PostgreSQL 2: RLS/owner isolation、lease CAS、latest document、idempotent upload replay
+- HTTP 1: 実 `TestClient(create_app(...))` でmultipart相当のchunk upload、parse、citation、answer、他owner 403
+
+### 4.2 静的検査
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check packages/multimodal packages/api/src/aiagent_api/multimodal_api.py tests/test_multimodal_*.py tests/multimodal_fixtures.py
+.\.venv\Scripts\python.exe -m ruff format --check ...
+.\.venv\Scripts\python.exe -m mypy packages/multimodal/src packages/api/src/aiagent_api/multimodal_api.py
+```
+
+結果: ruff all checks passed、format 39 files unchanged、mypy `Success: no issues found in 34 source files`。
+
+### 4.3 Web build
+
+```powershell
+cd web
+npm ci
+npm run check
+npm run build
+```
+
+結果: TypeScript `tsc --noEmit` 成功、Vite production build 成功。
+
+### 4.4 実ブラウザ
+
+ローカルAPI（`http://127.0.0.1:8099`）と実PostgreSQLに対して、Chromiumの実ブラウザで以下を確認した。
+
+1. Control ConsoleでBearer→HttpOnly Cookieのセッションを開始
+2. Multimodalタブで実CSV（`price.csv`, 23 bytes）を選択
+3. ブラウザがSHA-256を計算し、chunk PUT → complete → job作成 → run がすべて成功
+4. artifact format `csv`、quarantine `admitted`、job `succeeded`
+5. amount `100 JPY` が `anchored`、locator `record 2 · field 2`
+6. questionへの回答が `status answered`、citationがamount
+7. 実PDF（`invoice.pdf`, 588 bytes）でもformat `pdf`、amount `100` が `anchored`、locator `page 1`、回答が `page 1` を引用
+
+この環境のAPIは `parserIsolation: in_process_dev` を返しており、UIにもその警告を表示した。**これは本番の隔離境界ではない。**
+
+## 5. 状態の正直な区分
+
+| 項目 | Designed | Tested | Verified |
+|---|---|---|---|
+| Upload/quarantine/hash/idempotency | Yes | Yes（unit/HTTP/PG） | ローカル実環境のみ |
+| Magic detection / mismatch | Yes | Yes | ローカル |
+| ZIP/XML security gates | Yes | Yes（fixtures） | 悪性実corpusは未検証 |
+| CSV/XLSX/DOCX/PPTX | Yes | Yes | ローカル |
+| PDF native text | Yes | Yes（pdfplumber導入時） | 実PDF corpusは限定的 |
+| PDF table | Yes | 未（fixture未作成） | No |
+| Image header validation | Yes | Yes | OCRは未実行 |
+| Independent verification | Yes | Yes（CSV/PDF/office/cell） | 画像pixel再読は未実装 |
+| RLS / lease CAS / owner isolation | Yes | Yes（実PostgreSQL） | ローカルPGのみ |
+| Web UI E2E | Yes | Yes | ローカルChromiumで確認 |
+| Isolated parser jail / VM | Yes | No | **No** |
+| External vision | Yes（仕様） | No | **No** |
+| Task Tool Gateway連携 | Yes（提案） | No | **No** |
+| 悪性文書・資源枯渇の実測 | Yes（試験設計） | No | **No** |
+
+## 6. 既知の制約・次の作業
+
+- 実parser jail/VMを作り、非root・no-network・seccomp/Landlock・cgroup・kill後cleanupを実測するまでproduction有効化しない。
+- 画像は現在、独立検証でpixelを再読していない。metadata/digest検証に留まる。
+- OCRのEXIF座標変換は未適用。`OCR_COORDINATES_EXIF_UNCORRECTED` を警告する。
+- `MmiSourceLocator` のhidden検証は、hidden sheetとhidden row/columnを混同しないよう整理が必要。
+- PDF tableのbboxは回転0を仮定している。
+- migration 0029はPR #122と衝突する。merge順を決めた担当者が片方をrenumberし、両方のDBテストを再実行する。
+- Task Agentから文書を読むには、Tool Gatewayのread-only toolとしてmanifest/schema/citation変換を追加し、Tool Intent・approval・Run fencingに接続する必要がある。

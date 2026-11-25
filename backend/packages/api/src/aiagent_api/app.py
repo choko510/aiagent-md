@@ -49,9 +49,12 @@ from aiagent_domain.generated import (
     TaskSubmitCommandV1,
 )
 from aiagent_domain.rpcwire import RpcError
+from aiagent_multimodal.pipeline import ParserExecutor
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
+
+from aiagent_api.multimodal_api import build_router
 
 
 def _parse_keyring_secret(raw_json: str) -> tuple[str, bytes]:
@@ -445,6 +448,8 @@ def create_app(
     notify_allow_private: frozenset[str] = frozenset(),
     notify_direct_send_fn: notifications.DirectSendFn | None = None,
     web_dist_dir: Path | None = None,
+    multimodal_blob_root: Path | None = None,
+    multimodal_executor: ParserExecutor | None = None,
 ) -> FastAPI:
     state: dict[str, Database] = {}
 
@@ -492,6 +497,16 @@ def create_app(
         return Scope(row["tenant_id"], row["user_id"], row["workspace_id"])
 
     S = Annotated[Scope, Depends(scope)]
+
+    app.include_router(
+        build_router(
+            get_db,
+            scope,
+            blob_root=multimodal_blob_root,
+            executor=multimodal_executor,
+            profile=config.profile(),
+        )
+    )
 
     @app.exception_handler(CommandError)
     async def _cmd(_: Request, e: CommandError) -> JSONResponse:
