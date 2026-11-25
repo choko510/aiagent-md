@@ -27,6 +27,7 @@ source = { editable = "packages/api" }
 dependencies = [
     { name = "aiagent-automation" },
     { name = "aiagent-core" },
+    { name = "aiagent-multimodal" },
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
@@ -35,6 +36,7 @@ dependencies = [
 requires-dist = [
     { name = "aiagent-automation", editable = "packages/automation" },
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-multimodal", editable = "packages/multimodal" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "uvicorn", specifier = ">=0.38" },
 ]
