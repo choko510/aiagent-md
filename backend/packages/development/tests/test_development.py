@@ -537,6 +537,10 @@ def test_reported_conflict_after_commit_stays_unknown(env):
     with pytest.raises(EffectUnknown, match="provider exception"):
         flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
     assert scm.head(scope) != scope.base_sha
+    # A later ref reset must not erase the fact that the write may have occurred.
+    scm.heads[(scope.repository, scope.branch, scope.workspace_id)] = scope.base_sha
+    with pytest.raises(EffectUnknown, match="retain unknown"):
+        flow.reconcile_commit(scope, "conflict-after-effect")
     assert flow._load(scope, "conflict-after-effect").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
     with pytest.raises(StateConflict):
         flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
