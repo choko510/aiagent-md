@@ -28,6 +28,22 @@ class GitJournalError(RuntimeError):
     """The operation must remain unknown and must not be re-executed."""
 
 
+def verify_confirmed_journal(key: bytes, envelope: Any, prepared: dict[str, Any]) -> None:
+    """Authenticate the immutable confirmation corresponding to a verified preparation."""
+    try:
+        if len(key) < 32 or not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+            raise ValueError
+        payload, mac = envelope["payload"], envelope["mac"]
+        if not isinstance(payload, dict) or not isinstance(mac, str):
+            raise ValueError
+        expected = {**prepared, "stage": "confirmed"}
+        signature = hmac.new(key, _DOMAIN + canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+        if payload != expected or not hmac.compare_digest(mac, signature):
+            raise ValueError
+    except (ValueError, TypeError) as exc:
+        raise GitJournalError("confirmed journal authentication failed") from exc
+
+
 def verify_prepared_journal(
     key: bytes,
     envelope: Any,
@@ -184,6 +200,12 @@ class GitOperationJournal:
     def export_prepared(self, operation: str) -> dict[str, Any]:
         """Export authenticated bytes only after the persisted record revalidates."""
         payload = self.read(operation, "prepared")
+        mac = hmac.new(self._key, _DOMAIN + canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+        return {"payload": payload, "mac": mac}
+
+    def export_confirmed(self, operation: str) -> dict[str, Any]:
+        """Export a revalidated confirmed record without asserting canonical success."""
+        payload = self.read(operation, "confirmed")
         mac = hmac.new(self._key, _DOMAIN + canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
         return {"payload": payload, "mac": mac}
 

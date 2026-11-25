@@ -16,7 +16,8 @@ from aiagent_core import config, control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_core.rpc import RpcClient
-from aiagent_domain import is_uuid7
+from aiagent_domain import canonical_json, is_uuid7
+from aiagent_sandbox.git_operation_journal import verify_confirmed_journal, verify_prepared_journal
 from aiagent_sandbox.git_worker_rpc import sign_git_recovery_grant
 
 from .context_keys import KeyRing
@@ -70,6 +71,7 @@ async def inspect_unknown_git_operation(
     endpoint: str,
     rpc_key: bytes,
     grant_key: bytes,
+    journal_key: bytes,
     worker_id: str,
     deadline: float,
 ) -> GitRecoveryObservation:
@@ -80,7 +82,8 @@ async def inspect_unknown_git_operation(
         or not endpoint.startswith("unix:/")
         or len(rpc_key) < 32
         or len(grant_key) < 32
-        or rpc_key == grant_key
+        or len(journal_key) < 32
+        or len({rpc_key, grant_key, journal_key}) != 3
         or not worker_id
         or not time.monotonic() < deadline <= time.monotonic() + 10
     ):
@@ -161,6 +164,8 @@ async def inspect_unknown_git_operation(
                 "commit_object",
                 "tree_object",
                 "prepared_journal_sha256",
+                "prepared_journal",
+                "confirmed_journal",
             }
             or response["operation"] != operation
             or response["worker_id"] != worker_id
@@ -171,6 +176,25 @@ async def inspect_unknown_git_operation(
             or response["prepared_journal_sha256"] != row["prepared_journal_sha256"]
         ):
             raise ValueError("Git recovery evidence mismatch")
+        journal = verify_prepared_journal(
+            journal_key,
+            response["prepared_journal"],
+            operation=operation,
+            attempt=str(row["attempt_id"]),
+            binding=str(row["binding_id"]),
+            generation=int(row["binding_generation"]),
+            branch=str(row["branch"]),
+            request_sha256=str(row["request_sha256"]),
+            parent=str(row["parent_sha"]),
+        )
+        if (
+            journal["commit"] != row["candidate_commit"]
+            or journal["tree"] != row["candidate_tree"]
+            or hashlib.sha256(canonical_json(response["prepared_journal"]).encode()).hexdigest()
+            != row["prepared_journal_sha256"]
+        ):
+            raise ValueError("Git recovery journal mismatch")
+        verify_confirmed_journal(journal_key, response["confirmed_journal"], journal)
         commit = base64.b64decode(response["commit_object"], validate=True)
         tree = base64.b64decode(response["tree_object"], validate=True)
         if not 1 <= len(commit) <= 1024 * 1024 or not 1 <= len(tree) <= 1024 * 1024:

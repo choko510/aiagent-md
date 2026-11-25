@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 from aiagent_development.git_commit_worker import IsolatedGitCommitWorker
 from aiagent_domain import uuid7
-from aiagent_sandbox.git_operation_journal import GitJournalError, GitOperationJournal, verify_prepared_journal
+from aiagent_sandbox.git_operation_journal import (
+    GitJournalError,
+    GitOperationJournal,
+    verify_confirmed_journal,
+    verify_prepared_journal,
+)
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -96,6 +101,10 @@ def test_git_cas_requires_durable_preparation_when_provider_supplies_fence(tmp_p
         commit = worker.commit(parent, patch, digest, ("a.txt",), "approved", before_cas=before_success)
         journal.confirm(second, request, parent, commit, captured[0])
         assert journal.read(second, "confirmed")["commit"] == commit
+        prepared2, confirmed2 = journal.read(second, "prepared"), journal.export_confirmed(second)
+        verify_confirmed_journal(b"j" * 32, confirmed2, prepared2)
+        with pytest.raises(GitJournalError):
+            verify_confirmed_journal(b"j" * 32, {**confirmed2, "mac": "0" * 64}, prepared2)
         (directory / (second + ".prepared")).write_bytes(b"tampered")
         with pytest.raises(GitJournalError):
             journal.read(second, "prepared")
