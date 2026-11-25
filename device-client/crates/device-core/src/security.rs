@@ -78,6 +78,21 @@ pub fn verify_owner_only_acl(path: &Path) -> Result<bool, String> {
     windows_acl::verify_owner_only(path)
 }
 
+#[cfg(windows)]
+pub(crate) fn current_user_sid() -> Result<String, String> {
+    windows_acl::current_user_sid_string()
+}
+
+#[cfg(windows)]
+pub(crate) fn protect_identity_key(data: &[u8], binding: &[u8]) -> Result<Vec<u8>, String> {
+    windows_dpapi::protect(data, binding)
+}
+
+#[cfg(windows)]
+pub(crate) fn unprotect_identity_key(data: &[u8], binding: &[u8]) -> Result<Vec<u8>, String> {
+    windows_dpapi::unprotect(data, binding)
+}
+
 #[cfg(unix)]
 pub fn verify_owner_only_acl(path: &Path) -> Result<bool, String> {
     use std::os::unix::fs::PermissionsExt;
@@ -393,6 +408,7 @@ fn hex_nibble(b: u8) -> Result<u8, String> {
 #[cfg(windows)]
 mod windows_dpapi {
     use core::ffi::c_void;
+    use zeroize::Zeroize;
 
     #[repr(C)]
     struct CryptDataBlob {
@@ -459,6 +475,13 @@ mod windows_dpapi {
                 std::io::Error::last_os_error()
             ));
         }
+        if out_blob.pb_data.is_null() {
+            return if out_blob.cb_data == 0 {
+                Ok(Vec::new())
+            } else {
+                Err("DPAPI returned invalid output".into())
+            };
+        }
         let slice =
             unsafe { core::slice::from_raw_parts(out_blob.pb_data, out_blob.cb_data as usize) };
         let result = slice.to_vec();
@@ -498,9 +521,17 @@ mod windows_dpapi {
                 std::io::Error::last_os_error()
             ));
         }
+        if out_blob.pb_data.is_null() {
+            return if out_blob.cb_data == 0 {
+                Ok(Vec::new())
+            } else {
+                Err("DPAPI returned invalid output".into())
+            };
+        }
         let slice =
-            unsafe { core::slice::from_raw_parts(out_blob.pb_data, out_blob.cb_data as usize) };
+            unsafe { core::slice::from_raw_parts_mut(out_blob.pb_data, out_blob.cb_data as usize) };
         let result = slice.to_vec();
+        slice.zeroize();
         unsafe {
             LocalFree(out_blob.pb_data.cast());
         }
@@ -614,6 +645,7 @@ mod windows_acl {
     const TOKEN_USER: u32 = 1;
     const SDDL_REVISION_1: u32 = 1;
     const SE_FILE_OBJECT: u32 = 1;
+    const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
     const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
     const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
     const SE_DACL_PROTECTED: u16 = 0x1000;
@@ -689,7 +721,7 @@ mod windows_acl {
         f(user.sid.cast_const())
     }
 
-    fn current_user_sid_string() -> Result<String, String> {
+    pub(super) fn current_user_sid_string() -> Result<String, String> {
         with_current_user_sid(|sid| {
             let mut sid_w: *mut u16 = core::ptr::null_mut();
             if unsafe { ConvertSidToStringSidW(sid, &mut sid_w) } == 0 {
@@ -771,12 +803,13 @@ mod windows_acl {
         let user_sid = current_user_sid_bytes()?;
         let path_w = wide(path.as_os_str());
         let mut sd: *mut c_void = core::ptr::null_mut();
+        let mut owner: *mut c_void = core::ptr::null_mut();
         let rc = unsafe {
             GetNamedSecurityInfoW(
                 path_w.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                core::ptr::null_mut(),
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
@@ -787,6 +820,9 @@ mod windows_acl {
             return Err(format!("GetNamedSecurityInfoW failed: error {rc}"));
         }
         let _sd_guard = LocalGuard(sd);
+        if owner.is_null() || unsafe { EqualSid(owner, user_sid.as_ptr().cast()) } == 0 {
+            return Ok(false);
+        }
 
         let mut control: u16 = 0;
         let mut revision: u32 = 0;
