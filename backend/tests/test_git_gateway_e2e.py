@@ -439,6 +439,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                     rpc_key=b"r" * 32,
                     grant_key=b"g" * 32,
                     worker_id="fixture-worker",
+                    cycle_id=cycle,
                 )
                 assert await asyncio.to_thread(head_reader, scope, deadline=time.monotonic() + 5) == parent
                 client = RpcClient(f"tcp:127.0.0.1:{server.port}", "development", b"d" * 32)
@@ -738,6 +739,11 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         restored = await asyncio.to_thread(cycle_store.load, scope, cycle)
                         assert completed == restored and len(restored.tests) == 1
                         evidence = restored.tests[0]
+                        await asyncio.to_thread(test_workflow._ensure_review_head, restored)
+                        with pytest.raises(StaleReference):
+                            await asyncio.to_thread(
+                                head_reader, replace(scope, project_id="other"), deadline=time.monotonic() + 5
+                            )
                         assert (
                             evidence.executed
                             and (
