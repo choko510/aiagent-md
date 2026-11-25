@@ -219,6 +219,8 @@ impl DeviceIdentity {
         if nonce == [0; 32]
             || generation == 0
             || generation > i64::MAX as u64
+            || issued > i64::MAX as u64
+            || expires > i64::MAX as u64
             || issued > now.saturating_add(5_000)
             || issued < now.saturating_sub(60_000)
             || expires <= now
@@ -451,6 +453,13 @@ mod tests {
             key: SigningKey::from_bytes(&[7; 32]),
         };
         let sig = identity.sign_at([9; 32], 4, 1_000, 31_000, 2_000).unwrap();
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/connection-proof-v1.json"))
+                .unwrap();
+        assert_eq!(
+            crate::protocol::hex_digest(&sig),
+            vector["signatureHex"].as_str().unwrap()
+        );
         let mut message = b"aiagent-device-connect-proof-candidate-v1".to_vec();
         message.extend_from_slice(&identity.binding.digest());
         message.extend_from_slice(&identity.public_key());

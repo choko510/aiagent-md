@@ -226,7 +226,8 @@ class PairingService:
                 "SELECT * FROM device_gateway.pairing_requests WHERE id=%s AND tenant_id=%s AND owner_id=%s FOR UPDATE",
                 (request_id, tenant_hint, owner_hint),
             ).fetchone()
-            if row is not None and row["state"] == "WAITING_DEVICE" and self._now(conn) < row["expires_ms"]:
+            now = self._now(conn)
+            if row is not None and row["state"] == "WAITING_DEVICE" and row["issued_ms"] <= now < row["expires_ms"]:
                 valid = (
                     isinstance(token, bytes)
                     and len(token) == 32
@@ -270,7 +271,8 @@ class PairingService:
                 "SELECT * FROM device_gateway.pairing_requests WHERE id=%s AND tenant_id=%s AND owner_id=%s FOR UPDATE",
                 (request_id, scope.tenant_id, scope.user_id),
             ).fetchone()
-            if row is not None and row["state"] == "WAITING_APPROVAL" and self._now(conn) < row["expires_ms"]:
+            now = self._now(conn)
+            if row is not None and row["state"] == "WAITING_APPROVAL" and row["issued_ms"] <= now < row["expires_ms"]:
                 valid_code = isinstance(code, str) and len(code) == 8 and code.isascii() and code.isdigit()
                 valid = (
                     valid_code
@@ -302,7 +304,8 @@ class PairingService:
                 "SELECT * FROM device_gateway.pairing_requests WHERE id=%s AND tenant_id=%s AND owner_id=%s",
                 (request_id, scope.tenant_id, scope.user_id),
             ).fetchone()
-            if row is None or row["state"] != "WAITING_APPROVAL" or self._now(conn) >= row["expires_ms"]:
+            now = self._now(conn)
+            if row is None or row["state"] != "WAITING_APPROVAL" or not row["issued_ms"] <= now < row["expires_ms"]:
                 raise PairingRejected()
             return PendingPairing(
                 row["id"],
@@ -324,7 +327,8 @@ class PairingService:
                 "SELECT * FROM device_gateway.pairing_requests WHERE id=%s AND tenant_id=%s AND owner_id=%s FOR UPDATE",
                 (request_id, tenant_hint, owner_hint),
             ).fetchone()
-            if row is not None and row["state"] == "APPROVED" and self._now(conn) < row["expires_ms"]:
+            now = self._now(conn)
+            if row is not None and row["state"] == "APPROVED" and row["issued_ms"] <= now < row["expires_ms"]:
                 if (
                     isinstance(token, bytes)
                     and len(token) == 32
