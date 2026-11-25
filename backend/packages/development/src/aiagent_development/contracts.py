@@ -297,6 +297,7 @@ class Cycle:
     round_number: int = 1
     push_receipt: str | None = None
     pr_receipt: str | None = None
+    commit_intent_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not self.cycle_id or not self.change_request_ref or self.version < 0 or self.round_number < 1:

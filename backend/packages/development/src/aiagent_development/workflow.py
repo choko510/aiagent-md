@@ -196,7 +196,9 @@ class DevelopmentWorkflow:
             raise StaleReference("branch HEAD moved: CAS conflict")
         # Gateway does fresh authoritative checks immediately before dispatch.
         self.gateway.require_operation(c.scope, c.run, "git.commit", c.patch.parent_sha, intent_ref)
-        pending = self._save(c, replace(c, version=c.version + 1, phase=Phase.COMMIT_PENDING))
+        pending = self._save(
+            c, replace(c, version=c.version + 1, phase=Phase.COMMIT_PENDING, commit_intent_ref=intent_ref)
+        )
         try:
             result = self.git.commit_patch(c.scope, c.patch, c.patch.parent_sha, intent_ref, message)
         except EffectUnknown:
@@ -299,6 +301,22 @@ class DevelopmentWorkflow:
         if c.patch is None:
             raise StateConflict("missing patch for reconciliation")
         head = self.git.head(scope)
+        recover = getattr(self.git, "recover_commit", None)
+        if observed_commit is None and c.commit is None and c.commit_intent_ref and callable(recover):
+            evidence = recover(scope, cycle_id, c.patch, c.commit_intent_ref)
+            if (
+                not isinstance(evidence, CommitEvidence)
+                or evidence.parent_sha != c.patch.parent_sha
+                or evidence.diff_sha256 != c.patch.diff_sha256
+                or evidence.artifact_ref != c.patch.artifact_ref
+                or evidence.commit_sha != head
+                or self.git.head(scope) != head
+            ):
+                raise EffectUnknown("canonical commit evidence mismatch; retain unknown")
+            try:
+                return self._save(c, replace(c, version=c.version + 1, phase=Phase.COMMITTED, commit=evidence))
+            except Exception as exc:
+                raise EffectUnknown("Git recovery could not be fenced; retain unknown") from exc
         if observed_commit is not None:
             if (
                 head != observed_commit.commit_sha

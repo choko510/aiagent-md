@@ -99,6 +99,11 @@ pytestmark = [
         "receipt_response_lost",
         "worker_crash_after_cas",
         "workflow_commit",
+        "workflow_response_lost",
+        "workflow_recovery_cancel",
+        "workflow_recovery_concurrent",
+        "workflow_recovery_uncertain",
+        "workflow_recovery_tamper",
         "workflow_nonzero",
         "workflow_timeout",
         "workflow_truncation",
@@ -350,6 +355,11 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
             if scenario not in (
                 "success",
                 "workflow_commit",
+                "workflow_response_lost",
+                "workflow_recovery_cancel",
+                "workflow_recovery_concurrent",
+                "workflow_recovery_uncertain",
+                "workflow_recovery_tamper",
                 "workflow_nonzero",
                 "workflow_timeout",
                 "workflow_truncation",
@@ -454,7 +464,7 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         return response
 
                     monkeypatch.setattr(RpcClient, "call", lose_worker_response)
-                if scenario == "receipt_response_lost":
+                if scenario in ("receipt_response_lost", "workflow_recovery_uncertain"):
                     original_fetch = GitReceiptStore.fetch
 
                     def lose_receipt_response(self, *args, **kwargs):
@@ -535,9 +545,123 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                         reviewers=None,
                         sandbox=None,
                     )  # type: ignore[arg-type]
-                    committed = await asyncio.to_thread(
-                        workflow.commit, scope, cycle, message="approved fixture", intent_ref=call_id
-                    )
+                    if scenario == "workflow_recovery_uncertain":
+                        with pytest.raises(EffectUnknown):
+                            await asyncio.to_thread(
+                                workflow.commit, scope, cycle, message="approved fixture", intent_ref=call_id
+                            )
+                        with pytest.raises(EffectUnknown):
+                            await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                        still_unknown = await asyncio.to_thread(cycle_store.load, scope, cycle)
+                        assert still_unknown.phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+                        record = dbs["owner"].one(
+                            "SELECT o.state,a.status_code FROM agent.git_operations o "
+                            "JOIN agent.tool_attempts a ON a.tenant_id=o.tenant_id AND a.id=o.attempt_id "
+                            "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                            "WHERE o.tenant_id=%s AND i.invocation_key=%s",
+                            (claim.tenant_id, call_id),
+                        )
+                        assert record["state"] == "RECEIPT_PERSISTED" and record["status_code"] == "UNKNOWN"
+                        return
+                    if scenario in (
+                        "workflow_response_lost",
+                        "workflow_recovery_cancel",
+                        "workflow_recovery_concurrent",
+                        "workflow_recovery_tamper",
+                    ):
+                        original_commit = provider.commit_patch
+
+                        def lose_workflow_response(*args, **kwargs):
+                            original_commit(*args, **kwargs)
+                            raise EffectUnknown("fixture lost the confirmed Gateway response")
+
+                        monkeypatch.setattr(provider, "commit_patch", lose_workflow_response)
+                        with pytest.raises(EffectUnknown):
+                            await asyncio.to_thread(
+                                workflow.commit, scope, cycle, message="approved fixture", intent_ref=call_id
+                            )
+                        unknown = await asyncio.to_thread(cycle_store.load, scope, cycle)
+                        assert unknown.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and unknown.commit_intent_ref == call_id
+                        if scenario == "workflow_recovery_tamper":
+                            dbs["owner"].one(
+                                "UPDATE agent.git_operation_receipts r SET body=r.body || %s::bytea "
+                                "FROM agent.git_operations o JOIN agent.tool_intents i "
+                                "ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                                "WHERE r.tenant_id=o.tenant_id AND r.operation_id=o.id "
+                                "AND i.tenant_id=%s AND i.invocation_key=%s RETURNING r.receipt_id",
+                                (b" ", claim.tenant_id, call_id),
+                            )
+                            with pytest.raises(EffectUnknown):
+                                await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                            assert (
+                                await asyncio.to_thread(cycle_store.load, scope, cycle)
+                            ).phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+                            return
+                        with pytest.raises(EffectUnknown):
+                            await asyncio.to_thread(
+                                provider.recover_commit, scope, cycle, approved_patch, call_id + "-other"
+                            )
+                        with pytest.raises(EffectUnknown):
+                            await asyncio.to_thread(
+                                provider.recover_commit, scope, cycle + "-other", approved_patch, call_id
+                            )
+                        if scenario == "workflow_response_lost":
+                            verified = await asyncio.to_thread(
+                                provider.recover_commit, scope, cycle, approved_patch, call_id
+                            )
+                            forged = replace(verified, diff_sha256="0" * 64)
+                            with pytest.raises(StateConflict, match="receipt mismatch"):
+                                await asyncio.to_thread(
+                                    cycle_store.save,
+                                    unknown,
+                                    replace(unknown, version=unknown.version + 1, phase=Phase.COMMITTED, commit=forged),
+                                )
+                            with pytest.raises(StateConflict, match="recovery authority"):
+                                await asyncio.to_thread(
+                                    cycle_store.save,
+                                    unknown,
+                                    replace(
+                                        unknown,
+                                        version=unknown.version + 1,
+                                        phase=Phase.COMMITTED,
+                                        commit=verified,
+                                        commit_intent_ref=call_id + "-other",
+                                    ),
+                                )
+                        if scenario == "workflow_recovery_cancel":
+                            original_save = cycle_store.save
+
+                            def cancel_before_save(old, updated):
+                                if old.phase == Phase.UNKNOWN_EXTERNAL_EFFECT and updated.phase == Phase.COMMITTED:
+                                    commands.cancel(
+                                        dbs["api"],
+                                        Scope(claim.tenant_id, claim.owner_user_id, workspace),
+                                        claim.task_id,
+                                    )
+                                return original_save(old, updated)
+
+                            monkeypatch.setattr(cycle_store, "save", cancel_before_save)
+                            with pytest.raises(EffectUnknown, match="could not be fenced"):
+                                await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                            assert (
+                                await asyncio.to_thread(cycle_store.load, scope, cycle)
+                            ).phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+                            return
+                        if scenario == "workflow_recovery_concurrent":
+                            outcomes = await asyncio.gather(
+                                asyncio.to_thread(workflow.reconcile_commit, scope, cycle),
+                                asyncio.to_thread(workflow.reconcile_commit, scope, cycle),
+                                return_exceptions=True,
+                            )
+                            successes = [item for item in outcomes if isinstance(item, Cycle)]
+                            assert len(successes) == 1 and sum(isinstance(item, Exception) for item in outcomes) == 1
+                            committed = successes[0]
+                        else:
+                            committed = await asyncio.to_thread(workflow.reconcile_commit, scope, cycle)
+                    else:
+                        committed = await asyncio.to_thread(
+                            workflow.commit, scope, cycle, message="approved fixture", intent_ref=call_id
+                        )
                     assert committed.phase == Phase.COMMITTED and committed.commit is not None
                     loaded = await asyncio.to_thread(cycle_store.load, scope, cycle)
                     assert loaded.phase == Phase.COMMITTED and loaded.commit == committed.commit
@@ -790,7 +914,13 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             evidence.executed
                             and (
                                 evidence.exit_code == (7 if scenario == "workflow_nonzero" else 0)
-                                if scenario in ("workflow_commit", "workflow_nonzero")
+                                if scenario
+                                in (
+                                    "workflow_commit",
+                                    "workflow_response_lost",
+                                    "workflow_recovery_concurrent",
+                                    "workflow_nonzero",
+                                )
                                 else evidence.exit_code is not None
                             )
                             and evidence.timed_out is (scenario == "workflow_timeout")
@@ -799,7 +929,11 @@ def test_real_gateway_to_git_receipt(dbs, verified_setup, tmp_path: Path, scenar
                             and evidence.source_commit_sha == committed.commit.commit_sha
                             and evidence.snapshot_revision == 3
                         )
-                        if scenario != "workflow_commit":
+                        if scenario not in (
+                            "workflow_commit",
+                            "workflow_response_lost",
+                            "workflow_recovery_concurrent",
+                        ):
                             assert not DevelopmentWorkflow._gate(restored, ())
                         with pytest.raises(StateConflict):
                             await asyncio.to_thread(test_workflow.execute, scope, cycle, request)

@@ -138,6 +138,7 @@ class GitReceiptStore:
                 cycle_id=str(row["cycle_id"]),
                 plan_ref=str(row["plan_ref"]),
                 deadline=deadline,
+                recovery_read=not fresh,
             )
             if verified["patch_bytes"] != len(patch.data) or verified["paths"] != list(patch.paths):
                 raise ValueError

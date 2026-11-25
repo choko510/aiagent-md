@@ -163,5 +163,45 @@ class ToolGatewayGitProvider:
     def push(self, scope: ProjectScope, expected_head_sha: str, intent_ref: str) -> str:
         raise ScopeDenied("Git push is not supported by this adapter")
 
+    def recover_commit(
+        self, scope: ProjectScope, cycle_id: str, patch: PatchArtifact, intent_ref: str
+    ) -> CommitEvidence:
+        """Re-read only a settled effect for the Workflow's persisted invocation."""
+        self._scope(scope, patch.run)
+        if not cycle_id or not intent_ref:
+            raise EffectUnknown("Git recovery scope unavailable")
+        deadline = time.monotonic() + 8
+        try:
+            with self._db.tx(tenant=self._claim.tenant_id) as c:
+                c.execute("SELECT set_config('statement_timeout', '5000ms', true)")
+                current = control.check_current(c, self._claim)
+                if str(current["workspace_id"]) != scope.workspace_id:
+                    raise ValueError("Git recovery workspace mismatch")
+                rows = c.execute(
+                    "SELECT o.id,e.external_receipt_ref FROM agent.git_operations o "
+                    "JOIN agent.tool_intents i ON i.tenant_id=o.tenant_id AND i.id=o.intent_id "
+                    "JOIN agent.side_effect_records e ON e.tenant_id=i.tenant_id AND e.tool_intent_id=i.id "
+                    "WHERE o.tenant_id=%s AND o.cycle_id=%s AND o.patch_id=%s "
+                    "AND i.task_id=%s AND i.run_id=%s AND i.invocation_key=%s "
+                    "AND i.tool_key='git.commit' AND i.status_code='CONFIRMED' "
+                    "AND e.outcome_code='CONFIRMED' AND o.state='RECEIPT_PERSISTED'",
+                    (
+                        self._claim.tenant_id,
+                        cycle_id,
+                        patch.artifact_ref,
+                        self._claim.task_id,
+                        self._claim.run_id,
+                        intent_ref,
+                    ),
+                ).fetchall()
+            if len(rows) != 1 or not isinstance(rows[0]["external_receipt_ref"], str):
+                raise ValueError("confirmed Git effect unavailable")
+            reference = rows[0]["external_receipt_ref"]
+            if not reference.startswith("git:") or not is_uuid7(reference[4:]):
+                raise ValueError("confirmed Git receipt unavailable")
+            return self._receipts.read(scope, patch, str(rows[0]["id"]), reference[4:], deadline=deadline)
+        except Exception as exc:
+            raise EffectUnknown("Git commit requires reconciliation") from exc
+
     def create_pr(self, scope: ProjectScope, head_sha: str, intent_ref: str) -> str:
         raise ScopeDenied("PR creation is not supported by this adapter")
