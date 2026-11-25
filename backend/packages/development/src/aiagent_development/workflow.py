@@ -202,11 +202,9 @@ class DevelopmentWorkflow:
         except EffectUnknown:
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise
-        except StaleReference:
-            self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.BLOCKED))
-            raise
         except Exception as exc:
-            # A provider exception after dispatch may conceal a completed write.
+            # Even a reported CAS conflict is not proof of a negative outcome:
+            # the provider may have updated the ref before losing its response.
             self._save(pending, replace(pending, version=pending.version + 1, phase=Phase.UNKNOWN_EXTERNAL_EFFECT))
             raise EffectUnknown("provider exception; reconcile remote operation") from exc
         try:

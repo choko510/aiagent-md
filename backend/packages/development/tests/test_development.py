@@ -520,6 +520,28 @@ def test_malformed_commit_result_after_dispatch_stays_unknown(env):
     assert flow._load(scope, "malformed-result").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
 
 
+def test_reported_conflict_after_commit_stays_unknown(env):
+    root, scope, run, _, scm, _, _, flow = env
+    flow.create("conflict-after-effect", scope, run, "change")
+    flow.plan(scope, "conflict-after-effect", TaskPlan("plan-1", "change", ("unit",), run.goal_revision))
+    flow.execute(scope, "conflict-after-effect", _request(env))
+    patch = PatchArtifact("patch", "d" * 64, ("app.py",), scope.base_sha, scope.workspace_revision, run)
+    flow.submit_patch(scope, "conflict-after-effect", patch, root)
+    original = scm.commit_patch
+
+    def commit_then_conflict(*args, **kwargs):
+        original(*args, **kwargs)
+        raise StaleReference("reported conflict after an uncertain write")
+
+    scm.commit_patch = commit_then_conflict
+    with pytest.raises(EffectUnknown, match="provider exception"):
+        flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
+    assert scm.head(scope) != scope.base_sha
+    assert flow._load(scope, "conflict-after-effect").phase == Phase.UNKNOWN_EXTERNAL_EFFECT
+    with pytest.raises(StateConflict):
+        flow.commit(scope, "conflict-after-effect", message="fixture", intent_ref="commit")
+
+
 def test_build_rejects_receipt_for_different_commit(env):
     _, scope, run, _, _, sandbox, _, flow = env
     flow.create("cycle-sha", scope, run, "change-1")
