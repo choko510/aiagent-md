@@ -200,6 +200,24 @@ TOOLS: dict[str, ToolSpec] = {
         "browser_fixture",
         ("web-fetch",),
     ),
+    "dev_github_pr": ToolSpec(
+        "dev_github_pr",
+        "Create or inspect a Pull Request via Sentinel-enforced GitHub API egress. Irreversible write requires owner approval; never merges.",
+        _obj(
+            {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+                "branch": {"type": "string", "minLength": 1, "maxLength": 200},
+                "headSha": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+                "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                "draft": {"type": "boolean"},
+            },
+            ["repository", "branch", "headSha", "title"],
+        ),
+        "external_irreversible",
+        True,
+        "dev_github_pr",
+        ("github-api",),
+    ),
 }
 
 # Profile -> tools the model may see. Framework built-ins are NOT here and are removed by the runtime.

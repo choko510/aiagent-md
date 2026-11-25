@@ -209,6 +209,118 @@ export type CapabilityItem = {
   productionReady: boolean;
 };
 
+export type DevProjectItem = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  repository: string;
+  defaultBranch: string;
+  framework: string;
+  repositoryBindingId: string | null;
+  githubApiBase: string | null;
+  preferences: {
+    designPolicy?: string;
+    demoAcceptancePolicy?: string;
+    styleCandidates?: number;
+    expertAdvisorEnabled?: boolean;
+    releasePolicy?: string;
+  };
+  status: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DevCycleItem = {
+  id: string;
+  projectId: string;
+  workspaceId: string;
+  taskId: string;
+  runId: string;
+  version: number;
+  phase: string;
+  roundNumber: number;
+  changeRequestRef: string;
+  repository: string;
+  branch: string;
+  baseSha: string;
+  commitSha: string | null;
+  tests: Array<Record<string, unknown>>;
+  reviews: Array<Record<string, unknown>>;
+  pushReceipt: string | null;
+  prReceipt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DevDesignCandidate = {
+  candidateId: string;
+  label: string;
+  fixtureRef: string;
+  summary: string;
+  desktopThumbRef: string;
+  mobileThumbRef: string;
+  viewports: string[];
+  themes: string[];
+  tokens?: { theme?: string; accent?: string };
+};
+
+export type DevDesignDecisionItem = {
+  id: string;
+  projectId: string;
+  cycleId: string;
+  goalRevision: number;
+  designRevision: number;
+  designPolicy: string;
+  demoAcceptancePolicy: string;
+  candidates: DevDesignCandidate[];
+  recommendedCandidateId: string | null;
+  selectedCandidateId: string | null;
+  demoDecision: string;
+  demoSnapshotDigest: string | null;
+  feedback: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DevDebugFindingItem = {
+  id: string;
+  projectId: string;
+  cycleId: string;
+  previewLeaseId: string | null;
+  commitSha: string;
+  sourceUrlRedacted: string;
+  consoleErrors: string[];
+  networkErrors: string[];
+  layoutIssues: string[];
+  reproTestId: string | null;
+  reproBeforeFailDigest: string | null;
+  reproAfterPassDigest: string | null;
+  status: string;
+  createdAt: string;
+};
+
+export type DevPrRecordItem = {
+  id: string;
+  projectId: string;
+  cycleId: string;
+  repository: string;
+  branch: string;
+  headSha: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  idempotencyKey: string;
+  intentId: string | null;
+  effectStatus: string;
+  ciState: string;
+  repairAttempts: number;
+  maxRepairAttempts: number;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export class ApiClientError extends Error {
   status: number;
   code: string;

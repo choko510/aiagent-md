@@ -444,6 +444,8 @@ def create_app(
     notify_verify_ssl: Any = True,
     notify_allow_private: frozenset[str] = frozenset(),
     notify_direct_send_fn: notifications.DirectSendFn | None = None,
+    dev_github_client: Any = None,
+    dev_debug_probe_fn: Any = None,
     web_dist_dir: Path | None = None,
 ) -> FastAPI:
     state: dict[str, Database] = {}
@@ -2346,6 +2348,18 @@ def create_app(
             notification_id=notification_id,
         )
         return {"schemaVersion": "1.0", "notification": updated}
+
+    from .development_routes import register_development_routes
+
+    register_development_routes(
+        app,
+        get_db=get_db,
+        scope_dep=scope,
+        sentinel=sentinel,
+        egress_proxy=egress_proxy,
+        dev_github_client=dev_github_client,
+        dev_debug_probe_fn=dev_debug_probe_fn,
+    )
 
     # Optional same-origin built Web UI serving (for self-hosted console & real browser E2E)
     resolved_dist = web_dist_dir or (

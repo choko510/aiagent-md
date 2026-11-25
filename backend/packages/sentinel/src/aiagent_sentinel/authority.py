@@ -160,7 +160,12 @@ class Sentinel:
                 " WHERE i.tenant_id=%s AND i.id=%s",
                 (tenant_id, intent_id),
             ).fetchone()
-            if it is None or it["status_code"] not in ("UNKNOWN", "SENDING"):
+            allowed_statuses = (
+                ("UNKNOWN", "SENDING", "CONFIRMED")
+                if it and it["tool_key"] == "dev_github_pr"
+                else ("UNKNOWN", "SENDING")
+            )
+            if it is None or it["status_code"] not in allowed_statuses:
                 raise RpcError("INTENT_NOT_RECONCILABLE")
             if not control.scope_active(c, tenant_id, str(it["owner_user_id"]), str(it["workspace_id"])):
                 raise RpcError("SCOPE_REVOKED")
