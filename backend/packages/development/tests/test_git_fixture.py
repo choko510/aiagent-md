@@ -10,11 +10,13 @@ import hashlib
 import os
 import shutil
 import subprocess  # nosec B404 - fixed test-only commands against pytest tmp_path
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from aiagent_development.contracts import InvalidEvidence, StaleReference
+from aiagent_development.contracts import EffectUnknown, InvalidEvidence, StaleReference
 from aiagent_development.git_commit_worker import IsolatedGitCommitWorker
 
 
@@ -93,6 +95,44 @@ def test_isolated_worker_applies_exact_approved_patch_and_cas(tmp_path: Path):
     assert git(repo, "rev-parse", f"{commit}^ ".strip()).stdout.strip() == parent
     with pytest.raises(StaleReference):
         worker.commit(parent, patch, digest, ("example.txt",), "approved")
+
+
+def test_two_isolated_workers_race_one_branch_cas(tmp_path: Path):
+    executable = shutil.which("git")
+    assert executable is not None
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "feat/fixture")
+    (repo / "example.txt").write_text("before\n", encoding="utf-8")
+    git(repo, "add", "example.txt")
+    git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base")
+    parent = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "example.txt").write_text("after\n", encoding="utf-8")
+    patch = git(repo, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames").stdout.encode()
+    digest = hashlib.sha256(patch).hexdigest()
+    workers = [IsolatedGitCommitWorker(repo.resolve(), Path(executable).resolve(), "feat/fixture") for _ in range(2)]
+    ready = threading.Barrier(2, timeout=10)
+    candidates = []
+
+    def attempt(index):
+        def before_cas(commit, tree):
+            candidates.append((commit, tree))
+            ready.wait()
+
+        try:
+            return workers[index].commit(
+                parent, patch, digest, ("example.txt",), f"approved {index}", before_cas=before_cas
+            )
+        except EffectUnknown:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, range(2)))
+    assert len(candidates) == 2 and candidates[0][0] != candidates[1][0]
+    assert len([result for result in results if result is not None]) == 1
+    winner = next(result for result in results if result is not None)
+    assert git(repo, "rev-parse", "refs/heads/feat/fixture").stdout.strip() == winner
+    assert git(repo, "rev-parse", f"{winner}^").stdout.strip() == parent
 
 
 def test_isolated_worker_rejects_symlinks_and_main(tmp_path: Path):
