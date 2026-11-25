@@ -1,0 +1,4 @@
+psycopg[binary]==3.3.8
+PyNaCl==1.6.2
+cryptography==50.0.2
+pytest==9.2.0

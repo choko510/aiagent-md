@@ -126,6 +126,64 @@ impl DeviceIdentity {
         self.key.verifying_key().to_bytes()
     }
 
+    /// Opaque local binding digest; the server must separately authenticate the
+    /// tenant and owner and obtain explicit confirmation of this key.
+    pub fn binding_digest(&self) -> [u8; 32] {
+        self.binding.digest()
+    }
+
+    /// Candidate pairing possession proof; not a Tool grant or authorization.
+    /// The caller must receive the challenge over a verified server connection.
+    pub fn sign_pairing_challenge(
+        &self,
+        pairing_id: [u8; 16],
+        nonce: [u8; 32],
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<[u8; 64], &'static str> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "CLOCK_UNAVAILABLE")?
+            .as_millis();
+        self.sign_pairing_at(
+            pairing_id,
+            nonce,
+            issued_at_ms,
+            expires_at_ms,
+            u64::try_from(now).map_err(|_| "CLOCK_UNAVAILABLE")?,
+        )
+    }
+
+    fn sign_pairing_at(
+        &self,
+        pairing_id: [u8; 16],
+        nonce: [u8; 32],
+        issued: u64,
+        expires: u64,
+        now: u64,
+    ) -> Result<[u8; 64], &'static str> {
+        if pairing_id == [0; 16]
+            || nonce == [0; 32]
+            || issued > i64::MAX as u64
+            || expires > i64::MAX as u64
+            || issued > now.saturating_add(5_000)
+            || issued < now.saturating_sub(120_000)
+            || expires <= now
+            || expires <= issued
+            || expires.saturating_sub(issued) > 120_000
+        {
+            return Err("INVALID_CHALLENGE");
+        }
+        let mut message = b"aiagent-device-pairing-proof-candidate-v1".to_vec();
+        message.extend_from_slice(&pairing_id);
+        message.extend_from_slice(&self.binding_digest());
+        message.extend_from_slice(&self.public_key());
+        message.extend_from_slice(&nonce);
+        message.extend_from_slice(&issued.to_be_bytes());
+        message.extend_from_slice(&expires.to_be_bytes());
+        Ok(self.key.sign(&message).to_bytes())
+    }
+
     /// Local candidate only, not a wire contract or evidence of server auth.
     /// The future authenticated protocol must enforce nonce replay and session
     /// generation on the server and must not call this for unverified channels.
@@ -449,6 +507,37 @@ mod tests {
             IdentityBinding::from_parts("sid", "t", "o", "i", "d", "http://example.com", 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn pairing_proof_matches_shared_public_test_vector() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/pairing-proof-v1.json")).unwrap();
+        let identity = DeviceIdentity {
+            binding: binding("alice"),
+            key: SigningKey::from_bytes(&[7; 32]),
+        };
+        let signature = identity
+            .sign_pairing_at([1; 16], [9; 32], 1_000, 61_000, 2_000)
+            .unwrap();
+        assert_eq!(
+            crate::protocol::hex_digest(&identity.binding_digest()),
+            vector["bindingDigestHex"].as_str().unwrap()
+        );
+        assert_eq!(
+            crate::protocol::hex_digest(&identity.public_key()),
+            vector["publicKeyHex"].as_str().unwrap()
+        );
+        assert_eq!(
+            crate::protocol::hex_digest(&signature),
+            vector["signatureHex"].as_str().unwrap()
+        );
+        assert!(identity
+            .sign_pairing_at([0; 16], [9; 32], 1_000, 61_000, 2_000)
+            .is_err());
+        assert!(identity
+            .sign_pairing_at([1; 16], [9; 32], 1_000, 121_001, 2_000)
+            .is_err());
     }
 
     #[cfg(not(windows))]

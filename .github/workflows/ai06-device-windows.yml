@@ -3,11 +3,13 @@ on:
   pull_request:
     paths:
       - 'device-client/**'
+      - 'backend/device_gateway/**'
       - '.github/workflows/ai06-device-windows.yml'
   push:
     branches: [main]
     paths:
       - 'device-client/**'
+      - 'backend/device_gateway/**'
       - '.github/workflows/ai06-device-windows.yml'
   workflow_dispatch:
 permissions:
@@ -45,3 +47,33 @@ jobs:
           components: rustfmt, clippy
       - name: Core and real TLS/WSS tests
         run: bash ci/verify.sh
+  gateway-pairing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: device-test-only
+          POSTGRES_DB: device_gateway_test
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_DEVICE_TEST_ADMIN_DSN: postgresql://postgres:device-test-only@127.0.0.1:5432/device_gateway_test
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - name: Pairing transactions and tenant/owner RLS (test schema)
+        run: >-
+          uv run --isolated --no-project --python 3.13
+          --with-requirements backend/device_gateway/requirements-test.lock
+          python -m pytest -c backend/device_gateway/tests/pytest.ini backend/device_gateway/tests -q
+      - name: Gateway lint
+        run: uv run --isolated --no-project --python 3.13 --with ruff==0.17.4 ruff check backend/device_gateway
+      - name: Gateway type check
+        run: >-
+          uv run --isolated --no-project --python 3.13 --with mypy==2.4.1
+          --with-requirements backend/device_gateway/requirements-test.lock
+          python -m mypy --strict --follow-imports=skip --ignore-missing-imports backend/device_gateway/pairing.py
