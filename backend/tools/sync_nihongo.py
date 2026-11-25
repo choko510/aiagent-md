@@ -244,30 +244,53 @@ def _verify_bundle(destination: Path) -> dict[str, bytes]:
     return files
 
 
+def _work_base(destination: Path) -> Path:
+    """Private staging/backup parent beside skills, outside the publicly exposed tree."""
+    return destination.parent.parent / ".nihongo-work"
+
+
+def _work_key(destination: Path) -> str:
+    """Key work state by a path relative to the work parent, not by an absolute checkout path.
+
+    The same source tree can be copied from WSL to Docker and therefore has a different absolute path. Hashing
+    'skills/nihongo' relative to the source tree keeps the state discoverable after such a copy, while still
+    separating two different relative destinations under one work parent.
+    """
+    root = destination.parent.parent
+    try:
+        relative = destination.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        relative = Path(destination.name)
+    return hashlib.sha256(relative.as_posix().encode("utf-8")).hexdigest()[:16]
+
+
 def _work_root(destination: Path) -> Path:
     """Private staging/backup area outside the publicly exposed skills tree.
 
-    A destination-specific key prevents tests and two checkouts from sharing recovery state. The directory lives
-    beside skills rather than inside it, so the Runtime filesystem route and packaged_skill_texts cannot discover
-    an unverified staged copy.
+    The directory lives beside skills rather than inside it, so the Runtime filesystem route and
+    packaged_skill_texts cannot discover an unverified staged copy. Its key is relative-path based so a copied
+    source tree finds the same work directory.
     """
-    key = hashlib.sha256(str(destination.resolve()).encode("utf-8")).hexdigest()[:16]
-    return destination.parent.parent / ".nihongo-work" / key
+    return _work_base(destination) / _work_key(destination)
+
+
+def _work_entries(destination: Path, pattern: str) -> list[Path]:
+    """Find work entries under every key, including keys left by an older absolute-path scheme."""
+    base = _work_base(destination)
+    if not base.is_dir():
+        return []
+    return sorted({*base.glob(pattern), *base.glob(f"*/{pattern}")})
 
 
 def _staging_dirs(destination: Path) -> list[Path]:
     paths = list(destination.parent.glob(".nihongo-stage-*"))
-    work = _work_root(destination)
-    if work.is_dir():
-        paths.extend(work.glob(".nihongo-stage-*"))
+    paths.extend(_work_entries(destination, ".nihongo-stage-*"))
     return sorted(paths)
 
 
 def _backup_dirs(destination: Path) -> list[Path]:
     paths = list(destination.parent.glob(".nihongo-backup-*"))
-    work = _work_root(destination)
-    if work.is_dir():
-        paths.extend(work.glob(".nihongo-backup-*"))
+    paths.extend(_work_entries(destination, ".nihongo-backup-*"))
     return sorted(paths)
 
 
@@ -403,10 +426,10 @@ def install(files: dict[str, bytes], destination: Path, *, allow_legacy_destinat
 
     A directory rename cannot replace a non-empty directory, so the old bundle is moved aside first. The window
     between that move and the staged rename is covered by a rollback: if the swap raises, the previous verified
-    bundle is restored. If the process dies in that window, the next install/verify restores the verified backup
-    before proceeding, so the destination is not left missing. ``allow_legacy_destination`` is used only by
-    the update path after it has restored a known legacy backup; the legacy bundle is then replaced, never
-    accepted as the current pin.
+    bundle is restored. If the process dies in that window, the next install/update restores the verified backup
+    before proceeding, so the destination is not left missing. Ordinary verification never writes.
+    ``allow_legacy_destination`` is used only by the update path after it has restored a known legacy backup; the
+    legacy bundle is then replaced, never accepted as the current pin.
     """
     if set(files) != set(EXPECTED_FILES):
         raise ValueError("unverified skill bundle")
@@ -467,11 +490,11 @@ def main() -> None:
         help="fetch the pinned upstream commit and replace the bundle after verification (maintainer only)",
     )
     args = parser.parse_args()
-    recover_leftover_backup(args.destination, allow_legacy=args.update)
     if args.update:
         files = update(args.destination)
         print(f"Verified and installed upstream nihongo {UPSTREAM_COMMIT} ({len(files)} files)")
         return
+    # Ordinary verification is read-only. Recovery and stale-directory cleanup belong to --update.
     files = verify_tree(args.destination)
     print(f"Verified packaged nihongo {UPSTREAM_COMMIT} ({len(files)} files)")
 

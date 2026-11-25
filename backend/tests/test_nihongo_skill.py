@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 import shutil
+import sys
 import tarfile
 from pathlib import Path
 
@@ -135,6 +136,8 @@ def test_context_path_applies_full_only_for_a_writing_goal() -> None:
         ("メールを検索して結果をまとめて", False),
         ("LPの表示速度を改善して", False),
         ("LPのデザインを修正して", False),
+        ("SEOを意識したLPのコピーを書いて", True),
+        ("APIの特徴を伝える広告文を作成して", True),
         ("議事録を要約して", False),
         ("nihongoを使わずREADMEを作成して", False),
         ("READMEを作成して。nihongoは使わないで", False),
@@ -188,8 +191,8 @@ def test_marketing_reference_is_vendored_and_listed_by_full() -> None:
 def test_tampered_skill_file_is_rejected(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
-    destination.mkdir()
+    destination = tmp_path / "tree" / "nihongo"
+    destination.mkdir(parents=True)
     (destination / "ALWAYS.md").write_bytes(b"tampered bytes\n")
     with pytest.raises(ValueError, match="Git blob mismatch"):
         sync.verify_tree(destination)
@@ -198,8 +201,8 @@ def test_tampered_skill_file_is_rejected(tmp_path, monkeypatch) -> None:
 def test_tree_rejects_missing_extra_and_linked_files(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
-    destination.mkdir()
+    destination = tmp_path / "tree" / "nihongo"
+    destination.mkdir(parents=True)
     with pytest.raises(ValueError, match="incomplete nihongo skill bundle"):
         sync.verify_tree(destination)
     (destination / "ALWAYS.md").write_bytes(data)
@@ -278,7 +281,7 @@ def test_archive_verification_accepts_pinned_files_only(monkeypatch) -> None:
 def test_fetch_or_verification_failure_never_ships_a_partial_bundle(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     sync.install({"ALWAYS.md": data}, destination)
     installed = (destination / "ALWAYS.md").read_bytes()
 
@@ -301,7 +304,7 @@ def test_fetch_or_verification_failure_never_ships_a_partial_bundle(tmp_path, mo
 def test_leftover_backup_is_recovered_after_a_crash_between_renames(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     sync.install({"ALWAYS.md": data}, destination)
 
     # Simulate a hard kill after destination.rename(backup) and before staging.rename(destination).
@@ -325,7 +328,7 @@ def test_leftover_backup_is_recovered_after_a_crash_between_renames(tmp_path, mo
 def test_stale_staging_and_backups_fail_closed_and_update_cleans_them(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     sync.install({"ALWAYS.md": data}, destination)
     work = _work(destination)
 
@@ -357,10 +360,60 @@ def test_stale_staging_and_backups_fail_closed_and_update_cleans_them(tmp_path, 
     assert sync.verify_tree(destination) == {"ALWAYS.md": data}
 
 
+def test_work_entries_from_a_previous_key_fail_closed(tmp_path, monkeypatch) -> None:
+    data = b"pinned bytes"
+    monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
+    destination = tmp_path / "tree" / "nihongo"
+    sync.install({"ALWAYS.md": data}, destination)
+    old_key = sync._work_base(destination) / "previous-absolute-key"
+    staged = old_key / ".nihongo-stage-old"
+    staged.mkdir(parents=True)
+    (staged / "ALWAYS.md").write_bytes(data)
+
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.verify_tree(destination)
+    shutil.rmtree(sync._work_base(destination))
+    assert sync.verify_tree(destination) == {"ALWAYS.md": data}
+
+
+def test_work_state_is_found_after_the_source_tree_is_relocated(tmp_path, monkeypatch) -> None:
+    data = b"pinned bytes"
+    monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
+    destination = tmp_path / "source" / "skills" / "nihongo"
+    sync.install({"ALWAYS.md": data}, destination)
+    staged = _work(destination) / ".nihongo-stage-relocated"
+    staged.mkdir()
+    (staged / "ALWAYS.md").write_bytes(data)
+
+    relocated = tmp_path / "relocated"
+    shutil.copytree(destination.parent.parent, relocated)
+    copied = relocated / "skills" / "nihongo"
+
+    # The relative work key is the same in the copy; an absolute-path key would miss this leftover.
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.verify_tree(copied)
+
+
+def test_cli_verification_is_read_only_for_a_leftover_backup(tmp_path, monkeypatch) -> None:
+    data = b"pinned bytes"
+    monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
+    destination = tmp_path / "tree" / "nihongo"
+    sync.install({"ALWAYS.md": data}, destination)
+    backup = _work(destination) / ".nihongo-backup-cli"
+    backup.mkdir()
+    (backup / "ALWAYS.md").write_bytes(data)
+
+    monkeypatch.setattr(sys, "argv", ["sync_nihongo.py", "--destination", str(destination)])
+    with pytest.raises(RuntimeError, match="unrecovered nihongo work directory"):
+        sync.main()
+    assert backup.exists()  # ordinary verification never deletes recovery state
+    assert (destination / "ALWAYS.md").read_bytes() == data
+
+
 def test_backup_cleanup_failure_is_reported_and_backup_is_preserved(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     sync.install({"ALWAYS.md": data}, destination)
 
     original = shutil.rmtree
@@ -385,7 +438,8 @@ def test_legacy_backup_is_update_only_and_never_current(tmp_path, monkeypatch) -
     legacy = {"ALWAYS.md": b"v2.3.1 legacy bytes\n", "LICENSE": b"legacy license\n"}
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(current)})
     monkeypatch.setattr(sync, "LEGACY_BUNDLES", {"old-pin": (len(legacy), sync.bundle_fingerprint(legacy))})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     backup = _work(destination) / ".nihongo-backup-legacy"
     backup.mkdir()
     for rel, data in legacy.items():
@@ -408,7 +462,8 @@ def test_update_replaces_a_legacy_bundle_restored_after_a_crash(tmp_path, monkey
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(current["ALWAYS.md"])})
     monkeypatch.setattr(sync, "LEGACY_BUNDLES", {"old-pin": (len(legacy), sync.bundle_fingerprint(legacy))})
     monkeypatch.setattr(sync, "verified_archive_files", lambda _: current)
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     backup = _work(destination) / ".nihongo-backup-legacy"
     backup.mkdir()
     for rel, data in legacy.items():
@@ -427,8 +482,8 @@ def test_download_failure_keeps_the_current_bundle_or_restores_the_legacy_backup
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(current["ALWAYS.md"])})
     monkeypatch.setattr(sync, "LEGACY_BUNDLES", {"old-pin": (len(legacy), sync.bundle_fingerprint(legacy))})
 
-    destination = tmp_path / "nihongo"
-    destination.mkdir()
+    destination = tmp_path / "tree" / "nihongo"
+    destination.mkdir(parents=True)
     for rel, data in current.items():
         (destination / rel).write_bytes(data)
     with pytest.raises(OSError, match="network down"):
@@ -451,7 +506,7 @@ def test_download_failure_keeps_the_current_bundle_or_restores_the_legacy_backup
 def test_ambiguous_or_unverifiable_leftover_backups_are_refused(tmp_path, monkeypatch) -> None:
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     work = _work(destination)
     for name in (".nihongo-backup-a", ".nihongo-backup-b"):
         (work / name).mkdir()
@@ -474,7 +529,7 @@ def test_failed_replacement_restores_the_previous_bundle(tmp_path, monkeypatch) 
     """A failed staging swap must not leave the destination deleted or only partially replaced."""
     data = b"pinned bytes\n"
     monkeypatch.setattr(sync, "EXPECTED_FILES", {"ALWAYS.md": sync.digests(data)})
-    destination = tmp_path / "nihongo"
+    destination = tmp_path / "tree" / "nihongo"
     sync.install({"ALWAYS.md": data}, destination)
 
     original = Path.rename

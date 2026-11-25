@@ -326,10 +326,10 @@ _NIHONGO_MARKETING_TARGET = re.compile(
     re.IGNORECASE,
 )
 _NIHONGO_NON_WRITING = re.compile(
-    r"コード|プログラム|スクリプト|関数|実装|SQL|JSON|YAML|XML|CSV|API|バグ|エラー|デバッグ|計算|"
-    r"表示速度|ページ速度|デザイン|レイアウト|パフォーマンス|SEO|天気|検索|調べ|要約|説明して|"
-    r"(?<![A-Za-z0-9])(?:code|script|function|implement|sql|json|yaml|xml|csv|api|bug|error|debug|calculate|compute|"
-    r"weather|search|lookup|summari[sz]e|explain|render|layout|performance|seo|analytics)(?![A-Za-z0-9])",
+    r"コード|プログラム|スクリプト|関数|実装|SQL|JSON|YAML|XML|CSV|バグ|エラー|デバッグ|計算|"
+    r"表示速度|ページ速度|デザイン|レイアウト|パフォーマンス|天気|検索|調べ|要約|説明して|"
+    r"(?<![A-Za-z0-9])(?:code|script|function|implement|sql|json|yaml|xml|csv|bug|error|debug|calculate|compute|"
+    r"weather|search|lookup|summari[sz]e|explain|render|layout|performance|analytics)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _NIHONGO_OPT_OUT = re.compile(
@@ -378,7 +378,8 @@ def nihongo_full_for_goal(goal: str) -> bool:
         if not document:
             return False
         # A marketing deliverable is still a document, but an implementation/design request about its surface
-        # (speed, layout, SEO) is development work, not copywriting.
+        # (speed, layout, design) is development work, not copywriting. API/SEO can be subject matter, so they
+        # are not in the non-writing set above.
         if _NIHONGO_MARKETING_TARGET.search(text):
             return False
     return document
