@@ -1,6 +1,7 @@
 //! LDC-1 device agent simulator. No production transport, OS input, or cloud approval.
 //! The only adapter implementation is a no-OS-effect mock.
 pub mod agent;
+pub mod authority;
 pub mod identity;
 pub mod journal;
 pub mod mock;

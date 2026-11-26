@@ -24,7 +24,7 @@ pub enum SessionError {
 
 // All fields of this candidate protocol are strings. Reject duplicate keys,
 // nesting, unknown fields and non-string values before schema validation.
-struct FlatFrame(Map<String, Value>);
+pub(crate) struct FlatFrame(pub(crate) Map<String, Value>);
 impl<'de> Deserialize<'de> for FlatFrame {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct FrameVisitor;
