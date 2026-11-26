@@ -1,11 +1,11 @@
 //! Explicit-root, read-only project discovery. No Git, build, shell or network.
 //! A caller must obtain local user consent before opening a root; this module is
 //! not exposed to the model or WebView and does not grant execution authority.
+use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    ffi::OsStr,
     fs::OpenOptions,
     path::{Component, Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -321,7 +321,7 @@ fn scan(
                 continue;
             }
             let child = dir
-                .open_dir(OsStr::new(text))
+                .open_dir_nofollow(text)
                 .map_err(|_| "DISCOVERY_BOUNDARY_OR_IO")?;
             scan(
                 &child,
