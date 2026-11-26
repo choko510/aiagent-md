@@ -43,8 +43,10 @@ def _matches_request(
     ev: ExecutionEvidence,
     expected_test_id: str,
     receipt_verifier: ReceiptVerifier | None = None,
+    *,
+    allow_unverified_receipts_for_test: bool = False,
 ) -> bool:
-    """Verify full RunFence, intent_ref, kind, test_id, toolchain, commit SHA, and receipt attestation (P1-08/R2-12)."""
+    """Verify full RunFence, intent_ref, kind, test_id, toolchain, commit SHA, and mandatory receipt attestation (R3-09)."""
     if (
         ev.run != req.run
         or ev.intent_ref != req.intent_ref
@@ -55,7 +57,9 @@ def _matches_request(
         or not (ev.receipt_ref and ev.receipt_ref.strip())
     ):
         return False
-    return receipt_verifier is None or receipt_verifier(req, ev)
+    if receipt_verifier is None:
+        return allow_unverified_receipts_for_test
+    return bool(receipt_verifier(req, ev))
 
 
 def _validate_pair_requests(
@@ -97,9 +101,16 @@ def _validate_pair_requests(
 class ReproductionLab:
     """Runs failure-then-fix verification pairs inside an isolated Execution Cell."""
 
-    def __init__(self, sandbox: SandboxExecutionPort, *, receipt_verifier: ReceiptVerifier | None = None) -> None:
+    def __init__(
+        self,
+        sandbox: SandboxExecutionPort,
+        *,
+        receipt_verifier: ReceiptVerifier | None = None,
+        allow_unverified_receipts_for_test: bool = False,
+    ) -> None:
         self._sandbox = sandbox
         self._receipt_verifier = receipt_verifier
+        self._allow_unverified_for_test = allow_unverified_receipts_for_test
 
     def verify_pair(  # noqa: PLR0911
         self,
@@ -109,6 +120,8 @@ class ReproductionLab:
         post_request: ExecutionRequest,
         repeat_count: int = 1,
     ) -> ReproductionProof:
+        if self._receipt_verifier is None and not self._allow_unverified_for_test:
+            raise InvalidEvidence("EXECUTION_RECEIPT_VERIFIER_REQUIRED")
         pre_commit, post_commit = _validate_pair_requests(test_id, pre_request, post_request)
         if isinstance(repeat_count, bool) or not 1 <= repeat_count <= 5:
             raise InvalidEvidence("repeat_count must be between 1 and 5")
@@ -124,7 +137,13 @@ class ReproductionLab:
                 else replace(pre_request, intent_ref=f"{pre_request.intent_ref}:iter:{i}")
             )
             ev = self._sandbox.execute(req_i)
-            if not _matches_request(req_i, ev, test_id, self._receipt_verifier):
+            if not _matches_request(
+                req_i,
+                ev,
+                test_id,
+                self._receipt_verifier,
+                allow_unverified_receipts_for_test=self._allow_unverified_for_test,
+            ):
                 raise InvalidEvidence("pre-fix execution evidence mismatched request bindings")
             if ev.receipt_ref in seen_receipts:
                 return ReproductionProof(
@@ -149,7 +168,13 @@ class ReproductionLab:
                 else replace(post_request, intent_ref=f"{post_request.intent_ref}:iter:{i}")
             )
             ev = self._sandbox.execute(req_i)
-            if not _matches_request(req_i, ev, test_id, self._receipt_verifier):
+            if not _matches_request(
+                req_i,
+                ev,
+                test_id,
+                self._receipt_verifier,
+                allow_unverified_receipts_for_test=self._allow_unverified_for_test,
+            ):
                 raise InvalidEvidence("post-fix execution evidence mismatched request bindings")
             if ev.receipt_ref in seen_receipts:
                 return ReproductionProof(

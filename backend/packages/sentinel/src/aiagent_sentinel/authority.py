@@ -31,8 +31,8 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
-def _derive_dev_github_pr_binding(safe_args: Any) -> tuple[str, str]:
-    """Independently derive canonical GitHub PR path and POST body SHA-256 from approved safe_arguments_json (R2-10)."""
+def _derive_dev_github_pr_binding(safe_args: Any, *, intent_id: str, request_sha256: str) -> tuple[str, str]:
+    """Independently derive canonical GitHub PR path and POST body SHA-256 (with intent correlation marker) (R2-10/R3-07)."""
     if not isinstance(safe_args, dict):
         raise RpcError("APPROVAL_INVALID")
     repo = str(safe_args.get("repository") or "")
@@ -50,13 +50,18 @@ def _derive_dev_github_pr_binding(safe_args: Any) -> tuple[str, str]:
         or not title
         or not isinstance(body, str)
         or type(draft) is not bool
+        or not intent_id
+        or _SHA256_HEX_RE.fullmatch(request_sha256) is None
     ):
         raise RpcError("APPROVAL_INVALID")
     expected_path = f"/repos/{repo}/pulls"
+    marker = f"<!-- aiagent-pr-intent:{intent_id}:{request_sha256[:16]} -->"
+    base_body = body[:1900]
+    rendered_body = f"{base_body}\n\n{marker}" if base_body else marker
     payload = canonical_json(
         {
             "title": title[:200],
-            "body": body[:2000],
+            "body": rendered_body,
             "head": branch,
             "base": base_branch,
             "draft": draft,
@@ -187,7 +192,11 @@ class Sentinel:
             bound_path = target_path
             bound_body_sha = body_sha256
             if it["tool_key"] == "dev_github_pr" and method != "GET":
-                derived_path, derived_body_sha = _derive_dev_github_pr_binding(it["safe_arguments_json"])
+                derived_path, derived_body_sha = _derive_dev_github_pr_binding(
+                    it["safe_arguments_json"],
+                    intent_id=str(intent_id),
+                    request_sha256=str(it["request_sha256"]),
+                )
                 if target_path is not None and target_path != derived_path:
                     raise RpcError("APPROVAL_INVALID")
                 if body_sha256 is not None and body_sha256 != derived_body_sha:

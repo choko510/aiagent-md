@@ -53,7 +53,11 @@ secrets:
   login_passwords: {file: ./secrets/login_passwords.env}
   model_gateway_rpc_keys: {file: ./secrets/model_gateway_rpc_keys}
   api_model_rpc_key: {file: ./secrets/api_model_rpc_key}
+  api_tool_rpc_key: {file: ./secrets/api_tool_rpc_key}
   api_sentinel_rpc_key: {file: ./secrets/api_sentinel_rpc_key}
+  preview_capability_key: {file: ./secrets/preview_capability_key}
+  preview_attestation_key: {file: ./secrets/preview_attestation_key}
+  github_binding_tokens: {file: ./secrets/github_binding_tokens}
   context_artifact_keys: {file: ./secrets/context_artifact_keys}
   browser_storage_keys: {file: ./secrets/browser_storage_keys}
   notification_secret_keys: {file: ./secrets/notification_secret_keys}
@@ -112,15 +116,21 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       model-gateway: {condition: service_healthy}
-    secrets: [api_dsn, api_model_rpc_key, api_sentinel_rpc_key, browser_storage_keys, notification_secret_keys, memory_tombstone_hmac_key]
+      tool-gateway: {condition: service_healthy}
+    secrets: [api_dsn, api_model_rpc_key, api_tool_rpc_key, api_sentinel_rpc_key, browser_storage_keys,
+              notification_secret_keys, memory_tombstone_hmac_key, preview_attestation_key, github_binding_tokens]
     environment:
       <<: *env
       AIAGENT_API_DSN_FILE: /run/secrets/api_dsn
       AIAGENT_MODEL_GATEWAY_ENDPOINT: tcp:model-gateway:7101
       AIAGENT_API_MODEL_RPC_KEY_FILE: /run/secrets/api_model_rpc_key
+      AIAGENT_TOOL_GATEWAY_ENDPOINT: tcp:tool-gateway:7102
+      AIAGENT_API_TOOL_RPC_KEY_FILE: /run/secrets/api_tool_rpc_key
       AIAGENT_SENTINEL_ENDPOINT: tcp:sentinel:7103
       AIAGENT_API_SENTINEL_RPC_KEY_FILE: /run/secrets/api_sentinel_rpc_key
       AIAGENT_EGRESS_PROXY: http://sentinel:3128
+      AIAGENT_PREVIEW_ATTESTATION_KEY_FILE: /run/secrets/preview_attestation_key
+      AIAGENT_GITHUB_BINDING_TOKENS_JSON_FILE: /run/secrets/github_binding_tokens
       AIAGENT_BROWSER_STORAGE_KEYS_FILE: /run/secrets/browser_storage_keys
       AIAGENT_NOTIFICATION_SECRET_KEYS_FILE: /run/secrets/notification_secret_keys
       AIAGENT_BROWSER_ALLOWED_WEB_HOSTS: ${AIAGENT_BROWSER_ALLOWED_WEB_HOSTS:-}
@@ -216,7 +226,8 @@ services:
     networks: [db, rpc]
     depends_on: {migrate: {condition: service_completed_successfully}, sentinel: {condition: service_healthy}}
     secrets: [tool_gateway_dsn, tool_gateway_rpc_keys, tool_sentinel_client_key, browser_storage_keys,
-              sandbox_rpc_key, sandbox_grant_key, receiver_token]
+              sandbox_rpc_key, sandbox_grant_key, preview_capability_key, preview_attestation_key,
+              github_binding_tokens, receiver_token]
     environment:
       <<: *env
       AIAGENT_TOOL_GATEWAY_DSN_FILE: /run/secrets/tool_gateway_dsn
@@ -230,6 +241,9 @@ services:
       AIAGENT_SANDBOX_ENDPOINT: ${AIAGENT_SANDBOX_ENDPOINT:-vsock:3:7000}  # Untrusted Execution VM (CID 3)
       AIAGENT_SANDBOX_RPC_KEY_FILE: /run/secrets/sandbox_rpc_key
       AIAGENT_SANDBOX_GRANT_KEY_FILE: /run/secrets/sandbox_grant_key
+      AIAGENT_PREVIEW_CAPABILITY_KEY_FILE: /run/secrets/preview_capability_key
+      AIAGENT_PREVIEW_ATTESTATION_KEY_FILE: /run/secrets/preview_attestation_key
+      AIAGENT_GITHUB_BINDING_TOKENS_JSON_FILE: /run/secrets/github_binding_tokens
       AIAGENT_MESSAGE_RECEIVER_URL: ${AIAGENT_MESSAGE_RECEIVER_URL:-}
       AIAGENT_MESSAGE_RECEIVER_TOKEN_FILE: /run/secrets/receiver_token
       AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST: ${AIAGENT_MESSAGE_RECEIVER_CREDENTIAL_HOST:-}

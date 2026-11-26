@@ -66,10 +66,11 @@ services:
     cap_add: [SETUID, SETGID, SYS_ADMIN, CHOWN, KILL]
     security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
     deploy: {resources: {limits: {pids: 256, memory: 1g}}}
-    secrets: [sandbox_rpc_key, sandbox_grant_key]
+    secrets: [sandbox_rpc_key, sandbox_grant_key, preview_capability_key]
     environment:
       AIAGENT_SANDBOX_RPC_KEY_FILE: /run/secrets/sandbox_rpc_key
       AIAGENT_SANDBOX_GRANT_KEY_FILE: /run/secrets/sandbox_grant_key
+      AIAGENT_PREVIEW_CAPABILITY_KEY_FILE: /run/secrets/preview_capability_key
       AIAGENT_SANDBOX_LISTEN: tcp:0.0.0.0:7000
 networks:
   devsim:

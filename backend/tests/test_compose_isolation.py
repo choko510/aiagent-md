@@ -219,3 +219,77 @@ def test_browser_takeover_revisit_over_compose_network() -> None:
         assert st["state"] == "SUCCEEDED", st
         assert "done:compose-browser:ACTIVE:" in st["run"]["result"], st
         assert "SECRET_COMPOSE_PORTAL_OK" in st["run"]["result"], st
+
+
+def test_phase7_production_compose_rpc_and_secret_separation() -> None:
+    """R3-02/R3-03: Verify real Compose service startup wiring, secret separation (no sandbox keys in API), and live RPC."""
+    # 1. API MUST NOT hold sandbox_grant_key, sandbox_rpc_key, or preview_capability_key; DOES hold api_tool_rpc_key & preview_attestation_key
+    r_api = dc(
+        "exec",
+        "-T",
+        "api",
+        "python",
+        "-c",
+        (
+            "import asyncio, json, os\n"
+            "from pathlib import Path\n"
+            "from aiagent_core.rpc import RpcClient\n"
+            "from aiagent_domain.rpcwire import RpcError\n"
+            "secrets_present = sorted(p.name for p in Path('/run/secrets').iterdir())\n"
+            "ep = os.environ['AIAGENT_TOOL_GATEWAY_ENDPOINT']\n"
+            "key = bytes.fromhex(Path(os.environ['AIAGENT_API_TOOL_RPC_KEY_FILE']).read_text().strip())\n"
+            "async def probe():\n"
+            "  cli = RpcClient(ep, 'api', key, timeout_s=10.0)\n"
+            "  try:\n"
+            "    await cli.call('tool.reconcile', {'tenantId': '01950000-0000-7000-8000-000000000000', "
+            "'ownerUserId': '01950000-0000-7000-8000-000000000001', 'intentId': '01950000-0000-7000-8000-000000000002'})\n"
+            "    return 'OK'\n"
+            "  except RpcError as e:\n"
+            "    return e.code\n"
+            "print(json.dumps({'secrets': secrets_present, 'tg_ep': ep, 'rpc_code': asyncio.run(probe())}))\n"
+        ),
+    )
+    assert r_api.returncode == 0, r_api.stderr
+    api_info = json.loads(r_api.stdout.strip())
+    assert "api_tool_rpc_key" in api_info["secrets"]
+    assert "preview_attestation_key" in api_info["secrets"]
+    assert "sandbox_grant_key" not in api_info["secrets"]
+    assert "sandbox_rpc_key" not in api_info["secrets"]
+    assert "preview_capability_key" not in api_info["secrets"]
+    assert api_info["tg_ep"] == "tcp:tool-gateway:7102"
+    # Authenticated RPC reached real ToolGateway service (NOT_FOUND for nonexistent intent, NOT auth error!)
+    assert api_info["rpc_code"] == "NOT_FOUND", api_info
+
+    # 2. ToolGateway holds distinct sandbox_grant_key & preview_capability_key and reaches live Cell `preview.debug` RPC
+    r_tg = dc(
+        "exec",
+        "-T",
+        "tool-gateway",
+        "python",
+        "-c",
+        (
+            "import asyncio, json, os\n"
+            "from pathlib import Path\n"
+            "from aiagent_core.rpc import RpcClient\n"
+            "from aiagent_domain.rpcwire import RpcError\n"
+            "gk = Path(os.environ['AIAGENT_SANDBOX_GRANT_KEY_FILE']).read_text().strip()\n"
+            "pk = Path(os.environ['AIAGENT_PREVIEW_CAPABILITY_KEY_FILE']).read_text().strip()\n"
+            "rk = bytes.fromhex(Path(os.environ['AIAGENT_SANDBOX_RPC_KEY_FILE']).read_text().strip())\n"
+            "ep = os.environ['AIAGENT_SANDBOX_ENDPOINT']\n"
+            "async def probe():\n"
+            "  cli = RpcClient(ep, 'tool_gateway', rk, timeout_s=10.0)\n"
+            "  try:\n"
+            "    await cli.call('preview.debug', {'capability': {'bad': True}})\n"
+            "    return 'OK'\n"
+            "  except RpcError as e:\n"
+            "    return e.code\n"
+            "print(json.dumps({'distinct_keys': gk != pk and len(pk) == 64, "
+            "'has_gh_tokens': Path(os.environ['AIAGENT_GITHUB_BINDING_TOKENS_JSON_FILE']).is_file(), "
+            "'cell_rpc_code': asyncio.run(probe())}))\n"
+        ),
+    )
+    assert r_tg.returncode == 0, r_tg.stderr
+    tg_info = json.loads(r_tg.stdout.strip())
+    assert tg_info["distinct_keys"] is True
+    assert tg_info["has_gh_tokens"] is True
+    assert tg_info["cell_rpc_code"] == "GRANT_PREVIEW_CAP_MALFORMED", tg_info

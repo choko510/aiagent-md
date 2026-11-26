@@ -27,7 +27,7 @@ from aiagent_development.contracts import (
     TaskPlan,
 )
 from aiagent_development.design_demo import DevelopmentPreferences, normalize_design_candidates, redact_dev_text
-from aiagent_development.pr_guardian import PrGuardian, evaluate_pr_checks
+from aiagent_development.pr_guardian import PrGuardian, RequiredCheckRule, evaluate_pr_checks
 from aiagent_development.reproduction import ReproductionLab
 
 
@@ -138,7 +138,22 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
                 truncated=False,
             )
 
-    gate = AdaptiveTestingGate(_RecordingSandbox())
+    # R3-09: Default AdaptiveTestingGate WITHOUT receipt_verifier MUST fail closed!
+    res_unverified = AdaptiveTestingGate(_RecordingSandbox()).run_gate(
+        scope=scope,
+        run=run,
+        plan=plan,
+        adaptive_plan=ad_plan,
+        toolchain_digest=tc_digest,
+        intent_prefix="g0-no-verifier",
+        target_commit_sha=sha,
+    )
+    assert res_unverified.impacted_status == "FAILED" and res_unverified.overall_passed is False
+
+    def _valid_rcpt(req: ExecutionRequest, ev: ExecutionEvidence) -> bool:
+        return ev.receipt_ref == f"rcpt:{req.intent_ref}"
+
+    gate = AdaptiveTestingGate(_RecordingSandbox(), receipt_verifier=_valid_rcpt)
     res_skip = gate.run_gate(
         scope=scope,
         run=run,
@@ -162,7 +177,7 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
         fallback_to_full=False,
         fallback_reasons=(),
     )
-    res_ok = AdaptiveTestingGate(_RecordingSandbox()).run_gate(
+    res_ok = AdaptiveTestingGate(_RecordingSandbox(), receipt_verifier=_valid_rcpt).run_gate(
         scope=scope,
         run=run,
         plan=plan,
@@ -222,7 +237,7 @@ def test_dev14_adaptive_testing_separates_impacted_and_mandatory_and_falls_back(
         _MismatchedSandbox(wrong_test=True),
         _MismatchedSandbox(wrong_run=True),
     ):
-        res_bad = AdaptiveTestingGate(bad_sb).run_gate(
+        res_bad = AdaptiveTestingGate(bad_sb, receipt_verifier=_valid_rcpt).run_gate(
             scope=scope,
             run=run,
             plan=plan,
@@ -285,9 +300,18 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
                 truncated=False,
             )
 
-    # 1. Valid pre-FAIL (exit_code=1) + post-PASS (exit_code=0) pair
+    # 0. R3-09: ReproductionLab WITHOUT receipt_verifier MUST fail closed!
     sb = _CommitAwareSandbox({"repro-pre": 1, "repro-post": 0})
-    proof = ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
+    with pytest.raises(InvalidEvidence, match="EXECUTION_RECEIPT_VERIFIER_REQUIRED"):
+        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
+
+    def _ok_verifier(req: ExecutionRequest, ev: ExecutionEvidence) -> bool:
+        return bool(ev.receipt_ref) and ev.intent_ref == req.intent_ref
+
+    # 1. Valid pre-FAIL (exit_code=1) + post-PASS (exit_code=0) pair with verified receipts
+    proof = ReproductionLab(sb, receipt_verifier=_ok_verifier).verify_pair(
+        test_id="test_bug", pre_request=pre_req, post_request=post_req
+    )
     assert proof.verified is True
     assert proof.flaky is False
     assert proof.reason == "VERIFIED"
@@ -298,19 +322,25 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
         scope, run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "other_test", sha_post
     )
     with pytest.raises(InvalidEvidence, match="test_id"):
-        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_test_post)
+        ReproductionLab(sb, receipt_verifier=_ok_verifier).verify_pair(
+            test_id="test_bug", pre_request=pre_req, post_request=wrong_test_post
+        )
 
     wrong_argv_post = ExecutionRequest(
         scope, run, "plan-1", "test", ("pytest", "test_other.py"), tc_digest, "repro-post", "test_bug", sha_post
     )
     with pytest.raises(InvalidEvidence, match="identical test command"):
-        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_argv_post)
+        ReproductionLab(sb, receipt_verifier=_ok_verifier).verify_pair(
+            test_id="test_bug", pre_request=pre_req, post_request=wrong_argv_post
+        )
 
     same_sha_post = ExecutionRequest(
         scope, run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "test_bug", sha_pre
     )
     with pytest.raises(InvalidEvidence, match="must differ"):
-        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=same_sha_post)
+        ReproductionLab(sb, receipt_verifier=_ok_verifier).verify_pair(
+            test_id="test_bug", pre_request=pre_req, post_request=same_sha_post
+        )
 
     # R2-12: Reject mismatched RunFence between pre/post or returned evidence, and unverified receipts
     other_run = RunFence("task-1", "run-1", 1, 2, 0)
@@ -318,7 +348,9 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
         scope, other_run, "plan-1", "test", ("pytest", "test_bug.py"), tc_digest, "repro-post", "test_bug", sha_post
     )
     with pytest.raises(InvalidEvidence, match="RunFence"):
-        ReproductionLab(sb).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=wrong_fence_post)
+        ReproductionLab(sb, receipt_verifier=_ok_verifier).verify_pair(
+            test_id="test_bug", pre_request=pre_req, post_request=wrong_fence_post
+        )
 
     with pytest.raises(InvalidEvidence, match="mismatched request bindings"):
         ReproductionLab(sb, receipt_verifier=lambda _req, _ev: False).verify_pair(
@@ -327,12 +359,16 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
 
     # 3. P1-08: Pre-fix pytest collection/environment error (exit_code=5) MUST NOT count as bug reproduction
     sb_env = _CommitAwareSandbox({"repro-pre": 5, "repro-post": 0})
-    p_env = ReproductionLab(sb_env).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
+    p_env = ReproductionLab(sb_env, receipt_verifier=_ok_verifier).verify_pair(
+        test_id="test_bug", pre_request=pre_req, post_request=post_req
+    )
     assert p_env.verified is False and p_env.reason == "PRE_FIX_ENV_OR_COLLECTION_ERROR"
 
     # 4. Pre-fix already passing -> rejected
     sb2 = _CommitAwareSandbox({"repro-pre": 0, "repro-post": 0})
-    p_nofail = ReproductionLab(sb2).verify_pair(test_id="test_bug", pre_request=pre_req, post_request=post_req)
+    p_nofail = ReproductionLab(sb2, receipt_verifier=_ok_verifier).verify_pair(
+        test_id="test_bug", pre_request=pre_req, post_request=post_req
+    )
     assert p_nofail.verified is False and p_nofail.reason == "PRE_FIX_DID_NOT_FAIL"
 
     # 5. P1-08: Duplicate receipt_ref reused across repeat_count=2 is rejected
@@ -356,7 +392,7 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
                 truncated=False,
             )
 
-    p_dup = ReproductionLab(_DupReceiptSandbox()).verify_pair(
+    p_dup = ReproductionLab(_DupReceiptSandbox(), receipt_verifier=_ok_verifier).verify_pair(
         test_id="test_bug", pre_request=pre_req, post_request=post_req, repeat_count=2
     )
     assert p_dup.verified is False and p_dup.reason == "DUPLICATE_EXECUTION_RECEIPT"
@@ -392,7 +428,7 @@ def test_dev12_reproduction_lab_enforces_fail_pass_pair_and_detects_flaky() -> N
             )
 
     flaky_sb = _FlakySandbox()
-    p_flaky = ReproductionLab(flaky_sb).verify_pair(
+    p_flaky = ReproductionLab(flaky_sb, receipt_verifier=_ok_verifier).verify_pair(
         test_id="test_bug", pre_request=pre_req, post_request=post_req, repeat_count=2
     )
     assert len(set(flaky_sb.seen_intents)) == 4
@@ -610,25 +646,55 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
     )
     assert ev_status_err.ci_state == "UNKNOWN"
 
-    # PrGuardian paginates check-runs, reads branch protection required checks, and reads commit statuses
+    # R3-10: App ID mismatch MUST NOT satisfy an app-pinned required check rule!
+    ev_wrong_app = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "ci/build", "status": "completed", "conclusion": "success", "app": {"id": 99999}}],
+        },
+        expected_head_sha=sha,
+        required_check_rules=(RequiredCheckRule("ci/build", app_id=15368),),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_wrong_app.ci_state == "UNKNOWN"
+    assert ev_wrong_app.missing_required_checks == ("ci/build(app:15368)",)
+
+    # PrGuardian paginates check-runs, reads branch metadata + branch protection + rulesets (with App IDs) + commit statuses
     seen_paths: list[str] = []
 
-    def _fake_read(scope: ProjectScope, intent_ref: str, path: str) -> tuple[int, dict[str, object]]:
+    def _fake_read(scope: ProjectScope, intent_ref: str, path: str) -> tuple[int, object]:
         del scope, intent_ref
         seen_paths.append(path)
         if path.endswith("/pulls/9"):
             return 200, {"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}, "base": {"ref": "main"}}
+        if path.endswith("/rules/branches/main"):
+            return 200, [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "ruleset-gate", "integration_id": 15368}]},
+                }
+            ]
+        if path.endswith("/branches/main"):
+            return 200, {"name": "main", "protected": True}
         if path.endswith("/branches/main/protection/required_status_checks"):
-            return 200, {"contexts": ["legacy/ci"], "checks": [{"context": "required-last"}]}
+            return 200, {"contexts": ["legacy/ci"], "checks": [{"context": "required-last", "app_id": 15368}]}
         if "check-runs?per_page=100&page=1" in path:
             return 200, {
-                "total_count": 101,
-                "check_runs": [{"name": f"c-{i}", "status": "completed", "conclusion": "success"} for i in range(100)],
+                "total_count": 102,
+                "check_runs": [
+                    {"name": f"c-{i}", "status": "completed", "conclusion": "success", "app": {"id": 15368}}
+                    for i in range(100)
+                ],
             }
         if "check-runs?per_page=100&page=2" in path:
             return 200, {
-                "total_count": 101,
-                "check_runs": [{"name": "required-last", "status": "completed", "conclusion": "success"}],
+                "total_count": 102,
+                "check_runs": [
+                    {"name": "required-last", "status": "completed", "conclusion": "success", "app": {"id": 15368}},
+                    {"name": "ruleset-gate", "status": "completed", "conclusion": "success", "app": {"id": 15368}},
+                ],
             }
         if path.endswith("/status"):
             return 200, {"statuses": [{"context": "legacy/ci", "state": "success"}]}
@@ -647,4 +713,36 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
     assert ev_paged.ci_state == "PASS"
     assert any("page=2" in p for p in seen_paths)
     assert any("protection/required_status_checks" in p for p in seen_paths)
+    assert any("/rules/branches/main" in p for p in seen_paths)
     assert any(p.endswith("/status") for p in seen_paths)
+
+    # R3-10: Protected branch where protection returns 404 and rulesets return [] (permission gap) MUST fail closed as UNKNOWN!
+    def _fake_protected_404(scope: ProjectScope, intent_ref: str, path: str) -> tuple[int, object]:
+        del scope, intent_ref
+        if path.endswith("/pulls/9"):
+            return 200, {"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}, "base": {"ref": "main"}}
+        if path.endswith("/rules/branches/main"):
+            return 200, []
+        if path.endswith("/branches/main"):
+            return 200, {"name": "main", "protected": True}
+        if path.endswith("/branches/main/protection/required_status_checks"):
+            return 404, {}
+        if "check-runs" in path:
+            return 200, {
+                "total_count": 1,
+                "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+            }
+        if path.endswith("/status"):
+            return 200, {"statuses": []}
+        return 404, {}
+
+    ev_prot_404 = PrGuardian(_fake_protected_404).inspect_pr(
+        scope=scope,
+        intent_ref="int-1",
+        pr_number=9,
+        head_sha=sha,
+        repair_attempts=0,
+        max_repair_attempts=2,
+        required_checks=("static",),
+    )
+    assert ev_prot_404.ci_state == "UNKNOWN"

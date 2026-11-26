@@ -48,13 +48,14 @@ from aiagent_development.contracts import (
     ReviewVerdict,
     RunFence,
     ScopeDenied,
+    StateConflict,
     TaskPlan,
 )
 from aiagent_development.github_egress import canonical_pr_request, pr_request_sha256
 from aiagent_development.pg_store import PostgresCycleStore, PreviewBroker, sign_preview_launch_receipt
 from aiagent_development.store import PostgresDevStore, PostgresReviewAttestationPort
-from aiagent_domain import sha256_hex, uuid7
-from aiagent_gateways.dev_github_executor import DevGitHubPrExecutor
+from aiagent_domain import canonical_json, sha256_hex, uuid7
+from aiagent_gateways.dev_github_executor import DevGitHubPrExecutor, canonical_github_pr_payload
 from aiagent_gateways.sentinel_port import RpcSentinel
 from aiagent_gateways.servers import build_tool_server
 from aiagent_gateways.tool_gateway import ToolGateway
@@ -277,10 +278,45 @@ def _propose_dev_pr_through_gateway(
     return str(row["id"]), approval_id
 
 
+def _seed_context_artifact(
+    dbs: dict[str, Database],
+    tenant: dict[str, str],
+    *,
+    task_id: str,
+    run_id: str,
+    payload: dict[str, Any],
+) -> tuple[str, bytes]:
+    """Persist a real agent.context_artifacts row for the reviewer run so R3-06 source attestation can verify it."""
+    import hashlib as _hashlib
+
+    raw_bytes = canonical_json(payload).encode("utf-8")
+    digest = _hashlib.sha256(raw_bytes).hexdigest()
+    art_id = uuid7()
+    with dbs["owner"].tx() as c:
+        c.execute(
+            "INSERT INTO agent.context_artifacts"
+            " (tenant_id, id, task_id, run_id, owner_user_id, kind, content_sha256, byte_length,"
+            "  nonce, ciphertext, key_id, expires_at)"
+            " VALUES (%s,%s,%s,%s,%s,'raw',%s,%s,%s,%s,'test-k1', now() + interval '1 hour')",
+            (
+                tenant["tenantId"],
+                art_id,
+                task_id,
+                run_id,
+                tenant["userId"],
+                digest,
+                len(raw_bytes),
+                b"\x01" * 12,
+                raw_bytes + b"\x00" * 16,
+            ),
+        )
+    return art_id, raw_bytes
+
+
 def test_phase7_projects_design_demo_reviews_and_owner_isolation(
     pg: Any, dbs: dict[str, Database], tenant: dict[str, str]
 ) -> None:
-    """DEV-01/02/03/07/09 + R2-02/R2-07/R2-11: Repo Binding enforcement, Review full-findings attestation, Demo artifact/goal CAS."""
+    """DEV-01/02/03/07/09 + R3-06/R3-08: Repo Binding, Context-Artifact-grounded Review Verdicts, Real Demo Render Artifacts."""
     other = admin.provision_tenant(pg.owner)
     app = create_app(dbs["api"])
     h_a = {"Authorization": f"Bearer {tenant['token']}"}
@@ -295,6 +331,8 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         dbs["sentinel"].one("SELECT id FROM agent.dev_preview_instances LIMIT 1")
     with pytest.raises(InsufficientPrivilege):
         dbs["relay"].one("SELECT id FROM agent.dev_review_artifacts LIMIT 1")
+    with pytest.raises(InsufficientPrivilege):
+        dbs["sentinel"].one("SELECT id FROM agent.dev_demo_artifacts LIMIT 1")
 
     other_binding_id = _seed_repository_binding(dbs, other, repository="org/phase7-app")
     own_binding_id = _seed_repository_binding(dbs, tenant, repository="org/phase7-app")
@@ -394,7 +432,17 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         indep = commands.submit_task(
             dbs["api"], Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "indep-review"
         )
-        # Cannot record passed=True with an OPEN P0/P1 finding
+        # R3-06: Cannot record passed=True with an OPEN P0/P1 finding (payload itself drives verdict fields)
+        bad_payload = {
+            "reviewerRole": "security",
+            "targetSha": commit_sha,
+            "passed": True,
+            "findings": [{"findingId": "f0", "severity": "P0", "status": "OPEN"}],
+            "summary": "critical issue",
+        }
+        bad_src_id, bad_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=bad_payload
+        )
         with pytest.raises(InvalidEvidence, match="open/unverified P0 or P1"):
             dev_store.record_review_artifact(
                 tenant_id=tenant["tenantId"],
@@ -403,11 +451,43 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
                 cycle_id=cycle_id,
                 task_id=indep["taskId"],
                 run_id=indep["runId"],
-                reviewer_role="security",
-                target_sha=commit_sha,
-                evidence_payload={"summary": "critical issue"},
-                passed=True,
-                findings=[{"findingId": "f0", "severity": "P0", "status": "OPEN"}],
+                source_artifact_id=bad_src_id,
+                evidence_payload=bad_raw,
+            )
+
+        good_payload = {
+            "reviewerRole": "security",
+            "targetSha": commit_sha,
+            "passed": True,
+            "findings": [{"findingId": "f1", "severity": "P2", "status": "RESOLVED"}],
+            "summary": "resolved finding",
+        }
+        good_src_id, good_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=good_payload
+        )
+        # R3-06: Tampering payload bytes vs persisted context_artifacts MUST be rejected (SOURCE_ARTIFACT_MISMATCH)!
+        with pytest.raises(ScopeDenied, match="SOURCE_ARTIFACT_MISMATCH"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=good_src_id,
+                evidence_payload={**good_payload, "findings": []},
+            )
+        # Non-existent context_artifact ID MUST also be rejected!
+        with pytest.raises(ScopeDenied, match="SOURCE_ARTIFACT_MISMATCH"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=uuid7(),
+                evidence_payload=good_raw,
             )
         art_id = dev_store.record_review_artifact(
             tenant_id=tenant["tenantId"],
@@ -416,11 +496,8 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             cycle_id=cycle_id,
             task_id=indep["taskId"],
             run_id=indep["runId"],
-            reviewer_role="security",
-            target_sha=commit_sha,
-            evidence_payload={"summary": "resolved finding"},
-            passed=True,
-            findings=[{"findingId": "f1", "severity": "P2", "status": "RESOLVED"}],
+            source_artifact_id=good_src_id,
+            evidence_payload=good_raw,
         )
         # QUEUED reviewer run -> rejected
         with pytest.raises(ScopeDenied, match="did not SUCCEED"):
@@ -451,7 +528,7 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         assert reconstructed.findings == (ReviewFinding("f1", "P2", "RESOLVED"),)
         attest.assert_verified(proj_scope, builder_fence, reconstructed, cycle_id=cycle_id)
 
-        # Design Picker + Demo approval with rendered artifact digest + live goal_revision check (P1-06 + R2-11)
+        # Design Picker + Demo approval with REAL rendered artifact (R3-08) + live goal_revision check (P1-06 + R2-11)
         r_des = client.post(
             f"/v1/development/cycles/{cycle_id}/design",
             headers=h_a,
@@ -479,20 +556,71 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             },
         )
         assert r_des.status_code == 201
+
+        # R3-08: Passing an unverified/self-declared demoArtifactSha256 without a persisted dev_demo_artifacts row fails 422!
+        r_fake_sha = client.post(
+            f"/v1/development/cycles/{cycle_id}/design-decision",
+            headers=h_a,
+            json={
+                "designRevision": 1,
+                "selectedCandidateId": "minimal",
+                "demoArtifactRef": "artifact://unverified",
+                "demoArtifactSha256": "a" * 64,
+            },
+        )
+        assert r_fake_sha.status_code == 422 and "RENDERED_DEMO_ARTIFACT_REQUIRED" in r_fake_sha.text
+
+        # R3-08: Selecting without a rendered artifact succeeds as PENDING, but Demo APPROVED fails 422!
+        r_sel_unrendered = client.post(
+            f"/v1/development/cycles/{cycle_id}/design-decision",
+            headers=h_a,
+            json={"designRevision": 1, "selectedCandidateId": "minimal"},
+        )
+        assert r_sel_unrendered.status_code == 200
+        assert r_sel_unrendered.json()["design"]["demoArtifactSha256"] is None
+        r_demo_unrendered = client.post(
+            f"/v1/development/cycles/{cycle_id}/demo-decision",
+            headers=h_a,
+            json={
+                "designRevision": 1,
+                "decision": "APPROVED",
+                "demoSnapshotDigest": r_sel_unrendered.json()["design"]["demoSnapshotDigest"],
+            },
+        )
+        assert r_demo_unrendered.status_code == 422 and "RENDERED_DEMO_ARTIFACT_REQUIRED" in r_demo_unrendered.text
+
+        # Now persist real rendered Demo artifacts for minimal & dense -> Demo APPROVED succeeds with verified digest!
+        render_min = dev_store.record_demo_render_artifact(
+            tenant_id=tenant["tenantId"],
+            owner_user_id=tenant["userId"],
+            cycle_id=cycle_id,
+            candidate_id="minimal",
+            viewport="1280x800",
+            fixture_ref="fixture://dash-1",
+            render_bytes=b"<html><body>Minimal Rendered Demo v1</body></html>",
+        )
+        render_dense = dev_store.record_demo_render_artifact(
+            tenant_id=tenant["tenantId"],
+            owner_user_id=tenant["userId"],
+            cycle_id=cycle_id,
+            candidate_id="dense",
+            viewport="1280x800",
+            fixture_ref="fixture://dash-1",
+            render_bytes=b"<html><body>Dense Rendered Demo v1</body></html>",
+        )
         r_sel = client.post(
             f"/v1/development/cycles/{cycle_id}/design-decision",
             headers=h_a,
             json={
                 "designRevision": 1,
                 "selectedCandidateId": "minimal",
-                "demoArtifactRef": "artifact://demo-render-v1",
-                "demoArtifactSha256": "a" * 64,
+                "demoRenderArtifactId": render_min["id"],
             },
         )
-        assert r_sel.status_code == 200
+        assert r_sel.status_code == 200, r_sel.text
         digest_minimal = r_sel.json()["design"]["demoSnapshotDigest"]
-        assert r_sel.json()["design"]["demoArtifactRef"] == "artifact://demo-render-v1"
-        assert r_sel.json()["design"]["demoArtifactSha256"] == "a" * 64
+        assert r_sel.json()["design"]["demoRenderArtifactId"] == render_min["id"]
+        assert r_sel.json()["design"]["demoArtifactSha256"] == render_min["contentSha256"]
 
         r_demo = client.post(
             f"/v1/development/cycles/{cycle_id}/demo-decision",
@@ -505,7 +633,11 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         r_switch = client.post(
             f"/v1/development/cycles/{cycle_id}/design-decision",
             headers=h_a,
-            json={"designRevision": 1, "selectedCandidateId": "dense"},
+            json={
+                "designRevision": 1,
+                "selectedCandidateId": "dense",
+                "demoRenderArtifactId": render_dense["id"],
+            },
         )
         assert r_switch.status_code == 200 and r_switch.json()["design"]["demoDecision"] == "PENDING"
         digest_dense = r_switch.json()["design"]["demoSnapshotDigest"]
@@ -531,11 +663,12 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
     sys.platform != "linux", reason="PR #110 Sandbox Cell Supervisor requires Linux kernel namespaces/Landlock"
 )
 def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
-    dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    pg: Any, dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEV-06 + R2-01 + R2-06 + P2-11: REAL PR #110 Sandbox Cell OS isolation (Landlock+CLONE_NEWNET) & HMAC Preview Attestation."""
+    """DEV-06 + R3-02 + R3-04 + R3-05: Dedicated PreviewCapability via ToolGateway -> Sandbox Cell, cgroup v2, single-use nonce & monotonic generation."""
     pytest.importorskip("playwright.async_api")
-    from aiagent_sandbox.supervisor import Supervisor
+    from aiagent_sandbox.grant import GrantError, PreviewCapability, sign_preview_capability, verify_preview_capability
+    from aiagent_sandbox.supervisor import Supervisor, _BrowserCgroup
     from aiagent_sandbox.supervisor import serve as serve_sandbox
 
     escape_hits: list[str] = []
@@ -591,13 +724,90 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     srv_port = srv.server_address[1]
 
-    # Boot REAL PR #110 Sandbox Cell Supervisor with Landlock + CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET
+    # R3-02: Separate preview_capability_key from sandbox_grant_key; reusing the same key MUST fail closed!
     sb_port = _free_tcp_port()
     sb_rpc_key = secrets.token_bytes(32)
     sb_grant_key = secrets.token_bytes(32)
+    preview_cap_key = secrets.token_bytes(32)
     attest_key = secrets.token_bytes(32)
     sb_endpoint = f"tcp:127.0.0.1:{sb_port}"
 
+    with pytest.raises(RuntimeError, match="distinct from grant_key"):
+        Supervisor(tmp_path / "bad_sup", sb_grant_key, preview_capability_key=sb_grant_key)
+
+    # R3-02: PreviewCapability binds target_port/target_url/commit_sha/instance_generation; tampering fails signature!
+    sample_cap = PreviewCapability(
+        capability_id=f"prvcap-{secrets.token_hex(12)}",
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        project_id="proj-dbg-1",
+        cycle_id="cyc-1",
+        workspace_id=tenant["workspaceId"],
+        task_id=uuid7(),
+        run_id=uuid7(),
+        lease_id=uuid7(),
+        preview_instance_id=uuid7(),
+        instance_generation=2,
+        target_port=srv_port,
+        target_url=f"http://127.0.0.1:{srv_port}/",
+        endpoint_ref=f"sandbox-cell://127.0.0.1:{srv_port}",
+        commit_sha="2" * 40,
+        wall_ms=15_000,
+        memory_bytes=2 * 1024 * 1024 * 1024,
+        pids_max=256,
+        cpu_quota_us=100_000,
+        expires=int(time.time()) + 30,
+        attempt_id="dbg-sample",
+    )
+    signed_sample = sign_preview_capability(preview_cap_key, sample_cap)
+    with pytest.raises(GrantError, match="PREVIEW_CAP_BAD_SIGNATURE"):
+        verify_preview_capability(sb_grant_key, signed_sample)
+    tampered_port = {
+        "capability": {**signed_sample["capability"], "target_port": escape_port},
+        "mac": signed_sample["mac"],
+    }
+    with pytest.raises(GrantError, match="PREVIEW_CAP_BAD_SIGNATURE"):
+        verify_preview_capability(preview_cap_key, tampered_port)
+
+    # R3-04: Verify _BrowserCgroup writes memory.max, pids.max, cpu.max & require_browser_cgroup=True fails closed!
+    fake_cg_root = tmp_path / "fake_cgroup"
+    fake_cg_root.mkdir()
+    cg = _BrowserCgroup.create(
+        name="aiagent-prv-unit",
+        memory_bytes=1024 * 1024 * 1024,
+        pids_max=192,
+        cpu_quota_us=80_000,
+        cgroup_root=fake_cg_root,
+    )
+    assert cg is not None
+    assert (cg.path / "memory.max").read_text().strip() == str(1024 * 1024 * 1024)
+    assert (cg.path / "pids.max").read_text().strip() == "192"
+    assert (cg.path / "cpu.max").read_text().strip() == "80000 100000"
+    assert cg.attach(os.getpid()) is True
+    assert (cg.path / "cgroup.procs").read_text().strip() == str(os.getpid())
+    # Real kernel cgroupfs auto-removes virtual control files on rmdir; remove fake regular files in tmp_path first.
+    for ctrl in ("memory.max", "pids.max", "cpu.max", "cgroup.procs"):
+        (cg.path / ctrl).unlink(missing_ok=True)
+    cg.cleanup()
+    assert not cg.path.exists()
+
+    strict_sup = Supervisor(
+        tmp_path / "strict_cg_cells",
+        sb_grant_key,
+        preview_capability_key=preview_cap_key,
+        require_browser_cgroup=True,
+        cgroup_root=tmp_path / "nonexistent_ro_parent" / "nested",
+    )
+    # Force unreadable parent so _BrowserCgroup.create fails -> strict_sup MUST fail closed with BROWSER_CGROUP_REQUIRED!
+    (tmp_path / "nonexistent_ro_parent").mkdir()
+    os.chmod(tmp_path / "nonexistent_ro_parent", 0o500)
+    try:
+        with pytest.raises(GrantError, match="BROWSER_CGROUP_REQUIRED"):
+            _run(strict_sup.debug_preview(signed_sample))
+    finally:
+        os.chmod(tmp_path / "nonexistent_ro_parent", 0o700)
+
+    # Boot REAL Sandbox Supervisor accepting ONLY caller `tool_gateway` (matches production supervisor.py main()!)
     async def _boot_sandbox(holder: dict[str, Any]) -> None:
         sup = Supervisor(
             tmp_path / "sandbox_cells",
@@ -605,8 +815,10 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             require_netns=True,
             cell_uid=65534 if os.geteuid() == 0 else None,
             cell_gid=65534 if os.geteuid() == 0 else None,
+            preview_capability_key=preview_cap_key,
+            require_browser_cgroup=False,
         )
-        task = asyncio.create_task(serve_sandbox(sup, {"api": sb_rpc_key, "tool_gateway": sb_rpc_key}, sb_endpoint))
+        task = asyncio.create_task(serve_sandbox(sup, {"tool_gateway": sb_rpc_key}, sb_endpoint))
         await asyncio.sleep(0.2)
 
         async def _cleanup() -> None:
@@ -617,9 +829,31 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
 
     _, sb_loop, sb_th = _start_async_service(_boot_sandbox)
 
-    # Wire API via production env vars ONLY (ZERO dev_debug_probe_fn!)
+    # Boot REAL ToolGateway RPC server (the ONLY component holding Sandbox RPC & PreviewCapability keys!)
+    tg_rpc_port = _free_tcp_port()
+    tg_endpoint = f"tcp:127.0.0.1:{tg_rpc_port}"
+    api_tg_key = secrets.token_bytes(32)
+    gw = ToolGateway(dbs["tool_gateway"], {})
+
+    async def _boot_tg(holder: dict[str, Any]) -> None:
+        tg_srv = build_tool_server({"api": api_tg_key}, tg_endpoint, gw)
+        await tg_srv.start()
+
+        async def _cleanup() -> None:
+            await tg_srv.close()
+
+        holder["cleanup"] = _cleanup
+
+    _, tg_loop, tg_th = _start_async_service(_boot_tg)
+
+    # API gets ONLY Preview Attestation key & ToolGateway RPC (ZERO sandbox_grant_key / sandbox_rpc_key / preview_cap_key!)
     monkeypatch.setenv("AIAGENT_PREVIEW_ATTESTATION_KEY", attest_key.hex())
+    monkeypatch.delenv("AIAGENT_TOOL_GATEWAY_ENDPOINT", raising=False)
+    monkeypatch.delenv("AIAGENT_API_TOOL_RPC_KEY", raising=False)
     monkeypatch.delenv("AIAGENT_SANDBOX_ENDPOINT", raising=False)
+    monkeypatch.delenv("AIAGENT_SANDBOX_RPC_KEY", raising=False)
+    monkeypatch.delenv("AIAGENT_SANDBOX_GRANT_KEY", raising=False)
+    monkeypatch.delenv("AIAGENT_PREVIEW_CAPABILITY_KEY", raising=False)
 
     app = create_app(dbs["api"])
     headers = {"Authorization": f"Bearer {tenant['token']}"}
@@ -641,17 +875,50 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
 
             broker = PreviewBroker(dbs["api"])
             proc_sha = sha256_hex({"cycle": cycle_a, "port": srv_port})
+            now_s = int(time.time())
 
-            # R2-06: Forged self-declared launch_receipt_hmac MUST be rejected
+            # R3-05: Forged HMAC & expired launch receipts MUST be rejected!
             with pytest.raises(ScopeDenied, match="INVALID_PREVIEW_LAUNCH_RECEIPT"):
                 broker.register_instance(
                     cycle_a_obj,
                     target_port=srv_port,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac="f" * 64,
+                    launch_nonce=f"nonce-forged-{secrets.token_hex(8)}",
+                    issued_at_epoch=now_s,
+                    expires_at_epoch=now_s + 30,
+                )
+            expired_nonce = f"nonce-expired-{secrets.token_hex(8)}"
+            rcpt_exp = sign_preview_launch_receipt(
+                attest_key,
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id="proj-dbg-1",
+                cycle_id=cycle_a,
+                workspace_id=tenant["workspaceId"],
+                commit_sha=sha_a,
+                target_port=srv_port,
+                runner_kind="sandbox_cell",
+                process_attestation_sha256=proc_sha,
+                generation=1,
+                launch_nonce=expired_nonce,
+                issued_at_epoch=now_s - 50,
+                expires_at_epoch=now_s - 5,
+            )
+            with pytest.raises(ScopeDenied, match="EXPIRED_PREVIEW_LAUNCH_RECEIPT"):
+                broker.register_instance(
+                    cycle_a_obj,
+                    target_port=srv_port,
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac=rcpt_exp,
+                    launch_nonce=expired_nonce,
+                    issued_at_epoch=now_s - 50,
+                    expires_at_epoch=now_s - 5,
+                    generation=1,
                 )
 
-            # Register generation 1 with valid HMAC launch receipt
+            # Register generation 1 with valid short-lived single-use HMAC launch receipt
+            nonce_g1 = f"nonce-g1-{secrets.token_hex(10)}"
             rcpt_g1 = sign_preview_launch_receipt(
                 attest_key,
                 tenant_id=tenant["tenantId"],
@@ -664,14 +931,61 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=1,
+                launch_nonce=nonce_g1,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
             )
             inst_g1 = broker.register_instance(
                 cycle_a_obj,
                 target_port=srv_port,
                 process_attestation_sha256=proc_sha,
                 launch_receipt_hmac=rcpt_g1,
+                launch_nonce=nonce_g1,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
                 generation=1,
             )
+
+            # R3-05: Replaying the SAME launch_nonce OR non-monotonic generation (<= 1) MUST be rejected!
+            with pytest.raises(StateConflict, match="NON_MONOTONIC_PREVIEW_GENERATION"):
+                broker.register_instance(
+                    cycle_a_obj,
+                    target_port=srv_port,
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac=rcpt_g1,
+                    launch_nonce=nonce_g1,
+                    issued_at_epoch=now_s,
+                    expires_at_epoch=now_s + 45,
+                    generation=1,
+                )
+            rcpt_replay_nonce = sign_preview_launch_receipt(
+                attest_key,
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id="proj-dbg-1",
+                cycle_id=cycle_a,
+                workspace_id=tenant["workspaceId"],
+                commit_sha=sha_a,
+                target_port=srv_port,
+                runner_kind="sandbox_cell",
+                process_attestation_sha256=proc_sha,
+                generation=2,
+                launch_nonce=nonce_g1,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
+            )
+            with pytest.raises(ScopeDenied, match="PREVIEW_LAUNCH_RECEIPT_REPLAYED"):
+                broker.register_instance(
+                    cycle_a_obj,
+                    target_port=srv_port,
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac=rcpt_replay_nonce,
+                    launch_nonce=nonce_g1,
+                    issued_at_epoch=now_s,
+                    expires_at_epoch=now_s + 45,
+                    generation=2,
+                )
+
             r_l1 = client.post(
                 f"/v1/development/cycles/{cycle_a}/previews",
                 headers=headers,
@@ -680,7 +994,50 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             assert r_l1.status_code == 201
             lease_g1, tok_g1 = r_l1.json()["leaseId"], r_l1.json()["previewToken"]
 
-            # R2-06: Registering generation 2 on the same port supersedes generation 1 & revokes lease_g1!
+            # R3-05: Another tenant attempting to register the SAME running port MUST be rejected (PREVIEW_PORT_OCCUPIED)!
+            other = admin.provision_tenant(pg.owner)
+            PostgresDevStore(dbs["api"]).create_project(
+                tenant_id=other["tenantId"],
+                owner_user_id=other["userId"],
+                workspace_id=other["workspaceId"],
+                project_id="proj-other-port",
+                name="Other Port",
+                repository="org/other-port",
+            )
+            cyc_o, sha_o, _, _, cyc_o_obj = _seed_code_ready_cycle(
+                dbs, other, project_id="proj-other-port", repository="org/other-port"
+            )
+            nonce_other = f"nonce-other-{secrets.token_hex(10)}"
+            rcpt_other = sign_preview_launch_receipt(
+                attest_key,
+                tenant_id=other["tenantId"],
+                owner_user_id=other["userId"],
+                project_id="proj-other-port",
+                cycle_id=cyc_o,
+                workspace_id=other["workspaceId"],
+                commit_sha=sha_o,
+                target_port=srv_port,
+                runner_kind="sandbox_cell",
+                process_attestation_sha256=proc_sha,
+                generation=1,
+                launch_nonce=nonce_other,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
+            )
+            with pytest.raises(ScopeDenied, match="PREVIEW_PORT_OCCUPIED"):
+                broker.register_instance(
+                    cyc_o_obj,
+                    target_port=srv_port,
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac=rcpt_other,
+                    launch_nonce=nonce_other,
+                    issued_at_epoch=now_s,
+                    expires_at_epoch=now_s + 45,
+                    generation=1,
+                )
+
+            # Registering monotonic generation 2 on the same port supersedes generation 1 & revokes lease_g1!
+            nonce_g2 = f"nonce-g2-{secrets.token_hex(10)}"
             rcpt_g2 = sign_preview_launch_receipt(
                 attest_key,
                 tenant_id=tenant["tenantId"],
@@ -693,12 +1050,18 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=2,
+                launch_nonce=nonce_g2,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
             )
             inst_g2 = broker.register_instance(
                 cycle_a_obj,
                 target_port=srv_port,
                 process_attestation_sha256=proc_sha,
                 launch_receipt_hmac=rcpt_g2,
+                launch_nonce=nonce_g2,
+                issued_at_epoch=now_s,
+                expires_at_epoch=now_s + 45,
                 generation=2,
             )
             assert (
@@ -729,7 +1092,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 == 403
             )
 
-            # R2-01: Without AIAGENT_SANDBOX_ENDPOINT, Browser Debugger FAILS CLOSED (403 SANDBOX_CELL_REQUIRED)
+            # R2-01/R3-02: Without ToolGateway RPC configured, Browser Debugger FAILS CLOSED (403 SANDBOX_CELL_REQUIRED)
             r_no_sb = client.post(
                 f"/v1/development/cycles/{cycle_a}/debug",
                 headers=headers,
@@ -737,10 +1100,12 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             )
             assert r_no_sb.status_code == 403 and "SANDBOX_CELL_REQUIRED" in r_no_sb.text
 
-            # Now configure Sandbox Cell RPC env vars -> execute inside REAL Landlock + CLONE_NEWNET Sandbox Cell!
+            # Wire API -> ToolGateway (`api` caller) and ToolGateway -> Sandbox Cell (`tool_gateway` caller + PreviewCapability key)
+            monkeypatch.setenv("AIAGENT_TOOL_GATEWAY_ENDPOINT", tg_endpoint)
+            monkeypatch.setenv("AIAGENT_API_TOOL_RPC_KEY", api_tg_key.hex())
             monkeypatch.setenv("AIAGENT_SANDBOX_ENDPOINT", sb_endpoint)
-            monkeypatch.setenv("AIAGENT_API_SANDBOX_RPC_KEY", sb_rpc_key.hex())
-            monkeypatch.setenv("AIAGENT_SANDBOX_GRANT_KEY", sb_grant_key.hex())
+            monkeypatch.setenv("AIAGENT_SANDBOX_RPC_KEY", sb_rpc_key.hex())
+            monkeypatch.setenv("AIAGENT_PREVIEW_CAPABILITY_KEY", preview_cap_key.hex())
 
             r_dbg = client.post(
                 f"/v1/development/cycles/{cycle_a}/debug",
@@ -776,6 +1141,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 == 403
             )
     finally:
+        _stop_async_service(tg_loop, tg_th)
         _stop_async_service(sb_loop, sb_th)
         srv.shutdown()
         srv.server_close()
@@ -789,13 +1155,29 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
     """Zero-DI Production-Wired E2E (R2-02..R2-05, R2-08..R2-10, R2-13): REAL Sentinel RPC + EgressProxy + ToolGateway RPC."""
     post_hits: list[dict[str, Any]] = []
     seen_auth_headers: list[str] = []
-    created_prs: list[dict[str, Any]] = []
+    # Pre-seed an unrelated pre-existing PR #41 on the same branch/head/title WITHOUT intent correlation marker (R3-07)
+    created_prs: list[dict[str, Any]] = [
+        {
+            "number": 41,
+            "html_url": "https://github.test/org/gh-app/pull/41",
+            "state": "open",
+            "title": "Approved Phase 7 PR",
+            "body": "Pre-existing PR without correlation marker",
+            "draft": True,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "head": {"sha": "2" * 40, "ref": "feat/p7-demo"},
+            "base": {"ref": "main"},
+        }
+    ]
     gh_state: dict[str, Any] = {
         "remote_ref_sha": "2" * 40,
         "pr_response_head_sha": "2" * 40,
         "live_pr_head_sha": "2" * 40,
         "post_mode": "drop",
         "reconcile_mismatch": False,
+        "reconcile_body_tamper": False,
+        "branch_protected": False,
         "status_http_code": 200,
         "check_runs": [{"name": "integration-pytest", "status": "completed", "conclusion": "failure"}],
         "commit_statuses": [{"context": "ci/policy", "state": "success"}],
@@ -830,13 +1212,15 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
             if method == "POST" and path == "/repos/org/gh-app/pulls":
                 body_obj = json.loads(raw.decode("utf-8"))
                 assert "head_sha" not in body_obj
+                assert "<!-- aiagent-pr-intent:" in str(body_obj.get("body") or "")
                 post_hits.append(body_obj)
-                pr_num = 42 + len(created_prs)
+                pr_num = 41 + len(created_prs)
                 pr_obj = {
                     "number": pr_num,
                     "html_url": f"https://github.test/org/gh-app/pull/{pr_num}",
                     "state": "open",
                     "title": body_obj["title"],
+                    "body": body_obj["body"],
                     "draft": bool(body_obj["draft"]),
                     "mergeable": True,
                     "mergeable_state": "unstable",
@@ -857,9 +1241,14 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
                 return
 
             if method == "GET" and path.startswith("/repos/org/gh-app/pulls?"):
-                items = [
-                    {**p, "base": {"ref": "wrong-base"}} if gh_state["reconcile_mismatch"] else p for p in created_prs
-                ]
+                items = []
+                for p in created_prs:
+                    item = dict(p)
+                    if gh_state["reconcile_mismatch"]:
+                        item["base"] = {"ref": "wrong-base"}
+                    if gh_state["reconcile_body_tamper"] and item["number"] >= 42:
+                        item["body"] = "Tampered body without marker"
+                    items.append(item)
                 resp = json.dumps(items).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
@@ -869,8 +1258,27 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
                 return
 
             if method == "GET" and path == "/repos/org/gh-app/pulls/42":
-                live_pr = {**created_prs[0], "head": {"sha": gh_state["live_pr_head_sha"], "ref": "feat/p7-demo"}}
+                pr_42 = next(p for p in created_prs if p["number"] == 42)
+                live_pr = {**pr_42, "head": {"sha": gh_state["live_pr_head_sha"], "ref": "feat/p7-demo"}}
                 resp = json.dumps(live_pr).encode()
+                w.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                    % (len(resp), resp)
+                )
+                await w.drain()
+                return
+
+            if method == "GET" and path == "/repos/org/gh-app/branches/main":
+                resp = json.dumps({"name": "main", "protected": gh_state["branch_protected"]}).encode()
+                w.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                    % (len(resp), resp)
+                )
+                await w.drain()
+                return
+
+            if method == "GET" and path == "/repos/org/gh-app/rules/branches/main":
+                resp = json.dumps([]).encode()
                 w.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                     % (len(resp), resp)
@@ -1047,7 +1455,33 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
                 dbs, tenant, project_id="proj-gh-1", repository="org/gh-app", profile="development"
             )
 
-            # Propose dev_github_pr through REAL ToolGateway.submit (validates TOOLS['dev_github_pr'] schema!)
+            # R3-01: Direct runtime ToolGateway.submit with wrong headSha or non-CODE_READY cycle MUST be DENIED inside ToolGateway!
+            wrong_sha_args = canonical_pr_request(
+                project_id="proj-gh-1",
+                cycle_id=cycle_id,
+                repository="org/gh-app",
+                branch="feat/p7-demo",
+                head_sha="9" * 40,
+                base_branch="main",
+                title="Bypass Attempt PR",
+                body="Should be denied by ToolGateway",
+                draft=True,
+            )
+            bad_tc_id = f"call-{uuid7()[:10]}"
+            with dbs["model_gateway"].tx() as c:
+                control.append_head(
+                    c,
+                    claim,
+                    "assistant",
+                    {"content": "", "tool_calls": [{"id": bad_tc_id, "name": "dev_github_pr", "args": wrong_sha_args}]},
+                    writer="model_gateway",
+                    stream="main",
+                )
+            bad_submit = _run(gw.submit(claim, bad_tc_id, "dev_github_pr", wrong_sha_args))
+            assert bad_submit["status"] == "DENIED", bad_submit
+            assert bad_submit["result"]["error"] == "CYCLE_COMMIT_OR_GOAL_MISMATCH", bad_submit
+
+            # Propose valid dev_github_pr through REAL ToolGateway.submit (validates TOOLS['dev_github_pr'] + Cycle CODE_READY!)
             pr_args = canonical_pr_request(
                 project_id="proj-gh-1",
                 cycle_id=cycle_id,
@@ -1158,13 +1592,18 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
             assert r_retry_diff.status_code == 409 and r_retry_diff.json()["reconcileRequired"] is True
             assert len(post_hits) == 1
 
-            # R2-05: Reconcile refuses to confirm a PR whose base.ref mismatches the approved intent!
+            # R3-07: Reconcile refuses base.ref mismatch, body/marker tamper, AND NEVER confuses pre-existing PR #41!
             gh_state["reconcile_mismatch"] = True
             r_rec_miss = client.post(f"/v1/development/prs/{pr_rec_id}/reconcile", headers=headers)
             assert r_rec_miss.status_code == 200 and r_rec_miss.json()["reconciled"] is False
             gh_state["reconcile_mismatch"] = False
 
-            # R2-04 + R2-05 + R2-09: Reconcile via ToolGateway RPC confirms exact PR #42 atomically!
+            gh_state["reconcile_body_tamper"] = True
+            r_rec_body = client.post(f"/v1/development/prs/{pr_rec_id}/reconcile", headers=headers)
+            assert r_rec_body.status_code == 200 and r_rec_body.json()["reconciled"] is False
+            gh_state["reconcile_body_tamper"] = False
+
+            # R2-04 + R3-07: Reconcile via ToolGateway RPC confirms ONLY exact intent-correlated PR #42 (NOT pre-existing #41)!
             r_rec = client.post(f"/v1/development/prs/{pr_rec_id}/reconcile", headers=headers)
             assert r_rec.status_code == 200, r_rec.text
             assert r_rec.json()["reconciled"] is True
@@ -1180,7 +1619,7 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
             assert confirmed_row is not None
             assert confirmed_row["status_code"] == "CONFIRMED"
             assert confirmed_row["outcome_code"] == "RECONCILED_SENT"
-            assert confirmed_row["external_receipt_ref"] == f"github-pr:org/gh-app#42:{commit_sha}"
+            assert confirmed_row["external_receipt_ref"] == f"github-pr:org/gh-app#42:{commit_sha[:12]}:{intent_id[:8]}"
 
             # R2-04 + P1-05 + P2-10: Guardian check via Sentinel RPC in CONFIRMED state -> 200 OK & 0 repair consumption
             g_ro = client.post(f"/v1/development/prs/{pr_rec_id}/guardian-check", headers=headers, json={})
@@ -1284,11 +1723,9 @@ def test_phase7_production_wired_tool_gateway_sentinel_pr_e2e(
                     "UPDATE agent.approval_records SET expires_at = now() - interval '5s' WHERE tenant_id=%s AND id=%s",
                     (tenant["tenantId"], exp_apr_id),
                 )
-            exp_body = json.dumps(
-                {"base": "main", "body": "Body", "draft": True, "head": "feat/p7-demo", "title": "Expiry Test PR"},
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
+            exp_body = canonical_github_pr_payload(
+                exp_args, intent_id=exp_intent_id, request_sha256=pr_request_sha256(exp_args)
+            )
             with pytest.raises(ForwardProxyError) as exc_exp:
                 _run(
                     send_via_forward_proxy(
@@ -1354,6 +1791,16 @@ def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], 
             },
             {"candidateId": "cand-c", "label": "Classic Pro", "fixtureRef": "fixture://v1", "summary": "Dense data UI"},
         ],
+    )
+    # R3-08: Seed a real rendered Demo artifact for cand-b so Web UI Demo approval verifies against real artifact bytes
+    store.record_demo_render_artifact(
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        cycle_id=cycle_id,
+        candidate_id="cand-b",
+        viewport="1280x800",
+        fixture_ref="fixture://v1",
+        render_bytes=b"<html><body>Studio Dark Rendered Preview</body></html>",
     )
 
     app = create_app(dbs["api"], web_dist_dir=dist_dir)

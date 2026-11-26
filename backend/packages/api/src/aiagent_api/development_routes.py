@@ -24,7 +24,7 @@ from aiagent_core.commands import Scope
 from aiagent_core.db import Database
 from aiagent_core.events import append_event
 from aiagent_core.rpc import RpcClient
-from aiagent_development.browser_debugger import AutonomousBrowserDebugger
+from aiagent_development.browser_debugger import AutonomousBrowserDebugger, DebugReport
 from aiagent_development.contracts import (
     DevelopmentError,
     EffectUnknown,
@@ -148,6 +148,67 @@ def register_development_routes(
                 "tool.reconcile",
                 {"tenantId": tenant_id, "ownerUserId": owner_user_id, "intentId": intent_id},
             )
+        )
+
+    async def _dispatch_preview_debug_via_gateway(
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        cycle_id: str,
+        lease_id: str,
+        preview_token: str,
+        target_port: int,
+        task_id: str,
+        run_id: str,
+        path: str,
+        revoke_after: bool,
+    ) -> DebugReport:
+        """Route Browser Preview debug strictly through ToolGateway so API never holds Sandbox/Capability keys (R3-02/R3-03)."""
+        if tool_gateway is not None:
+            raw = dict(
+                await tool_gateway.dispatch_preview_debug(
+                    tenant_id=tenant_id,
+                    owner_user_id=owner_user_id,
+                    cycle_id=cycle_id,
+                    lease_id=lease_id,
+                    preview_token=preview_token,
+                    target_port=target_port,
+                    task_id=task_id,
+                    run_id=run_id,
+                    path=path,
+                    revoke_after=revoke_after,
+                )
+            )
+        else:
+            endpoint = (os.environ.get("AIAGENT_TOOL_GATEWAY_ENDPOINT") or "").strip()
+            key = config.secret("AIAGENT_API_TOOL_RPC_KEY", required=False)
+            if not endpoint or key is None:
+                raise ScopeDenied("SANDBOX_CELL_REQUIRED: ToolGateway preview RPC is not configured")
+            cli = RpcClient(endpoint, "api", bytes.fromhex(key.reveal().strip()), timeout_s=65.0)
+            raw = dict(
+                await cli.call(
+                    "tool.preview_debug",
+                    {
+                        "tenantId": tenant_id,
+                        "ownerUserId": owner_user_id,
+                        "cycleId": cycle_id,
+                        "leaseId": lease_id,
+                        "previewToken": preview_token,
+                        "targetPort": target_port,
+                        "taskId": task_id,
+                        "runId": run_id,
+                        "path": path,
+                        "revokeAfter": revoke_after,
+                    },
+                )
+            )
+        return DebugReport(
+            commit_sha=str(raw["commitSha"]),
+            source_url_redacted=str(raw["sourceUrlRedacted"]),
+            console_errors=tuple(str(x) for x in raw.get("consoleErrors", ())),
+            network_errors=tuple(str(x) for x in raw.get("networkErrors", ())),
+            layout_issues=tuple(str(x) for x in raw.get("layoutIssues", ())),
+            status=str(raw["status"]),
         )
 
     # ------------------------------------------------------------------ Projects
@@ -297,6 +358,7 @@ def register_development_routes(
                 design_revision=raw_rev,
                 selected_candidate_id=cid,
                 feedback=body.get("feedback"),
+                demo_render_artifact_id=body.get("demoRenderArtifactId"),
                 demo_artifact_ref=body.get("demoArtifactRef"),
                 demo_artifact_sha256=body.get("demoArtifactSha256"),
             )
@@ -466,22 +528,47 @@ def register_development_routes(
         )
         if cy_dto is None:
             raise HTTPException(404)
-        dbg = AutonomousBrowserDebugger(_previews())
         try:
-            report = await asyncio.to_thread(
-                dbg.debug_preview,
-                tenant_id=s.tenant_id,
-                owner_user_id=s.user_id,
-                cycle_id=cycle_id,
-                lease_id=lease_id,
-                token=token,
-                port=raw_port,
-                task_id=cy_dto["taskId"],
-                run_id=cy_dto["runId"],
-                path=path,
-                revoke_after=revoke_after,
-                probe_fn=dev_debug_probe_fn,
-            )
+            if dev_debug_probe_fn is not None:
+                dbg = AutonomousBrowserDebugger(_previews())
+                report = await asyncio.to_thread(
+                    dbg.debug_preview,
+                    tenant_id=s.tenant_id,
+                    owner_user_id=s.user_id,
+                    cycle_id=cycle_id,
+                    lease_id=lease_id,
+                    token=token,
+                    port=raw_port,
+                    task_id=cy_dto["taskId"],
+                    run_id=cy_dto["runId"],
+                    path=path,
+                    revoke_after=revoke_after,
+                    probe_fn=dev_debug_probe_fn,
+                )
+            else:
+                # Verify lease upfront in API for fast 403, then delegate Sandbox Cell capability signing & execution
+                # strictly to ToolGateway so API never holds Sandbox/Capability keys (R3-02/R3-03).
+                await asyncio.to_thread(
+                    _previews().verify_lease_details,
+                    s.tenant_id,
+                    s.user_id,
+                    lease_id,
+                    token,
+                    raw_port,
+                    expected_cycle_id=cycle_id,
+                )
+                report = await _dispatch_preview_debug_via_gateway(
+                    tenant_id=s.tenant_id,
+                    owner_user_id=s.user_id,
+                    cycle_id=cycle_id,
+                    lease_id=lease_id,
+                    preview_token=token,
+                    target_port=raw_port,
+                    task_id=cy_dto["taskId"],
+                    run_id=cy_dto["runId"],
+                    path=path,
+                    revoke_after=revoke_after,
+                )
             finding = await asyncio.to_thread(
                 _store().record_debug_finding,
                 tenant_id=s.tenant_id,
@@ -492,6 +579,15 @@ def register_development_routes(
             )
         except DevelopmentError as exc:
             _raise_dev_http(exc)
+        except RpcError as exc:
+            detail_msg = str(exc)
+            if exc.code == "DENIED":
+                raise HTTPException(403, detail={"error": detail_msg}) from None
+            if exc.code == "BAD_REQUEST":
+                raise HTTPException(422, detail={"error": detail_msg}) from None
+            if "BROWSER_DEBUG_UNAVAILABLE" in detail_msg:
+                raise HTTPException(503, detail={"error": "BROWSER_DEBUG_UNAVAILABLE"}) from None
+            raise HTTPException(502, detail={"error": detail_msg}) from None
         except RuntimeError as exc:
             if str(exc) == "BROWSER_DEBUG_UNAVAILABLE":
                 raise HTTPException(503, detail={"error": "BROWSER_DEBUG_UNAVAILABLE"}) from None

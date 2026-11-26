@@ -153,6 +153,24 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
             expected_args=args,
         )
 
+    async def preview_debug(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        raw_port = body.get("targetPort")
+        if type(raw_port) is not int:
+            raise RpcError("BAD_REQUEST")
+        return await gw.dispatch_preview_debug(
+            tenant_id=str(body["tenantId"]),
+            owner_user_id=str(body["ownerUserId"]),
+            cycle_id=str(body["cycleId"]),
+            lease_id=str(body["leaseId"]),
+            preview_token=str(body["previewToken"]),
+            target_port=raw_port,
+            task_id=str(body.get("taskId") or ""),
+            run_id=str(body.get("runId") or ""),
+            path=str(body.get("path") or "/"),
+            revoke_after=bool(body.get("revokeAfter", True)),
+        )
+
     srv.register("tool.submit", submit, {"runtime"})
     if gw._development_git_enabled:
         key = keys.get("development")
@@ -162,6 +180,7 @@ def build_tool_server(keys: dict[str, bytes], endpoint: str, gw: ToolGateway) ->
     srv.register("tool.record_internal", record_internal, {"runtime"})
     srv.register("tool.reconcile", reconcile, {"ops", "api"})
     srv.register("tool.dev_pr_dispatch", dev_pr_dispatch, {"api"})
+    srv.register("tool.preview_debug", preview_debug, {"api"})
     return srv
 
 

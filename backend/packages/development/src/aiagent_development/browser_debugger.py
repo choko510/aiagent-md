@@ -1,17 +1,21 @@
-"""DEV-06 Autonomous Browser Debugger bound strictly to attested PreviewBroker leases & PR #110 Sandbox Cell (R2-01).
+"""DEV-06 Autonomous Browser Debugger bound to attested PreviewBroker leases & dedicated PreviewCapability (R3-02/R3-05).
 
-Hardens R2-01, R2-06, and P2-11:
-- Verifies PreviewBroker lease against exact (tenant_id, owner_user_id, cycle_id, lease_id, token, port)
-  AND live attested `dev_preview_instances` (HMAC launch receipt + active heartbeat + generation) BEFORE dispatch.
-- NEVER spawns Chromium directly from the API process. Dispatches strictly to PR #110's OS-isolated Sandbox Cell
-  Supervisor (`preview.debug` RPC with signed single-use Grant -> Landlock + unprivileged UID + CLONE_NEWUSER |
-  CLONE_NEWPID | CLONE_NEWNET + single-target Unix bridge to ONLY host 127.0.0.1:<leased_port>).
-- Fails closed (`ScopeDenied("SANDBOX_CELL_REQUIRED")`) if Sandbox Cell RPC credentials are not configured.
+Hardens R2-01, R3-02, R3-04, and R3-05:
+- API NEVER holds `AIAGENT_SANDBOX_GRANT_KEY`, `AIAGENT_SANDBOX_RPC_KEY`, or `AIAGENT_PREVIEW_CAPABILITY_KEY`.
+- Production flow: API -> ToolGateway (`tool.preview_debug`, authenticated as caller `api`) -> ToolGateway verifies
+  PreviewBroker lease + live attested instance -> ToolGateway signs a single-use `PreviewCapability` with dedicated
+  `AIAGENT_PREVIEW_CAPABILITY_KEY` (distinct from `AIAGENT_SANDBOX_GRANT_KEY`) binding instance ID, generation,
+  target port/URL, endpoint_ref, commit SHA, lease ID, resource caps, and short expiry -> Sandbox Supervisor
+  (`preview.debug`, authenticated as caller `tool_gateway`).
+- Monitors live lease revocation / heartbeat expiry during execution and cancels the running Browser Cell via
+  `preview.cancel` RPC immediately if revoked.
+- Fails closed (`ScopeDenied("SANDBOX_CELL_REQUIRED")`) if the preview execution authority is unconfigured.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -22,10 +26,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .contracts import ScopeDenied
-from .pg_store import PreviewBroker
+from .pg_store import PreviewBroker, PreviewLeaseDetails
 
 _MAX_STDOUT_BYTES = 131_072
-_PREVIEW_DEBUG_ARGV = ("python", "-m", "aiagent_development.browser_debug_worker")
 
 
 @dataclass(frozen=True)
@@ -38,90 +41,39 @@ class DebugReport:
     status: str  # OPEN | VERIFIED
 
 
-def _resolve_sandbox_cell_config() -> tuple[str, bytes, bytes]:
-    """Resolve authenticated Sandbox Cell endpoint, RPC key, and Grant signing key from environment/secrets."""
+def _resolve_sandbox_preview_config() -> tuple[str, bytes, bytes]:
+    """Resolve ToolGateway -> Sandbox Cell endpoint, RPC key, and dedicated PreviewCapability key (NEVER grant_key)."""
     from aiagent_core import config  # noqa: PLC0415
 
     endpoint = (os.environ.get("AIAGENT_SANDBOX_ENDPOINT") or "").strip()
-    rpc_key_sec = config.secret("AIAGENT_API_SANDBOX_RPC_KEY", required=False) or config.secret(
-        "AIAGENT_SANDBOX_RPC_KEY", required=False
-    )
-    grant_key_sec = config.secret("AIAGENT_SANDBOX_GRANT_KEY", required=False)
-    if not endpoint or rpc_key_sec is None or grant_key_sec is None:
-        raise ScopeDenied("SANDBOX_CELL_REQUIRED: configure AIAGENT_SANDBOX_ENDPOINT, RPC key, and Grant key")
+    rpc_key_sec = config.secret("AIAGENT_SANDBOX_RPC_KEY", required=False)
+    cap_key_sec = config.secret("AIAGENT_PREVIEW_CAPABILITY_KEY", required=False)
+    if not endpoint or rpc_key_sec is None or cap_key_sec is None:
+        raise ScopeDenied(
+            "SANDBOX_CELL_REQUIRED: configure AIAGENT_SANDBOX_ENDPOINT, AIAGENT_SANDBOX_RPC_KEY, and AIAGENT_PREVIEW_CAPABILITY_KEY"
+        )
     try:
         rpc_key = bytes.fromhex(rpc_key_sec.reveal().strip())
-        grant_key = bytes.fromhex(grant_key_sec.reveal().strip())
+        cap_key = bytes.fromhex(cap_key_sec.reveal().strip())
     except ValueError as exc:
         raise ScopeDenied("SANDBOX_CELL_KEYS_INVALID") from exc
-    return endpoint, rpc_key, grant_key
+    grant_key_sec = config.secret("AIAGENT_SANDBOX_GRANT_KEY", required=False)
+    if grant_key_sec is not None:
+        try:
+            if bytes.fromhex(grant_key_sec.reveal().strip()) == cap_key:
+                raise ScopeDenied("PREVIEW_CAPABILITY_KEY_MUST_DIFFER_FROM_GRANT_KEY")
+        except ValueError:
+            pass
+    return endpoint, rpc_key, cap_key
 
 
-def run_sandbox_cell_browser_debug(
-    *,
-    tenant_id: str,
-    task_id: str,
-    run_id: str,
-    lease_id: str,
-    target_url: str,
-    leased_port: int,
-    commit_sha: str,
-    sandbox_endpoint: str | None = None,
-    sandbox_rpc_key: bytes | None = None,
-    sandbox_grant_key: bytes | None = None,
-    caller_identity: str = "api",
-    wall_ms: int = 30_000,
-) -> DebugReport:
-    """Execute Browser Debugger inside PR #110 Sandbox Cell over authenticated RPC with a signed single-use Grant."""
-    from aiagent_core.rpc import RpcClient  # noqa: PLC0415
-    from aiagent_domain.rpcwire import RpcAuthError, RpcError  # noqa: PLC0415
-    from aiagent_sandbox.grant import Grant, sign  # noqa: PLC0415
-
-    pu = urlsplit(target_url)
-    if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port != leased_port:
-        raise ScopeDenied("browser debugger permits attested loopback 127.0.0.1 preview origin only")
-
-    if sandbox_endpoint and sandbox_rpc_key and sandbox_grant_key:
-        endpoint, rpc_key, grant_key = sandbox_endpoint, sandbox_rpc_key, sandbox_grant_key
-    else:
-        endpoint, rpc_key, grant_key = _resolve_sandbox_cell_config()
-
-    attempt_id = f"dbg-{uuid.uuid4().hex[:16]}"
-    grant = Grant(
-        grant_id=uuid.uuid4().hex,
-        tenant_id=tenant_id,
-        task_id=task_id,
-        run_id=run_id,
-        intent_id=lease_id,
-        lease_epoch=1,
-        argv=_PREVIEW_DEBUG_ARGV,
-        cwd=".",
-        wall_ms=wall_ms,
-        memory_bytes=2 * 1024 * 1024 * 1024,
-        expires=int(time.time()) + 120,
-        attempt_id=attempt_id,
-        attempt_binding_version=1,
-    )
-    signed_grant = sign(grant_key, grant)
-    client = RpcClient(endpoint, caller_identity, rpc_key, timeout_s=wall_ms / 1000.0 + 30.0)
-    try:
-        res: dict[str, Any] = asyncio.run(
-            client.call(
-                "preview.debug",
-                {
-                    "grant": signed_grant,
-                    "argv": list(_PREVIEW_DEBUG_ARGV),
-                    "cwdRelative": ".",
-                    "targetPort": leased_port,
-                    "targetUrl": target_url,
-                    "commitSha": commit_sha,
-                },
-            )
-        )
-    except (RpcError, RpcAuthError, OSError, TimeoutError) as exc:
-        raise RuntimeError(f"BROWSER_DEBUG_SANDBOX_RPC_FAILED:{type(exc).__name__}") from exc
-
-    if res.get("status") != "EXITED" or res.get("attemptId") != attempt_id:
+def _parse_debug_result(res: dict[str, Any], *, expected_attempt_id: str) -> DebugReport:
+    status_val = res.get("status")
+    if status_val == "REVOKED":
+        if res.get("memoryExceeded") is True:
+            raise RuntimeError("BROWSER_DEBUG_MEMORY_LIMIT_EXCEEDED")
+        raise ScopeDenied("PREVIEW_LEASE_REVOKED_DURING_EXECUTION")
+    if status_val != "EXITED" or res.get("attemptId") != expected_attempt_id:
         raise RuntimeError("BROWSER_DEBUG_SANDBOX_INVALID_RESPONSE")
     exit_code = res.get("exitCode")
     stderr_text = str(res.get("stderr") or "")
@@ -141,6 +93,140 @@ def run_sandbox_cell_browser_debug(
         network_errors=tuple(str(x) for x in data.get("networkErrors", ())),
         layout_issues=tuple(str(x) for x in data.get("layoutIssues", ())),
         status=str(data["status"]),
+    )
+
+
+async def run_sandbox_cell_preview_debug_async(
+    *,
+    tenant_id: str,
+    owner_user_id: str,
+    task_id: str,
+    run_id: str,
+    lease: PreviewLeaseDetails,
+    target_url: str,
+    sandbox_endpoint: str | None = None,
+    sandbox_rpc_key: bytes | None = None,
+    preview_capability_key: bytes | None = None,
+    caller_identity: str = "tool_gateway",
+    wall_ms: int = 30_000,
+    memory_bytes: int = 2 * 1024 * 1024 * 1024,
+    pids_max: int = 256,
+    cpu_quota_us: int = 100_000,
+    lease_alive_check: Callable[[], bool] | None = None,
+) -> DebugReport:
+    """Execute Browser Debugger inside PR #110 Sandbox Cell via dedicated PreviewCapability + live revocation watch (R3-02/R3-05)."""
+    from aiagent_core.rpc import RpcClient  # noqa: PLC0415
+    from aiagent_domain.rpcwire import RpcAuthError, RpcError  # noqa: PLC0415
+    from aiagent_sandbox.grant import PreviewCapability, sign_preview_capability  # noqa: PLC0415
+
+    pu = urlsplit(target_url)
+    if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port != lease.target_port:
+        raise ScopeDenied("browser debugger permits attested loopback 127.0.0.1 preview origin only")
+
+    if sandbox_endpoint and sandbox_rpc_key and preview_capability_key:
+        endpoint, rpc_key, cap_key = sandbox_endpoint, sandbox_rpc_key, preview_capability_key
+    else:
+        endpoint, rpc_key, cap_key = _resolve_sandbox_preview_config()
+
+    now_s = int(time.time())
+    max_exp = min(
+        now_s + 60,
+        int(lease.lease_expires_at.timestamp()),
+        int(lease.heartbeat_expires_at.timestamp()),
+    )
+    if max_exp <= now_s:
+        raise ScopeDenied("preview lease or instance heartbeat already expired")
+
+    capability_id = f"prvcap-{uuid.uuid4().hex}"
+    attempt_id = f"dbg-{uuid.uuid4().hex[:16]}"
+    cap = PreviewCapability(
+        capability_id=capability_id,
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        project_id=lease.project_id,
+        cycle_id=lease.cycle_id,
+        workspace_id=lease.workspace_id,
+        task_id=task_id,
+        run_id=run_id,
+        lease_id=lease.lease_id,
+        preview_instance_id=lease.instance_id,
+        instance_generation=lease.generation,
+        target_port=lease.target_port,
+        target_url=target_url,
+        endpoint_ref=lease.endpoint_ref,
+        commit_sha=lease.commit_sha,
+        wall_ms=wall_ms,
+        memory_bytes=memory_bytes,
+        pids_max=pids_max,
+        cpu_quota_us=cpu_quota_us,
+        expires=max_exp,
+        attempt_id=attempt_id,
+    )
+    signed_cap = sign_preview_capability(cap_key, cap)
+    client = RpcClient(endpoint, caller_identity, rpc_key, timeout_s=wall_ms / 1000.0 + 30.0)
+
+    call_task = asyncio.create_task(client.call("preview.debug", {"capability": signed_cap}))
+    watch_task: asyncio.Task[None] | None = None
+    if lease_alive_check is not None:
+
+        async def _watch_lease() -> None:
+            cancel_client = RpcClient(endpoint, caller_identity, rpc_key, timeout_s=5.0)
+            while not call_task.done():
+                await asyncio.sleep(0.3)
+                if call_task.done():
+                    return
+                alive = await asyncio.to_thread(lease_alive_check)
+                if not alive:
+                    with contextlib.suppress(RpcError, RpcAuthError, OSError, TimeoutError):
+                        await cancel_client.call(
+                            "preview.cancel", {"tenantId": tenant_id, "capabilityId": capability_id}
+                        )
+                    return
+
+        watch_task = asyncio.create_task(_watch_lease())
+
+    try:
+        res: dict[str, Any] = await call_task
+    except (RpcError, RpcAuthError, OSError, TimeoutError) as exc:
+        raise RuntimeError(f"BROWSER_DEBUG_SANDBOX_RPC_FAILED:{type(exc).__name__}:{exc}") from exc
+    finally:
+        if watch_task is not None:
+            watch_task.cancel()
+            await asyncio.gather(watch_task, return_exceptions=True)
+
+    return _parse_debug_result(res, expected_attempt_id=attempt_id)
+
+
+def run_sandbox_cell_browser_debug(
+    *,
+    tenant_id: str,
+    owner_user_id: str,
+    task_id: str,
+    run_id: str,
+    lease: PreviewLeaseDetails,
+    target_url: str,
+    sandbox_endpoint: str | None = None,
+    sandbox_rpc_key: bytes | None = None,
+    preview_capability_key: bytes | None = None,
+    caller_identity: str = "tool_gateway",
+    wall_ms: int = 30_000,
+    lease_alive_check: Callable[[], bool] | None = None,
+) -> DebugReport:
+    return asyncio.run(
+        run_sandbox_cell_preview_debug_async(
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            run_id=run_id,
+            lease=lease,
+            target_url=target_url,
+            sandbox_endpoint=sandbox_endpoint,
+            sandbox_rpc_key=sandbox_rpc_key,
+            preview_capability_key=preview_capability_key,
+            caller_identity=caller_identity,
+            wall_ms=wall_ms,
+            lease_alive_check=lease_alive_check,
+        )
     )
 
 
@@ -167,7 +253,7 @@ class AutonomousBrowserDebugger:
     ) -> DebugReport:
         if not path.startswith("/") or ".." in path or "\\" in path or len(path) > 256:
             raise ScopeDenied("invalid preview path")
-        commit_sha = self._previews.verify_lease(
+        lease = self._previews.verify_lease_details(
             tenant_id,
             owner_user_id,
             lease_id,
@@ -178,15 +264,25 @@ class AutonomousBrowserDebugger:
         target_url = f"http://127.0.0.1:{port}{path}"
         try:
             if probe_fn is not None:
-                return probe_fn(target_url=target_url, commit_sha=commit_sha)
+                return probe_fn(target_url=target_url, commit_sha=lease.commit_sha)
+
+            def _is_alive() -> bool:
+                try:
+                    self._previews.verify_lease_details(
+                        tenant_id, owner_user_id, lease_id, token, port, expected_cycle_id=cycle_id
+                    )
+                    return True
+                except ScopeDenied:
+                    return False
+
             return run_sandbox_cell_browser_debug(
                 tenant_id=tenant_id,
+                owner_user_id=owner_user_id,
                 task_id=task_id or cycle_id,
                 run_id=run_id or lease_id,
-                lease_id=lease_id,
+                lease=lease,
                 target_url=target_url,
-                leased_port=port,
-                commit_sha=commit_sha,
+                lease_alive_check=_is_alive,
             )
         finally:
             if revoke_after:

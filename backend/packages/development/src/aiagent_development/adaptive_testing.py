@@ -52,6 +52,7 @@ def _evidence_matches_and_passed(
     *,
     expected_commit_sha: str | None,
     receipt_verifier: ReceiptVerifier | None = None,
+    allow_unverified_receipts_for_test: bool = False,
 ) -> bool:
     basic_ok = (
         ev.executed
@@ -66,7 +67,11 @@ def _evidence_matches_and_passed(
         and (expected_commit_sha is None or ev.source_commit_sha == expected_commit_sha)
         and bool(ev.receipt_ref and ev.receipt_ref.strip())
     )
-    return basic_ok and (receipt_verifier is None or receipt_verifier(req, ev))
+    if not basic_ok:
+        return False
+    if receipt_verifier is None:
+        return allow_unverified_receipts_for_test
+    return bool(receipt_verifier(req, ev))
 
 
 def plan_adaptive_tests(
@@ -119,9 +124,16 @@ def plan_adaptive_tests(
 class AdaptiveTestingGate:
     """Runs fast impacted checks and mandatory checks separately inside an isolated Sandbox Cell."""
 
-    def __init__(self, sandbox: SandboxExecutionPort, *, receipt_verifier: ReceiptVerifier | None = None) -> None:
+    def __init__(
+        self,
+        sandbox: SandboxExecutionPort,
+        *,
+        receipt_verifier: ReceiptVerifier | None = None,
+        allow_unverified_receipts_for_test: bool = False,
+    ) -> None:
         self._sandbox = sandbox
         self._receipt_verifier = receipt_verifier
+        self._allow_unverified_for_test = allow_unverified_receipts_for_test
 
     def run_gate(
         self,
@@ -138,6 +150,15 @@ class AdaptiveTestingGate:
         static_command: Sequence[str] | None = None,
         run_mandatory: bool = True,
     ) -> AdaptiveGateResult:
+        if self._receipt_verifier is None and not self._allow_unverified_for_test:
+            return AdaptiveGateResult(
+                plan=adaptive_plan,
+                impacted_status="FAILED",
+                mandatory_status="FAILED" if run_mandatory else "SKIPPED",
+                overall_passed=False,
+                impacted_evidence=(),
+                mandatory_evidence=(),
+            )
         test_base = tuple(test_command or ("pytest", "-q"))
         static_base = tuple(static_command or ("ruff", "check"))
         # Always derive authoritative mandatory tests from TaskPlan, never trusting an altered adaptive_plan list.
@@ -163,7 +184,11 @@ class AdaptiveTestingGate:
             ev = self._sandbox.execute(req)
             impacted_ev.append(ev)
             if not _evidence_matches_and_passed(
-                req, ev, expected_commit_sha=target_commit_sha, receipt_verifier=self._receipt_verifier
+                req,
+                ev,
+                expected_commit_sha=target_commit_sha,
+                receipt_verifier=self._receipt_verifier,
+                allow_unverified_receipts_for_test=self._allow_unverified_for_test,
             ):
                 impacted_ok = False
 
@@ -190,7 +215,11 @@ class AdaptiveTestingGate:
                 ev = self._sandbox.execute(req)
                 mandatory_ev.append(ev)
                 if not _evidence_matches_and_passed(
-                    req, ev, expected_commit_sha=target_commit_sha, receipt_verifier=self._receipt_verifier
+                    req,
+                    ev,
+                    expected_commit_sha=target_commit_sha,
+                    receipt_verifier=self._receipt_verifier,
+                    allow_unverified_receipts_for_test=self._allow_unverified_for_test,
                 ):
                     mandatory_ok = False
             mandatory_status = "PASSED" if (mandatory_ev and mandatory_ok) else "FAILED"

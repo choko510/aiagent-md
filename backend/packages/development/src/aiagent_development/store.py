@@ -18,6 +18,7 @@ Hardens P1-03, P1-06, P1-07, and P2-10:
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -26,7 +27,7 @@ from urllib.parse import urlsplit
 from aiagent_core import control
 from aiagent_core.db import Database
 from aiagent_core.events import append_event
-from aiagent_domain import is_uuid7, sha256_hex, uuid7
+from aiagent_domain import canonical_json, is_uuid7, sha256_hex, uuid7
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
@@ -93,8 +94,11 @@ def _demo_binding_digest(
     design_revision: int,
     selected_candidate_id: str | None,
     candidates: list[Any],
+    demo_render_artifact_id: str | None = None,
     demo_artifact_ref: str | None = None,
     demo_artifact_sha256: str | None = None,
+    demo_viewport: str | None = None,
+    demo_fixture_ref: str | None = None,
 ) -> str:
     return sha256_hex(
         {
@@ -103,8 +107,11 @@ def _demo_binding_digest(
             "goalRevision": goal_revision,
             "designRevision": design_revision,
             "selectedCandidateId": selected_candidate_id or "",
+            "demoRenderArtifactId": demo_render_artifact_id or "",
             "demoArtifactRef": demo_artifact_ref or "",
             "demoArtifactSha256": demo_artifact_sha256 or "",
+            "demoViewport": demo_viewport or "",
+            "demoFixtureRef": demo_fixture_ref or "",
             "candidates": candidates,
         }
     )
@@ -183,8 +190,12 @@ def _design_dto(row: dict[str, Any]) -> dict[str, Any]:
         "recommendedCandidateId": str(row["recommended_candidate_id"]) if row.get("recommended_candidate_id") else None,
         "selectedCandidateId": str(row["selected_candidate_id"]) if row.get("selected_candidate_id") else None,
         "demoDecision": str(row["demo_decision"]),
+        "demoRenderArtifactId": str(row["demo_render_artifact_id"]) if row.get("demo_render_artifact_id") else None,
         "demoArtifactRef": str(row["demo_artifact_ref"]) if row.get("demo_artifact_ref") else None,
         "demoArtifactSha256": str(row["demo_artifact_sha256"]) if row.get("demo_artifact_sha256") else None,
+        "demoViewport": str(row["demo_viewport"]) if row.get("demo_viewport") else None,
+        "demoFixtureRef": str(row["demo_fixture_ref"]) if row.get("demo_fixture_ref") else None,
+        "demoCommitSha": str(row["demo_commit_sha"]) if row.get("demo_commit_sha") else None,
         "demoSnapshotDigest": str(row["demo_snapshot_digest"]) if row.get("demo_snapshot_digest") else None,
         "feedback": str(row["feedback"]) if row.get("feedback") else None,
         "decidedAt": row["decided_at"].isoformat() if row.get("decided_at") else None,
@@ -262,7 +273,7 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
                 "SELECT a.id, a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id,"
-                " a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256,"
+                " a.source_artifact_id, a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256,"
                 " a.passed, a.findings_json, t.workspace_id, r.status_code"
                 " FROM agent.dev_review_artifacts a"
                 " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
@@ -270,8 +281,18 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 " WHERE a.tenant_id=%s AND a.id=%s",
                 (scope.tenant_id, artifact_id),
             ).fetchone()
+            src_art = (
+                c.execute(
+                    "SELECT * FROM agent.verify_dev_review_source_artifact(%s,%s,%s,%s,%s)",
+                    (scope.tenant_id, scope.owner_user_id, row["task_id"], row["run_id"], row["source_artifact_id"]),
+                ).fetchone()
+                if row is not None
+                else None
+            )
         if (
             row is None
+            or src_art is None
+            or str(src_art["content_sha256"]) != str(row["evidence_sha256"])
             or str(row["task_id"]) == builder_run.task_id
             or str(row["owner_user_id"]) != scope.owner_user_id
             or str(row["workspace_id"]) != scope.workspace_id
@@ -279,7 +300,9 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
             or str(row["cycle_id"]) != cycle_id
             or str(row["status_code"]) != "SUCCEEDED"
         ):
-            raise ScopeDenied("review artifact missing, out of scope, self-reviewed, or reviewer run did not SUCCEED")
+            raise ScopeDenied(
+                "review artifact missing, source artifact invalid/revoked, self-reviewed, or reviewer run did not SUCCEED"
+            )
         raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
         norm_findings = _normalize_review_findings(raw_findings)
         expected_digest = _review_verdict_digest(
@@ -323,8 +346,8 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
 
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
-                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id, a.reviewer_role,"
-                " a.target_sha, a.evidence_sha256, a.verdict_digest_sha256, a.passed, a.findings_json,"
+                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id, a.source_artifact_id,"
+                " a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256, a.passed, a.findings_json,"
                 " t.workspace_id, r.status_code"
                 " FROM agent.dev_review_artifacts a"
                 " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
@@ -332,8 +355,18 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 " WHERE a.tenant_id=%s AND a.id=%s",
                 (scope.tenant_id, verdict.evidence_ref),
             ).fetchone()
+            src_art = (
+                c.execute(
+                    "SELECT * FROM agent.verify_dev_review_source_artifact(%s,%s,%s,%s,%s)",
+                    (scope.tenant_id, scope.owner_user_id, row["task_id"], row["run_id"], row["source_artifact_id"]),
+                ).fetchone()
+                if row is not None
+                else None
+            )
             if (
                 row is None
+                or src_art is None
+                or str(src_art["content_sha256"]) != str(row["evidence_sha256"])
                 or str(row["task_id"]) != verdict.reviewer_task_id
                 or str(row["owner_user_id"]) != scope.owner_user_id
                 or str(row["workspace_id"]) != scope.workspace_id
@@ -344,7 +377,9 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 or bool(row["passed"]) != verdict.passed
                 or str(row["status_code"]) != "SUCCEEDED"
             ):
-                raise ScopeDenied("review artifact missing, mismatched, or reviewer run did not SUCCEED")
+                raise ScopeDenied(
+                    "review artifact missing, source artifact invalid/revoked, mismatched, or reviewer run did not SUCCEED"
+                )
             raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
             norm_stored = _normalize_review_findings(raw_findings)
             expected_digest = _review_verdict_digest(
@@ -460,7 +495,7 @@ class PostgresDevStore:
             ).fetchone()
         return _project_dto(dict(row)) if row is not None else None
 
-    # ------------------------------------------------------------------ Review Evidence Artifacts (P1-07 / R2-07)
+    # ------------------------------------------------------------------ Review Evidence Artifacts (R2-07 / R3-06)
     def record_review_artifact(
         self,
         *,
@@ -470,32 +505,45 @@ class PostgresDevStore:
         cycle_id: str,
         task_id: str,
         run_id: str,
-        reviewer_role: str,
-        target_sha: str,
-        passed: bool,
-        evidence_payload: Mapping[str, Any] | bytes | None = None,
-        evidence_sha256: str | None = None,
-        findings: Sequence[Mapping[str, Any]] = (),
+        source_artifact_id: str,
+        evidence_payload: Mapping[str, Any] | bytes,
     ) -> str:
+        """Materialize a verified dev_review_artifacts row strictly from a persisted context_artifacts payload (R3-06).
+
+        Refuses self-declared hashes without raw payload AND refuses payloads that do not match the reviewer run's
+        persisted `agent.context_artifacts` row (byte_length + content_sha256). Derives `reviewerRole`, `targetSha`,
+        `passed`, and `findings` authoritatively from the verified payload itself.
+        """
+        if not is_uuid7(source_artifact_id):
+            raise InvalidEvidence("source_artifact_id must be a persisted context_artifacts uuid7")
+        if isinstance(evidence_payload, (bytes, bytearray)):
+            raw_bytes = bytes(evidence_payload)
+            try:
+                doc = json.loads(raw_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise InvalidEvidence("review evidence_payload must be valid UTF-8 JSON") from exc
+        elif isinstance(evidence_payload, Mapping):
+            doc = dict(evidence_payload)
+            raw_bytes = canonical_json(doc).encode("utf-8")
+        else:
+            raise InvalidEvidence("evidence_payload bytes or JSON mapping is required")
+        if not isinstance(doc, dict):
+            raise InvalidEvidence("review evidence payload must be a JSON object")
+
+        computed_sha = hashlib.sha256(raw_bytes).hexdigest()
+        reviewer_role = str(doc.get("reviewerRole") or "").strip()
+        target_sha = str(doc.get("targetSha") or "").strip()
+        passed = doc.get("passed")
+        raw_findings = doc.get("findings", ())
         require_sha(target_sha)
         if reviewer_role not in ("functional", "security", "ui-e2e"):
-            raise InvalidEvidence("invalid reviewer_role")
-        if evidence_payload is not None:
-            computed_sha = (
-                hashlib.sha256(evidence_payload).hexdigest()
-                if isinstance(evidence_payload, (bytes, bytearray))
-                else sha256_hex(dict(evidence_payload))
-            )
-            if evidence_sha256 is not None and evidence_sha256 != computed_sha:
-                raise InvalidEvidence("evidence_sha256 does not match evidence_payload")
-            resolved_sha = computed_sha
-        elif evidence_sha256 is not None:
-            require_digest(evidence_sha256)
-            resolved_sha = evidence_sha256
-        else:
-            raise InvalidEvidence("evidence_payload or evidence_sha256 is required")
+            raise InvalidEvidence("invalid reviewerRole in review artifact payload")
+        if type(passed) is not bool:
+            raise InvalidEvidence("passed boolean is required in review artifact payload")
+        if not isinstance(raw_findings, (list, tuple)):
+            raise InvalidEvidence("findings list is required in review artifact payload")
 
-        norm_findings = _normalize_review_findings(findings)
+        norm_findings = _normalize_review_findings(raw_findings)
         if passed and any(
             f["severity"] in ("P0", "P1") and f["status"] in ("OPEN", "UNVERIFIED") for f in norm_findings
         ):
@@ -507,17 +555,29 @@ class PostgresDevStore:
             run_id=run_id,
             reviewer_role=reviewer_role,
             target_sha=target_sha,
-            passed=bool(passed),
+            passed=passed,
             findings=norm_findings,
-            evidence_sha256=resolved_sha,
+            evidence_sha256=computed_sha,
         )
         art_id = uuid7()
         with self._db.tx(tenant=tenant_id) as c:
+            src_art = c.execute(
+                "SELECT * FROM agent.verify_dev_review_source_artifact(%s,%s,%s,%s,%s)",
+                (tenant_id, owner_user_id, task_id, run_id, source_artifact_id),
+            ).fetchone()
+            if (
+                src_art is None
+                or str(src_art["content_sha256"]) != computed_sha
+                or int(src_art["byte_length"]) != len(raw_bytes)
+            ):
+                raise ScopeDenied(
+                    "SOURCE_ARTIFACT_MISMATCH: review payload must exactly match reviewer run's context_artifacts entry"
+                )
             c.execute(
                 "INSERT INTO agent.dev_review_artifacts(tenant_id, id, task_id, run_id, owner_user_id,"
-                " project_id, cycle_id, reviewer_role, target_sha, evidence_sha256, verdict_digest_sha256,"
-                " passed, findings_json)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " project_id, cycle_id, source_artifact_id, reviewer_role, target_sha, evidence_sha256,"
+                " verdict_digest_sha256, passed, findings_json)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     tenant_id,
                     art_id,
@@ -526,11 +586,12 @@ class PostgresDevStore:
                     owner_user_id,
                     project_id,
                     cycle_id,
+                    source_artifact_id,
                     reviewer_role,
                     target_sha,
-                    resolved_sha,
+                    computed_sha,
                     verdict_digest,
-                    bool(passed),
+                    passed,
                     Jsonb(norm_findings),
                 ),
             )
@@ -707,6 +768,137 @@ class PostgresDevStore:
             ).fetchall()
         return [_design_dto(dict(r)) for r in rows]
 
+    # ------------------------------------------------------------------ Demo Render Artifacts (R3-08)
+    def record_demo_render_artifact(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        cycle_id: str,
+        candidate_id: str,
+        viewport: str,
+        fixture_ref: str,
+        render_bytes: bytes,
+    ) -> dict[str, Any]:
+        """Persist a real rendered Demo artifact bound to (cycle, candidate, commit_sha, viewport, fixture_ref) (R3-08)."""
+        if not candidate_id.strip():
+            raise InvalidEvidence("candidateId is required")
+        if not re.fullmatch(r"[0-9]{2,5}x[0-9]{2,5}(@[a-z0-9_-]{1,16})?", viewport.strip()):
+            raise InvalidEvidence("invalid demo viewport format (e.g. 1280x800)")
+        clean_fix = fixture_ref.strip()
+        if not clean_fix or len(clean_fix) > 256:
+            raise InvalidEvidence("invalid demo fixtureRef")
+        if not isinstance(render_bytes, (bytes, bytearray)) or not 1 <= len(render_bytes) <= 4_194_304:
+            raise InvalidEvidence("render_bytes must be non-empty bytes <= 4MiB")
+        content_sha = hashlib.sha256(bytes(render_bytes)).hexdigest()
+        art_id = uuid7()
+        with self._db.tx(tenant=tenant_id) as c:
+            cy = c.execute(
+                "SELECT project_id, cycle_json FROM agent.dev_cycles WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                (tenant_id, cycle_id, owner_user_id),
+            ).fetchone()
+            if cy is None:
+                raise ScopeDenied("cycle not found for owner")
+            cj = dict(cy["cycle_json"]) if isinstance(cy["cycle_json"], dict) else {}
+            raw_commit = cj.get("commit")
+            commit_sha = (
+                str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else ""
+            )
+            require_sha(commit_sha)
+            row = c.execute(
+                "INSERT INTO agent.dev_demo_artifacts(tenant_id, id, owner_user_id, project_id, cycle_id,"
+                " candidate_id, commit_sha, viewport, fixture_ref, content_sha256, byte_length)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (
+                    tenant_id,
+                    art_id,
+                    owner_user_id,
+                    str(cy["project_id"]),
+                    cycle_id,
+                    candidate_id.strip(),
+                    commit_sha,
+                    viewport.strip(),
+                    clean_fix,
+                    content_sha,
+                    len(render_bytes),
+                ),
+            ).fetchone()
+        assert row is not None
+        return {
+            "id": str(row["id"]),
+            "projectId": str(row["project_id"]),
+            "cycleId": str(row["cycle_id"]),
+            "candidateId": str(row["candidate_id"]),
+            "commitSha": str(row["commit_sha"]),
+            "viewport": str(row["viewport"]),
+            "fixtureRef": str(row["fixture_ref"]),
+            "contentSha256": str(row["content_sha256"]),
+            "byteLength": int(row["byte_length"]),
+            "createdAt": row["created_at"].isoformat(),
+        }
+
+    @staticmethod
+    def _resolve_rendered_demo_binding(
+        c: Any,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        cycle_id: str,
+        selected_candidate_id: str,
+        commit_sha: str | None,
+        cand_fixture: str,
+        demo_render_artifact_id: str | None,
+        demo_artifact_ref: str | None,
+        demo_artifact_sha256: str | None,
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+        """Resolve and validate persisted rendered Demo artifact binding without fallback hashing (R3-08)."""
+        render_row: dict[str, Any] | None = None
+        if demo_render_artifact_id is not None:
+            found = c.execute(
+                "SELECT * FROM agent.dev_demo_artifacts"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND cycle_id=%s AND candidate_id=%s",
+                (tenant_id, demo_render_artifact_id, owner_user_id, cycle_id, selected_candidate_id),
+            ).fetchone()
+            if found is None:
+                raise InvalidEvidence("RENDERED_DEMO_ARTIFACT_NOT_FOUND")
+            render_row = dict(found)
+        elif commit_sha:
+            found = c.execute(
+                "SELECT * FROM agent.dev_demo_artifacts"
+                " WHERE tenant_id=%s AND owner_user_id=%s AND cycle_id=%s AND candidate_id=%s"
+                " AND commit_sha=%s AND fixture_ref=%s"
+                " ORDER BY created_at DESC LIMIT 1",
+                (tenant_id, owner_user_id, cycle_id, selected_candidate_id, commit_sha, cand_fixture),
+            ).fetchone()
+            if found is not None:
+                render_row = dict(found)
+
+        if render_row is None:
+            if demo_artifact_sha256 is not None:
+                raise InvalidEvidence("RENDERED_DEMO_ARTIFACT_REQUIRED: unverified demoArtifactSha256 rejected")
+            return None, None, None, None, None, None
+
+        if (
+            (commit_sha and str(render_row["commit_sha"]) != commit_sha)
+            or str(render_row["fixture_ref"]) != cand_fixture
+            or (demo_artifact_sha256 is not None and str(render_row["content_sha256"]) != demo_artifact_sha256)
+        ):
+            raise InvalidEvidence("RENDERED_DEMO_ARTIFACT_MISMATCH")
+        resolved_render_id = str(render_row["id"])
+        resolved_ref = (
+            redact_dev_text(demo_artifact_ref.strip(), limit=256)
+            if demo_artifact_ref and demo_artifact_ref.strip()
+            else f"demo-artifact://{resolved_render_id}"
+        )
+        return (
+            resolved_render_id,
+            resolved_ref,
+            str(render_row["content_sha256"]),
+            str(render_row["viewport"]),
+            str(render_row["fixture_ref"]),
+            str(render_row["commit_sha"]),
+        )
+
     def record_design_decision(
         self,
         *,
@@ -716,9 +908,12 @@ class PostgresDevStore:
         design_revision: int,
         selected_candidate_id: str,
         feedback: str | None = None,
+        demo_render_artifact_id: str | None = None,
         demo_artifact_ref: str | None = None,
         demo_artifact_sha256: str | None = None,
     ) -> dict[str, Any]:
+        if demo_render_artifact_id is not None and not is_uuid7(demo_render_artifact_id):
+            raise InvalidEvidence("demoRenderArtifactId must be uuid7")
         if demo_artifact_sha256 is not None:
             require_digest(demo_artifact_sha256)
         with self._db.tx(tenant=tenant_id) as c:
@@ -756,18 +951,28 @@ class PostgresDevStore:
             commit_sha = (
                 str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
             )
-            art_ref = (
-                redact_dev_text(demo_artifact_ref.strip(), limit=256)
-                if demo_artifact_ref and demo_artifact_ref.strip()
-                else str(matched_cand.get("fixtureRef") or "")
+            cand_fixture = str(matched_cand.get("fixtureRef") or "")
+
+            (
+                resolved_render_id,
+                resolved_ref,
+                resolved_sha,
+                resolved_vp,
+                resolved_fix,
+                resolved_commit,
+            ) = self._resolve_rendered_demo_binding(
+                c,
+                tenant_id=tenant_id,
+                owner_user_id=owner_user_id,
+                cycle_id=cycle_id,
+                selected_candidate_id=selected_candidate_id,
+                commit_sha=commit_sha,
+                cand_fixture=cand_fixture,
+                demo_render_artifact_id=demo_render_artifact_id,
+                demo_artifact_ref=demo_artifact_ref,
+                demo_artifact_sha256=demo_artifact_sha256,
             )
-            art_sha = demo_artifact_sha256 or sha256_hex(
-                {
-                    "candidate": matched_cand,
-                    "commitSha": commit_sha or "",
-                    "artifactRef": art_ref,
-                }
-            )
+
             new_digest = _demo_binding_digest(
                 cycle_id=cycle_id,
                 commit_sha=commit_sha,
@@ -775,18 +980,34 @@ class PostgresDevStore:
                 design_revision=design_revision,
                 selected_candidate_id=selected_candidate_id,
                 candidates=cands,
-                demo_artifact_ref=art_ref,
-                demo_artifact_sha256=art_sha,
+                demo_render_artifact_id=resolved_render_id,
+                demo_artifact_ref=resolved_ref,
+                demo_artifact_sha256=resolved_sha,
+                demo_viewport=resolved_vp,
+                demo_fixture_ref=resolved_fix,
             )
             clean_fb = redact_dev_text(feedback, limit=500) if feedback else None
-            # P1-06 / R2-11: selecting or changing candidate ALWAYS resets demo_decision to PENDING & binds artifact!
+            # P1-06 / R2-11 / R3-08: selecting/changing candidate resets demo_decision to PENDING & binds real render artifact!
             updated = c.execute(
                 "UPDATE agent.dev_design_decisions"
                 " SET selected_candidate_id=%s, demo_decision='PENDING', decided_at=NULL,"
-                " demo_artifact_ref=%s, demo_artifact_sha256=%s,"
+                " demo_render_artifact_id=%s, demo_artifact_ref=%s, demo_artifact_sha256=%s,"
+                " demo_viewport=%s, demo_fixture_ref=%s, demo_commit_sha=%s,"
                 " demo_snapshot_digest=%s, feedback=%s, updated_at=now()"
                 " WHERE tenant_id=%s AND id=%s RETURNING *",
-                (selected_candidate_id, art_ref, art_sha, new_digest, clean_fb, tenant_id, cur_row["id"]),
+                (
+                    selected_candidate_id,
+                    resolved_render_id,
+                    resolved_ref,
+                    resolved_sha,
+                    resolved_vp,
+                    resolved_fix,
+                    resolved_commit,
+                    new_digest,
+                    clean_fb,
+                    tenant_id,
+                    cur_row["id"],
+                ),
             ).fetchone()
             append_event(
                 c,
@@ -798,7 +1019,8 @@ class PostgresDevStore:
                     "cycleId": cycle_id,
                     "designRevision": design_revision,
                     "candidateId": selected_candidate_id,
-                    "demoArtifactSha256": art_sha,
+                    "demoRenderArtifactId": resolved_render_id,
+                    "demoArtifactSha256": resolved_sha,
                     "demoSnapshotDigest": new_digest,
                 },
                 actor={"type": "user", "id": owner_user_id},
@@ -848,13 +1070,42 @@ class PostgresDevStore:
                 raise StateConflict("STALE_GOAL_REVISION: task goal changed before demo decision")
             if decision == "APPROVED" and not cur_row["selected_candidate_id"]:
                 raise StateConflict("must select a design candidate before approving demo")
-            # Re-verify digest against live cycle commit, live goal_revision, selected candidate & rendered demo artifact!
+            # Re-verify digest against live cycle commit, live goal_revision, selected candidate & real rendered artifact!
             cj = dict(cy_row["cycle_json"]) if isinstance(cy_row["cycle_json"], dict) else {}
             raw_commit = cj.get("commit")
             commit_sha = (
                 str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else None
             )
             cands = list(cur_row["candidates_json"]) if isinstance(cur_row["candidates_json"], list) else []
+            if decision == "APPROVED":
+                render_id = cur_row.get("demo_render_artifact_id")
+                if not render_id:
+                    raise InvalidEvidence("RENDERED_DEMO_ARTIFACT_REQUIRED")
+                render_row = c.execute(
+                    "SELECT * FROM agent.dev_demo_artifacts"
+                    " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND cycle_id=%s",
+                    (tenant_id, render_id, owner_user_id, cycle_id),
+                ).fetchone()
+                matched_cand = next(
+                    (
+                        x
+                        for x in cands
+                        if isinstance(x, dict) and str(x.get("candidateId")) == str(cur_row["selected_candidate_id"])
+                    ),
+                    None,
+                )
+                if (
+                    render_row is None
+                    or matched_cand is None
+                    or str(render_row["candidate_id"]) != str(cur_row["selected_candidate_id"])
+                    or not commit_sha
+                    or str(render_row["commit_sha"]) != commit_sha
+                    or str(render_row["fixture_ref"]) != str(matched_cand.get("fixtureRef") or "")
+                    or str(render_row["viewport"]) != str(cur_row.get("demo_viewport") or "")
+                    or str(render_row["content_sha256"]) != str(cur_row.get("demo_artifact_sha256") or "")
+                ):
+                    raise StateConflict("RENDERED_DEMO_ARTIFACT_MISMATCH")
+
             expected_digest = _demo_binding_digest(
                 cycle_id=cycle_id,
                 commit_sha=commit_sha,
@@ -864,10 +1115,15 @@ class PostgresDevStore:
                 if cur_row["selected_candidate_id"]
                 else None,
                 candidates=cands,
+                demo_render_artifact_id=str(cur_row["demo_render_artifact_id"])
+                if cur_row.get("demo_render_artifact_id")
+                else None,
                 demo_artifact_ref=str(cur_row["demo_artifact_ref"]) if cur_row.get("demo_artifact_ref") else None,
                 demo_artifact_sha256=str(cur_row["demo_artifact_sha256"])
                 if cur_row.get("demo_artifact_sha256")
                 else None,
+                demo_viewport=str(cur_row["demo_viewport"]) if cur_row.get("demo_viewport") else None,
+                demo_fixture_ref=str(cur_row["demo_fixture_ref"]) if cur_row.get("demo_fixture_ref") else None,
             )
             if demo_snapshot_digest != expected_digest or str(cur_row["demo_snapshot_digest"] or "") != expected_digest:
                 raise StateConflict("demoSnapshotDigest mismatch with current design/commit/artifact state")

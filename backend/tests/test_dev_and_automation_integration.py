@@ -266,6 +266,7 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
     )
     from aiagent_development.pg_store import sign_preview_launch_receipt
     from aiagent_development.store import PostgresDevStore
+    from aiagent_domain import uuid7
 
     PostgresDevStore(dbs["api"]).create_project(
         tenant_id=scope.tenant_id,
@@ -277,8 +278,12 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         default_branch="feat/fixture",
     )
     PostgresCycleStore(dbs["api"]).create(fixture)
+    import time as _time
+
     attest_key = b"k" * 32
     broker = PreviewBroker(dbs["api"], attestation_key=attest_key)
+    now_s = int(_time.time())
+    nonce_1 = f"fixture-nonce-{uuid7()[:12]}"
     receipt = sign_preview_launch_receipt(
         attest_key,
         tenant_id=scope.tenant_id,
@@ -291,12 +296,18 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         runner_kind="sandbox_cell",
         process_attestation_sha256="d" * 64,
         generation=1,
+        launch_nonce=nonce_1,
+        issued_at_epoch=now_s,
+        expires_at_epoch=now_s + 45,
     )
     broker.register_instance(
         fixture,
         target_port=4173,
         process_attestation_sha256="d" * 64,
         launch_receipt_hmac=receipt,
+        launch_nonce=nonce_1,
+        issued_at_epoch=now_s,
+        expires_at_epoch=now_s + 45,
         runner_kind="sandbox_cell",
         generation=1,
     )

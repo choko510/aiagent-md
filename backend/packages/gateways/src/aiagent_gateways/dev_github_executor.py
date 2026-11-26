@@ -1,15 +1,15 @@
-"""Canonical Tool Gateway executor for `dev_github_pr` (R2-02 / R2-03 / R2-04 / R2-05 / R2-09).
+"""Canonical Tool Gateway executor for `dev_github_pr` (R2-02..R2-09 / R3-01 / R3-07).
 
 Runs strictly inside the Tool Gateway process (owner of tool_intents / tool_attempts / side_effect_records):
-- Binds GitHub credentials exclusively to an active operator-provisioned `agent.repository_bindings` row
+- R3-01: Enforces full Development Cycle admission inside ToolGateway (for BOTH runtime `tool.submit` and API
+  `tool.dev_pr_dispatch`): `dev_projects`, `verify_dev_repository_binding`, `dev_cycles` (`phase == 'CODE_READY'`),
+  immutable `commit_sha == headSha`, `task_id`, `run_id`, `goal_revision`, `repository`, and `branch`.
+- R2-02: Binds GitHub credentials exclusively to an active operator-provisioned `agent.repository_bindings` row
   matching (tenant_id, owner_user_id, workspace_id, repository_binding_id, repository, api_origin).
-  Never falls back to unscoped repository names or a global token.
-- Verifies remote branch ref SHA via Sentinel-authorized GET BEFORE POST /pulls.
-- Sends standard GitHub REST payload (no synthetic head_sha override) through Sentinel EgressProxy with
-  Sentinel-derived Path + Body SHA-256 binding.
-- Treats post-send errors, malformed JSON, unexpected status, or response head.sha mismatch as ExecutorUnknown.
-- Reconciles ONLY intents with an active SENDING/UNKNOWN side_effect_record and a unique exact match on
-  (repository, branch, headSha, baseBranch, draft, title).
+- R3-07: Embeds a deterministic intent-scoped correlation marker in the canonical PR body (independently derived
+  by Sentinel for `body_sha256` binding), snapshots pre-existing PR numbers BEFORE POST /pulls, refuses if a
+  matching marker already exists, and reconciles across ALL pages matching exact (repository, branch, headSha,
+  baseBranch, draft, title, body+marker) while excluding pre-existing PRs.
 """
 
 from __future__ import annotations
@@ -26,8 +26,22 @@ from aiagent_core.control import Claim
 from aiagent_core.db import Database
 from aiagent_core.egress_http import ForwardProxyError, send_via_forward_proxy
 from aiagent_domain import canonical_json
+from psycopg.types.json import Jsonb
 
 from .executors import Destination, ExecutorFailed, ExecutorUnknown
+
+_MAX_RECONCILE_PAGES = 10
+_PER_PAGE = 100
+
+
+def pr_intent_correlation_marker(intent_id: str, request_sha256: str) -> str:
+    return f"<!-- aiagent-pr-intent:{intent_id}:{request_sha256[:16]} -->"
+
+
+def render_pr_body_with_marker(raw_body: str, *, intent_id: str, request_sha256: str) -> str:
+    marker = pr_intent_correlation_marker(intent_id, request_sha256)
+    base = raw_body[:1900]
+    return f"{base}\n\n{marker}" if base else marker
 
 
 def normalize_api_origin(url: str) -> tuple[str, str, int, str]:
@@ -76,11 +90,16 @@ def resolve_binding_github_token(
     return tok
 
 
-def canonical_github_pr_payload(args: Mapping[str, Any]) -> bytes:
+def canonical_github_pr_payload(
+    args: Mapping[str, Any],
+    *,
+    intent_id: str,
+    request_sha256: str,
+) -> bytes:
     return canonical_json(
         {
             "title": str(args["title"])[:200],
-            "body": str(args["body"])[:2000],
+            "body": render_pr_body_with_marker(str(args["body"]), intent_id=intent_id, request_sha256=request_sha256),
             "head": str(args["branch"]),
             "base": str(args["baseBranch"]),
             "draft": bool(args["draft"]),
@@ -110,7 +129,7 @@ class DevGitHubPrExecutor:
         branch: str,
         base_branch: str,
     ) -> dict[str, Any]:
-        with self._db.tx() as c:
+        with self._db.tx(tenant=tenant_id) as c:
             proj = c.execute(
                 "SELECT id, owner_user_id, workspace_id, repository, default_branch, repository_binding_id, github_api_base"
                 " FROM agent.dev_projects"
@@ -144,6 +163,65 @@ class DevGitHubPrExecutor:
                 "github_api_base": str(proj["github_api_base"]).rstrip("/"),
             }
 
+    def verify_cycle_admission(self, claim: Claim, args: Mapping[str, Any]) -> dict[str, Any]:
+        """R3-01: Mandatory ToolGateway admission check binding Project, RepositoryBinding, Cycle CODE_READY, Commit & RunFence."""
+        try:
+            project_id = str(args["projectId"])
+            cycle_id = str(args["cycleId"])
+            repository = str(args["repository"])
+            branch = str(args["branch"])
+            head_sha = str(args["headSha"])
+            base_branch = str(args["baseBranch"])
+        except KeyError as exc:
+            raise ExecutorFailed("INVALID_DEV_PR_ARGUMENTS") from exc
+
+        proj = self._load_bound_project(
+            tenant_id=claim.tenant_id,
+            owner_user_id=claim.owner_user_id,
+            project_id=project_id,
+            repository=repository,
+            branch=branch,
+            base_branch=base_branch,
+        )
+        with self._db.tx(tenant=claim.tenant_id) as c:
+            cy = c.execute(
+                "SELECT c.id, c.project_id, c.workspace_id, c.owner_user_id, c.task_id, c.run_id,"
+                " c.phase, c.cycle_json, t.goal_revision AS live_goal_revision"
+                " FROM agent.dev_cycles c"
+                " JOIN agent.tasks t ON t.tenant_id=c.tenant_id AND t.id=c.task_id"
+                " WHERE c.tenant_id=%s AND c.id=%s",
+                (claim.tenant_id, cycle_id),
+            ).fetchone()
+        if cy is None:
+            raise ExecutorFailed("CYCLE_NOT_FOUND")
+        if (
+            str(cy["owner_user_id"]) != claim.owner_user_id
+            or str(cy["project_id"]) != project_id
+            or str(cy["workspace_id"]) != proj["workspace_id"]
+            or str(cy["task_id"]) != claim.task_id
+            or str(cy["run_id"]) != claim.run_id
+        ):
+            raise ExecutorFailed("CYCLE_SCOPE_OR_RUN_MISMATCH")
+        if str(cy["phase"]) != "CODE_READY":
+            raise ExecutorFailed("CYCLE_NOT_CODE_READY")
+        cj = dict(cy["cycle_json"]) if isinstance(cy.get("cycle_json"), dict) else {}
+        raw_commit = cj.get("commit")
+        commit_sha = str(raw_commit.get("commit_sha") or "") if isinstance(raw_commit, dict) else ""
+        raw_scope = cj.get("scope")
+        scope_repo = str(raw_scope.get("repository") or "") if isinstance(raw_scope, dict) else ""
+        scope_branch = str(raw_scope.get("branch") or "") if isinstance(raw_scope, dict) else ""
+        raw_run = cj.get("run")
+        cycle_goal_rev = int(raw_run.get("goal_revision", 0)) if isinstance(raw_run, dict) else 0
+        if (
+            commit_sha != head_sha
+            or scope_repo != repository
+            or scope_branch != branch
+            or cycle_goal_rev != claim.goal_revision
+            or int(cy["live_goal_revision"]) != claim.goal_revision
+        ):
+            raise ExecutorFailed("CYCLE_COMMIT_OR_GOAL_MISMATCH")
+        return proj
+
     def destination_for_tool(
         self,
         tool: str,
@@ -151,20 +229,18 @@ class DevGitHubPrExecutor:
         *,
         bound_form: dict[str, Any] | None = None,
         claim: Claim | None = None,
+        intent: Mapping[str, Any] | None = None,
     ) -> Destination:
         del bound_form
-        if tool != "dev_github_pr" or claim is None:
+        if tool != "dev_github_pr" or claim is None or intent is None:
             raise ExecutorFailed("INVALID_DEV_PR_TOOL_CALL")
-        proj = self._load_bound_project(
-            tenant_id=claim.tenant_id,
-            owner_user_id=claim.owner_user_id,
-            project_id=str(args["projectId"]),
-            repository=str(args["repository"]),
-            branch=str(args["branch"]),
-            base_branch=str(args["baseBranch"]),
-        )
+        proj = self.verify_cycle_admission(claim, args)
         scheme, host, port, _ = normalize_api_origin(proj["github_api_base"])
-        payload = canonical_github_pr_payload(args)
+        payload = canonical_github_pr_payload(
+            args,
+            intent_id=str(intent["id"]),
+            request_sha256=str(intent["request_sha256"]),
+        )
         return Destination(
             scheme=scheme,
             host=host,
@@ -178,7 +254,7 @@ class DevGitHubPrExecutor:
         args = intent_row.get("safe_arguments_json")
         if not isinstance(args, dict):
             raise ExecutorFailed("INVALID_INTENT_ARGUMENTS")
-        with self._db.tx() as c:
+        with self._db.tx(tenant=tenant_id) as c:
             task = c.execute(
                 "SELECT owner_user_id FROM agent.tasks WHERE tenant_id=%s AND id=%s",
                 (tenant_id, intent_row["task_id"]),
@@ -200,8 +276,66 @@ class DevGitHubPrExecutor:
             host=host,
             port=port,
             method="GET",
-            target_path=f"/repos/{args['repository']}/pulls?state=all&head={owner_org}:{args['branch']}",
+            target_path=(
+                f"/repos/{args['repository']}/pulls?state=all&head={owner_org}:{args['branch']}"
+                f"&per_page={_PER_PAGE}&page=1"
+            ),
         )
+
+    async def _list_all_branch_prs(
+        self,
+        *,
+        proxy_url: str,
+        scheme: str,
+        host: str,
+        port: int,
+        origin: str,
+        host_hdr: str,
+        base_headers: dict[str, str],
+        repository: str,
+        branch: str,
+        first_permit: str | None,
+        permit_issuer: Any,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Paginate ALL PRs for head branch through Sentinel GET permits (R3-07)."""
+        owner_org = repository.split("/", 1)[0]
+        all_items: list[dict[str, Any]] = []
+        for page in range(1, _MAX_RECONCILE_PAGES + 1):
+            path = f"/repos/{repository}/pulls?state=all&head={owner_org}:{branch}&per_page={_PER_PAGE}&page={page}"
+            if page == 1 and first_permit:
+                page_permit = first_permit
+            elif callable(permit_issuer):
+                page_permit = await permit_issuer(Destination(scheme, host, port, "GET", target_path=path))
+            else:
+                return [], False
+            try:
+                st, _, raw = await send_via_forward_proxy(
+                    proxy_url,
+                    identity="tool_gateway",
+                    permit=page_permit,
+                    method="GET",
+                    target_url=f"{origin}{path}",
+                    host_header=host_hdr,
+                    headers=base_headers,
+                    body=None,
+                    timeout_s=self._timeout_s,
+                )
+            except ForwardProxyError:
+                return [], False
+            if st != 200:
+                return [], False
+            try:
+                items = json.loads(raw)
+            except ValueError:
+                return [], False
+            if not isinstance(items, list):
+                return [], False
+            for item in items:
+                if isinstance(item, dict):
+                    all_items.append(item)
+            if len(items) < _PER_PAGE:
+                return all_items, True
+        return [], False  # exceeded page ceiling without exhausting list
 
     async def execute(self, effect_key: str, args: dict[str, Any], permit: str | None) -> dict[str, Any]:
         proxy_url = self._proxy or os.environ.get("AIAGENT_EGRESS_PROXY") or ""
@@ -209,20 +343,25 @@ class DevGitHubPrExecutor:
         if not proxy_url or not permit or ctx is None:
             raise ExecutorFailed("EGRESS_OR_ADMISSION_CONTEXT_MISSING")
 
-        proj = self._load_bound_project(
+        intent_id = str(ctx["intent_id"])
+        request_sha256 = str(ctx["request_sha256"])
+        claim = Claim(
             tenant_id=str(ctx["tenant_id"]),
             owner_user_id=str(ctx["owner_user_id"]),
-            project_id=str(args["projectId"]),
-            repository=str(args["repository"]),
-            branch=str(args["branch"]),
-            base_branch=str(args["baseBranch"]),
+            task_id=str(ctx["task_id"]),
+            run_id=str(ctx["run_id"]),
+            lease_epoch=int(ctx["lease_epoch"]),
+            goal_revision=int(ctx["goal_revision"]),
+            worker_ref=str(ctx["worker_ref"]),
+            restore_incarnation=int(ctx.get("restore_incarnation", 1)),
         )
+        proj = self.verify_cycle_admission(claim, args)
         scheme, host, port, origin = normalize_api_origin(proj["github_api_base"])
         host_hdr = (
             host if (port == 80 and scheme == "http") or (port == 443 and scheme == "https") else f"{host}:{port}"
         )
         token = resolve_binding_github_token(
-            tenant_id=str(ctx["tenant_id"]),
+            tenant_id=claim.tenant_id,
             workspace_id=proj["workspace_id"],
             repository_binding_id=proj["repository_binding_id"],
             repository=str(args["repository"]),
@@ -234,11 +373,12 @@ class DevGitHubPrExecutor:
             "Authorization": f"Bearer {token}",
         }
 
-        # P1-04: verify remote branch ref SHA via Sentinel-authorized GET BEFORE POST /pulls
-        ref_path = f"/repos/{args['repository']}/git/ref/heads/{args['branch']}"
         reconcile_issuer = ctx.get("reconcile_permit_issuer")
         if not callable(reconcile_issuer):
             raise ExecutorFailed("REF_VERIFY_PERMIT_ISSUER_UNAVAILABLE")
+
+        # P1-04: verify remote branch ref SHA via Sentinel-authorized GET BEFORE POST /pulls
+        ref_path = f"/repos/{args['repository']}/git/ref/heads/{args['branch']}"
         ref_permit = await reconcile_issuer(Destination(scheme, host, port, "GET", target_path=ref_path))
         try:
             st_ref, _, raw_ref = await send_via_forward_proxy(
@@ -264,9 +404,42 @@ class DevGitHubPrExecutor:
         if remote_sha != str(args["headSha"]):
             raise ExecutorFailed("STALE_REMOTE_HEAD")
 
-        # Send canonical GitHub PR creation POST through Sentinel EgressProxy
+        # R3-07: Snapshot pre-existing PRs BEFORE POST /pulls so reconcile can NEVER confuse a pre-existing PR
+        # with the outcome of this intent, and refuse if the same intent correlation marker already exists.
+        marker = pr_intent_correlation_marker(intent_id, request_sha256)
+        pre_items, pre_ok = await self._list_all_branch_prs(
+            proxy_url=proxy_url,
+            scheme=scheme,
+            host=host,
+            port=port,
+            origin=origin,
+            host_hdr=host_hdr,
+            base_headers=base_headers,
+            repository=str(args["repository"]),
+            branch=str(args["branch"]),
+            first_permit=None,
+            permit_issuer=reconcile_issuer,
+        )
+        if not pre_ok:
+            raise ExecutorFailed("PRE_SEND_PR_SNAPSHOT_UNAVAILABLE")
+        pre_existing_nums: list[int] = []
+        for item in pre_items:
+            if marker in str(item.get("body") or ""):
+                raise ExecutorFailed("DUPLICATE_PR_INTENT_MARKER_EXISTS")
+            num = item.get("number")
+            if isinstance(num, int) and num >= 1:
+                pre_existing_nums.append(num)
+        with self._db.tx() as c:
+            c.execute(
+                "UPDATE agent.tool_intents"
+                " SET result_json = coalesce(result_json, '{}'::jsonb) || %s::jsonb"
+                " WHERE tenant_id=%s AND id=%s AND status_code='SENDING'",
+                (Jsonb({"preExistingPrNumbers": sorted(set(pre_existing_nums))}), claim.tenant_id, intent_id),
+            )
+
+        # Send canonical GitHub PR creation POST (with intent correlation marker in body) through Sentinel EgressProxy
         post_path = f"/repos/{args['repository']}/pulls"
-        payload = canonical_github_pr_payload(args)
+        payload = canonical_github_pr_payload(args, intent_id=intent_id, request_sha256=request_sha256)
         try:
             st, _, raw_body = await send_via_forward_proxy(
                 proxy_url,
@@ -297,8 +470,10 @@ class DevGitHubPrExecutor:
         resp_sha = str(resp_head.get("sha") or "") if isinstance(resp_head, dict) else ""
         if not isinstance(pr_num, int) or pr_num < 1 or not pr_url or resp_sha != str(args["headSha"]):
             raise ExecutorUnknown("GITHUB_POST_HEAD_OR_RECEIPT_MISMATCH")
+        if pr_num in pre_existing_nums:
+            raise ExecutorUnknown("GITHUB_POST_RETURNED_PREEXISTING_PR")
 
-        receipt = f"github-pr:{args['repository']}#{pr_num}:{resp_sha}"
+        receipt = f"github-pr:{args['repository']}#{pr_num}:{resp_sha[:12]}:{intent_id[:8]}"
         return {
             "receipt": receipt[:120],
             "prNumber": pr_num,
@@ -309,15 +484,15 @@ class DevGitHubPrExecutor:
         }
 
     async def query(self, effect_key: str, permit: str | None = None) -> dict[str, Any] | None:
-        """Strict reconciliation query matching (repository, branch, headSha, baseBranch, draft, title) (R2-05)."""
+        """Strict paginated reconciliation requiring exact body+intent marker match and excluding pre-existing PRs (R3-07)."""
         proxy_url = self._proxy or os.environ.get("AIAGENT_EGRESS_PROXY") or ""
         if not proxy_url or not permit or ":" not in effect_key:
             return None
         tenant_id, intent_id = effect_key.split(":", 1)
         with self._db.tx() as c:
             row = c.execute(
-                "SELECT i.tool_key, i.status_code, i.safe_arguments_json, t.owner_user_id,"
-                " se.outcome_code AS side_effect_outcome"
+                "SELECT i.tool_key, i.status_code, i.request_sha256, i.safe_arguments_json, i.result_json,"
+                " t.owner_user_id, se.outcome_code AS side_effect_outcome"
                 " FROM agent.tool_intents i"
                 " JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
                 " JOIN agent.side_effect_records se ON se.tenant_id=i.tenant_id AND se.tool_intent_id=i.id"
@@ -334,6 +509,14 @@ class DevGitHubPrExecutor:
         args = row["safe_arguments_json"]
         if not isinstance(args, dict):
             return None
+        request_sha256 = str(row["request_sha256"])
+        res_json = dict(row["result_json"] or {}) if isinstance(row.get("result_json"), dict) else {}
+        raw_pre = res_json.get("preExistingPrNumbers")
+        if not isinstance(raw_pre, list) or any(type(x) is not int for x in raw_pre):
+            # Without a verified pre-send snapshot we refuse to attribute any PR to this intent.
+            return None
+        pre_existing = set(raw_pre)
+
         try:
             proj = self._load_bound_project(
                 tenant_id=tenant_id,
@@ -357,33 +540,26 @@ class DevGitHubPrExecutor:
         host_hdr = (
             host if (port == 80 and scheme == "http") or (port == 443 and scheme == "https") else f"{host}:{port}"
         )
-        owner_org = str(args["repository"]).split("/", 1)[0]
-        path = f"/repos/{args['repository']}/pulls?state=all&head={owner_org}:{args['branch']}"
-        try:
-            st, _, raw_body = await send_via_forward_proxy(
-                proxy_url,
-                identity="tool_gateway",
-                permit=permit,
-                method="GET",
-                target_url=f"{origin}{path}",
-                host_header=host_hdr,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "aiagent-tool-gateway-github/1.0",
-                    "Authorization": f"Bearer {token}",
-                },
-                body=None,
-                timeout_s=self._timeout_s,
-            )
-        except ForwardProxyError:
-            return None
-        if st != 200:
-            return None
-        try:
-            items = json.loads(raw_body)
-        except ValueError:
-            return None
-        if not isinstance(items, list):
+        base_headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "aiagent-tool-gateway-github/1.0",
+            "Authorization": f"Bearer {token}",
+        }
+        ctx = self.context.get(effect_key) or {}
+        items, complete = await self._list_all_branch_prs(
+            proxy_url=proxy_url,
+            scheme=scheme,
+            host=host,
+            port=port,
+            origin=origin,
+            host_hdr=host_hdr,
+            base_headers=base_headers,
+            repository=str(args["repository"]),
+            branch=str(args["branch"]),
+            first_permit=permit,
+            permit_issuer=ctx.get("reconcile_permit_issuer"),
+        )
+        if not complete:
             return None
 
         expected_sha = str(args["headSha"])
@@ -391,13 +567,17 @@ class DevGitHubPrExecutor:
         expected_base = str(args["baseBranch"])
         expected_draft = bool(args["draft"])
         expected_title = str(args["title"])[:200]
+        expected_body = render_pr_body_with_marker(
+            str(args["body"]), intent_id=intent_id, request_sha256=request_sha256
+        )
         matches: list[dict[str, Any]] = []
         for item in items:
-            if not isinstance(item, dict):
-                continue
             hd = item.get("head")
             bs = item.get("base")
-            if not isinstance(hd, dict) or not isinstance(bs, dict):
+            num = item.get("number")
+            if not isinstance(hd, dict) or not isinstance(bs, dict) or type(num) is not int or num < 1:
+                continue
+            if num in pre_existing:
                 continue
             if (
                 str(hd.get("sha") or "") == expected_sha
@@ -405,8 +585,7 @@ class DevGitHubPrExecutor:
                 and str(bs.get("ref") or "") == expected_base
                 and bool(item.get("draft")) is expected_draft
                 and str(item.get("title") or "")[:200] == expected_title
-                and isinstance(item.get("number"), int)
-                and int(item["number"]) >= 1
+                and str(item.get("body") or "") == expected_body
                 and isinstance(item.get("html_url"), str)
                 and bool(item["html_url"])
             ):
@@ -416,7 +595,7 @@ class DevGitHubPrExecutor:
         found = matches[0]
         pr_num = int(found["number"])
         pr_url = str(found["html_url"])
-        receipt = f"github-pr:{args['repository']}#{pr_num}:{expected_sha}"
+        receipt = f"github-pr:{args['repository']}#{pr_num}:{expected_sha[:12]}:{intent_id[:8]}"
         return {
             "sent": True,
             "receipt": receipt[:120],
