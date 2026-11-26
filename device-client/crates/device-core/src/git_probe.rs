@@ -142,37 +142,88 @@ fn packed(git: &Dir, reference: &str) -> Result<Option<String>, ()> {
     Ok(result)
 }
 
+// Interpret indirections only beneath the already-open project directory.
+// Never reopen the project by pathname or follow a link during traversal.
+fn resolve(base: &[String], value: &str) -> Result<Vec<String>, ()> {
+    if value.is_empty() || value.len() > HEAD_LIMIT as usize || value.starts_with(['/', '\\']) {
+        return Err(());
+    }
+    let mut parts = base.to_vec();
+    for part in value.split(['/', '\\']) {
+        match part {
+            "" => return Err(()),
+            "." => (),
+            ".." => {
+                parts.pop().ok_or(())?;
+            }
+            name if crate::discovery::valid_component(name)
+                && !crate::discovery::blocked_component(name) =>
+            {
+                parts.push(name.to_owned())
+            }
+            _ => return Err(()),
+        }
+        if parts.len() > 32 {
+            return Err(());
+        }
+    }
+    Ok(parts)
+}
+
+fn open_path(project: &Dir, parts: &[String]) -> Result<Dir, ()> {
+    let mut dir = project.try_clone().map_err(|_| ())?;
+    for part in parts {
+        dir = dir.open_dir_nofollow(part).map_err(|_| ())?;
+    }
+    Ok(dir)
+}
+
 pub(crate) fn observe(project: &Dir) -> GitHead {
     let metadata = match project.symlink_metadata(".git") {
         Ok(value) => value,
         Err(_) => return GitHead::Untrusted,
     };
-    if metadata.is_file() {
-        return GitHead::Unsupported;
-    } // worktree gitdir requires a separately authorized binding
-    if !metadata.is_dir() || metadata.is_symlink() {
-        return GitHead::Untrusted;
-    }
-    let git = match project.open_dir_nofollow(".git") {
-        Ok(dir) => dir,
-        Err(_) => return GitHead::Untrusted,
-    };
     let result = (|| -> Result<GitHead, ()> {
-        let raw = read(&git, "HEAD", HEAD_LIMIT)?.ok_or(())?;
-        let head = line(&raw)?;
-        if let Some(hash) = oid(head) {
-            return Ok(GitHead::Observed(hash));
-        }
-        let reference = head.strip_prefix("ref: ").ok_or(())?;
-        if !valid_ref(reference) {
+        if metadata.is_symlink() {
             return Err(());
         }
-        let hash = match loose(&git, reference)? {
-            Some(hash) => Some(hash),
-            None => packed(&git, reference)?,
+        let (git, path, pointer) = if metadata.is_file() {
+            let raw = read(project, ".git", HEAD_LIMIT)?.ok_or(())?;
+            let path = resolve(&[], line(&raw)?.strip_prefix("gitdir: ").ok_or(())?)?;
+            (open_path(project, &path)?, path, Some(raw))
+        } else if metadata.is_dir() {
+            (
+                project.open_dir_nofollow(".git").map_err(|_| ())?,
+                vec![".git".to_owned()],
+                None,
+            )
+        } else {
+            return Err(());
         };
-        // Detect a changed HEAD during lookup; still require revalidation before use.
-        if read(&git, "HEAD", HEAD_LIMIT)?.as_deref() != Some(raw.as_slice()) {
+        let common_raw = read(&git, "commondir", HEAD_LIMIT)?;
+        let common = match &common_raw {
+            Some(raw) => open_path(project, &resolve(&path, line(raw)?)?)?,
+            None => git.try_clone().map_err(|_| ())?,
+        };
+        let raw = read(&git, "HEAD", HEAD_LIMIT)?.ok_or(())?;
+        let head = line(&raw)?;
+        let hash = if let Some(hash) = oid(head) {
+            Some(hash)
+        } else {
+            let reference = head.strip_prefix("ref: ").ok_or(())?;
+            if !valid_ref(reference) {
+                return Err(());
+            }
+            match loose(&common, reference)? {
+                Some(hash) => Some(hash),
+                None => packed(&common, reference)?,
+            }
+        };
+        // Detect changed indirections during lookup; revalidation is still required before use.
+        if read(&git, "HEAD", HEAD_LIMIT)?.as_deref() != Some(raw.as_slice())
+            || read(&git, "commondir", HEAD_LIMIT)? != common_raw
+            || (pointer.is_some() && read(project, ".git", HEAD_LIMIT)? != pointer)
+        {
             return Err(());
         }
         Ok(hash.map_or(GitHead::Unresolved, GitHead::Observed))

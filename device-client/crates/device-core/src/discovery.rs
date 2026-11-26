@@ -179,7 +179,7 @@ pub(crate) fn valid_component(name: &str) -> bool {
     true
 }
 
-fn blocked_component(name: &str) -> bool {
+pub(crate) fn blocked_component(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(
             ws.probe_git(&candidate.candidate_id, candidate.generation)
                 .unwrap(),
-            GitHead::Unsupported
+            GitHead::Untrusted
         );
         fs::remove_file(project.join(".git")).unwrap();
         fs::create_dir(project.join(".git")).unwrap();
@@ -568,6 +568,57 @@ mod tests {
                 .unwrap(),
             GitHead::Untrusted
         );
+    }
+
+    #[test]
+    fn worktree_pointer_and_shared_refs_stay_inside_project() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("repo");
+        let git = project.join(".meta");
+        let worktree = git.join("worktrees/wt");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(git.join("refs/heads")).unwrap();
+        fs::write(project.join(".git"), b"gitdir: .meta/worktrees/wt\n").unwrap();
+        fs::write(worktree.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(worktree.join("commondir"), b"../..\n").unwrap();
+        fs::write(git.join("refs/heads/main"), format!("{}\n", "a".repeat(40))).unwrap();
+        let mut ws = WorkspaceRoot::open_selected(root.path()).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        let probe = || {
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap()
+        };
+        assert_eq!(probe(), GitHead::Observed("a".repeat(40)));
+        fs::remove_file(git.join("refs/heads/main")).unwrap();
+        fs::write(
+            git.join("packed-refs"),
+            format!("{} refs/heads/main\n", "b".repeat(40)),
+        )
+        .unwrap();
+        assert_eq!(probe(), GitHead::Observed("b".repeat(40)));
+        fs::write(worktree.join("commondir"), b"../../../..\n").unwrap();
+        assert_eq!(probe(), GitHead::Untrusted);
+        fs::write(project.join(".git"), b"gitdir: /outside\n").unwrap();
+        assert_eq!(probe(), GitHead::Untrusted);
+        fs::write(project.join(".git"), b"gitdir: C:\\outside\n").unwrap();
+        assert_eq!(probe(), GitHead::Untrusted);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_pointer_rejects_junction_to_external_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("repo");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        fs::write(project.join(".git"), b"gitdir: link\n").unwrap();
+        let link = project.join("link");
+        junction::create(&outside, &link).unwrap();
+        let ws = WorkspaceRoot::open_selected(&project).unwrap();
+        assert_eq!(crate::git_probe::observe(&ws.root), GitHead::Untrusted);
+        junction::delete(&link).unwrap();
     }
 
     #[cfg(unix)]
