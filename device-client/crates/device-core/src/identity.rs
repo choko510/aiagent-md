@@ -136,11 +136,15 @@ impl DeviceIdentity {
     /// The caller must receive the challenge over a verified server connection.
     pub fn sign_pairing_challenge(
         &self,
+        socket: &aiagent_device_transport::ServerVerifiedSocket,
         pairing_id: [u8; 16],
         nonce: [u8; 32],
         issued_at_ms: u64,
         expires_at_ms: u64,
     ) -> Result<[u8; 64], &'static str> {
+        if !socket.matches_https_origin(&self.binding.server_origin) {
+            return Err("SERVER_ORIGIN_MISMATCH_OR_OFFLINE");
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "CLOCK_UNAVAILABLE")?
@@ -184,40 +188,20 @@ impl DeviceIdentity {
         Ok(self.key.sign(&message).to_bytes())
     }
 
-    /// Local candidate only, not a wire contract or evidence of server auth.
-    /// The future authenticated protocol must enforce nonce replay and session
-    /// generation on the server and must not call this for unverified channels.
-    pub fn sign_candidate_challenge(
-        &self,
-        nonce: [u8; 32],
-        connection_generation: u64,
-        issued_at_ms: u64,
-        expires_at_ms: u64,
-    ) -> Result<[u8; 64], &'static str> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "CLOCK_UNAVAILABLE")?
-            .as_millis();
-        let now = u64::try_from(now).map_err(|_| "CLOCK_UNAVAILABLE")?;
-        self.sign_at(
-            nonce,
-            connection_generation,
-            issued_at_ms,
-            expires_at_ms,
-            now,
-        )
-    }
-
     /// Candidate v2 binds the proof to a server-generated per-socket value.
-    /// The caller must verify the TLS origin against this identity before signing.
+    /// The socket must be open and server-verified for this identity's origin.
     pub fn sign_bound_connection_challenge(
         &self,
+        socket: &aiagent_device_transport::ServerVerifiedSocket,
         nonce: [u8; 32],
         channel_digest: [u8; 32],
         generation: u64,
         issued: u64,
         expires: u64,
     ) -> Result<[u8; 64], &'static str> {
+        if !socket.matches_https_origin(&self.binding.server_origin) {
+            return Err("SERVER_ORIGIN_MISMATCH_OR_OFFLINE");
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "CLOCK_UNAVAILABLE")?
@@ -266,6 +250,7 @@ impl DeviceIdentity {
         Ok(self.key.sign(&message).to_bytes())
     }
 
+    #[cfg(test)]
     fn sign_at(
         &self,
         nonce: [u8; 32],
@@ -618,6 +603,89 @@ mod tests {
         assert!(identity
             .sign_pairing_at([1; 16], [9; 32], 1_000, 121_001, 2_000)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn signing_requires_unclosed_socket_with_matching_verified_origin() {
+        use futures_util::StreamExt;
+        use rustls::{pki_types::PrivatePkcs8KeyDer, RootCertStore, ServerConfig};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = cert.der().clone();
+        let key = PrivatePkcs8KeyDer::from(key_pair.serialize_der());
+        let config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone()], key.into())
+                .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tls).await.unwrap();
+            let _ = ws.next().await;
+        });
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let mut socket = aiagent_device_transport::ServerVerifiedSocket::connect_with_test_ca(
+            &format!("wss://localhost:{port}/device"),
+            roots,
+        )
+        .await
+        .unwrap();
+        let valid = DeviceIdentity {
+            binding: IdentityBinding::from_parts(
+                "sid",
+                "tenant",
+                "owner",
+                "identity",
+                "device",
+                &format!("https://localhost:{port}"),
+                0,
+            )
+            .unwrap(),
+            key: SigningKey::from_bytes(&[7; 32]),
+        };
+        let wrong = DeviceIdentity {
+            binding: binding("alice"),
+            key: SigningKey::from_bytes(&[7; 32]),
+        };
+        let now = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        assert!(valid
+            .sign_bound_connection_challenge(&socket, [9; 32], [8; 32], 1, now, now + 30_000)
+            .is_ok());
+        assert_eq!(
+            wrong.sign_bound_connection_challenge(&socket, [9; 32], [8; 32], 1, now, now + 30_000),
+            Err("SERVER_ORIGIN_MISMATCH_OR_OFFLINE")
+        );
+        assert!(valid
+            .sign_pairing_challenge(&socket, [1; 16], [9; 32], now, now + 30_000)
+            .is_ok());
+        assert_eq!(
+            wrong.sign_pairing_challenge(&socket, [1; 16], [9; 32], now, now + 30_000),
+            Err("SERVER_ORIGIN_MISMATCH_OR_OFFLINE")
+        );
+        socket.close().await;
+        assert_eq!(
+            valid.sign_pairing_challenge(&socket, [1; 16], [9; 32], now, now + 30_000),
+            Err("SERVER_ORIGIN_MISMATCH_OR_OFFLINE")
+        );
+        server.await.unwrap();
     }
 
     #[cfg(not(windows))]

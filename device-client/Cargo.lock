@@ -43,14 +43,21 @@ dependencies = [
 name = "aiagent-device-core"
 version = "0.1.0"
 dependencies = [
+ "aiagent-device-transport",
  "chacha20poly1305",
  "ed25519-dalek",
+ "futures-util",
  "hkdf",
+ "rcgen",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "url",
  "zeroize",
 ]

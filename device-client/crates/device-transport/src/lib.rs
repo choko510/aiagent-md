@@ -1,4 +1,6 @@
 //! Server-verified outbound WSS only. A connection conveys no device authority.
+#[cfg(all(feature = "test-ca", not(debug_assertions)))]
+compile_error!("test-ca must not be enabled in release builds");
 use futures_util::{SinkExt, StreamExt};
 use rustls::{ClientConfig, RootCertStore};
 use std::{sync::Arc, time::Duration};
@@ -30,6 +32,7 @@ pub enum TransportError {
 /// This type is not an authenticated device session and cannot authorize actions.
 pub struct ServerVerifiedSocket {
     stream: Option<Stream>,
+    https_origin: String,
 }
 
 impl ServerVerifiedSocket {
@@ -39,11 +42,25 @@ impl ServerVerifiedSocket {
         Self::connect_with_roots(endpoint, roots).await
     }
 
+    /// Explicit development-test CA; unavailable in release builds.
+    #[cfg(feature = "test-ca")]
+    pub async fn connect_with_test_ca(
+        endpoint: &str,
+        roots: RootCertStore,
+    ) -> Result<Self, TransportError> {
+        Self::connect_with_roots(endpoint, roots).await
+    }
+
     async fn connect_with_roots(
         endpoint: &str,
         roots: RootCertStore,
     ) -> Result<Self, TransportError> {
         let url = validate_endpoint(endpoint)?;
+        let mut https_url = url.clone();
+        https_url
+            .set_scheme("https")
+            .map_err(|_| TransportError::InvalidEndpoint)?;
+        let https_origin = https_url.origin().ascii_serialization();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -67,7 +84,14 @@ impl ServerVerifiedSocket {
         .map_err(|_| TransportError::ConnectFailed)?;
         Ok(Self {
             stream: Some(result.0),
+            https_origin,
         })
+    }
+
+    /// True only while this server-verified socket is present and its origin
+    /// matches the identity's canonical HTTPS origin. This is not a heartbeat.
+    pub fn matches_https_origin(&self, expected: &str) -> bool {
+        self.stream.is_some() && self.https_origin == expected
     }
 
     pub async fn send_text(&mut self, text: &str) -> Result<(), TransportError> {
@@ -213,6 +237,9 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(socket.matches_https_origin(&format!("https://localhost:{port}")));
+        assert!(!socket.matches_https_origin(&format!("https://127.0.0.1:{port}")));
+        assert!(!socket.matches_https_origin("https://localhost"));
         assert_eq!(
             socket.send_text(&"x".repeat(MAX_MESSAGE_BYTES + 1)).await,
             Err(TransportError::MessageTooLarge)
@@ -220,6 +247,7 @@ mod tests {
         socket.send_text("fixture").await.unwrap();
         assert_eq!(socket.receive_text().await.unwrap(), "fixture");
         socket.close().await;
+        assert!(!socket.matches_https_origin(&format!("https://localhost:{port}")));
         assert_eq!(socket.send_text("late").await, Err(TransportError::Closed));
     }
 
