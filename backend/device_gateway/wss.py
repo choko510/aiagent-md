@@ -96,7 +96,7 @@ class DeviceWss:
             await _send(
                 socket,
                 {
-                    "version": "1.0",
+                    "version": "1.1",
                     "kind": "CHALLENGE",
                     "nonce": challenge.nonce.hex(),
                     "channelDigest": challenge.channel_digest.hex(),
@@ -112,7 +112,7 @@ class DeviceWss:
             await _send(
                 socket,
                 {
-                    "version": "1.0",
+                    "version": "1.1",
                     "kind": "ACCEPTED",
                     "generation": str(session.generation),
                     "expiresMs": str(session.expires_ms),
@@ -125,13 +125,21 @@ class DeviceWss:
                 if int(heartbeat["generation"]) != session.generation or next_sequence != sequence + 1:
                     raise InvalidFrame()
                 await asyncio.to_thread(
-                    self._service.heartbeat, tenant, owner, identity, channel, session.generation, session.token
+                    self._service.signed_heartbeat,
+                    tenant,
+                    owner,
+                    identity,
+                    channel,
+                    session.generation,
+                    session.token,
+                    next_sequence,
+                    bytes.fromhex(heartbeat["signature"]),
                 )
                 sequence = next_sequence
                 await _send(
                     socket,
                     {
-                        "version": "1.0",
+                        "version": "1.1",
                         "kind": "HEARTBEAT_ACK",
                         "generation": str(session.generation),
                         "sequence": str(sequence),

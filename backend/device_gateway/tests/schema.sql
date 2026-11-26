@@ -54,6 +54,7 @@ CREATE TABLE device_gateway.connection_sessions (
   channel_digest bytea NOT NULL CHECK (octet_length(channel_digest) = 32),
   expires_ms bigint NOT NULL,
   last_heartbeat_ms bigint NOT NULL,
+  heartbeat_sequence bigint NOT NULL DEFAULT 0 CHECK (heartbeat_sequence >= 0),
   restore_incarnation bigint NOT NULL CHECK (restore_incarnation >= 0),
   revocation_generation bigint NOT NULL CHECK (revocation_generation >= 0),
   valid boolean NOT NULL DEFAULT true,

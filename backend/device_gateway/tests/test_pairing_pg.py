@@ -385,7 +385,9 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
     assert len(sessions) == 1
     session = sessions[0]
     assert session.token.hex() not in repr(session)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    gateway._heartbeat_unchecked_for_tests(
+        owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+    )
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         row = conn.execute(
@@ -407,10 +409,12 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
         (str(uuid.uuid4()), owner.user_id, session.generation, session.token),
     ]:
         with pytest.raises(ConnectionRejected):
-            gateway.heartbeat(tenant, user, identity_id, channel, generation, token)
+            gateway._heartbeat_unchecked_for_tests(tenant, user, identity_id, channel, generation, token)
     other_channel = ConnectionChannel()
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, session.generation, session.token)
+        gateway._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, other_channel, session.generation, session.token
+        )
     reconnect = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, other_channel)
     assert reconnect.generation == session.generation + 1
     second_sig = key.sign(
@@ -428,9 +432,13 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
         gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, second_sig)
     second = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, other_channel, second_sig)
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+        gateway._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+        )
     gateway.disconnect(owner.tenant_id, owner.user_id, identity_id, channel)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token)
+    gateway._heartbeat_unchecked_for_tests(
+        owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token
+    )
     with pytest.raises(ConnectionRejected):
         gateway.revoke(Scope(owner.tenant_id, str(uuid.uuid4())), identity_id)
     gateway.revoke(owner, identity_id)
@@ -442,7 +450,9 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
         ).fetchone()
         assert row == {"revoked": True, "revocation_generation": 1}
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token)
+        gateway._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token
+        )
     with pytest.raises(ConnectionRejected):
         gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
 
@@ -461,7 +471,9 @@ def test_new_generation_expires_and_rejects_old_restore_incarnation(service: Pai
     session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     restarted = ConnectionService(service, 2)
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+        restarted._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+        )
     next_challenge = restarted.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     assert next_challenge.generation == session.generation + 1
     with pytest.raises(ConnectionRejected):
@@ -483,15 +495,17 @@ def test_new_generation_expires_and_rejects_old_restore_incarnation(service: Pai
     )
     next_session = restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, next_signature)
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
-    restarted.heartbeat(
+        restarted._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+        )
+    restarted._heartbeat_unchecked_for_tests(
         owner.tenant_id, owner.user_id, identity_id, channel, next_session.generation, next_session.token
     )
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         conn.execute("UPDATE device_gateway.connection_sessions SET expires_ms=0 WHERE identity_id=%s", (identity_id,))
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(
+        restarted._heartbeat_unchecked_for_tests(
             owner.tenant_id, owner.user_id, identity_id, channel, next_session.generation, next_session.token
         )
 
@@ -527,7 +541,9 @@ def test_revocation_races_authentication_without_live_session(service: PairingSe
         revoke_future.result()
     if session is not None:
         with pytest.raises(ConnectionRejected):
-            gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+            gateway._heartbeat_unchecked_for_tests(
+                owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+            )
     with pytest.raises(ConnectionRejected):
         gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
 
@@ -583,7 +599,9 @@ def test_connection_rejects_expired_or_future_challenges_and_rolled_back_clock(s
             (identity_id,),
         )
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+        gateway._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+        )
 
 
 def test_failed_session_commit_does_not_consume_challenge(service: PairingService) -> None:
@@ -631,7 +649,9 @@ def test_failed_session_commit_does_not_consume_challenge(service: PairingServic
             conn.execute("DROP TRIGGER reject_session ON device_gateway.connection_sessions")
             conn.execute("DROP FUNCTION device_gateway.reject_session()")
     session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    gateway._heartbeat_unchecked_for_tests(
+        owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+    )
 
 
 def test_challenge_replay_on_new_channel_and_disconnect_are_rejected(service: PairingService) -> None:
@@ -657,7 +677,9 @@ def test_challenge_replay_on_new_channel_and_disconnect_are_rejected(service: Pa
     session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, new, fresh_sig)
     gateway.disconnect(owner.tenant_id, owner.user_id, identity_id, new)
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, new, session.generation, session.token)
+        gateway._heartbeat_unchecked_for_tests(
+            owner.tenant_id, owner.user_id, identity_id, new, session.generation, session.token
+        )
     with pytest.raises(ConnectionRejected):
         gateway.challenge(owner.tenant_id, owner.user_id, identity_id, new)
 
@@ -692,7 +714,9 @@ def test_disconnect_races_authentication_without_live_session(service: PairingSe
         close_future.result()
     if session is not None:
         with pytest.raises(ConnectionRejected):
-            gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+            gateway._heartbeat_unchecked_for_tests(
+                owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+            )
     with pytest.raises(ConnectionRejected):
         gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
 
@@ -719,7 +743,9 @@ def test_channel_cannot_switch_owner_or_identity(service: PairingService) -> Non
         )
     )
     session = gateway.authenticate(alice.tenant_id, alice.user_id, alice_id, channel, signature)
-    gateway.heartbeat(alice.tenant_id, alice.user_id, alice_id, channel, session.generation, session.token)
+    gateway._heartbeat_unchecked_for_tests(
+        alice.tenant_id, alice.user_id, alice_id, channel, session.generation, session.token
+    )
 
 
 def test_concurrent_channel_binding_has_one_owner(service: PairingService) -> None:
@@ -741,24 +767,85 @@ def test_concurrent_channel_binding_has_one_owner(service: PairingService) -> No
         assert sorted([first.result(), second.result()]) == [False, True]
 
 
+def test_signed_heartbeat_sequence_is_atomic_and_replay_safe(service: PairingService) -> None:
+    owner = make_scope()
+    identity_id, key, public, digest = registered_device(service, owner)
+    gateway, channel = ConnectionService(service, 1), ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
+    proof = key.sign(
+        connection_proof_bytes(
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
+        )
+    )
+    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, proof)
+    message = (
+        b"aiagent-device-heartbeat-candidate-v1"
+        + digest
+        + public
+        + challenge.channel_digest
+        + session.generation.to_bytes(8, "big")
+        + (1).to_bytes(8, "big")
+    )
+    signature = key.sign(message)
+    with pytest.raises(ConnectionRejected):
+        gateway.signed_heartbeat(
+            owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token, 1, bytes(64)
+        )
+
+    def attempt() -> bool:
+        try:
+            gateway.signed_heartbeat(
+                owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token, 1, signature
+            )
+            return True
+        except ConnectionRejected:
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(lambda _: attempt(), range(2))) == [False, True]
+    with service._connect() as conn, conn.transaction():
+        service._scope(conn, owner.tenant_id, owner.user_id)
+        assert (
+            conn.execute(
+                "SELECT heartbeat_sequence FROM device_gateway.connection_sessions WHERE identity_id=%s", (identity_id,)
+            ).fetchone()["heartbeat_sequence"]
+            == 1
+        )
+
+
 def test_wss_frame_validation_rejects_duplicates_and_unknown_versions() -> None:
     for raw in (
-        '{"version":"1.0","version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
+        '{"version":"1.1","version":"1.1","kind":"PROOF","signature":"' + "00" * 64 + '"}',
+        '{"version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
         '{"version":"2.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
-        '{"version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '","extra":1}',
+        '{"version":"1.1","kind":"PROOF","signature":"' + "00" * 64 + '","extra":1}',
     ):
         with pytest.raises(InvalidFrame):
             decode_frame(raw, "PROOF")
     for sequence in ("0", "01", "9223372036854775808", "1\n"):
         with pytest.raises(InvalidFrame):
             decode_frame(
-                json.dumps({"version": "1.0", "kind": "HEARTBEAT", "generation": "1", "sequence": sequence}),
+                json.dumps(
+                    {
+                        "version": "1.1",
+                        "kind": "HEARTBEAT",
+                        "generation": "1",
+                        "sequence": sequence,
+                        "signature": "00" * 64,
+                    }
+                ),
                 "HEARTBEAT",
             )
     with pytest.raises(InvalidFrame):
         decode_frame(b"{}", "PROOF")
     with pytest.raises(InvalidFrame):
-        decode_frame('{"version":"1.0","kind":"ACTION_OFFER"}', "HEARTBEAT")
+        decode_frame('{"version":"1.1","kind":"ACTION_OFFER"}', "HEARTBEAT")
 
 
 def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingService, tmp_path: Path) -> None:
@@ -805,7 +892,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 async with connect(url, ssl=ssl.create_default_context(), proxy=None):
                     pass
             hello = {
-                "version": "1.0",
+                "version": "1.1",
                 "kind": "HELLO",
                 "tenantId": owner.tenant_id,
                 "ownerId": owner.user_id,
@@ -824,13 +911,21 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                     int(challenge["expiresMs"]),
                 )
                 signature = key.sign(payload).hex()
-                await socket.send(json.dumps({"version": "1.0", "kind": "PROOF", "signature": signature}))
+                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": signature}))
                 accepted = decode_frame(await socket.recv(), "ACCEPTED")
                 heartbeat = {
-                    "version": "1.0",
+                    "version": "1.1",
                     "kind": "HEARTBEAT",
                     "generation": accepted["generation"],
                     "sequence": "1",
+                    "signature": key.sign(
+                        b"aiagent-device-heartbeat-candidate-v1"
+                        + digest
+                        + public
+                        + bytes.fromhex(challenge["channelDigest"])
+                        + int(accepted["generation"]).to_bytes(8, "big")
+                        + (1).to_bytes(8, "big")
+                    ).hex(),
                 }
                 await socket.send(json.dumps(heartbeat))
                 assert decode_frame(await socket.recv(), "HEARTBEAT_ACK")["sequence"] == "1"
@@ -840,7 +935,34 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
             async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
                 await socket.send(json.dumps(hello))
                 decode_frame(await socket.recv(), "CHALLENGE")
-                await socket.send(json.dumps({"version": "1.0", "kind": "PROOF", "signature": signature}))
+                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": signature}))
+                with pytest.raises(ConnectionClosed):
+                    await socket.recv()
+            async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(hello))
+                challenge = decode_frame(await socket.recv(), "CHALLENGE")
+                payload = connection_proof_bytes(
+                    digest,
+                    public,
+                    bytes.fromhex(challenge["nonce"]),
+                    bytes.fromhex(challenge["channelDigest"]),
+                    int(challenge["generation"]),
+                    int(challenge["issuedMs"]),
+                    int(challenge["expiresMs"]),
+                )
+                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": key.sign(payload).hex()}))
+                accepted = decode_frame(await socket.recv(), "ACCEPTED")
+                await socket.send(
+                    json.dumps(
+                        {
+                            "version": "1.1",
+                            "kind": "HEARTBEAT",
+                            "generation": accepted["generation"],
+                            "sequence": "1",
+                            "signature": "00" * 64,
+                        }
+                    )
+                )
                 with pytest.raises(ConnectionClosed):
                     await socket.recv()
 

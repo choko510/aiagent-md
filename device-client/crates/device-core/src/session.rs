@@ -135,6 +135,8 @@ async fn receive(
 /// Only an authenticated connection candidate; no grant, action or ONLINE claim.
 pub struct DeviceSession {
     socket: Option<ServerVerifiedSocket>,
+    identity: DeviceIdentity,
+    channel_digest: [u8; 32],
     generation: u64,
     expires_ms: u64,
     sequence: u64,
@@ -144,26 +146,27 @@ pub struct DeviceSession {
 impl DeviceSession {
     pub async fn connect(
         mut socket: ServerVerifiedSocket,
-        identity: &DeviceIdentity,
+        identity: DeviceIdentity,
     ) -> Result<Self, SessionError> {
         if !identity.matches_socket(&socket) {
             return Err(SessionError::SigningDenied);
         }
         let (tenant, owner, id) = identity.connection_scope();
-        send(&mut socket, json!({"version":"1.0", "kind":"HELLO", "tenantId":tenant, "ownerId":owner, "identityId":id}), "HELLO").await?;
+        send(&mut socket, json!({"version":"1.1", "kind":"HELLO", "tenantId":tenant, "ownerId":owner, "identityId":id}), "HELLO").await?;
         let challenge = receive(&mut socket, "CHALLENGE").await?;
         let generation = integer(&challenge, "generation")?;
+        let channel_digest = hex32(field(&challenge, "channelDigest")?)?;
         let signature = identity
             .sign_bound_connection_challenge(
                 &socket,
                 hex32(field(&challenge, "nonce")?)?,
-                hex32(field(&challenge, "channelDigest")?)?,
+                channel_digest,
                 generation,
                 integer(&challenge, "issuedMs")?,
                 integer(&challenge, "expiresMs")?,
             )
             .map_err(|_| SessionError::SigningDenied)?;
-        send(&mut socket, json!({"version":"1.0", "kind":"PROOF", "signature":crate::protocol::hex_digest(&signature)}), "PROOF").await?;
+        send(&mut socket, json!({"version":"1.1", "kind":"PROOF", "signature":crate::protocol::hex_digest(&signature)}), "PROOF").await?;
         let accepted = receive(&mut socket, "ACCEPTED").await?;
         let expires_ms = integer(&accepted, "expiresMs")?;
         let now = now_ms()?;
@@ -175,6 +178,8 @@ impl DeviceSession {
         }
         Ok(Self {
             socket: Some(socket),
+            identity,
+            channel_digest,
             generation,
             expires_ms,
             sequence: 0,
@@ -200,7 +205,11 @@ impl DeviceSession {
             .checked_add(1)
             .filter(|n| *n <= i64::MAX as u64)
             .ok_or(SessionError::InvalidFrame)?;
-        send(&mut socket, json!({"version":"1.0", "kind":"HEARTBEAT", "generation":self.generation.to_string(), "sequence":next.to_string()}), "HEARTBEAT").await?;
+        let signature = self
+            .identity
+            .sign_heartbeat(&socket, self.channel_digest, self.generation, next)
+            .map_err(|_| SessionError::SigningDenied)?;
+        send(&mut socket, json!({"version":"1.1", "kind":"HEARTBEAT", "generation":self.generation.to_string(), "sequence":next.to_string(), "signature":crate::protocol::hex_digest(&signature)}), "HEARTBEAT").await?;
         let ack = receive(&mut socket, "HEARTBEAT_ACK").await?;
         let end_wall = now_ms()?;
         if integer(&ack, "generation")? != self.generation
@@ -244,11 +253,11 @@ mod tests {
     #[test]
     fn strict_schema_rejects_duplicate_unknown_and_overflow() {
         for raw in [
-            r#"{"version":"1.0","version":"1.0","kind":"ACCEPTED","generation":"1","expiresMs":"2"}"#,
+            r#"{"version":"1.1","version":"1.1","kind":"ACCEPTED","generation":"1","expiresMs":"2"}"#,
             r#"{"version":"2.0","kind":"ACCEPTED","generation":"1","expiresMs":"2"}"#,
-            r#"{"version":"1.0","kind":"ACCEPTED","generation":"9223372036854775808","expiresMs":"2"}"#,
-            r#"{"version":"1.0","kind":"ACCEPTED","generation":"1","expiresMs":"2","extra":"x"}"#,
-            r#"{"version":"1.0","kind":"ACCEPTED","generation":1,"expiresMs":"2"}"#,
+            r#"{"version":"1.1","kind":"ACCEPTED","generation":"9223372036854775808","expiresMs":"2"}"#,
+            r#"{"version":"1.1","kind":"ACCEPTED","generation":"1","expiresMs":"2","extra":"x"}"#,
+            r#"{"version":"1.1","kind":"ACCEPTED","generation":1,"expiresMs":"2"}"#,
         ] {
             assert_eq!(decode(raw, "ACCEPTED"), Err(SessionError::InvalidFrame));
         }
@@ -307,7 +316,7 @@ mod tests {
             );
             let issued = now_ms().unwrap();
             let expires = issued + 60_000;
-            ws.send(Message::Text(json!({"version":"1.0", "kind":"CHALLENGE", "nonce":"09".repeat(32),
+            ws.send(Message::Text(json!({"version":"1.1", "kind":"CHALLENGE", "nonce":"09".repeat(32),
                 "channelDigest":"08".repeat(32), "generation":"1", "issuedMs":issued.to_string(), "expiresMs":expires.to_string()}).to_string().into())).await.unwrap();
             let proof = decode(
                 &ws.next().await.unwrap().unwrap().into_text().unwrap(),
@@ -331,15 +340,33 @@ mod tests {
                 .unwrap()
                 .verify_strict(&payload, &Signature::from_bytes(&signature))
                 .unwrap();
-            ws.send(Message::Text(json!({"version":"1.0", "kind":"ACCEPTED", "generation":"1", "expiresMs":(issued+120_000).to_string()}).to_string().into())).await.unwrap();
+            ws.send(Message::Text(json!({"version":"1.1", "kind":"ACCEPTED", "generation":"1", "expiresMs":(issued+120_000).to_string()}).to_string().into())).await.unwrap();
             let heartbeat = decode(
                 &ws.next().await.unwrap().unwrap().into_text().unwrap(),
                 "HEARTBEAT",
             )
             .unwrap();
             assert_eq!(field(&heartbeat, "sequence").unwrap(), "1");
+            let heartbeat_sig = field(&heartbeat, "signature").unwrap();
+            let mut heartbeat_signature = [0u8; 64];
+            for (index, byte) in heartbeat_signature.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&heartbeat_sig[index * 2..index * 2 + 2], 16).unwrap();
+            }
+            let mut heartbeat_payload = b"aiagent-device-heartbeat-candidate-v1".to_vec();
+            heartbeat_payload.extend_from_slice(&binding);
+            heartbeat_payload.extend_from_slice(&public);
+            heartbeat_payload.extend_from_slice(&[8; 32]);
+            heartbeat_payload.extend_from_slice(&1u64.to_be_bytes());
+            heartbeat_payload.extend_from_slice(&1u64.to_be_bytes());
+            VerifyingKey::from_bytes(&public)
+                .unwrap()
+                .verify_strict(
+                    &heartbeat_payload,
+                    &Signature::from_bytes(&heartbeat_signature),
+                )
+                .unwrap();
             ws.send(Message::Text(
-                json!({"version":"1.0", "kind":"HEARTBEAT_ACK", "generation":"1", "sequence":"1"})
+                json!({"version":"1.1", "kind":"HEARTBEAT_ACK", "generation":"1", "sequence":"1"})
                     .to_string()
                     .into(),
             ))
@@ -352,7 +379,7 @@ mod tests {
             .unwrap();
             assert_eq!(field(&second, "sequence").unwrap(), "2");
             ws.send(Message::Text(
-                json!({"version":"1.0", "kind":"HEARTBEAT_ACK", "generation":"1", "sequence":"1"})
+                json!({"version":"1.1", "kind":"HEARTBEAT_ACK", "generation":"1", "sequence":"1"})
                     .to_string()
                     .into(),
             ))
@@ -370,7 +397,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            DeviceSession::connect(wrong_socket, &wrong).await,
+            DeviceSession::connect(wrong_socket, wrong).await,
             Err(SessionError::SigningDenied)
         ));
         let socket = ServerVerifiedSocket::connect_with_test_ca(
@@ -379,7 +406,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut session = DeviceSession::connect(socket, &identity).await.unwrap();
+        let mut session = DeviceSession::connect(socket, identity).await.unwrap();
         session.heartbeat().await.unwrap();
         assert_eq!(session.heartbeat().await, Err(SessionError::InvalidFrame));
         assert_eq!(session.heartbeat().await, Err(SessionError::Offline));

@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if line.trim() != "CONTINUE" {
         return Err("FIXTURE_STOPPED".into());
     }
-    let mut session = DeviceSession::connect(socket, &identity)
+    let mut session = DeviceSession::connect(socket, identity)
         .await
         .map_err(|_| "CONNECT_FAILED")?;
     session.heartbeat().await.map_err(|_| "HEARTBEAT_FAILED")?;

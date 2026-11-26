@@ -162,6 +162,31 @@ impl DeviceIdentity {
         self.binding.digest()
     }
 
+    pub(crate) fn sign_heartbeat(
+        &self,
+        socket: &aiagent_device_transport::ServerVerifiedSocket,
+        channel: [u8; 32],
+        generation: u64,
+        sequence: u64,
+    ) -> Result<[u8; 64], &'static str> {
+        if !self.matches_socket(socket)
+            || channel == [0; 32]
+            || generation == 0
+            || sequence == 0
+            || generation > i64::MAX as u64
+            || sequence > i64::MAX as u64
+        {
+            return Err("INVALID_HEARTBEAT");
+        }
+        let mut message = b"aiagent-device-heartbeat-candidate-v1".to_vec();
+        message.extend_from_slice(&self.binding_digest());
+        message.extend_from_slice(&self.public_key());
+        message.extend_from_slice(&channel);
+        message.extend_from_slice(&generation.to_be_bytes());
+        message.extend_from_slice(&sequence.to_be_bytes());
+        Ok(self.key.sign(&message).to_bytes())
+    }
+
     /// Candidate pairing possession proof; not a Tool grant or authorization.
     /// The caller must receive the challenge over a verified server connection.
     pub fn sign_pairing_challenge(

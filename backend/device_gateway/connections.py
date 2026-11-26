@@ -20,6 +20,7 @@ from nacl.signing import VerifyKey
 from .pairing import AuthenticatedScope, PairingService
 
 DOMAIN = b"aiagent-device-connect-proof-candidate-v2"
+HEARTBEAT_DOMAIN = b"aiagent-device-heartbeat-candidate-v1"
 CHALLENGE_TTL_MS = 60_000
 SESSION_TTL_MS = 120_000
 INT64_MAX = 2**63 - 1
@@ -259,7 +260,7 @@ class ConnectionService:
                         "restore_incarnation, revocation_generation, valid) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true) "
                         "ON CONFLICT(identity_id) DO UPDATE SET generation=excluded.generation, "
                         "token_digest=excluded.token_digest, channel_digest=excluded.channel_digest, expires_ms=excluded.expires_ms, "
-                        "last_heartbeat_ms=excluded.last_heartbeat_ms, restore_incarnation=excluded.restore_incarnation, "
+                        "last_heartbeat_ms=excluded.last_heartbeat_ms, heartbeat_sequence=0, restore_incarnation=excluded.restore_incarnation, "
                         "revocation_generation=excluded.revocation_generation, valid=true",
                         (
                             tenant_hint,
@@ -279,7 +280,7 @@ class ConnectionService:
             raise ConnectionRejected()
         return result
 
-    def heartbeat(
+    def _heartbeat_unchecked_for_tests(
         self,
         tenant_hint: str,
         owner_hint: str,
@@ -288,6 +289,7 @@ class ConnectionService:
         generation: int,
         token: bytes,
     ) -> None:
+        """Legacy database guard regression tests only; never use for network traffic."""
         accepted = False
         with self._pairing._connect() as conn, conn.transaction():
             self._pairing._scope(conn, tenant_hint, owner_hint)
@@ -322,6 +324,73 @@ class ConnectionService:
                     (now, identity_id),
                 )
                 accepted = True
+        if not accepted:
+            raise ConnectionRejected()
+
+    def signed_heartbeat(
+        self,
+        tenant: str,
+        owner: str,
+        identity_id: uuid.UUID,
+        channel: ConnectionChannel,
+        generation: int,
+        token: bytes,
+        sequence: int,
+        signature: bytes,
+    ) -> None:
+        accepted = False
+        with self._pairing._connect() as conn, conn.transaction():
+            self._pairing._scope(conn, tenant, owner)
+            row = conn.execute(
+                "SELECT i.revoked, i.revocation_generation AS current_revocation, i.connection_generation, "
+                "i.authority_incarnation, i.public_key, i.binding_digest, s.* FROM device_gateway.device_identities i "
+                "JOIN device_gateway.connection_sessions s ON (i.tenant_id,i.owner_id,i.id)=(s.tenant_id,s.owner_id,s.identity_id) "
+                "WHERE i.id=%s AND i.tenant_id=%s AND i.owner_id=%s FOR UPDATE OF i,s",
+                (identity_id, tenant, owner),
+            ).fetchone()
+            now = self._pairing._now(conn)
+            if (
+                row is not None
+                and channel._active(tenant, owner, identity_id)
+                and type(generation) is int
+                and type(sequence) is int
+                and 0 < generation <= INT64_MAX
+                and 0 < sequence <= INT64_MAX
+                and isinstance(token, bytes)
+                and len(token) == 32
+                and isinstance(signature, bytes)
+                and len(signature) == 64
+                and row["valid"]
+                and not row["revoked"]
+                and row["authority_incarnation"] == self._restore
+                and row["last_heartbeat_ms"] <= now < row["expires_ms"]
+                and row["generation"] == generation == row["connection_generation"]
+                and sequence == row["heartbeat_sequence"] + 1
+                and row["restore_incarnation"] == self._restore
+                and row["revocation_generation"] == row["current_revocation"]
+                and hmac.compare_digest(row["channel_digest"], channel._digest)
+                and hmac.compare_digest(hashlib.sha256(token).digest(), row["token_digest"])
+            ):
+                message = (
+                    HEARTBEAT_DOMAIN
+                    + row["binding_digest"]
+                    + row["public_key"]
+                    + channel._digest
+                    + generation.to_bytes(8, "big")
+                    + sequence.to_bytes(8, "big")
+                )
+                try:
+                    if not crypto_core_ed25519_is_valid_point(row["public_key"]):
+                        raise ConnectionRejected()
+                    VerifyKey(row["public_key"]).verify(message, signature)
+                except (ValueError, BadSignatureError, CryptoError, ConnectionRejected):
+                    pass
+                else:
+                    conn.execute(
+                        "UPDATE device_gateway.connection_sessions SET last_heartbeat_ms=%s, heartbeat_sequence=%s WHERE identity_id=%s",
+                        (now, sequence, identity_id),
+                    )
+                    accepted = True
         if not accepted:
             raise ConnectionRejected()
 
