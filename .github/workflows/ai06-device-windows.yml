@@ -77,4 +77,4 @@ jobs:
           uv run --isolated --no-project --python 3.13 --with mypy==2.4.1
           --with-requirements backend/device_gateway/requirements-test.lock
           python -m mypy --strict --follow-imports=skip --ignore-missing-imports
-          backend/device_gateway/pairing.py backend/device_gateway/connections.py
+          backend/device_gateway/pairing.py backend/device_gateway/connections.py backend/device_gateway/wss.py

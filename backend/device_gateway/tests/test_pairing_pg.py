@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import hashlib
 import json
 import os
 import secrets
+import ssl
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -21,10 +24,16 @@ from backend.device_gateway.connections import (
     connection_proof_bytes,
 )
 from backend.device_gateway.pairing import PairingRejected, PairingService, pairing_proof_bytes
-from cryptography.hazmat.primitives import serialization
+from backend.device_gateway.wss import DeviceWss, InvalidFrame, decode_frame
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.x509.oid import NameOID
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 
 @dataclass(frozen=True)
@@ -729,3 +738,109 @@ def test_concurrent_channel_binding_has_one_owner(service: PairingService) -> No
         first = pool.submit(attempt, alice, alice_id)
         second = pool.submit(attempt, bob, bob_id)
         assert sorted([first.result(), second.result()]) == [False, True]
+
+
+def test_wss_frame_validation_rejects_duplicates_and_unknown_versions() -> None:
+    for raw in (
+        '{"version":"1.0","version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
+        '{"version":"2.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
+        '{"version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '","extra":1}',
+    ):
+        with pytest.raises(InvalidFrame):
+            decode_frame(raw, "PROOF")
+    for sequence in ("0", "01", "9223372036854775808", "1\n"):
+        with pytest.raises(InvalidFrame):
+            decode_frame(
+                json.dumps({"version": "1.0", "kind": "HEARTBEAT", "generation": "1", "sequence": sequence}),
+                "HEARTBEAT",
+            )
+    with pytest.raises(InvalidFrame):
+        decode_frame(b"{}", "PROOF")
+    with pytest.raises(InvalidFrame):
+        decode_frame('{"version":"1.0","kind":"ACTION_OFFER"}', "HEARTBEAT")
+
+
+def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingService, tmp_path: Path) -> None:
+    owner = make_scope()
+    identity_id, key, public, digest = registered_device(service, owner)
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(private.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=5))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+        .sign(private, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "test-cert.pem", tmp_path / "test-key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
+    )
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(cert_path, key_path)
+    client_tls = ssl.create_default_context(cafile=str(cert_path))
+    gateway = DeviceWss(ConnectionService(service, 1))
+
+    async def exercise() -> None:
+        with pytest.raises(ValueError):
+            gateway.listen("127.0.0.1", 0, server_tls)
+        with pytest.raises(ValueError):
+            gateway.listen("0.0.0.0", 0, server_tls, development_only=True)  # noqa: S104 -- rejection test
+        async with gateway.listen("127.0.0.1", 0, server_tls, development_only=True) as server:
+            port = server.sockets[0].getsockname()[1]
+            url = f"wss://localhost:{port}/v1/device/connect"
+            with pytest.raises(ssl.SSLCertVerificationError):
+                async with connect(f"wss://127.0.0.1:{port}/v1/device/connect", ssl=client_tls, proxy=None):
+                    pass
+            with pytest.raises(ssl.SSLCertVerificationError):
+                async with connect(url, ssl=ssl.create_default_context(), proxy=None):
+                    pass
+            hello = {
+                "version": "1.0",
+                "kind": "HELLO",
+                "tenantId": owner.tenant_id,
+                "ownerId": owner.user_id,
+                "identityId": str(identity_id),
+            }
+            async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(hello))
+                challenge = decode_frame(await socket.recv(), "CHALLENGE")
+                payload = connection_proof_bytes(
+                    digest,
+                    public,
+                    bytes.fromhex(challenge["nonce"]),
+                    bytes.fromhex(challenge["channelDigest"]),
+                    int(challenge["generation"]),
+                    int(challenge["issuedMs"]),
+                    int(challenge["expiresMs"]),
+                )
+                signature = key.sign(payload).hex()
+                await socket.send(json.dumps({"version": "1.0", "kind": "PROOF", "signature": signature}))
+                accepted = decode_frame(await socket.recv(), "ACCEPTED")
+                heartbeat = {
+                    "version": "1.0",
+                    "kind": "HEARTBEAT",
+                    "generation": accepted["generation"],
+                    "sequence": "1",
+                }
+                await socket.send(json.dumps(heartbeat))
+                assert decode_frame(await socket.recv(), "HEARTBEAT_ACK")["sequence"] == "1"
+                await socket.send(json.dumps(heartbeat))
+                with pytest.raises(ConnectionClosed):
+                    await socket.recv()
+            async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(hello))
+                decode_frame(await socket.recv(), "CHALLENGE")
+                await socket.send(json.dumps({"version": "1.0", "kind": "PROOF", "signature": signature}))
+                with pytest.raises(ConnectionClosed):
+                    await socket.recv()
+
+    asyncio.run(exercise())
