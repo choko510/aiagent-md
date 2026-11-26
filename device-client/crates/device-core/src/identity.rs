@@ -208,6 +208,64 @@ impl DeviceIdentity {
         )
     }
 
+    /// Candidate v2 binds the proof to a server-generated per-socket value.
+    /// The caller must verify the TLS origin against this identity before signing.
+    pub fn sign_bound_connection_challenge(
+        &self,
+        nonce: [u8; 32],
+        channel_digest: [u8; 32],
+        generation: u64,
+        issued: u64,
+        expires: u64,
+    ) -> Result<[u8; 64], &'static str> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "CLOCK_UNAVAILABLE")?
+            .as_millis();
+        self.sign_bound_at(
+            nonce,
+            channel_digest,
+            generation,
+            issued,
+            expires,
+            u64::try_from(now).map_err(|_| "CLOCK_UNAVAILABLE")?,
+        )
+    }
+
+    fn sign_bound_at(
+        &self,
+        nonce: [u8; 32],
+        channel_digest: [u8; 32],
+        generation: u64,
+        issued: u64,
+        expires: u64,
+        now: u64,
+    ) -> Result<[u8; 64], &'static str> {
+        if nonce == [0; 32]
+            || channel_digest == [0; 32]
+            || generation == 0
+            || generation > i64::MAX as u64
+            || issued > i64::MAX as u64
+            || expires > i64::MAX as u64
+            || issued > now.saturating_add(5_000)
+            || issued < now.saturating_sub(60_000)
+            || expires <= now
+            || expires <= issued
+            || expires.saturating_sub(issued) > 60_000
+        {
+            return Err("INVALID_CHALLENGE");
+        }
+        let mut message = b"aiagent-device-connect-proof-candidate-v2".to_vec();
+        message.extend_from_slice(&self.binding.digest());
+        message.extend_from_slice(&self.public_key());
+        message.extend_from_slice(&nonce);
+        message.extend_from_slice(&channel_digest);
+        message.extend_from_slice(&generation.to_be_bytes());
+        message.extend_from_slice(&issued.to_be_bytes());
+        message.extend_from_slice(&expires.to_be_bytes());
+        Ok(self.key.sign(&message).to_bytes())
+    }
+
     fn sign_at(
         &self,
         nonce: [u8; 32],
@@ -460,6 +518,19 @@ mod tests {
             crate::protocol::hex_digest(&sig),
             vector["signatureHex"].as_str().unwrap()
         );
+        let v2: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/connection-proof-v2.json"))
+                .unwrap();
+        let bound = identity
+            .sign_bound_at([9; 32], [8; 32], 4, 1_000, 31_000, 2_000)
+            .unwrap();
+        assert_eq!(
+            crate::protocol::hex_digest(&bound),
+            v2["signatureHex"].as_str().unwrap()
+        );
+        assert!(identity
+            .sign_bound_at([9; 32], [0; 32], 4, 1_000, 31_000, 2_000)
+            .is_err());
         let mut message = b"aiagent-device-connect-proof-candidate-v1".to_vec();
         message.extend_from_slice(&identity.binding.digest());
         message.extend_from_slice(&identity.public_key());

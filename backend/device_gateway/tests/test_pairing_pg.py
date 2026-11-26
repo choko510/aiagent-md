@@ -14,7 +14,12 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from backend.device_gateway.connections import ConnectionRejected, ConnectionService, connection_proof_bytes
+from backend.device_gateway.connections import (
+    ConnectionChannel,
+    ConnectionRejected,
+    ConnectionService,
+    connection_proof_bytes,
+)
 from backend.device_gateway.pairing import PairingRejected, PairingService, pairing_proof_bytes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -52,16 +57,34 @@ def test_unpatched_ed25519_backend_cannot_start(monkeypatch: pytest.MonkeyPatch)
 
 def test_rust_and_python_share_connection_proof_vector() -> None:
     vector = json.loads(
-        (Path(__file__).resolve().parents[3] / "device-client/fixtures/connection-proof-v1.json").read_text()
+        (Path(__file__).resolve().parents[3] / "device-client/fixtures/connection-proof-v2.json").read_text()
     )
     public = bytes.fromhex(vector["publicKeyHex"])
     payload = connection_proof_bytes(
         bytes.fromhex(vector["bindingDigestHex"]),
         public,
         bytes.fromhex(vector["nonceHex"]),
+        bytes.fromhex(vector["channelDigestHex"]),
         int(vector["generation"]),
         int(vector["issuedMs"]),
         int(vector["expiresMs"]),
+    )
+    Ed25519PublicKey.from_public_bytes(public).verify(bytes.fromhex(vector["signatureHex"]), payload)
+
+
+def test_legacy_connection_vector_remains_verifiable_but_is_not_v2() -> None:
+    vector = json.loads(
+        (Path(__file__).resolve().parents[3] / "device-client/fixtures/connection-proof-v1.json").read_text()
+    )
+    public = bytes.fromhex(vector["publicKeyHex"])
+    payload = (
+        b"aiagent-device-connect-proof-candidate-v1"
+        + bytes.fromhex(vector["bindingDigestHex"])
+        + public
+        + bytes.fromhex(vector["nonceHex"])
+        + int(vector["generation"]).to_bytes(8, "big")
+        + int(vector["issuedMs"]).to_bytes(8, "big")
+        + int(vector["expiresMs"]).to_bytes(8, "big")
     )
     Ed25519PublicKey.from_public_bytes(public).verify(bytes.fromhex(vector["signatureHex"]), payload)
 
@@ -311,18 +334,38 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
     owner = make_scope()
     identity_id, key, public, digest = registered_device(service, owner)
     gateway = ConnectionService(service, 7)
-    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
-    assert challenge == gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+    channel = ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
+    assert challenge == gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     message = connection_proof_bytes(
-        digest, public, challenge.nonce, challenge.generation, challenge.issued_ms, challenge.expires_ms
+        digest,
+        public,
+        challenge.nonce,
+        challenge.channel_digest,
+        challenge.generation,
+        challenge.issued_ms,
+        challenge.expires_ms,
     )
     with pytest.raises(ConnectionRejected):
-        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, bytes(64))
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, bytes(64))
+    legacy = (
+        b"aiagent-device-connect-proof-candidate-v1"
+        + digest
+        + public
+        + challenge.nonce
+        + challenge.generation.to_bytes(8, "big")
+        + challenge.issued_ms.to_bytes(8, "big")
+        + challenge.expires_ms.to_bytes(8, "big")
+    )
+    with pytest.raises(ConnectionRejected):
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, key.sign(legacy))
     signature = key.sign(message)
+    with pytest.raises(ConnectionRejected):
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, ConnectionChannel(), signature)
 
     def attempt():
         try:
-            return gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+            return gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
         except ConnectionRejected:
             return None
 
@@ -332,7 +375,7 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
     assert len(sessions) == 1
     session = sessions[0]
     assert session.token.hex() not in repr(session)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
+    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         row = conn.execute(
@@ -354,18 +397,30 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
         (str(uuid.uuid4()), owner.user_id, session.generation, session.token),
     ]:
         with pytest.raises(ConnectionRejected):
-            gateway.heartbeat(tenant, user, identity_id, generation, token)
-    reconnect = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+            gateway.heartbeat(tenant, user, identity_id, channel, generation, token)
+    other_channel = ConnectionChannel()
+    with pytest.raises(ConnectionRejected):
+        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, session.generation, session.token)
+    reconnect = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, other_channel)
     assert reconnect.generation == session.generation + 1
     second_sig = key.sign(
         connection_proof_bytes(
-            digest, public, reconnect.nonce, reconnect.generation, reconnect.issued_ms, reconnect.expires_ms
+            digest,
+            public,
+            reconnect.nonce,
+            reconnect.channel_digest,
+            reconnect.generation,
+            reconnect.issued_ms,
+            reconnect.expires_ms,
         )
     )
-    second = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, second_sig)
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, second.generation, second.token)
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, second_sig)
+    second = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, other_channel, second_sig)
+    with pytest.raises(ConnectionRejected):
+        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    gateway.disconnect(owner.tenant_id, owner.user_id, identity_id, channel)
+    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token)
     with pytest.raises(ConnectionRejected):
         gateway.revoke(Scope(owner.tenant_id, str(uuid.uuid4())), identity_id)
     gateway.revoke(owner, identity_id)
@@ -377,66 +432,81 @@ def test_connection_challenge_single_use_generation_and_revocation(service: Pair
         ).fetchone()
         assert row == {"revoked": True, "revocation_generation": 1}
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, second.generation, second.token)
+        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, other_channel, second.generation, second.token)
     with pytest.raises(ConnectionRejected):
-        gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
 
 
 def test_new_generation_expires_and_rejects_old_restore_incarnation(service: PairingService) -> None:
     owner = make_scope()
     identity_id, key, public, digest = registered_device(service, owner)
     gateway = ConnectionService(service, 1)
-    first = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+    channel = ConnectionChannel()
+    first = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     signature = key.sign(
-        connection_proof_bytes(digest, public, first.nonce, first.generation, first.issued_ms, first.expires_ms)
+        connection_proof_bytes(
+            digest, public, first.nonce, first.channel_digest, first.generation, first.issued_ms, first.expires_ms
+        )
     )
-    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     restarted = ConnectionService(service, 2)
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
-    next_challenge = restarted.challenge(owner.tenant_id, owner.user_id, identity_id)
+        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    next_challenge = restarted.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     assert next_challenge.generation == session.generation + 1
     with pytest.raises(ConnectionRejected):
-        gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     with pytest.raises(ConnectionRejected):
-        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     with pytest.raises(ConnectionRejected):
-        restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+        restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     next_signature = key.sign(
         connection_proof_bytes(
             digest,
             public,
             next_challenge.nonce,
+            next_challenge.channel_digest,
             next_challenge.generation,
             next_challenge.issued_ms,
             next_challenge.expires_ms,
         )
     )
-    next_session = restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, next_signature)
+    next_session = restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, next_signature)
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
-    restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, next_session.generation, next_session.token)
+        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    restarted.heartbeat(
+        owner.tenant_id, owner.user_id, identity_id, channel, next_session.generation, next_session.token
+    )
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         conn.execute("UPDATE device_gateway.connection_sessions SET expires_ms=0 WHERE identity_id=%s", (identity_id,))
     with pytest.raises(ConnectionRejected):
-        restarted.heartbeat(owner.tenant_id, owner.user_id, identity_id, next_session.generation, next_session.token)
+        restarted.heartbeat(
+            owner.tenant_id, owner.user_id, identity_id, channel, next_session.generation, next_session.token
+        )
 
 
 def test_revocation_races_authentication_without_live_session(service: PairingService) -> None:
     owner = make_scope()
     identity_id, key, public, digest = registered_device(service, owner)
     gateway = ConnectionService(service, 1)
-    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+    channel = ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     signature = key.sign(
         connection_proof_bytes(
-            digest, public, challenge.nonce, challenge.generation, challenge.issued_ms, challenge.expires_ms
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
         )
     )
 
     def authenticate():
         try:
-            return gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+            return gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
         except ConnectionRejected:
             return None
 
@@ -447,19 +517,26 @@ def test_revocation_races_authentication_without_live_session(service: PairingSe
         revoke_future.result()
     if session is not None:
         with pytest.raises(ConnectionRejected):
-            gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
+            gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
     with pytest.raises(ConnectionRejected):
-        gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
 
 
 def test_connection_rejects_expired_or_future_challenges_and_rolled_back_clock(service: PairingService) -> None:
     owner = make_scope()
     identity_id, key, public, digest = registered_device(service, owner)
     gateway = ConnectionService(service, 1)
-    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+    channel = ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     signature = key.sign(
         connection_proof_bytes(
-            digest, public, challenge.nonce, challenge.generation, challenge.issued_ms, challenge.expires_ms
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
         )
     )
     with service._connect() as conn, conn.transaction():
@@ -470,9 +547,9 @@ def test_connection_rejects_expired_or_future_challenges_and_rolled_back_clock(s
             (identity_id,),
         )
     with pytest.raises(ConnectionRejected):
-        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     with pytest.raises(ConnectionRejected):
-        gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         conn.execute(
@@ -480,12 +557,14 @@ def test_connection_rejects_expired_or_future_challenges_and_rolled_back_clock(s
             (identity_id,),
         )
     with pytest.raises(ConnectionRejected):
-        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
-    fresh = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
+    fresh = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     signature = key.sign(
-        connection_proof_bytes(digest, public, fresh.nonce, fresh.generation, fresh.issued_ms, fresh.expires_ms)
+        connection_proof_bytes(
+            digest, public, fresh.nonce, fresh.channel_digest, fresh.generation, fresh.issued_ms, fresh.expires_ms
+        )
     )
-    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     with service._connect() as conn, conn.transaction():
         service._scope(conn, owner.tenant_id, owner.user_id)
         conn.execute(
@@ -494,17 +573,24 @@ def test_connection_rejects_expired_or_future_challenges_and_rolled_back_clock(s
             (identity_id,),
         )
     with pytest.raises(ConnectionRejected):
-        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
+        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
 
 
 def test_failed_session_commit_does_not_consume_challenge(service: PairingService) -> None:
     owner = make_scope()
     identity_id, key, public, digest = registered_device(service, owner)
     gateway = ConnectionService(service, 1)
-    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id)
+    channel = ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     signature = key.sign(
         connection_proof_bytes(
-            digest, public, challenge.nonce, challenge.generation, challenge.issued_ms, challenge.expires_ms
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
         )
     )
     admin_dsn = os.environ["AIAGENT_DEVICE_TEST_ADMIN_DSN"]
@@ -519,7 +605,7 @@ def test_failed_session_commit_does_not_consume_challenge(service: PairingServic
         )
     try:
         with pytest.raises(psycopg.Error):
-            gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
+            gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
         with service._connect() as conn, conn.transaction():
             service._scope(conn, owner.tenant_id, owner.user_id)
             row = conn.execute(
@@ -534,5 +620,68 @@ def test_failed_session_commit_does_not_consume_challenge(service: PairingServic
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
             conn.execute("DROP TRIGGER reject_session ON device_gateway.connection_sessions")
             conn.execute("DROP FUNCTION device_gateway.reject_session()")
-    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, signature)
-    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, session.generation, session.token)
+    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
+    gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+
+
+def test_challenge_replay_on_new_channel_and_disconnect_are_rejected(service: PairingService) -> None:
+    owner = make_scope()
+    identity_id, key, public, digest = registered_device(service, owner)
+    gateway = ConnectionService(service, 1)
+    old, new = ConnectionChannel(), ConnectionChannel()
+    first = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, old)
+    signature = key.sign(
+        connection_proof_bytes(
+            digest, public, first.nonce, first.channel_digest, first.generation, first.issued_ms, first.expires_ms
+        )
+    )
+    second = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, new)
+    assert first.nonce != second.nonce
+    with pytest.raises(ConnectionRejected):
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, new, signature)
+    fresh_sig = key.sign(
+        connection_proof_bytes(
+            digest, public, second.nonce, second.channel_digest, second.generation, second.issued_ms, second.expires_ms
+        )
+    )
+    session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, new, fresh_sig)
+    gateway.disconnect(owner.tenant_id, owner.user_id, identity_id, new)
+    with pytest.raises(ConnectionRejected):
+        gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, new, session.generation, session.token)
+    with pytest.raises(ConnectionRejected):
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, new)
+
+
+def test_disconnect_races_authentication_without_live_session(service: PairingService) -> None:
+    owner = make_scope()
+    identity_id, key, public, digest = registered_device(service, owner)
+    gateway, channel = ConnectionService(service, 1), ConnectionChannel()
+    challenge = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
+    signature = key.sign(
+        connection_proof_bytes(
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
+        )
+    )
+
+    def authenticate():
+        try:
+            return gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
+        except ConnectionRejected:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        auth_future = pool.submit(authenticate)
+        close_future = pool.submit(gateway.disconnect, owner.tenant_id, owner.user_id, identity_id, channel)
+        session = auth_future.result()
+        close_future.result()
+    if session is not None:
+        with pytest.raises(ConnectionRejected):
+            gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
+    with pytest.raises(ConnectionRejected):
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
