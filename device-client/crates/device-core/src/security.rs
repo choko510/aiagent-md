@@ -748,6 +748,7 @@ mod windows_acl {
 
     pub fn restrict_owner_only(path: &Path, is_dir: bool) -> Result<(), String> {
         let sid = current_user_sid_string()?;
+        let owner_sid = current_user_sid_bytes()?;
         let sddl = if is_dir {
             format!("D:P(A;OICI;FA;;;{sid})")
         } else {
@@ -786,8 +787,10 @@ mod windows_acl {
             SetNamedSecurityInfoW(
                 path_w.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                core::ptr::null_mut(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                owner_sid.as_ptr() as *mut c_void,
                 core::ptr::null_mut(),
                 dacl,
                 core::ptr::null_mut(),
