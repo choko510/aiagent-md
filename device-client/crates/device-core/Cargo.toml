@@ -5,6 +5,13 @@ edition = "2021"
 license = "MIT"
 description = "Fail-closed local device simulation; not a production gateway"
 
+[features]
+integration-fixture = ["aiagent-device-transport/test-ca"]
+
+[[example]]
+name = "cross_gateway_fixture"
+required-features = ["integration-fixture"]
+
 [dependencies]
 aiagent-device-transport = { path = "../device-transport" }
 chacha20poly1305 = "=0.10.1"

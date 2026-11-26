@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import ssl
+import sys
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -842,5 +843,102 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 await socket.send(json.dumps({"version": "1.0", "kind": "PROOF", "signature": signature}))
                 with pytest.raises(ConnectionClosed):
                     await socket.recv()
+
+    asyncio.run(exercise())
+
+
+def test_windows_rust_dpapi_client_to_python_gateway(service: PairingService, tmp_path: Path) -> None:
+    exe = os.environ.get("AIAGENT_RUST_TEST_CLIENT")
+    if sys.platform != "win32" or not exe:
+        pytest.skip("requires explicitly built Windows DPAPI integration fixture")
+    owner = make_scope()
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(private.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=5))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+        .sign(private, hashes.SHA256())
+    )
+    cert_pem, cert_der, key_path = tmp_path / "cert.pem", tmp_path / "cert.der", tmp_path / "key.pem"
+    cert_pem.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    cert_der.write_bytes(cert.public_bytes(serialization.Encoding.DER))
+    key_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
+    )
+    root = tmp_path / "identity-root"
+    root.mkdir()
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(cert_pem, key_path)
+
+    async def exercise() -> None:
+        gateway = DeviceWss(ConnectionService(service, 1))
+        async with gateway.listen("127.0.0.1", 0, server_tls, development_only=True) as server:
+            port = server.sockets[0].getsockname()[1]
+            origin = f"https://localhost:{port}"
+            scoped = PairingService(service._dsn, origin, bytes(range(32)))
+            ticket = await asyncio.to_thread(scoped.begin, owner)
+            proc = await asyncio.create_subprocess_exec(
+                exe, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+                config = {
+                    "tenant": owner.tenant_id,
+                    "owner": owner.user_id,
+                    "identity": str(ticket.identity_id),
+                    "device": str(ticket.device_id),
+                    "origin": origin,
+                    "url": f"wss://localhost:{port}/v1/device/connect",
+                    "certDer": str(cert_der),
+                    "root": str(root),
+                    "pairingIdHex": ticket.pairing_id.hex,
+                    "nonceHex": ticket.nonce.hex(),
+                    "issuedMs": str(ticket.issued_ms),
+                    "expiresMs": str(ticket.expires_ms),
+                }
+                proc.stdin.write((json.dumps(config) + "\n").encode())
+                await proc.stdin.drain()
+                proof = json.loads(await asyncio.wait_for(proc.stdout.readline(), 20))
+                assert proof["kind"] == "PROOF"
+                public, binding, signature = (bytes.fromhex(proof[k]) for k in ("public", "binding", "signature"))
+                code = await asyncio.to_thread(
+                    scoped.attach,
+                    owner.tenant_id,
+                    owner.user_id,
+                    ticket.pairing_id,
+                    ticket.token,
+                    public,
+                    binding,
+                    signature,
+                )
+                await asyncio.to_thread(
+                    scoped.approve, owner, ticket.pairing_id, code.code, code.public_key_sha256, binding
+                )
+                assert await asyncio.to_thread(
+                    scoped.consume, owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token
+                ) == (ticket.identity_id, ticket.device_id)
+                proc.stdin.write(b"CONTINUE\n")
+                await proc.stdin.drain()
+                assert json.loads(await asyncio.wait_for(proc.stdout.readline(), 20)) == {"kind": "OK"}
+                assert await asyncio.wait_for(proc.wait(), 20) == 0
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+        with service._connect() as conn, conn.transaction():
+            service._scope(conn, owner.tenant_id, owner.user_id)
+            state = conn.execute(
+                "SELECT valid FROM device_gateway.connection_sessions WHERE identity_id=%s", (ticket.identity_id,)
+            ).fetchone()
+            assert state is not None and state["valid"] is False
 
     asyncio.run(exercise())

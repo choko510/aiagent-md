@@ -34,6 +34,11 @@ jobs:
         run: cargo check --workspace --locked
       - name: Windows Tauri executable build (no installer or signing)
         run: cargo build -p aiagent-device-desktop --locked
+      - name: Build and lint the debug-only Windows integration fixture
+        run: |
+          cargo clippy -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked
   linux-core:
     runs-on: ubuntu-latest
     timeout-minutes: 30
