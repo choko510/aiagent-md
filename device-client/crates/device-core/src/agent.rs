@@ -307,6 +307,9 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             Ok(BeginResult::IntentConflict) => return Decision::IntentConflict,
             Ok(BeginResult::GrantReused) => return Decision::GrantReused,
             Ok(BeginResult::PermitReused) => return Decision::PermitReused,
+            Err(error) if error == "LOCAL_STOP_OR_REVOKED" => {
+                return Decision::Denied("LOCAL_STOP_OR_REVOKED");
+            }
             Err(_) => return Decision::StorageError,
             Ok(BeginResult::StartedNew) => {}
         }

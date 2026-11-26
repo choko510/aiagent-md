@@ -72,6 +72,30 @@ fn new_agent(path: &std::path::Path, owner: &str) -> Agent<MockChannel, MockAdap
         LocalJournal::open(path, &scope(owner)).unwrap(),
     )
 }
+
+#[test]
+fn persisted_stop_from_another_process_blocks_stale_agent() {
+    use aiagent_device_core::ControlRecord;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut agent = new_agent(&path, "A");
+    let mut other = LocalJournal::open(&path, &scope("A")).unwrap();
+    other
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: false,
+            audit: vec![],
+        })
+        .unwrap();
+    let req = request("A", "intent-stop", Operation::DesktopClick);
+    let grant = mock_grant(&req, "grant-stop", 200);
+    assert_eq!(
+        agent.execute(&req, &grant, 100),
+        Decision::Denied("LOCAL_STOP_OR_REVOKED")
+    );
+    assert_eq!(agent.adapters.calls, 0);
+    assert!(agent.effect("intent-stop").unwrap().is_none());
+}
 #[test]
 fn canonical_epochs_are_decimal_strings_not_numbers() {
     assert_eq!(
