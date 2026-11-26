@@ -121,7 +121,37 @@ pub struct DeviceIdentity {
     key: SigningKey,
 }
 
+#[cfg(test)]
+pub(crate) fn test_identity_for_origin(origin: &str) -> DeviceIdentity {
+    DeviceIdentity {
+        binding: IdentityBinding::from_parts(
+            "sid",
+            "tenant",
+            "owner",
+            "01010101-0101-0101-0101-010101010101",
+            "device",
+            origin,
+            0,
+        )
+        .unwrap(),
+        key: SigningKey::from_bytes(&[7; 32]),
+    }
+}
+
 impl DeviceIdentity {
+    pub(crate) fn matches_socket(
+        &self,
+        socket: &aiagent_device_transport::ServerVerifiedSocket,
+    ) -> bool {
+        socket.matches_https_origin(&self.binding.server_origin)
+    }
+    pub(crate) fn connection_scope(&self) -> (&str, &str, &str) {
+        (
+            &self.binding.tenant_id,
+            &self.binding.owner_user_id,
+            &self.binding.device_identity_id,
+        )
+    }
     pub fn public_key(&self) -> [u8; 32] {
         self.key.verifying_key().to_bytes()
     }
@@ -606,6 +636,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::result_large_err)] // tungstenite's required server callback error type
     async fn signing_requires_unclosed_socket_with_matching_verified_origin() {
         use futures_util::StreamExt;
         use rustls::{pki_types::PrivatePkcs8KeyDer, RootCertStore, ServerConfig};
@@ -631,7 +662,11 @@ mod tests {
                 .accept(stream)
                 .await
                 .unwrap();
-            let mut ws = tokio_tungstenite::accept_async(tls).await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(tls, |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert("Sec-WebSocket-Protocol", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("aiagent-device.v1"));
+                    Ok(response)
+                }).await.unwrap();
             let _ = ws.next().await;
         });
         let mut roots = RootCertStore::empty();

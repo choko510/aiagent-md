@@ -7,7 +7,9 @@ use std::{sync::Arc, time::Duration};
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{
+        client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message,
+    },
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
@@ -15,6 +17,7 @@ use url::Url;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const SUBPROTOCOL: &str = "aiagent-device.v1";
 type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,10 +73,18 @@ impl ServerVerifiedSocket {
         let ws_config = WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE_BYTES))
             .max_frame_size(Some(MAX_MESSAGE_BYTES));
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| TransportError::InvalidEndpoint)?;
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_static(SUBPROTOCOL),
+        );
         let result = timeout(
             CONNECT_TIMEOUT,
             connect_async_tls_with_config(
-                url.as_str(),
+                request,
                 Some(ws_config),
                 false,
                 Some(Connector::Rustls(Arc::new(config))),
@@ -82,6 +93,15 @@ impl ServerVerifiedSocket {
         .await
         .map_err(|_| TransportError::Timeout)?
         .map_err(|_| TransportError::ConnectFailed)?;
+        if result
+            .1
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok())
+            != Some(SUBPROTOCOL)
+        {
+            return Err(TransportError::ConnectFailed);
+        }
         Ok(Self {
             stream: Some(result.0),
             https_origin,
@@ -165,8 +185,12 @@ mod tests {
     use rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::{
+        accept_hdr_async,
+        tungstenite::handshake::server::{Request, Response},
+    };
 
+    #[allow(clippy::result_large_err)] // tungstenite's required server callback error type
     async fn server(mode: u8) -> (u16, rustls::pki_types::CertificateDer<'static>) {
         let rcgen::CertifiedKey { cert, key_pair } =
             rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -188,7 +212,17 @@ mod tests {
             let Ok(tls) = TlsAcceptor::from(Arc::new(config)).accept(stream).await else {
                 return;
             };
-            let Ok(mut ws) = accept_async(tls).await else {
+            let Ok(mut ws) = accept_hdr_async(tls, |_request: &Request, mut response: Response| {
+                if mode != 3 {
+                    response.headers_mut().insert(
+                        "Sec-WebSocket-Protocol",
+                        HeaderValue::from_static(SUBPROTOCOL),
+                    );
+                }
+                Ok(response)
+            })
+            .await
+            else {
                 return;
             };
             if mode == 1 {
@@ -273,6 +307,17 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn missing_protocol_negotiation_is_rejected() {
+        let (port, cert) = server(3).await;
+        assert!(ServerVerifiedSocket::connect_with_roots(
+            &format!("wss://localhost:{port}/device"),
+            roots(cert),
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

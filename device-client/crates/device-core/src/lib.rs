@@ -7,6 +7,7 @@ pub mod mock;
 pub mod pairing;
 pub mod protocol;
 pub mod security;
+pub mod session;
 
 pub use agent::{Agent, ConnectionPhase, Decision, Delivery, LocalPolicy};
 pub use journal::{BeginResult, ControlRecord, EffectState, LocalJournal};
