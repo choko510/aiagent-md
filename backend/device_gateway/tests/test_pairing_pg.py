@@ -59,6 +59,20 @@ def test_rust_and_python_share_pairing_proof_vector() -> None:
     Ed25519PublicKey.from_public_bytes(public).verify(bytes.fromhex(vector["signatureHex"]), payload)
 
 
+def test_rust_and_python_share_signed_authority_vector() -> None:
+    from nacl.signing import SigningKey
+
+    vector = json.loads(
+        (Path(__file__).resolve().parents[3] / "device-client/fixtures/authority-v1.json").read_text()
+    )
+    key = SigningKey(bytes.fromhex(vector["testSeedHex"]))
+    assert bytes(key.verify_key).hex() == vector["publicKeyHex"]
+    for name in ("grant", "permit"):
+        raw = vector[f"{name}Raw"].encode("utf-8")
+        assert json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() == raw
+        assert key.sign(b"aiagent-device-authority-v1\0" + raw).signature.hex() == vector[f"{name}SignatureHex"]
+
+
 def test_unpatched_ed25519_backend_cannot_start(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.device_gateway.pairing.crypto_core_ed25519_is_valid_point", lambda _: True)
     with pytest.raises(RuntimeError, match="UNSAFE_ED25519_BACKEND"):

@@ -432,4 +432,42 @@ mod tests {
             Err(AuthorityError::Invalid)
         ));
     }
+
+    #[test]
+    fn python_signed_authority_fixture_verifies_exact_bytes() {
+        fn bytes<const N: usize>(value: &str) -> [u8; N] {
+            assert_eq!(value.len(), N * 2);
+            let mut out = [0; N];
+            for (index, byte) in out.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).unwrap();
+            }
+            out
+        }
+        let vector: Value =
+            serde_json::from_str(include_str!("../../../fixtures/authority-v1.json")).unwrap();
+        let get = |name: &str| vector[name].as_str().unwrap();
+        let raw = get("grantRaw").as_bytes();
+        let signature = bytes::<64>(get("grantSignatureHex"));
+        let key = bytes::<32>(get("publicKeyHex"));
+        let fields: Value = serde_json::from_slice(raw).unwrap();
+        let trusted = expected(&fields);
+        let grant = VerifiedGrant::verify_at(raw, signature, key, &trusted, 2_000).unwrap();
+        assert_eq!(
+            VerifiedPermit::verify_at(
+                get("permitRaw").as_bytes(),
+                bytes::<64>(get("permitSignatureHex")),
+                &grant,
+                3_000
+            )
+            .unwrap()
+            .nonce(),
+            "d".repeat(64)
+        );
+        let mut modified = raw.to_vec();
+        modified.push(b' ');
+        assert!(matches!(
+            VerifiedGrant::verify_at(&modified, signature, key, &trusted, 2_000),
+            Err(AuthorityError::Signature)
+        ));
+    }
 }
