@@ -39,12 +39,27 @@ pub struct ProjectCandidate {
     pub dirty_state: &'static str,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum GitHead {
+    /// A syntactically valid, observed ref value; the object has not been verified.
+    Observed(String),
+    /// No loose or packed ref was found; unborn and unsupported backends are indistinguishable.
+    Unresolved,
+    Unsupported,
+    Untrusted,
+}
+
 pub struct WorkspaceRoot {
     root: Dir,
     nonce: [u8; 32],
-    local_paths: HashMap<String, PathBuf>,
+    local_paths: HashMap<String, LocalCandidate>,
     generation: u64,
     valid_until: Option<Instant>,
+}
+
+struct LocalCandidate {
+    path: PathBuf,
+    dir: Dir,
 }
 
 impl WorkspaceRoot {
@@ -119,11 +134,30 @@ impl WorkspaceRoot {
         {
             return None;
         }
-        self.local_paths.get(candidate_id).map(PathBuf::as_path)
+        self.local_paths
+            .get(candidate_id)
+            .map(|candidate| candidate.path.as_path())
+    }
+
+    /// Uses the directory handle retained from discovery, not a reopened path.
+    /// The result is an observation, never a source-revision or execution grant.
+    pub fn probe_git(&self, candidate_id: &str, generation: u64) -> Result<GitHead, &'static str> {
+        if generation != self.generation
+            || self
+                .valid_until
+                .is_none_or(|deadline| Instant::now() >= deadline)
+        {
+            return Err("STALE_CANDIDATE");
+        }
+        let candidate = self
+            .local_paths
+            .get(candidate_id)
+            .ok_or("UNKNOWN_CANDIDATE")?;
+        Ok(crate::git_probe::observe(&candidate.dir))
     }
 }
 
-fn valid_component(name: &str) -> bool {
+pub(crate) fn valid_component(name: &str) -> bool {
     if name.is_empty()
         || !name.is_ascii()
         || name.ends_with([' ', '.'])
@@ -176,7 +210,7 @@ fn scan(
     generation: u64,
     start: Instant,
     count: &mut usize,
-    paths: &mut HashMap<String, PathBuf>,
+    paths: &mut HashMap<String, LocalCandidate>,
     output: &mut Vec<ProjectCandidate>,
 ) -> Result<(), &'static str> {
     if start.elapsed() > MAX_TIME {
@@ -255,7 +289,13 @@ fn scan(
         hash.update(nonce);
         hash.update(relative.to_string_lossy().as_bytes());
         let id = crate::protocol::hex_digest(&hash.finalize());
-        paths.insert(id.clone(), relative.to_path_buf());
+        paths.insert(
+            id.clone(),
+            LocalCandidate {
+                path: relative.to_path_buf(),
+                dir: dir.try_clone().map_err(|_| "DISCOVERY_IO")?,
+            },
+        );
         output.push(ProjectCandidate {
             candidate_id: id,
             generation,
@@ -433,6 +473,149 @@ mod tests {
         assert_eq!(ws.discover(), Err("CASE_COLLISION"));
     }
 
+    #[test]
+    fn git_head_is_read_without_executing_git_or_config() {
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join(".git");
+        fs::create_dir_all(git.join("refs/heads")).unwrap();
+        fs::write(git.join("config"), b"[core]\nfsmonitor = malicious\n").unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(git.join("refs/heads/main"), format!("{}\n", "a".repeat(40))).unwrap();
+        let mut ws = WorkspaceRoot::open_selected(root.path()).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Observed("a".repeat(40))
+        );
+        fs::remove_file(git.join("refs/heads/main")).unwrap();
+        fs::write(
+            git.join("packed-refs"),
+            format!("# pack-refs\n{} refs/heads/main\n", "b".repeat(40)),
+        )
+        .unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Observed("b".repeat(40))
+        );
+        fs::write(
+            git.join("packed-refs"),
+            format!(
+                "{} refs/heads/main\n{} refs/heads/main\n",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+        fs::remove_file(git.join("packed-refs")).unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Unresolved
+        );
+        fs::write(git.join("HEAD"), format!("{}\n", "c".repeat(64))).unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Observed("c".repeat(64))
+        );
+        fs::write(git.join("HEAD"), b"ref: refs/heads/../../outside\n").unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+        fs::write(git.join("HEAD"), vec![b'a'; 1025]).unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+        let next = ws.discover().unwrap().remove(0);
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation),
+            Err("STALE_CANDIDATE")
+        );
+        assert_ne!(candidate.generation, next.generation);
+    }
+
+    #[test]
+    fn worktree_pointer_and_hardlinked_head_are_not_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("repo");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join(".git"), b"gitdir: ../../outside\n").unwrap();
+        let mut ws = WorkspaceRoot::open_selected(root.path()).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Unsupported
+        );
+        fs::remove_file(project.join(".git")).unwrap();
+        fs::create_dir(project.join(".git")).unwrap();
+        let external = root.path().join("external-head");
+        fs::write(&external, format!("{}\n", "a".repeat(40))).unwrap();
+        fs::hard_link(&external, project.join(".git/HEAD")).unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_uses_discovered_directory_handle_after_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("repo");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join(".git/HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        let mut ws = WorkspaceRoot::open_selected(root.path()).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        fs::rename(&project, root.path().join("old")).unwrap();
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join(".git/HEAD"), format!("{}\n", "b".repeat(40))).unwrap();
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Observed("a".repeat(40))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_head_symlink_and_fifo_fail_closed() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join(".git");
+        fs::create_dir(&git).unwrap();
+        let external = root.path().join("outside-head");
+        fs::write(&external, format!("{}\n", "a".repeat(40))).unwrap();
+        std::os::unix::fs::symlink(&external, git.join("HEAD")).unwrap();
+        let mut ws = WorkspaceRoot::open_selected(root.path()).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+        fs::remove_file(git.join("HEAD")).unwrap();
+        let path = CString::new(git.join("HEAD").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            ws.probe_git(&candidate.candidate_id, candidate.generation)
+                .unwrap(),
+            GitHead::Untrusted
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn junction_cannot_escape_selected_root() {
@@ -448,5 +631,26 @@ mod tests {
         let result = ws.discover();
         junction::delete(&link).unwrap();
         assert!(result.is_err() || result.unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_ref_junction_cannot_escape_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("selected");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(root.join(".git/refs")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(outside.join("main"), format!("{}\n", "a".repeat(40))).unwrap();
+        let link = root.join(".git/refs/heads");
+        junction::create(&outside, &link).unwrap();
+        let mut ws = WorkspaceRoot::open_selected(&root).unwrap();
+        let candidate = ws.discover().unwrap().remove(0);
+        let result = ws
+            .probe_git(&candidate.candidate_id, candidate.generation)
+            .unwrap();
+        junction::delete(&link).unwrap();
+        assert_eq!(result, GitHead::Untrusted);
     }
 }

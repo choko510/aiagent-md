@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod authority;
 pub mod discovery;
+mod git_probe;
 pub mod identity;
 pub mod journal;
 pub mod mock;
