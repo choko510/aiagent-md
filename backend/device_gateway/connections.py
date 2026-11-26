@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass, field
 
@@ -47,11 +48,32 @@ class Session:
 class ConnectionChannel:
     """Server-owned per-socket context, never deserialized from a client message."""
 
-    __slots__ = ("_closed", "_digest")
+    __slots__ = ("_closed", "_digest", "_lock", "_scope")
 
     def __init__(self) -> None:
         self._digest = hashlib.sha256(b"aiagent-device-channel-v1" + secrets.token_bytes(32)).digest()
         self._closed = False
+        self._scope: tuple[str, str, uuid.UUID] | None = None
+        self._lock = threading.Lock()
+
+    def _bind(self, tenant: str, owner: str, identity: uuid.UUID) -> bool:
+        with self._lock:
+            scope = (tenant, owner, identity)
+            if self._closed or (self._scope is not None and self._scope != scope):
+                return False
+            self._scope = scope
+            return True
+
+    def _active(self, tenant: str, owner: str, identity: uuid.UUID) -> bool:
+        with self._lock:
+            return not self._closed and self._scope == (tenant, owner, identity)
+
+    def _close(self, tenant: str, owner: str, identity: uuid.UUID) -> bool:
+        with self._lock:
+            if self._scope != (tenant, owner, identity):
+                return False
+            self._closed = True
+            return True
 
 
 def connection_proof_bytes(
@@ -96,6 +118,8 @@ class ConnectionService:
     def challenge(
         self, tenant_hint: str, owner_hint: str, identity_id: uuid.UUID, channel: ConnectionChannel
     ) -> Challenge:
+        if not channel._bind(tenant_hint, owner_hint, identity_id):
+            raise ConnectionRejected()
         result = None
         with self._pairing._connect() as conn, conn.transaction():
             self._pairing._scope(conn, tenant_hint, owner_hint)
@@ -106,7 +130,7 @@ class ConnectionService:
             now = self._pairing._now(conn)
             if (
                 identity is not None
-                and not channel._closed
+                and channel._active(tenant_hint, owner_hint, identity_id)
                 and not identity["revoked"]
                 and identity["connection_generation"] < INT64_MAX
                 and identity["authority_incarnation"] <= self._restore
@@ -190,7 +214,7 @@ class ConnectionService:
             now = self._pairing._now(conn)
             if (
                 identity is not None
-                and not channel._closed
+                and channel._active(tenant_hint, owner_hint, identity_id)
                 and challenge is not None
                 and not identity["revoked"]
                 and identity["authority_incarnation"] == self._restore
@@ -277,7 +301,7 @@ class ConnectionService:
             now = self._pairing._now(conn)
             if (
                 row is not None
-                and not channel._closed
+                and channel._active(tenant_hint, owner_hint, identity_id)
                 and type(generation) is int
                 and 0 < generation <= INT64_MAX
                 and isinstance(token, bytes)
@@ -303,7 +327,8 @@ class ConnectionService:
 
     def disconnect(self, tenant_hint: str, owner_hint: str, identity_id: uuid.UUID, channel: ConnectionChannel) -> None:
         """Invalidate only this channel; an old disconnect cannot close a newer session."""
-        channel._closed = True
+        if not channel._close(tenant_hint, owner_hint, identity_id):
+            raise ConnectionRejected()
         with self._pairing._connect() as conn, conn.transaction():
             self._pairing._scope(conn, tenant_hint, owner_hint)
             # Serialize with authenticate/revoke before checking either row, so a

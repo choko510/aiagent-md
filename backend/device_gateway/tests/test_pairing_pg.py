@@ -685,3 +685,47 @@ def test_disconnect_races_authentication_without_live_session(service: PairingSe
             gateway.heartbeat(owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token)
     with pytest.raises(ConnectionRejected):
         gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
+
+
+def test_channel_cannot_switch_owner_or_identity(service: PairingService) -> None:
+    alice, bob = make_scope(), make_scope()
+    alice_id, key, public, digest = registered_device(service, alice)
+    bob_id, _, _, _ = registered_device(service, bob)
+    gateway, channel = ConnectionService(service, 1), ConnectionChannel()
+    challenge = gateway.challenge(alice.tenant_id, alice.user_id, alice_id, channel)
+    with pytest.raises(ConnectionRejected):
+        gateway.challenge(bob.tenant_id, bob.user_id, bob_id, channel)
+    with pytest.raises(ConnectionRejected):
+        gateway.disconnect(bob.tenant_id, bob.user_id, bob_id, channel)
+    signature = key.sign(
+        connection_proof_bytes(
+            digest,
+            public,
+            challenge.nonce,
+            challenge.channel_digest,
+            challenge.generation,
+            challenge.issued_ms,
+            challenge.expires_ms,
+        )
+    )
+    session = gateway.authenticate(alice.tenant_id, alice.user_id, alice_id, channel, signature)
+    gateway.heartbeat(alice.tenant_id, alice.user_id, alice_id, channel, session.generation, session.token)
+
+
+def test_concurrent_channel_binding_has_one_owner(service: PairingService) -> None:
+    alice, bob = make_scope(), make_scope()
+    alice_id, _, _, _ = registered_device(service, alice)
+    bob_id, _, _, _ = registered_device(service, bob)
+    gateway, channel = ConnectionService(service, 1), ConnectionChannel()
+
+    def attempt(scope: Scope, identity_id: uuid.UUID) -> bool:
+        try:
+            gateway.challenge(scope.tenant_id, scope.user_id, identity_id, channel)
+            return True
+        except ConnectionRejected:
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(attempt, alice, alice_id)
+        second = pool.submit(attempt, bob, bob_id)
+        assert sorted([first.result(), second.result()]) == [False, True]
