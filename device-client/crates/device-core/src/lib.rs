@@ -2,6 +2,7 @@
 //! The only adapter implementation is a no-OS-effect mock.
 pub mod agent;
 pub mod authority;
+pub mod discovery;
 pub mod identity;
 pub mod journal;
 pub mod mock;
