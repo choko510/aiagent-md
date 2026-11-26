@@ -106,6 +106,50 @@ fn parse(
     {
         return Err(AuthorityError::Invalid);
     }
+    // IdentityBinding stores the canonical origin. Reject URLs with credentials,
+    // paths, query strings or alternate spellings even when signed.
+    let origin = frame
+        .0
+        .get("serverOrigin")
+        .and_then(Value::as_str)
+        .ok_or(AuthorityError::Invalid)?;
+    let url = url::Url::parse(origin).map_err(|_| AuthorityError::Invalid)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.origin().ascii_serialization() != origin
+    {
+        return Err(AuthorityError::Invalid);
+    }
+    // Schema regex anchors can have engine-specific newline semantics.
+    for name in [
+        "tenantId",
+        "ownerUserId",
+        "deviceIdentityId",
+        "deviceId",
+        "taskId",
+        "runId",
+        "toolIntentId",
+        "operation",
+    ] {
+        let value = frame
+            .0
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or(AuthorityError::Invalid)?;
+        if value.is_empty()
+            || value.len() > 256
+            || !value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._:@/-".contains(&c))
+        {
+            return Err(AuthorityError::Invalid);
+        }
+    }
     for name in EPOCHS {
         Epoch::parse(
             frame
@@ -339,6 +383,50 @@ mod tests {
                 key.sign(&payload).to_bytes(),
                 public,
                 &expected(&good),
+                2_000
+            ),
+            Err(AuthorityError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn signed_origin_and_identifiers_must_be_canonical() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        for origin in [
+            "https://",
+            "https://user@example.com",
+            "https://example.com/path",
+            "https://example.com?x=1",
+            "https://EXAMPLE.com",
+            "https://example.com:443",
+            "https://example.com/",
+        ] {
+            let mut value = grant();
+            value["serverOrigin"] = json!(origin);
+            let (raw, signature) = signed(&key, &value);
+            assert!(
+                matches!(
+                    VerifiedGrant::verify_at(
+                        &raw,
+                        signature,
+                        key.verifying_key().to_bytes(),
+                        &expected(&value),
+                        2_000
+                    ),
+                    Err(AuthorityError::Invalid)
+                ),
+                "accepted {origin}"
+            );
+        }
+        let mut value = grant();
+        value["ownerUserId"] = json!("owner\n");
+        let (raw, signature) = signed(&key, &value);
+        assert!(matches!(
+            VerifiedGrant::verify_at(
+                &raw,
+                signature,
+                key.verifying_key().to_bytes(),
+                &expected(&value),
                 2_000
             ),
             Err(AuthorityError::Invalid)
