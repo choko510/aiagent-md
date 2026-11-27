@@ -437,6 +437,7 @@ class PostgresSkillStore:
             engine_version=str(data.get("engineVersion", "skill-scan/1")),
             digest=str(data.get("digest", row["scan_digest"])),
             blocking=bool(data.get("blocking", False)),
+            complete=bool(data.get("complete", not bool(data.get("truncated", False)))),
         )
 
     @staticmethod

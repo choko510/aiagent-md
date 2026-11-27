@@ -151,6 +151,7 @@ def begin_enable(
         approved_release_digest=approved_release_digest,
         policy_revision=policy_revision,
         record_version=installation.record_version + 1,
+        revocation_epoch=installation.revocation_epoch + (1 if policy_revision != installation.policy_revision else 0),
         updated_at=now,
     )
 
@@ -222,6 +223,8 @@ def finish_update(
     policy_revision: str,
     now: str,
     suspended: bool = False,
+    was_enabled: bool = False,
+    previous_policy_revision: str | None = None,
 ) -> SkillInstallation:
     if approved_release_digest != target.content_digest:
         raise LifecycleConflict("update approval does not bind the target release")
@@ -232,12 +235,15 @@ def finish_update(
     else:
         effective = InstallationState.INSTALLED_DISABLED
     assert_installation_transition(installation.effective, effective)
+    stopped = not enable and was_enabled
+    policy_changed = previous_policy_revision is not None and policy_revision != previous_policy_revision
     return replace(
         installation,
         release_id=target.id,
         desired=DesiredState.ENABLED if enable else DesiredState.DISABLED,
         effective=effective,
         activation_generation=installation.activation_generation + (1 if enable else 0),
+        revocation_epoch=installation.revocation_epoch + (1 if stopped or policy_changed else 0),
         policy_revision=policy_revision,
         approved_release_digest=target.content_digest,
         updated_at=now,
@@ -301,6 +307,8 @@ def finish_rollback(
     policy_revision: str,
     now: str,
     suspended: bool = False,
+    was_enabled: bool = False,
+    previous_policy_revision: str | None = None,
 ) -> SkillInstallation:
     if reenable:
         effective = InstallationState.ENABLED
@@ -309,12 +317,15 @@ def finish_rollback(
     else:
         effective = InstallationState.INSTALLED_DISABLED
     assert_installation_transition(installation.effective, effective)
+    stopped = not reenable and was_enabled
+    policy_changed = previous_policy_revision is not None and policy_revision != previous_policy_revision
     return replace(
         installation,
         release_id=target.id,
         desired=DesiredState.ENABLED if reenable else DesiredState.DISABLED,
         effective=effective,
         activation_generation=installation.activation_generation + (1 if reenable else 0),
+        revocation_epoch=installation.revocation_epoch + (1 if stopped or policy_changed else 0),
         policy_revision=policy_revision,
         approved_release_digest=target.content_digest,
         updated_at=now,

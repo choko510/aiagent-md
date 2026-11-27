@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .bundle import BundleLimits, ValidatedBundle, _entry_kind, inspect_zip, normalize_member_path
+from .bundle import (
+    BundleLimits,
+    ValidatedBundle,
+    _entry_kind,
+    _validate_path_kinds,
+    inspect_zip,
+    normalize_member_path,
+)
 from .contracts import SkillSource, SourceKind
 from .digest import sha256_bytes
 from .errors import ArchiveRejected, ManifestInvalid, OwnerNotVerifiable, SourceUnavailable
@@ -41,9 +48,11 @@ def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
                 raise ArchiveRejected("GitHub archive has too many entries")
             limits = BundleLimits()
             declared_raw_total = 0
+            raw_paths: list[tuple[str, str]] = []
             for info in all_infos:
-                normalize_member_path(info.filename, limits)
+                path = normalize_member_path(info.filename, limits)
                 kind = _entry_kind(info)
+                raw_paths.append((path, kind))
                 if kind == "dir":
                     continue
                 if info.flag_bits & 0x1:
@@ -57,6 +66,7 @@ def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
                 declared_raw_total += info.file_size
                 if declared_raw_total > 64 * 1024 * 1024:
                     raise ArchiveRejected("GitHub archive expands beyond the safe limit")
+            _validate_path_kinds(raw_paths)
             infos = [info for info in all_infos if not info.is_dir()]
             if not infos:
                 raise SourceUnavailable("GitHub archive is empty")
@@ -68,6 +78,9 @@ def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
             selected = [info for info in infos if info.filename.startswith(prefix)]
             if not selected:
                 raise SourceUnavailable("GitHub archive does not contain the requested Skill subdirectory")
+            _validate_path_kinds(
+                [(normalize_member_path(info.filename, limits)[len(prefix) :], _entry_kind(info)) for info in selected]
+            )
             buffer = io.BytesIO()
             total = 0
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as rewritten:

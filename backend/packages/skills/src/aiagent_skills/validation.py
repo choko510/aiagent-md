@@ -16,6 +16,7 @@ from .errors import ProtectedBuiltin, ReleaseRevoked, SkillError
 from .frontmatter import parse_skill_markdown
 from .identity import assert_not_protected_builtin, trust_for_source
 from .manifest import build_manifest
+from .policy import validate_requested
 from .scanner import scan_files
 
 
@@ -33,10 +34,11 @@ def build_release(
         assert_not_protected_builtin(str(marker.data.get("name", "")))
     frontmatter = parse_skill_markdown(bundle.skill_md())
     manifest = build_manifest(frontmatter, bundle.files, source)
+    validate_requested(manifest.requested_capabilities)
     verify_file_list(manifest.files, bundle.files)
     scan = scan_files(bundle.files, bundle.entries)
     content = content_digest(manifest, bundle.files.items())
-    state = ReleaseState.STAGED_FOR_REVIEW if not scan.blocking else ReleaseState.REJECTED
+    state = ReleaseState.STAGED_FOR_REVIEW if not scan.blocking and scan.complete else ReleaseState.REJECTED
     release = SkillRelease(
         id=release_id,
         manifest=manifest,
@@ -62,8 +64,8 @@ def assert_release_installable(release: SkillRelease, scan: ScanResult) -> None:
         raise ReleaseRevoked("release is revoked")
     if release.state is not ReleaseState.STAGED_FOR_REVIEW:
         raise SkillError("release is not awaiting review")
-    if scan.blocking or scan.digest != release.scan_digest:
-        raise SkillError("release scan is not passing or changed")
+    if scan.blocking or not scan.complete or scan.digest != release.scan_digest:
+        raise SkillError("release scan is not passing, complete, or unchanged")
     if not release.publisher_verified and release.manifest.source.kind is SourceKind.CLAWHUB:
         raise SkillError("ClawHub publisher identity was not verified")
 

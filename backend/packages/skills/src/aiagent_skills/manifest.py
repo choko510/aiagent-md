@@ -18,6 +18,7 @@ from .digest import bundle_digest, content_digest, manifest_digest, sha256_bytes
 from .errors import ManifestInvalid, UnsupportedSchema
 from .frontmatter import Frontmatter
 from .identity import validate_publisher_handle, validate_skill_name
+from .policy import validate_requested
 
 SEMVER_RE = re.compile(
     r"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -254,6 +255,14 @@ _CANONICAL_KEYS = frozenset(
 )
 
 
+def _wire_capabilities(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ManifestInvalid("requestedCapabilities must be a list of strings")
+    if len(value) > MAX_CAPABILITIES:
+        raise ManifestInvalid(f"at most {MAX_CAPABILITIES} capabilities may be requested")
+    return tuple(sorted(validate_requested(tuple(value))))
+
+
 def manifest_from_wire(data: object) -> SkillManifestV1:
     """Strict reader for persisted manifests. Unknown fields fail closed."""
     if not isinstance(data, dict):
@@ -267,6 +276,18 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
     source_data = data.get("source")
     if not isinstance(source_data, dict):
         raise ManifestInvalid("source is required")
+    source_unknown = set(source_data) - {
+        "kind",
+        "originUri",
+        "publisherId",
+        "publisherHandle",
+        "commitSha",
+        "artifactDigest",
+        "catalogKey",
+        "subdir",
+    }
+    if source_unknown:
+        raise ManifestInvalid("unknown source fields", fields=sorted(source_unknown))
     try:
         source = SkillSource(
             kind=SourceKind(str(source_data["kind"])),
@@ -287,18 +308,35 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
     for item in files_data:
         if not isinstance(item, dict):
             raise ManifestInvalid("file entry must be an object")
+        unknown_file = set(item) - {"relativePath", "sha256", "byteSize", "mediaType"}
+        if unknown_file:
+            raise ManifestInvalid("unknown file entry fields", fields=sorted(unknown_file))
+        relative_path = item.get("relativePath")
+        sha256_value = item.get("sha256")
+        byte_size = item.get("byteSize")
+        media_type_value = item.get("mediaType")
+        if not isinstance(relative_path, str) or not relative_path or len(relative_path) > 1024:
+            raise ManifestInvalid("file relativePath is invalid")
+        if not isinstance(sha256_value, str) or len(sha256_value) != 64:
+            raise ManifestInvalid("file sha256 is invalid")
+        if not isinstance(byte_size, int) or isinstance(byte_size, bool) or byte_size < 0:
+            raise ManifestInvalid("file byteSize is invalid")
+        if not isinstance(media_type_value, str) or not media_type_value:
+            raise ManifestInvalid("file mediaType is invalid")
         files.append(
             SkillFile(
-                relative_path=str(item["relativePath"]),
-                sha256=str(item["sha256"]),
-                byte_size=int(item["byteSize"]),
-                media_type=str(item["mediaType"]),
+                relative_path=relative_path,
+                sha256=sha256_value,
+                byte_size=byte_size,
+                media_type=media_type_value,
             )
         )
     compatibility = data.get("compatibility") or {}
     signature_data = data.get("signature")
     signature = None
-    if isinstance(signature_data, dict):
+    if signature_data is not None:
+        if not isinstance(signature_data, dict):
+            raise ManifestInvalid("signature must be a mapping")
         unknown = set(signature_data) - {"alg", "signature", "keyId"}
         if unknown:
             raise ManifestInvalid("unknown signature fields", fields=sorted(unknown))
@@ -314,7 +352,7 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
         entry=str(data.get("entry")),
         source=source,
         files=tuple(files),
-        requested_capabilities=tuple(str(x) for x in data.get("requestedCapabilities", [])),
+        requested_capabilities=_wire_capabilities(data.get("requestedCapabilities", [])),
         dependencies=_dependencies(data.get("dependencies")),
         compatibility=_compatibility(compatibility),
         license=data.get("license"),

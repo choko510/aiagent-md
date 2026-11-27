@@ -20,6 +20,7 @@ from .errors import FrontmatterInvalid, ManifestInvalid
 MAX_SKILL_MD_BYTES = 64 * 1024
 MAX_FRONTMATTER_BYTES = 16 * 1024
 MAX_YAML_NODES = 4000
+MAX_YAML_EVENTS = 8000
 MAX_YAML_DEPTH = 12
 
 _ALLOWED_SCALAR_TAGS = frozenset(
@@ -107,6 +108,29 @@ class _Converter:
             self.active.discard(ident)
 
 
+def _preflight_yaml(raw: str) -> None:
+    """Bound the event stream and reject aliases/anchors before compose can build shared nodes."""
+    events = 0
+    depth = 0
+    try:
+        for event in yaml.parse(raw, Loader=yaml.SafeLoader):
+            events += 1
+            if events > MAX_YAML_EVENTS:
+                raise FrontmatterInvalid("YAML document has too many events")
+            if isinstance(event, yaml.events.AliasEvent):
+                raise FrontmatterInvalid("YAML aliases are not allowed", line=event.start_mark.line + 1)
+            if getattr(event, "anchor", None):
+                raise FrontmatterInvalid("YAML anchors are not allowed", line=event.start_mark.line + 1)
+            if isinstance(event, (yaml.events.MappingStartEvent, yaml.events.SequenceStartEvent)):
+                depth += 1
+                if depth > MAX_YAML_DEPTH:
+                    raise FrontmatterInvalid("YAML nesting is too deep", line=event.start_mark.line + 1)
+            elif isinstance(event, (yaml.events.MappingEndEvent, yaml.events.SequenceEndEvent)):
+                depth -= 1
+    except yaml.YAMLError as exc:
+        raise FrontmatterInvalid("invalid YAML", problem=str(exc)[:200]) from None
+
+
 def parse_skill_markdown(data: bytes, *, max_bytes: int = MAX_SKILL_MD_BYTES) -> Frontmatter:
     if len(data) > max_bytes:
         raise ManifestInvalid(f"SKILL.md exceeds {max_bytes} bytes", size=len(data))
@@ -129,6 +153,7 @@ def parse_skill_markdown(data: bytes, *, max_bytes: int = MAX_SKILL_MD_BYTES) ->
     raw = "".join(lines[1:end])
     if len(raw.encode("utf-8")) > MAX_FRONTMATTER_BYTES:
         raise FrontmatterInvalid(f"frontmatter exceeds {MAX_FRONTMATTER_BYTES} bytes")
+    _preflight_yaml(raw)
     try:
         documents = list(yaml.compose_all(raw, Loader=yaml.SafeLoader))
     except yaml.YAMLError as exc:

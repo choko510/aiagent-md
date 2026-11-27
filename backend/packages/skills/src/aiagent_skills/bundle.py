@@ -117,6 +117,8 @@ def normalize_member_path(raw: str, limits: BundleLimits) -> str:
     for part in parts:
         if part in ("", ".", ".."):
             _reject("PATH_TRAVERSAL", "archive entry path contains an unsafe segment")
+        if part.casefold() in _RESERVED_ROOT_NAMES:
+            _reject("RESERVED_PATH", "archive uses a quarantine-internal marker name")
         if part != part.strip() or part.endswith("."):
             _reject("WINDOWS_TRAILING", "archive entry path has a trailing space or dot")
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in part):
@@ -138,20 +140,50 @@ def normalize_member_path(raw: str, limits: BundleLimits) -> str:
 
 def _entry_kind(info: zipfile.ZipInfo) -> str:
     mode = info.external_attr >> 16
-    if info.is_dir():
-        return "dir"
     if mode:
         file_type = stat.S_IFMT(mode)
         if file_type == 0:
             # Python and many Windows tools store only permission bits (e.g. 0o600) without S_IFREG.
-            return "file"
-        if stat.S_ISLNK(mode):
+            pass
+        elif stat.S_ISLNK(mode):
             _reject("SYMLINK", "symbolic links are not accepted")
-        if stat.S_ISCHR(mode) or stat.S_ISBLK(mode) or stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+        elif stat.S_ISCHR(mode) or stat.S_ISBLK(mode) or stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
             _reject("SPECIAL_FILE", "device/FIFO/socket entries are not accepted")
-        if not stat.S_ISREG(mode):
+        elif stat.S_ISDIR(mode):
+            return "dir"
+        elif not stat.S_ISREG(mode):
             _reject("SPECIAL_FILE", "only regular files and directories are accepted")
+    if info.is_dir():
+        return "dir"
     return "file"
+
+
+def _validate_path_kinds(entries: list[tuple[str, str]]) -> None:
+    """Reject duplicate, case-aliased, marker, and file/directory prefix paths before extraction."""
+    folded_kind: dict[str, str] = {}
+    folded_actual: dict[str, str] = {}
+    for path, kind in entries:
+        folded = path.casefold()
+        previous = folded_kind.get(folded)
+        if previous is not None:
+            if previous == kind:
+                _reject("DUPLICATE_ENTRY", "duplicate archive entry")
+            _reject("DUPLICATE_ENTRY", "file and directory entries share an archive path")
+        folded_kind[folded] = kind
+        parts = path.split("/")
+        for index in range(1, len(parts) + 1):
+            folded_prefix = "/".join(parts[:index]).casefold()
+            actual_prefix = "/".join(parts[:index])
+            prior = folded_actual.get(folded_prefix)
+            if prior is not None and prior != actual_prefix:
+                _reject("CASE_COLLISION", "case-insensitive archive path collision")
+            folded_actual[folded_prefix] = actual_prefix
+    for folded, _kind in folded_kind.items():
+        parts = folded.split("/")
+        for index in range(1, len(parts)):
+            ancestor = "/".join(parts[:index])
+            if folded_kind.get(ancestor) == "file":
+                _reject("PATH_PREFIX_COLLISION", "archive contains a file/directory prefix collision")
 
 
 def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, limits: BundleLimits) -> bytes:
@@ -199,24 +231,17 @@ def inspect_zip(data: bytes, *, limits: BundleLimits | None = None, require_entr
         infos = zf.infolist()
         if len(infos) > limits.max_entries:
             _reject("TOO_MANY_ENTRIES", "archive has too many entries")
-        seen_exact: set[str] = set()
-        seen_folded: set[str] = set()
-        path_kinds: dict[str, str] = {}
         declared_total = 0
         files: dict[str, bytes] = {}
+        described: list[tuple[str, str, zipfile.ZipInfo]] = []
         for info in infos:
+            if "\x00" in info.orig_filename:
+                _reject("NUL_IN_PATH", "archive entry name contains NUL")
             path = normalize_member_path(info.filename, limits)
             kind = _entry_kind(info)
-            if path.casefold() in _RESERVED_ROOT_NAMES:
-                _reject("RESERVED_PATH", "archive uses a quarantine-internal marker name")
-            if path in seen_exact:
-                _reject("DUPLICATE_ENTRY", "duplicate archive entry")
-            folded = path.casefold()
-            if folded in seen_folded:
-                _reject("CASE_COLLISION", "case-insensitive archive entry collision")
-            seen_exact.add(path)
-            seen_folded.add(folded)
-            path_kinds[folded] = kind
+            described.append((path, kind, info))
+        _validate_path_kinds([(path, kind) for path, kind, _info in described])
+        for path, kind, info in described:
             if kind == "dir":
                 continue
             declared_total += info.file_size
@@ -225,15 +250,6 @@ def inspect_zip(data: bytes, *, limits: BundleLimits | None = None, require_entr
             files[path] = _read_entry(zf, info, limits)
         if len(files) > limits.max_files:
             _reject("TOO_MANY_FILES", "archive has too many files")
-        # A file cannot also be a directory: `a` + `a/b` would create a prefix collision on extraction.
-        for folded, kind in path_kinds.items():
-            if kind != "file":
-                continue
-            parts = folded.split("/")
-            for index in range(1, len(parts)):
-                ancestor = "/".join(parts[:index])
-                if path_kinds.get(ancestor) == "file":
-                    _reject("PATH_PREFIX_COLLISION", "archive contains a file/directory prefix collision")
         if require_entry:
             if "SKILL.md" not in files:
                 _reject("MISSING_SKILL_MD", "SKILL.md is required at the bundle root")

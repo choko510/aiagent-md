@@ -202,12 +202,14 @@ findings.
 Implemented in the working tree after `690292d`:
 
 - **A2-02 revocation epoch:** `SkillInstallation` and `RunSkillPin` carry a monotonic `revocation_epoch`.
-  Disable, remove and revoke increment it; enable/update/rollback preserve it. Pinned load verifies the epoch, so
-  disable -> re-enable cannot revive an old Run pin. Normal update still allows the old Run to read its immutable
-  snapshot, while a new pin for that Run is refused.
+  Disable, remove, revoke, and an update/rollback that stops an enabled installation or changes its policy revision
+  increment it. Pinned load verifies the epoch, so disable -> re-enable cannot revive an old Run pin. A normal
+  enabled -> enabled update that keeps the policy revision still allows the old Run to read its immutable snapshot,
+  while a new pin for that Run is refused.
 - **A2-02 dependency closure:** the enabled catalog now omits a Skill whose required dependency is disabled, revoked,
-  moved or otherwise unresolvable. Pinned loads recompute the closure digest and verify each dependency's exact
-  release, installation, generation, content digest, name and version.
+  moved or otherwise unresolvable. Pinned loads recompute the canonical dependency-snapshot digest, require a sorted
+  duplicate-free closure, and verify each dependency's exact release, installation, generation, content digest, name
+  and version.
 - **A2-03/A2-04 fences:** pin replay is checked against the live installation generation/epoch/release; the public
   mutations look up an existing receipt before release/state prechecks, so a retry after a later mutation returns the
   original receipt instead of a stale-revision error. Idempotency payloads mirror the HTTP request body.
@@ -228,3 +230,42 @@ Still open after this pass: independent persisted reviewer identity and one-time
 run-scoped runtime graph/backend and Gateway-mediated Skill loading (A2-03/A2-07), owner-aware RLS (A2-07), publisher
 evidence/raw artifact digest (A2-08), quarantine GC and a durable ingest queue (A2-06), signature verification/trust
 policy, and the independent review UI.
+
+## 10. Third-review hardening (R3, still Draft)
+
+This pass starts from `b3d582e` and keeps `AIAGENT_SKILLS_ENABLED` default-off. It does not claim `CODE_READY` or
+`MERGE_READY`, and it does not treat a green static CI run as runtime verification.
+
+Implemented in the working tree:
+
+- **R3-02 stop/epoch revival:** `finish_update` and `finish_rollback` now increment `revocation_epoch` when they
+  stop an enabled installation or change the policy revision. A regression proves update(`enableAfter=false`) ->
+  enable cannot revive the pre-update pin.
+- **R3-03 exact closure integrity:** run pins carry a canonical digest over the complete sorted dependency snapshot.
+  `verify_run_pin`, pinned replay, and pinned body loads reject a modified, duplicate, out-of-order, or otherwise
+  non-canonical closure. Pinned replay also re-checks every dependency's live installation.
+- **R3-04 receipt binding:** install/enable/update/rollback replay now runs before policy-revision validation, and the
+  stored payload binds the raw requested policy revision and the approval TTL as well as the release/revision/effect
+  fields. The API and registry compute the same payload, so a retry after a policy revision change returns the original
+  receipt instead of a stale-policy error. The API receipt test covers this transition.
+- **R3-09 ZIP semantics:** any path segment named `.complete` or `.manifest` is rejected, not only the root. Path
+  validation detects implicit-directory case aliases, file/directory prefix collisions on every path, duplicate
+  file-vs-directory entries, NUL names, and symlink/directory attributes before extraction. The raw GitHub archive is
+  checked with the same path-tree rules before its wrapper is rewritten.
+- **R3-10 scanner completeness:** the 500-finding cap is now strict across files and rules. `ScanResult` exposes
+  `complete` / `truncated`; an incomplete scan cannot become an installable release, and the scan digest binds
+  completeness. Findings no longer persist raw bundle excerpts.
+- **R3-12 parser strictness:** YAML anchors/aliases, excessive event/depth budgets, and invalid persisted manifest
+  shapes fail closed before installation. Persisted source/file/signature/capability fields are strict, and requested
+  capabilities are validated at ingest.
+
+Tests added in this pass: update-disable revival, tampered/duplicate closure rejection, policy-change receipt replay,
+strict scanner cap/redaction, YAML anchor/depth rejection, nested marker/case/symlink ZIP cases. The local run is
+`uv run pytest packages/skills/tests tests/test_skill_api.py -q` (57 passed) and the full local backend suite is
+277 passed / 396 skipped / 4 environment failures (no local PostgreSQL and Windows `O_DIRECTORY`).
+
+Still open after R3: independent persisted reviewer identity and one-time approval consumption (R3-01), Run
+lease/workspace/attempt binding (R3-05), Gateway-effective capability evidence and owner-aware RLS (R3-06), quarantine
+durability/GC/read policy (R3-07/R3-11), source provenance/raw-vs-normalized digest separation (R3-08), the remainder of
+YAML/capability/signature trust and catalog scale (R3-12), pin idempotency-key receipts (R3-04), and Slice B runtime
+wiring (run-keyed graph, Gateway-mediated loading). PostgreSQL fault/concurrency tests remain CI-only evidence.

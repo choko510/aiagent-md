@@ -213,12 +213,15 @@ class ScanResult:
     engine_version: str
     digest: str
     blocking: bool
+    complete: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "engineVersion": self.engine_version,
             "digest": self.digest,
             "blocking": self.blocking,
+            "complete": self.complete,
+            "truncated": not self.complete,
             "findings": [f.to_wire() for f in self.findings],
             "limitations": "A scanner PASS is not a proof of safety; review the findings and source.",
         }

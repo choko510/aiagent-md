@@ -312,7 +312,6 @@ def build_skills_router(
     ) -> dict[str, Any]:
         require_enabled()
         key = key_or_400(idempotency_key)
-        policy = policy_or_400(body.policy_revision)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
         replayed = _replay(
@@ -324,11 +323,13 @@ def build_skills_router(
             payload={
                 "releaseId": release_id,
                 "expectedContentDigest": body.expected_content_digest,
-                "policyRevision": policy,
+                "policyRevision": body.policy_revision,
+                "ttlSeconds": body.ttl_seconds,
             },
         )
         if replayed is not None:
             return {"receipt": replayed.to_wire()}
+        policy = policy_or_400(body.policy_revision)
         release = get_release(scope, release_id)
         if release.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
@@ -351,6 +352,8 @@ def build_skills_router(
                 capability_digest_value=_requested_digest(release),
                 policy_revision=policy,
                 request_id=key,
+                request_policy_revision=body.policy_revision,
+                request_ttl_seconds=body.ttl_seconds,
             )
         except SkillError as exc:
             _raise(exc)
@@ -368,7 +371,6 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
-        policy = policy_or_400(body.policy_revision)
         replayed = _replay(
             registry,
             tenant_id=tenant_id,
@@ -379,11 +381,13 @@ def build_skills_router(
                 "installationId": installation_id,
                 "expectedRevision": body.expected_revision,
                 "expectedContentDigest": body.expected_content_digest,
-                "policyRevision": policy,
+                "policyRevision": body.policy_revision,
+                "ttlSeconds": body.ttl_seconds,
             },
         )
         if replayed is not None:
             return {"receipt": replayed.to_wire()}
+        policy = policy_or_400(body.policy_revision)
         try:
             installation = registry.store.get_installation(tenant_id, installation_id)
         except SkillError as exc:
@@ -414,6 +418,8 @@ def build_skills_router(
                 policy_revision=policy,
                 expected_revision=body.expected_revision,
                 request_id=key,
+                request_policy_revision=body.policy_revision,
+                request_ttl_seconds=body.ttl_seconds,
             )
         except SkillError as exc:
             _raise(exc)
@@ -466,7 +472,6 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
-        policy = policy_or_400(body.policy_revision)
         replayed = _replay(
             registry,
             tenant_id=tenant_id,
@@ -479,11 +484,13 @@ def build_skills_router(
                 "expectedRevision": body.expected_revision,
                 "expectedContentDigest": body.expected_content_digest,
                 "enableAfter": body.enable_after,
-                "policyRevision": policy,
+                "policyRevision": body.policy_revision,
+                "ttlSeconds": body.ttl_seconds,
             },
         )
         if replayed is not None:
             return {"receipt": replayed.to_wire()}
+        policy = policy_or_400(body.policy_revision)
         target = get_release(scope, body.target_release_id)
         if target.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
@@ -512,6 +519,8 @@ def build_skills_router(
                 expected_revision=body.expected_revision,
                 enable_after=body.enable_after,
                 request_id=key,
+                request_policy_revision=body.policy_revision,
+                request_ttl_seconds=body.ttl_seconds,
             )
         except SkillError as exc:
             _raise(exc)
@@ -529,7 +538,6 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
-        policy = policy_or_400(body.policy_revision)
         replayed = _replay(
             registry,
             tenant_id=tenant_id,
@@ -542,11 +550,13 @@ def build_skills_router(
                 "expectedRevision": body.expected_revision,
                 "expectedContentDigest": body.expected_content_digest,
                 "reenable": body.reenable,
-                "policyRevision": policy,
+                "policyRevision": body.policy_revision,
+                "ttlSeconds": body.ttl_seconds,
             },
         )
         if replayed is not None:
             return {"receipt": replayed.to_wire()}
+        policy = policy_or_400(body.policy_revision)
         target = get_release(scope, body.target_release_id)
         if target.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
@@ -575,6 +585,8 @@ def build_skills_router(
                 expected_revision=body.expected_revision,
                 reenable=body.reenable,
                 request_id=key,
+                request_policy_revision=body.policy_revision,
+                request_ttl_seconds=body.ttl_seconds,
             )
         except SkillError as exc:
             _raise(exc)

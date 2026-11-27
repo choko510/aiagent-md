@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -18,11 +19,24 @@ from .contracts import (
     SkillRelease,
     SkillText,
 )
-from .digest import content_digest, sha256_bytes
+from .digest import content_digest, dependency_digest, sha256_bytes
 from .errors import ReleaseRevoked, SkillNotFound, SkillScopeViolation
 
 MAX_DISCLOSURE_BYTES = 16 * 1024
 MAX_BODY_BYTES = 256 * 1024
+
+
+def dependency_snapshot_digest(dependencies: tuple[DependencyPin, ...]) -> str:
+    """Canonical digest of the complete, ordered dependency closure."""
+    return sha256_bytes(canonical_json([dependency.to_wire() for dependency in dependencies]).encode("utf-8"))
+
+
+def _ordered_dependencies(dependencies: tuple[DependencyPin, ...]) -> tuple[DependencyPin, ...]:
+    ordered = tuple(sorted(dependencies, key=lambda dependency: dependency.skill_name))
+    names = [dependency.skill_name for dependency in ordered]
+    if len(names) != len(set(names)):
+        raise SkillScopeViolation("dependency closure contains duplicate Skill names")
+    return ordered
 
 
 def create_run_pin(
@@ -41,6 +55,7 @@ def create_run_pin(
         raise SkillScopeViolation("installation or release belongs to another tenant")
     if installation.release_id != release.id:
         raise SkillScopeViolation("installation does not point at the release being pinned")
+    ordered = _ordered_dependencies(dependencies)
     return RunSkillPin(
         tenant_id=tenant_id,
         run_id=run_id,
@@ -54,10 +69,8 @@ def create_run_pin(
         dependency_digest=dependency_digest,
         skill_surface_digest=skill_surface_digest,
         created_at=now,
-        dependencies=dependencies,
-        dependency_snapshot_digest=sha256_bytes(
-            canonical_json([dependency.to_wire() for dependency in dependencies]).encode("utf-8")
-        ),
+        dependencies=ordered,
+        dependency_snapshot_digest=dependency_snapshot_digest(ordered),
     )
 
 
@@ -71,6 +84,13 @@ def verify_run_pin(
 ) -> None:
     if revoked or release.state.value == "REVOKED":
         raise ReleaseRevoked("pinned Skill release was revoked")
+    ordered = _ordered_dependencies(pin.dependencies)
+    if ordered != pin.dependencies:
+        raise SkillScopeViolation("pinned dependency closure is not canonical")
+    if dependency_digest({item.skill_name: item.version for item in pin.dependencies}) != pin.dependency_digest:
+        raise SkillScopeViolation("pinned dependency digest does not match the snapshot")
+    if not hmac.compare_digest(pin.dependency_snapshot_digest, dependency_snapshot_digest(pin.dependencies)):
+        raise SkillScopeViolation("pinned dependency snapshot digest does not match the snapshot")
     checks = (
         pin.tenant_id == installation.tenant_id
         and pin.installation_id == installation.id

@@ -10,8 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from aiagent_domain.canonical import sha256_hex
+
 from .contracts import ScanResult, SecurityFinding, Severity, SkillFile
-from .digest import findings_digest
 
 ENGINE_VERSION = "skill-scan/1"
 MAX_FINDINGS = 500
@@ -156,15 +157,17 @@ _TEXTUAL = frozenset({".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".t
 
 
 def _excerpt(line: str) -> str:
-    clean = "".join(ch if ord(ch) >= 32 or ch == "\t" else " " for ch in line).strip()
-    return clean[:200]
+    """Never persist raw bundle text: findings carry only a location and a redacted marker."""
+    return ""
 
 
 def scan_files(files: dict[str, bytes], entries: tuple[SkillFile, ...]) -> ScanResult:
     findings: list[SecurityFinding] = []
     media = {entry.relative_path: entry.media_type for entry in entries}
+    truncated = False
     for path, payload in sorted(files.items()):
         if len(findings) >= MAX_FINDINGS:
+            truncated = True
             break
         if path.casefold().startswith(("scripts/", "bin/")) or media.get(path) == "text/x-shellscript":
             findings.append(
@@ -189,7 +192,13 @@ def scan_files(files: dict[str, bytes], entries: tuple[SkillFile, ...]) -> ScanR
         except UnicodeDecodeError:
             text = payload.decode("utf-8", errors="replace")
         for rule in RULES:
+            if len(findings) >= MAX_FINDINGS:
+                truncated = True
+                break
             for match in rule.pattern.finditer(text):
+                if len(findings) >= MAX_FINDINGS:
+                    truncated = True
+                    break
                 line_start = text.rfind("\n", 0, match.start()) + 1
                 line_end = text.find("\n", match.end())
                 if line_end < 0:
@@ -210,14 +219,25 @@ def scan_files(files: dict[str, bytes], entries: tuple[SkillFile, ...]) -> ScanR
                         heuristic=True,
                     )
                 )
-                if len(findings) >= MAX_FINDINGS:
-                    break
+            if truncated:
+                break
+        if truncated:
+            break
     unique = {(f.rule_id, f.path, f.line, f.column): f for f in findings}
     ordered = tuple(unique[key] for key in sorted(unique, key=lambda k: (k[0], k[1], k[2] or 0, k[3] or 0)))
     blocking = any(f.severity is Severity.BLOCKING for f in ordered)
+    complete = not truncated
+    digest = sha256_hex(
+        {
+            "engineVersion": ENGINE_VERSION,
+            "complete": complete,
+            "findings": [finding.to_wire() for finding in ordered],
+        }
+    )
     return ScanResult(
         findings=ordered,
         engine_version=ENGINE_VERSION,
-        digest=findings_digest(ordered),
+        digest=digest,
         blocking=blocking,
+        complete=complete,
     )

@@ -27,7 +27,7 @@ def make_zip() -> bytes:
     return buffer.getvalue()
 
 
-def build_client(tmp_path: Path) -> tuple[TestClient, SkillRegistry]:
+def build_client(tmp_path: Path, *, policy: str = "policy:1") -> tuple[TestClient, SkillRegistry]:
     store = InMemorySkillStore()
     registry = SkillRegistry(
         store,
@@ -39,7 +39,7 @@ def build_client(tmp_path: Path) -> tuple[TestClient, SkillRegistry]:
         build_skills_router(
             registry_factory=lambda: registry,
             scope_dep=lambda: SimpleNamespace(tenant_id=TENANT, user_id=OWNER, workspace_id="ws"),
-            policy_revision="policy:1",
+            policy_revision=policy,
         )
     )
     return TestClient(app), registry
@@ -236,6 +236,40 @@ def test_api_upload_limits_and_preview_traversal(tmp_path: Path) -> None:
     assert client.get(f"/v1/extensions/skills/releases/{release_id}/files/..%2F..%2Fetc%2Fpasswd").status_code == 404
     assert client.get("/v1/extensions/skills/releases/missing").status_code == 404
     assert client.get("/v1/extensions/skills/installations/not-a-uuid").status_code == 404
+
+
+def test_install_replay_survives_a_policy_revision_change(tmp_path: Path) -> None:
+    first_client, registry = build_client(tmp_path, policy="policy:1")
+    ingested = first_client.post(
+        "/v1/extensions/skills/ingest",
+        content=make_zip(),
+        headers={"Content-Type": "application/zip", "Idempotency-Key": "policy-replay-ingest"},
+    )
+    release_id = ingested.json()["receipt"]["releaseId"]
+    release = registry.store.get_release(TENANT, release_id)
+    body = {"expectedContentDigest": release.content_digest, "ttlSeconds": 120}
+    first = first_client.post(
+        f"/v1/extensions/skills/releases/{release_id}/install",
+        json=body,
+        headers={"Idempotency-Key": "policy-replay-install"},
+    )
+    assert first.status_code == 201, first.text
+
+    second_app = FastAPI()
+    second_app.include_router(
+        build_skills_router(
+            registry_factory=lambda: registry,
+            scope_dep=lambda: SimpleNamespace(tenant_id=TENANT, user_id=OWNER, workspace_id="ws"),
+            policy_revision="policy:2",
+        )
+    )
+    replay = TestClient(second_app).post(
+        f"/v1/extensions/skills/releases/{release_id}/install",
+        json=body,
+        headers={"Idempotency-Key": "policy-replay-install"},
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["receipt"] == first.json()["receipt"]
 
 
 def test_feature_flag_off_hides_routes(tmp_path: Path) -> None:

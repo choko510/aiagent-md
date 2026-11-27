@@ -54,7 +54,14 @@ from .lifecycle import (
     new_installation,
     revoke_installation,
 )
-from .pinning import EnabledSkillCatalog, ImmutableSkillBackend, create_run_pin, disclose_text, verify_run_pin
+from .pinning import (
+    EnabledSkillCatalog,
+    ImmutableSkillBackend,
+    create_run_pin,
+    dependency_snapshot_digest,
+    disclose_text,
+    verify_run_pin,
+)
 from .policy import validate_requested
 from .quarantine import QuarantineStore
 from .validation import assert_manifest_consistent, assert_release_installable, build_release
@@ -413,6 +420,8 @@ class SkillRegistry:
         policy_revision: str,
         request_id: str,
         now: str | None = None,
+        request_policy_revision: str | None = None,
+        request_ttl_seconds: int | None = None,
     ) -> OperationReceipt:
         timestamp = now or utc_instant()
 
@@ -464,7 +473,8 @@ class SkillRegistry:
             payload={
                 "releaseId": release_id,
                 "expectedContentDigest": approval.content_digest,
-                "policyRevision": policy_revision,
+                "policyRevision": request_policy_revision,
+                "ttlSeconds": request_ttl_seconds,
             },
             operation=operation,
         )
@@ -482,6 +492,8 @@ class SkillRegistry:
         expected_revision: int,
         request_id: str,
         now: str | None = None,
+        request_policy_revision: str | None = None,
+        request_ttl_seconds: int | None = None,
     ) -> OperationReceipt:
         timestamp = now or utc_instant()
 
@@ -527,7 +539,8 @@ class SkillRegistry:
                 "installationId": installation_id,
                 "expectedRevision": expected_revision,
                 "expectedContentDigest": approval.content_digest,
-                "policyRevision": policy_revision,
+                "policyRevision": request_policy_revision,
+                "ttlSeconds": request_ttl_seconds,
             },
             operation=operation,
         )
@@ -576,6 +589,8 @@ class SkillRegistry:
         enable_after: bool,
         request_id: str,
         now: str | None = None,
+        request_policy_revision: str | None = None,
+        request_ttl_seconds: int | None = None,
     ) -> OperationReceipt:
         timestamp = now or utc_instant()
 
@@ -626,6 +641,8 @@ class SkillRegistry:
                     policy_revision=policy_revision,
                     now=timestamp,
                     suspended=installation.effective is InstallationState.SUSPENDED,
+                    was_enabled=installation.effective is InstallationState.ENABLED,
+                    previous_policy_revision=installation.policy_revision,
                 )
             except Exception:
                 self.store.put_installation(abort_update(started, now=timestamp, restore=installation.effective))
@@ -645,7 +662,8 @@ class SkillRegistry:
                 "expectedRevision": expected_revision,
                 "expectedContentDigest": approval.content_digest,
                 "enableAfter": enable_after,
-                "policyRevision": policy_revision,
+                "policyRevision": request_policy_revision,
+                "ttlSeconds": request_ttl_seconds,
             },
             operation=operation,
         )
@@ -665,6 +683,8 @@ class SkillRegistry:
         reenable: bool,
         request_id: str,
         now: str | None = None,
+        request_policy_revision: str | None = None,
+        request_ttl_seconds: int | None = None,
     ) -> OperationReceipt:
         timestamp = now or utc_instant()
 
@@ -710,6 +730,8 @@ class SkillRegistry:
                 policy_revision=policy_revision,
                 now=timestamp,
                 suspended=installation.effective is InstallationState.SUSPENDED,
+                was_enabled=installation.effective is InstallationState.ENABLED,
+                previous_policy_revision=installation.policy_revision,
             )
             self.store.put_installation(finished)
             return finished.id, target.id, {"installation": finished.to_wire()}
@@ -725,7 +747,8 @@ class SkillRegistry:
                 "expectedRevision": expected_revision,
                 "expectedContentDigest": approval.content_digest,
                 "reenable": reenable,
-                "policyRevision": policy_revision,
+                "policyRevision": request_policy_revision,
+                "ttlSeconds": request_ttl_seconds,
             },
             operation=operation,
         )
@@ -863,6 +886,11 @@ class SkillRegistry:
         """Fail closed if any dependency in the snapshot was disabled, revoked, or moved."""
         if dependency_digest({item.skill_name: item.version for item in pin.dependencies}) != pin.dependency_digest:
             raise SkillScopeViolation("pinned dependency digest is inconsistent with the snapshot")
+        if dependency_snapshot_digest(pin.dependencies) != pin.dependency_snapshot_digest:
+            raise SkillScopeViolation("pinned dependency snapshot digest is inconsistent with the closure")
+        names = [item.skill_name for item in pin.dependencies]
+        if names != sorted(names) or len(names) != len(set(names)):
+            raise SkillScopeViolation("pinned dependency closure is not canonical")
         for dependency in pin.dependencies:
             installation = self.store.get_installation(tenant_id, dependency.installation_id)
             if installation.owner_user_id != owner_user_id:
@@ -914,6 +942,7 @@ class SkillRegistry:
                     or existing.release_id != installation.release_id
                 ):
                     raise LifecycleConflict("run pin no longer matches the live installation")
+                self._assert_dependencies_current(tenant_id, installation.owner_user_id, existing)
                 return existing
             release = self.store.get_release(tenant_id, installation.release_id)
             if installation.effective is not InstallationState.ENABLED:
