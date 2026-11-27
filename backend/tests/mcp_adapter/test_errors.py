@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from aiagent_mcp_adapter.errors import ErrorCode, McpError, classify_http_status
+from aiagent_mcp_adapter.sdk_transport import (
+    _close_after_failure,
+    _control_purpose,
+    _map_sdk_error,
+    _uncertain,
+)
+from mcp.shared.exceptions import MCPError
+
+
+def test_trusted_pre_send_denial_remains_pre_send() -> None:
+    error = McpError(ErrorCode.EGRESS_PRE_SEND_DENIED, "proxy_denied:PRE_SEND_DENIED")
+    assert _uncertain(error).effect_uncertain is False
+
+
+def test_post_send_origin_denial_is_not_treated_as_pre_send() -> None:
+    for status in (401, 403, 429, 500, 418):
+        error = classify_http_status(status)
+        assert error.effect_uncertain is True
+        assert _uncertain(error).effect_uncertain is True
+
+
+def test_control_purposes_are_explicit_and_unexposed_methods_are_denied() -> None:
+    assert _control_purpose("initialize") == "mcp_initialize"
+    assert _control_purpose("notifications/initialized") == "mcp_notification"
+    assert _control_purpose("tools/list") == "mcp_list"
+    assert _control_purpose("ping") == "mcp_ping"
+    with pytest.raises(McpError) as err:
+        _control_purpose("resources/list")
+    assert err.value.code is ErrorCode.CAPABILITY_MISSING
+
+
+def test_method_not_found_on_tools_call_is_uncertain_not_pre_send() -> None:
+    mapped = _map_sdk_error(MCPError(-32601, "method not found"), context="call")
+    assert mapped.code is ErrorCode.CAPABILITY_MISSING
+    assert mapped.effect_uncertain is True
+
+    listed = _map_sdk_error(MCPError(-32601, "method not found"), context="list")
+    assert listed.effect_uncertain is False
+
+
+async def test_cancellation_still_runs_transport_cleanup() -> None:
+    closed = asyncio.Event()
+
+    class Stack:
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            closed.set()
+
+    async def fail_after_cleanup() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await _close_after_failure(Stack())  # type: ignore[arg-type]
+            raise
+
+    task = asyncio.create_task(fail_after_cleanup())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
+
+
+def test_redirect_denial_is_uncertain_but_connect_failures_are_retryable() -> None:
+    redirect = McpError(ErrorCode.EGRESS_DENIED, "redirect_not_followed")
+    assert _uncertain(redirect).effect_uncertain is True
+    connect = McpError(ErrorCode.CONNECT_FAILED, "connect_failed")
+    assert connect.retryable is True
+    assert connect.effect_uncertain is False

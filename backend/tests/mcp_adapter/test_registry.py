@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+from aiagent_mcp_adapter.contracts import utc_now
+from aiagent_mcp_adapter.errors import ErrorCode, McpError
+from aiagent_mcp_adapter.registry_snapshot import SnapshotKey, SnapshotStore, ref_from_entry
+
+from .helpers import descriptor, entry, limits, snapshot
+
+
+async def test_publish_is_cas_and_monotonic() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=0)
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+    second = snapshot(entry(generation=2), generation=2)
+    await store.publish(second, expected_generation=1)
+    assert store.current(SnapshotKey("tenant-a", "owner-a", "demo")).generation == 2
+
+
+async def test_stale_generation_ref_is_rejected_after_publish() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    assert store.resolve(ref).alias == first.entries[0].alias
+    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    with pytest.raises(McpError) as err:
+        store.resolve(ref)
+    assert err.value.code is ErrorCode.STALE_TOOL_REF
+
+
+async def test_pinned_run_completes_on_its_generation_but_revocation_stops_it() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    await store.pin_run(first, run_id="run-1")
+    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    assert store.resolve_pinned("run-1", ref).tool_id == ref.tool_id
+    await store.revoke_run("run-1")
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-1", ref)
+    assert err.value.code is ErrorCode.POLICY_DENIED
+
+
+async def test_provider_revocation_invalidates_pins() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    await store.pin_run(first, run_id="run-2")
+    await store.revoke_provider(SnapshotKey("tenant-a", "owner-a", "demo"))
+    with pytest.raises(McpError):
+        store.resolve_pinned("run-2", ref)
+    with pytest.raises(McpError):
+        store.resolve(ref)
+
+
+async def test_expired_snapshot_and_pin_are_rejected() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry(), ttl_s=1.0)
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    await store.pin_run(first, run_id="run-3", ttl_s=1.0)
+    later = utc_now() + timedelta(seconds=5)
+    with pytest.raises(McpError) as err:
+        store.resolve(ref, now=later)
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-3", ref, now=later)
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+
+
+async def test_schema_mutation_is_detected_at_resolve() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    key = SnapshotKey("tenant-a", "owner-a", "demo")
+    stored = store._current[key]  # integrity test: simulate in-place corruption of the stored snapshot
+    stored.entries[0].input_schema["properties"]["injected"] = {"type": "string"}
+    with pytest.raises(McpError) as err:
+        store.resolve(ref)
+    assert err.value.code in (ErrorCode.SCHEMA_INVALID, ErrorCode.STALE_TOOL_REF)
+
+
+async def test_run_pin_is_immutable_and_revocation_survives_sweep() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-immutable")
+    second = snapshot(entry(generation=2), generation=2)
+    await store.publish(second, expected_generation=1)
+    with pytest.raises(McpError) as err:
+        await store.pin_run(second, run_id="run-immutable")
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+
+    await store.revoke_run("run-immutable")
+    later = utc_now() + timedelta(seconds=5)
+    store.sweep(now=later)
+    with pytest.raises(McpError) as err:
+        await store.pin_run(first, run_id="run-immutable")
+    assert err.value.code is ErrorCode.POLICY_DENIED
+
+
+async def test_revoked_provider_requires_explicit_admin_reenable() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    key = SnapshotKey("tenant-a", "owner-a", "demo")
+    await store.revoke_provider(key)
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry(), generation=1), expected_generation=0)
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    with pytest.raises(McpError):
+        await store.pin_run(first, run_id="run-after-revoke")
+    await store.unrevoke_provider(key)
+    await store.publish(
+        snapshot(entry(generation=2), generation=2, invalidation_epoch=1),
+        expected_generation=1,
+    )
+
+
+async def test_generation_never_restarts_after_ttl_expiry() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    later = utc_now() + timedelta(seconds=601)
+    assert store.sweep(now=later) == 1
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry()), expected_generation=0)
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+    await store.publish(
+        snapshot(entry(generation=2), generation=2, invalidation_epoch=1),
+        expected_generation=1,
+    )
+
+
+async def test_one_run_can_pin_tools_from_multiple_providers() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry(provider_id="provider-a"))
+    second = snapshot(entry(provider_id="provider-b"))
+    await store.publish(first, expected_generation=0)
+    await store.publish(second, expected_generation=0)
+    await store.pin_run(first, run_id="run-multi")
+    await store.pin_run(second, run_id="run-multi")
+    assert store.resolve_pinned("run-multi", ref_from_entry(first.entries[0])).provider_id == "provider-a"
+    assert store.resolve_pinned("run-multi", ref_from_entry(second.entries[0])).provider_id == "provider-b"
+    await store.revoke_run("run-multi")
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-multi", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.POLICY_DENIED
+
+
+async def test_removed_then_reintroduced_descriptor_cannot_revive_old_pin() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-1")
+
+    absent = snapshot(
+        entry(desc=descriptor("other"), generation=2),
+        generation=2,
+    )
+    await store.publish(absent, expected_generation=1)
+    third = snapshot(entry(generation=3), generation=3)
+    await store.publish(third, expected_generation=2)
+
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-1", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "run_revoked"
+
+
+async def test_endpoint_change_invalidates_an_old_pin_even_with_same_surface() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-1")
+    second = snapshot(
+        entry(generation=2),
+        generation=2,
+        endpoint_fingerprint="sha256:different-endpoint",
+    )
+    await store.publish(second, expected_generation=1)
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-1", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.STALE_TOOL_REF
+    assert err.value.detail == "endpoint_changed_since_pin"
+
+
+async def test_invalidation_removes_current_surface_and_rejects_stale_scan() -> None:
+    store = SnapshotStore(limits())
+    key = SnapshotKey("tenant-a", "owner-a", "demo")
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-old")
+    assert await store.invalidate_pins(key) == 1
+    assert store.current(key) is None
+    with pytest.raises(McpError) as err:
+        await store.pin_run(first, run_id="run-new")
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+    fresh = snapshot(entry(generation=2), generation=2, invalidation_epoch=1)
+    await store.publish(fresh, expected_generation=1)
+    await store.pin_run(fresh, run_id="run-new")
+
+
+async def test_old_pin_is_denied_when_live_descriptor_changed() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    await store.pin_run(first, run_id="run-changed")
+    changed = entry(desc=descriptor("echo", description="Changed semantics."), generation=2)
+    await store.publish(snapshot(changed, generation=2), expected_generation=1)
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-changed", ref)
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "run_revoked"
+
+
+async def test_expired_pin_is_not_silently_re_pinned() -> None:
+    store = SnapshotStore(limits())
+    snap = snapshot(entry())
+    await store.publish(snap, expected_generation=0)
+    start = utc_now()
+    await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start)
+    with pytest.raises(McpError) as err:
+        await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start + timedelta(seconds=2))
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+    assert store.sweep(now=start + timedelta(seconds=2)) == 0
+    with pytest.raises(McpError) as err2:
+        await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start + timedelta(seconds=3))
+    assert err2.value.code is ErrorCode.SNAPSHOT_EXPIRED
