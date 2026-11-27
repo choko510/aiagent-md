@@ -18,7 +18,6 @@ from .config import AdapterLimits, ProviderConfig, require_enabled
 from .credentials import CredentialBroker
 from .errors import ErrorCode, McpError
 from .sdk_transport import SdkSession, SdkStreamableHttpTransport
-from .transport import Credential
 
 
 @dataclass
@@ -61,7 +60,21 @@ class SessionManager:
             raise McpError(ErrorCode.ADAPTER_DISABLED, "provider_disabled")
         if provider.provider_id in self._revoked:
             raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
-        credential: Credential | None = await self.credentials.resolve(provider, run_id=run_id)
+        remaining = None
+        if deadline_epoch_s is not None:
+            remaining = deadline_epoch_s - time.time()
+            if remaining <= 0:
+                raise McpError(ErrorCode.BUDGET_EXCEEDED, "call_deadline_exceeded")
+        # The broker wait is part of the call deadline. Resolving credentials may involve a remote
+        # vault and must not outlive the caller's remaining budget.
+        if remaining is not None:
+            try:
+                async with asyncio.timeout(remaining):
+                    credential = await self.credentials.resolve(provider, run_id=run_id)
+            except TimeoutError as exc:
+                raise McpError(ErrorCode.BUDGET_EXCEEDED, "credential_resolution_deadline") from exc
+        else:
+            credential = await self.credentials.resolve(provider, run_id=run_id)
         # Re-check after the broker await: a revoke/rotate may have happened while waiting.
         if provider.provider_id in self._revoked:
             raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
@@ -121,11 +134,34 @@ class SessionManager:
             ) from exc
 
     @asynccontextmanager
-    async def call_slot(self, provider_id: str) -> AsyncIterator[None]:
-        """Per-provider concurrency ceiling for admitted tool calls."""
+    async def call_slot(
+        self,
+        provider_id: str,
+        *,
+        deadline_epoch_s: float | None = None,
+    ) -> AsyncIterator[None]:
+        """Per-provider concurrency ceiling for admitted tool calls.
+
+        The queue wait is bounded by the caller's overall deadline. Once the slot is acquired the
+        session/deadline logic owns the rest, so a timeout here can never misclassify an in-flight
+        effect as uncertain.
+        """
         del provider_id  # one global ceiling today; the key is kept for a future per-provider split
-        async with self._call_semaphore:
+        if deadline_epoch_s is not None:
+            remaining = deadline_epoch_s - time.time()
+            if remaining <= 0:
+                raise McpError(ErrorCode.BUDGET_EXCEEDED, "call_slot_deadline_exceeded")
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._call_semaphore.acquire()
+            except TimeoutError as exc:
+                raise McpError(ErrorCode.BUDGET_EXCEEDED, "call_slot_deadline_exceeded") from exc
+        else:
+            await self._call_semaphore.acquire()
+        try:
             yield
+        finally:
+            self._call_semaphore.release()
 
     @property
     def active(self) -> int:

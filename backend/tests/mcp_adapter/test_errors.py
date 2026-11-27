@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiagent_mcp_adapter.errors import ErrorCode, McpError, classify_http_status
-from aiagent_mcp_adapter.sdk_transport import _control_purpose, _map_sdk_error, _uncertain
+from aiagent_mcp_adapter.sdk_transport import (
+    _close_after_failure,
+    _control_purpose,
+    _map_sdk_error,
+    _uncertain,
+)
 from mcp.shared.exceptions import MCPError
 
 
@@ -35,6 +42,29 @@ def test_method_not_found_on_tools_call_is_uncertain_not_pre_send() -> None:
 
     listed = _map_sdk_error(MCPError(-32601, "method not found"), context="list")
     assert listed.effect_uncertain is False
+
+
+async def test_cancellation_still_runs_transport_cleanup() -> None:
+    closed = asyncio.Event()
+
+    class Stack:
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            closed.set()
+
+    async def fail_after_cleanup() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await _close_after_failure(Stack())  # type: ignore[arg-type]
+            raise
+
+    task = asyncio.create_task(fail_after_cleanup())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
 
 
 def test_redirect_denial_is_uncertain_but_connect_failures_are_retryable() -> None:

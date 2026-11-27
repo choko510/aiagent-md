@@ -141,6 +141,59 @@ async def test_generation_never_restarts_after_ttl_expiry() -> None:
     )
 
 
+async def test_one_run_can_pin_tools_from_multiple_providers() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry(provider_id="provider-a"))
+    second = snapshot(entry(provider_id="provider-b"))
+    await store.publish(first, expected_generation=0)
+    await store.publish(second, expected_generation=0)
+    await store.pin_run(first, run_id="run-multi")
+    await store.pin_run(second, run_id="run-multi")
+    assert store.resolve_pinned("run-multi", ref_from_entry(first.entries[0])).provider_id == "provider-a"
+    assert store.resolve_pinned("run-multi", ref_from_entry(second.entries[0])).provider_id == "provider-b"
+    await store.revoke_run("run-multi")
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-multi", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.POLICY_DENIED
+
+
+async def test_removed_then_reintroduced_descriptor_cannot_revive_old_pin() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-1")
+
+    absent = snapshot(
+        entry(desc=descriptor("other"), generation=2),
+        generation=2,
+    )
+    await store.publish(absent, expected_generation=1)
+    third = snapshot(entry(generation=3), generation=3)
+    await store.publish(third, expected_generation=2)
+
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-1", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "run_revoked"
+
+
+async def test_endpoint_change_invalidates_an_old_pin_even_with_same_surface() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-1")
+    second = snapshot(
+        entry(generation=2),
+        generation=2,
+        endpoint_fingerprint="sha256:different-endpoint",
+    )
+    await store.publish(second, expected_generation=1)
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-1", ref_from_entry(first.entries[0]))
+    assert err.value.code is ErrorCode.STALE_TOOL_REF
+    assert err.value.detail == "endpoint_changed_since_pin"
+
+
 async def test_invalidation_removes_current_surface_and_rejects_stale_scan() -> None:
     store = SnapshotStore(limits())
     key = SnapshotKey("tenant-a", "owner-a", "demo")
@@ -170,7 +223,8 @@ async def test_old_pin_is_denied_when_live_descriptor_changed() -> None:
     await store.publish(snapshot(changed, generation=2), expected_generation=1)
     with pytest.raises(McpError) as err:
         store.resolve_pinned("run-changed", ref)
-    assert err.value.code is ErrorCode.STALE_TOOL_REF
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "run_revoked"
 
 
 async def test_expired_pin_is_not_silently_re_pinned() -> None:

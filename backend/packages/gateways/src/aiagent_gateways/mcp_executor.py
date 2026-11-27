@@ -159,7 +159,10 @@ class McpToolExecutor:
             self.telemetry.emit("mcp.tools.list_changed", {"provider_id": provider.provider_id})
 
         try:
-            async with self.sessions.call_slot(provider.provider_id):
+            async with self.sessions.call_slot(
+                provider.provider_id,
+                deadline_epoch_s=deadline_epoch_s,
+            ):
                 async with self.sessions.session(
                     provider,
                     on_list_changed=on_list_changed,
@@ -258,11 +261,11 @@ class McpToolExecutor:
         if result.status == "OK" and not result.truncated:
             if entry.risk_class == "read":
                 return None
-            # A write is only CONFIRMED by a non-empty text body or a non-empty structured result.
-            # A resource link, binary digest or empty text/object is not proof the effect happened.
-            if result.text.strip() or (result.structured is not None and bool(result.structured)):
+            # Text is presentation, not an effect receipt. Without a non-empty structured result
+            # there is no machine-checkable evidence that a write happened.
+            if result.structured:
                 return None
-            return McpError(ErrorCode.EFFECT_UNCERTAIN, "empty_write_result", effect_uncertain=True)
+            return McpError(ErrorCode.EFFECT_UNCERTAIN, "no_structured_write_receipt", effect_uncertain=True)
         if entry.risk_class == "read":
             return McpError(
                 ErrorCode.TOOL_ERROR if result.status == "TOOL_ERROR" else ErrorCode.RESULT_UNSUPPORTED,

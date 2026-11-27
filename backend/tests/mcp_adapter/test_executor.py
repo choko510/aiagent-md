@@ -42,7 +42,8 @@ class FakeManager:
         return self.revoked
 
     @asynccontextmanager
-    async def call_slot(self, provider_id):
+    async def call_slot(self, provider_id, *, deadline_epoch_s=None):
+        del provider_id, deadline_epoch_s
         yield
 
     @asynccontextmanager
@@ -196,6 +197,16 @@ async def test_arguments_mutated_after_prepare_are_rejected_before_session() -> 
     with pytest.raises(ExecutorFailed, match="arguments_digest"):
         await executor.execute("eff-1", args, "permit-1")
     assert manager.opens == 0
+
+
+async def test_nonempty_text_write_result_is_unknown_without_structured_receipt() -> None:
+    store, snap, executor, _, _ = build(
+        risk_class="write_reversible",
+        result={"content": [{"type": "text", "text": "done"}]},
+    )
+    await prepare(executor, snap, {"text": "hello"})
+    with pytest.raises(ExecutorUnknown, match="EFFECT_UNCERTAIN"):
+        await executor.execute("eff-1", {"text": "hello"}, "permit-1")
 
 
 async def test_empty_write_result_is_unknown_not_confirmed() -> None:

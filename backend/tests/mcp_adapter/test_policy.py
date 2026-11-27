@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from aiagent_mcp_adapter.policy import PolicySet
 
 from .helpers import descriptor
@@ -56,6 +58,38 @@ def test_policy_requires_a_named_approver() -> None:
         policies={"echo": type(record)(**{**record.__dict__, "approved_by": " "})},
     )
     assert no_actor.decide(desc).reason == "unclassified"
+
+
+def test_policy_record_identity_and_integrity_are_bound() -> None:
+    desc = descriptor()
+    approved = PolicySet(provider_id="provider-a", revision=1, allowlist=frozenset({"echo"})).approve(
+        desc, risk_class="read", approval_required=False, actor="admin"
+    )
+    record = approved._policies["echo"]
+
+    renamed = PolicySet(
+        provider_id="provider-a",
+        revision=approved.revision,
+        allowlist=approved.allowlist,
+        policies={"echo": replace(record, tool_name="other")},
+    )
+    assert renamed.decide(desc).reason == "record_identity_mismatch"
+
+    tampered = PolicySet(
+        provider_id="provider-a",
+        revision=approved.revision,
+        allowlist=approved.allowlist,
+        policies={"echo": replace(record, enabled=False)},
+    )
+    assert tampered.decide(desc).reason == "record_integrity_failed"
+
+    future = PolicySet(
+        provider_id="provider-a",
+        revision=approved.revision,
+        allowlist=approved.allowlist,
+        policies={"echo": replace(record, policy_revision=approved.revision + 1)},
+    )
+    assert future.decide(desc).reason == "policy_revision_mismatch"
 
 
 def test_allowlist_and_policy_must_both_match() -> None:

@@ -337,12 +337,26 @@ class SdkStreamableHttpTransport:
         try:
             yield sdk_session
         except BaseException:
-            await _close_quietly(stack)
+            # Preserve the primary cancellation/interrupt while still giving the transport's
+            # DELETE/close path a chance to run. A pending cancellation would otherwise abort
+            # cleanup immediately and leak the HTTP session.
+            await _close_after_failure(stack)
             raise
         else:
             # Cleanup/DELETE failures happen after a response. They cannot change the effect
             # outcome that the caller already received, so they must not turn it into FAILED.
             await _close_quietly(stack)
+
+
+async def _close_after_failure(stack: AsyncExitStack) -> None:
+    current = asyncio.current_task()
+    if current is not None:
+        # The task was already cancelled at the yield. Temporarily decrement the cancellation
+        # count so aclose() can actually await transport cleanup; the original exception is
+        # re-raised immediately afterwards.
+        while current.cancelling():
+            current.uncancel()
+    await _close_quietly(stack)
 
 
 async def _close_quietly(stack: AsyncExitStack) -> None:

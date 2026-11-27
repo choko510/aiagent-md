@@ -22,9 +22,9 @@ client/catalog half of the canonical adapter:
 | Egress | `egress.py` | absolute-form HTTP through the existing forward proxy, `Proxy-Authorization: Aiagent tool_gateway:{permit}`, no redirect following in the adapter, HMAC denial proof check |
 | SDK transport | `sdk_transport.py` | pinned `mcp 2.3.0` streamable HTTP client, explicit `ListToolsRequest` / `CallToolRequest`, bounded timeouts, session-loss and transport-error classification |
 | Normalization | `normalization.py` | strips control characters, caps text, hashes binary content instead of inlining it, keeps resource links inert, validates `structuredContent` against the pinned output schema |
-| Snapshot store | `registry_snapshot.py` | compare-and-swap publish, monotonic generation high-watermark, TTL, invalidation epoch, current-snapshot-only run pin, live-descriptor recheck, tombstoned pins, revoke, strict `ToolRef` resolution (provider, schema digest, risk class, policy revision, credential version, endpoint fingerprint) |
+| Snapshot store | `registry_snapshot.py` | compare-and-swap publish, monotonic generation high-watermark, TTL, invalidation epoch, current-snapshot-only run pin, live-descriptor + endpoint recheck, surface-change pin revocation, tombstoned pins, revoke, strict `ToolRef` resolution (provider, schema digest, risk class, policy revision, credential version, endpoint fingerprint) |
 | Credentials | `credentials.py` | broker Protocol; production default refuses; static broker is explicitly test-only |
-| Sessions | `session_manager.py` | fail-closed feature flag, provider enable/revoke, credential presence check, bounded sessions and admitted-call slots, one SDK session per operation |
+| Sessions | `session_manager.py` | fail-closed feature flag, provider enable/revoke, credential presence check, bounded sessions and admitted-call slots, one SDK session per operation; the overall deadline covers broker resolution and the call-slot wait |
 | Telemetry | `telemetry.py` | bounded, secret-free event sink |
 
 The Gateway-side adapter is `backend/packages/gateways/src/aiagent_gateways/mcp_executor.py`:
@@ -32,7 +32,8 @@ The Gateway-side adapter is `backend/packages/gateways/src/aiagent_gateways/mcp_
 against the pinned input schema, checks the current endpoint/policy/credential revision, and runs a
 last-moment fence immediately before the single `tools/call` POST. Read failures return `ExecutorFailed`;
 an `isError`, unsupported, truncated, empty or otherwise incomplete write response becomes
-`ExecutorUnknown` so the existing side-effect ledger records UNKNOWN and never auto-retries.
+`ExecutorUnknown` so the existing side-effect ledger records UNKNOWN and never auto-retries. A write is
+never CONFIRMED from presentation text alone: it needs a non-empty structured result.
 
 ## 2. Trust flow
 
@@ -71,9 +72,11 @@ untrusted data. `annotations.readOnlyHint` never grants authority; risk class an
   included here; do not point this adapter at a remote HTTPS provider until it exists and is exercised.
 - **No stdio.** Only `streamable_http` is accepted. There is no command, shell, Docker socket, SSH, or
   arbitrary local executable path in the provider model or call request.
-- **No stale execution.** `SnapshotStore.resolve_pinned` checks generation, schema digest, policy revision,
-  credential version, risk class and endpoint fingerprint against the run pin, then requires the live
-  current snapshot to still contain the same descriptor. Invalidation removes the current surface and bumps
+- **No stale execution or historical resurrection.** `SnapshotStore.resolve_pinned` checks generation,
+  schema digest, policy revision, credential version, risk class and endpoint fingerprint against the run
+  pin, then requires the live current snapshot to still contain the same descriptor and endpoint. Publishing
+  any different surface revokes every pin for that provider, so a tool that disappears and later reappears
+  with an identical descriptor cannot revive the old pin. Invalidation removes the current surface and bumps
   a per-provider epoch, so a stale scan cannot publish and an old pin cannot execute a deleted/changed tool.
   A pin may only be created from the currently committed, unexpired snapshot; expired/revoked pins remain
   tombstoned and cannot be re-pinned. The executor re-checks the current provider config and pinned endpoint before opening a
@@ -89,6 +92,16 @@ untrusted data. `annotations.readOnlyHint` never grants authority; risk class an
 - **Bounded resources.** Pages, tools, listing bytes, schema bytes, regex length, argument bytes/depth/
   nodes/string/integer size, response bytes, text bytes, content blocks, sessions, concurrent admitted
   calls, timeouts and SSE event size all have hard ceilings.
+- **Policy records are integrity-bound.** A policy record carries its own revision and a canonical
+  record digest, and must still match the record name/provider/tenant/owner. A tampered, renamed, future-
+  revision or transplanted record is rejected before publication. This local digest is not a cryptographic
+  authority; real approval provenance remains a Sentinel/PostgreSQL gate.
+- **One run can pin several providers.** Pins are keyed by `(run_id, tenant, owner, provider)`; a run
+  using MCP tools from multiple providers keeps one immutable pin per provider, and `revoke_run` fences
+  all of them together.
+- **Deadlines cover waiting, not just I/O.** The overall call deadline is checked before and after the
+  credential broker, the admitted-call semaphore wait is bounded by the same deadline, and the session
+  deadline is recomputed after each wait. A timeout while queued cannot be misreported as an in-flight write.
 - **Purpose-scoped permits.** The transport never reuses the admitted Gateway permit for initialization,
   notifications, list, GET stream or DELETE. Those requests receive a control permit with an explicit
   purpose; the admitted permit is accepted only for one exact `tools/call` whose tool name and canonical
@@ -128,8 +141,10 @@ PostgreSQL persistence is **BLOCKED_ON_PR_122**:
 - This change must not add `0029`/`0030` to `backend/migrations` or edit shared migration numbering.
   The root `uv.lock` was regenerated only to add the new workspace package; resolve any conflict with
   PR #122 by regenerating, not by hand-editing dependency entries.
-- The package-local DDL and tenant/owner RLS policies are therefore not present in this PR. No PostgreSQL
-  or RLS test was executed. Do not claim RLS verified.
+- The package-local DDL and tenant/owner RLS policies are therefore not present in this PR. No
+  MCP-specific PostgreSQL/RLS test was executed. The repository's existing migration suite was executed
+  against a local PostgreSQL 14 instance (12 passed); this is not PostgreSQL 16 parity and does not verify
+  MCP persistence or RLS. Do not claim RLS verified.
 
 A follow-up must add package-local SQL and a numbered migration **after** PR #122 lands, with real
 PostgreSQL tests for tenant/owner isolation, CAS publish, TTL expiry and pinned-run resolution.
@@ -167,7 +182,7 @@ refusal through the adapter transport. They do not contact an external service.
 
 ## 8. Test evidence
 
-`90` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
+`98` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
 `docs/11-qa/mcp-adapter-verification.md`. This is local execution evidence only; it is not a production
 verification or a remote-provider certification.
 

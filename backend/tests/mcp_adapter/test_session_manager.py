@@ -129,6 +129,29 @@ async def test_credential_is_passed_only_to_the_transport(monkeypatch: pytest.Mo
     assert mgr.active == 0
 
 
+async def test_credential_broker_wait_is_bounded_by_the_overall_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_ADAPTER_ENABLED", "1")
+
+    class SlowBroker(FakeBroker):
+        async def resolve(self, provider: ProviderConfig, *, run_id: str | None = None) -> Credential | None:
+            await asyncio.sleep(0.2)
+            return Credential("Authorization", "secret", version=1)
+
+    mgr, transport, _ = manager(broker=SlowBroker())
+    with pytest.raises(McpError) as err:
+        async with mgr.session(
+            bearer_provider(),
+            on_list_changed=lambda: None,
+            deadline_epoch_s=time.time() + 0.05,
+        ):
+            pass
+    assert err.value.code is ErrorCode.BUDGET_EXCEEDED
+    assert err.value.detail == "credential_resolution_deadline"
+    assert transport.calls == []
+
+
 async def test_before_open_runs_after_the_semaphore_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_ADAPTER_ENABLED", "1")
     mgr, _, _ = manager(limits=limits(max_sessions=1))
@@ -174,6 +197,30 @@ async def test_expired_deadline_is_refused_after_the_semaphore_wait(monkeypatch:
             pass
     assert err.value.code is ErrorCode.BUDGET_EXCEEDED
     assert transport.calls == []
+
+
+async def test_call_slot_wait_is_bounded_by_the_overall_deadline() -> None:
+    mgr, _, _ = manager(limits=limits(max_concurrent_calls=1))
+    first_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_first() -> None:
+        async with mgr.call_slot("demo"):
+            first_entered.set()
+            await release.wait()
+
+    async def queued() -> None:
+        async with mgr.call_slot("demo", deadline_epoch_s=time.time() + 0.05):
+            raise AssertionError("expired call slot must not be acquired")
+
+    first = asyncio.create_task(hold_first())
+    await first_entered.wait()
+    second = asyncio.create_task(queued())
+    with pytest.raises(McpError) as err:
+        await second
+    release.set()
+    await first
+    assert err.value.code is ErrorCode.BUDGET_EXCEEDED
 
 
 async def test_call_slot_bounds_concurrency() -> None:

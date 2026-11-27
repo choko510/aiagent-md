@@ -6,7 +6,7 @@ semantic change yields a new revision, so the old approval never silently carrie
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -30,6 +30,7 @@ class ToolPolicy:
     approved_by: str
     approved_at: datetime
     policy_revision: int
+    record_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,9 @@ class PolicyDecision:
         "revoked",
         "provider_mismatch",
         "scope_mismatch",
+        "record_identity_mismatch",
+        "policy_revision_mismatch",
+        "record_integrity_failed",
     ]
 
 
@@ -80,6 +84,9 @@ class PolicySet:
         policy = self._policies.get(name)
         if policy is None:
             return PolicyDecision(None, "unclassified")
+        if policy.tool_name != name:
+            # The dictionary key is not the record's identity.
+            return PolicyDecision(None, "record_identity_mismatch")
         if policy.provider_id != self.provider_id:
             # A policy record cannot be transplanted from another provider with the same tool name.
             return PolicyDecision(None, "provider_mismatch")
@@ -87,6 +94,13 @@ class PolicySet:
             return PolicyDecision(None, "scope_mismatch")
         if not policy.approved_by.strip():
             return PolicyDecision(None, "unclassified")
+        if policy.policy_revision > self.revision:
+            # A record approved for a future revision is not authority for this set.
+            return PolicyDecision(None, "policy_revision_mismatch")
+        if not policy.record_digest or policy.record_digest != _record_digest(policy):
+            # Detects accidental or in-place replacement of an approved record. Cryptographic
+            # provenance and the single-use authority live in Sentinel, not in this local digest.
+            return PolicyDecision(None, "record_integrity_failed")
         if not policy.enabled:
             return PolicyDecision(None, "disabled")
         if (
@@ -127,6 +141,7 @@ class PolicySet:
             approved_at=now or utc_now(),
             policy_revision=self.revision + 1,
         )
+        record = replace(record, record_digest=_record_digest(record))
         policies = {**self._policies, descriptor.source_name: record}
         return PolicySet(
             provider_id=self.provider_id,
@@ -165,3 +180,23 @@ class PolicySet:
 
     def matches_scope(self, *, provider_id: str, tenant_id: str, owner_user_id: str) -> bool:
         return self.provider_id == provider_id and self.tenant_id == tenant_id and self.owner_user_id == owner_user_id
+
+
+def _record_digest(policy: ToolPolicy) -> str:
+    return digest(
+        {
+            "provider_id": policy.provider_id,
+            "tenant_id": policy.tenant_id,
+            "owner_user_id": policy.owner_user_id,
+            "tool_name": policy.tool_name,
+            "descriptor_revision": policy.descriptor_revision,
+            "input_digest": policy.input_digest,
+            "output_digest": policy.output_digest,
+            "risk_class": policy.risk_class,
+            "approval_required": bool(policy.approval_required),
+            "enabled": bool(policy.enabled),
+            "approved_by": policy.approved_by,
+            "approved_at": policy.approved_at.isoformat(),
+            "policy_revision": policy.policy_revision,
+        }
+    )
