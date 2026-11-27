@@ -40,6 +40,7 @@ def xlsx_bytes(
     rows: list[list[str | int | float | None]],
     *,
     formulas: dict[str, tuple[str, str]] | None = None,
+    formula_types: dict[str, str] | None = None,
     hidden_sheet: bool = False,
     external_link: bool = False,
     shared_strings: bool = True,
@@ -62,8 +63,9 @@ def xlsx_bytes(
         cell_xml.append(f'<row r="{r_index}">' + "".join(cells) + "</row>")
     for ref, (formula, cached) in (formulas or {}).items():
         row_no = int("".join(ch for ch in ref if ch.isdigit()))
+        cell_type = (formula_types or {}).get(ref, "e")
         cell_xml[row_no - 1] = cell_xml[row_no - 1].replace(
-            "</row>", f'<c r="{ref}" t="e"><f>{formula}</f><v>{cached}</v></c></row>'
+            "</row>", f'<c r="{ref}" t="{cell_type}"><f>{formula}</f><v>{cached}</v></c></row>'
         )
     shared = ""
     if strings:

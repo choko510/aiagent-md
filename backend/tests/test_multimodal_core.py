@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import stat
+import threading
 import zipfile
 
 import pytest
 from aiagent_multimodal.archive_gate import inspect_archive
+from aiagent_multimodal.blobstore import QuarantineBlobStore
 from aiagent_multimodal.contracts import MmiSourceLocator, canonical_parse_key
 from aiagent_multimodal.detection import DeclaredInput, detect
 from aiagent_multimodal.errors import MmiError
@@ -414,4 +417,115 @@ def test_pipeline_ignores_worker_candidate_text_and_reparses_source() -> None:
     amount = result.outcome["candidates"][0]
     assert amount["rawText"] == "100"
     assert amount["locator"]["kind"] == "csv"
-    assert amount["locator"]["kind"] == "csv"
+
+
+def test_xlsx_cached_formula_value_is_estimated_and_unverified() -> None:
+    data = xlsx_bytes(
+        [["Item", "Price"], ["A", None]],
+        formulas={"B2": ("1+1", "100\u5186")},
+        formula_types={"B2": "str"},
+    )
+    doc = XlsxParser().parse(make_input("xlsx", data))
+    extraction = extract_candidates(doc, ["amount"])
+    candidate = next(c for c in extraction.candidates if c.raw_text == "100\u5186")
+    assert candidate.value_state == "estimated"
+    assert "formula_cached_value" in candidate.conditions
+    result = verify_candidates(doc, [candidate], data, locale="ja-JP")
+    assert result.candidates[0].verification == "unverified"
+
+
+def test_normalized_value_without_replay_is_not_anchored() -> None:
+    data = "price\n100\u5186\n".encode()
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount"])
+    candidate = next(c for c in extraction.candidates if c.raw_text == "100\u5186")
+    changed = dataclasses.replace(
+        candidate,
+        normalized={"schema": "mmi.money/1", "amount": "999", "currency": "JPY", "tax": "unknown"},
+    )
+    assert verify_candidates(doc, [changed], data).candidates[0].verification == "contradicted"
+    no_replay = dataclasses.replace(candidate, field_key="quantity")
+    assert verify_candidates(doc, [no_replay], data).candidates[0].verification == "unverified"
+
+
+def test_date_replay_accepts_slash_form() -> None:
+    data = b"date\n2026/11/27\n"
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["date"])
+    result = verify_candidates(doc, extraction.candidates, data)
+    assert result.anchored == 1
+
+
+def test_concurrent_chunk_publish_does_not_overwrite(tmp_path) -> None:
+    store = QuarantineBlobStore(tmp_path, max_file_bytes=1024)
+    barrier = threading.Barrier(2)
+    outcomes: list[tuple[str, str]] = []
+
+    def writer(payload: bytes) -> None:
+        barrier.wait()
+        try:
+            digest = store.put_chunk(
+                "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", 0, payload
+            )
+        except MmiError as exc:
+            outcomes.append(("error", exc.code))
+        else:
+            outcomes.append(("ok", digest))
+
+    threads = [threading.Thread(target=writer, args=(b"first",)), threading.Thread(target=writer, args=(b"second",))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len([o for o in outcomes if o[0] == "ok"]) == 1
+    assert len([o for o in outcomes if o[0] == "error"]) == 1
+    winner = next(o[1] for o in outcomes if o[0] == "ok")
+    part = (
+        tmp_path
+        / "staging"
+        / "11111111-1111-4111-8111-111111111111"
+        / "22222222-2222-4222-8222-222222222222"
+        / "00000.part"
+    )
+    assert hashlib.sha256(part.read_bytes()).hexdigest() == winner
+
+
+def test_pdf_verification_is_limited_to_the_candidate_bbox() -> None:
+    data = "page\n100\u5186\n".encode()
+    sha = hashlib.sha256(data).hexdigest()
+    page_locator = MmiSourceLocator(
+        kind="pdf", artifact_id="art_bbox", source_sha256=sha, page1=1, layer="native", rotation_deg=0
+    )
+    block = TextBlock(
+        block_id="p1:b1",
+        kind="paragraph",
+        text="100\u5186",
+        locator=MmiSourceLocator(
+            kind="pdf",
+            artifact_id="art_bbox",
+            source_sha256=sha,
+            page1=1,
+            layer="native",
+            rotation_deg=0,
+            normalized_bbox=(0.1, 0.1, 0.3, 0.2),
+        ),
+    )
+    document = Document(
+        source_artifact_id="art_bbox",
+        source_sha256=sha,
+        format="pdf",
+        sections=[
+            Section(section_id="page:1", kind="page", ordinal1=1, label="Page 1", locator=page_locator, blocks=[block])
+        ],
+        parser_revision="test",
+        build_digest="test-build",
+    )
+    extraction = extract_candidates(document, ("amount",), locale="ja-JP")
+    candidate = extraction.candidates[0]
+    assert candidate.locator is not None
+    outside = dataclasses.replace(
+        candidate, locator=dataclasses.replace(candidate.locator, normalized_bbox=(0.7, 0.7, 0.9, 0.9))
+    )
+    result = verify_candidates(document, [outside], data)
+    assert result.candidates[0].verification == "unverified"
+    assert "bounding box" in result.candidates[0].provenance["verificationReason"]

@@ -17,6 +17,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+from uuid import uuid4
 
 from .errors import MmiError
 
@@ -74,12 +75,24 @@ class QuarantineBlobStore:
             if existing != data:
                 raise MmiError("POLICY_DENIED", "chunk replay differs")
             return hashlib.sha256(data).hexdigest()
-        temp = target.with_suffix(".tmp")
-        with temp.open("wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temp, target)
+        # Each writer uses a unique temp name and publishes with link(), which is atomic
+        # and fails if a concurrent writer already published. A shared temp + replace()
+        # let one request overwrite the other request's bytes before the DB conflict.
+        temp = chunk_dir / f".{index:05d}.{uuid4().hex}.tmp"
+        try:
+            with temp.open("wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temp, target)
+                self._chmod(target, 0o600)
+            except FileExistsError:
+                existing = target.read_bytes()
+                if existing != data:
+                    raise MmiError("POLICY_DENIED", "chunk replay differs") from None
+        finally:
+            temp.unlink(missing_ok=True)
         return hashlib.sha256(data).hexdigest()
 
     def finalize(

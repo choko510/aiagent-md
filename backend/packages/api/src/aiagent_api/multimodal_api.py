@@ -201,7 +201,7 @@ def build_router(
     @router.post("/uploads/{upload_id}/complete")
     async def complete_upload(upload_id: str, p: P) -> JSONResponse:
         try:
-            result = get_service().complete_upload(p, upload_id)
+            result = await asyncio.to_thread(get_service().complete_upload, p, upload_id)
         except MmiError as exc:
             raise _http(exc) from None
         return JSONResponse(result)
@@ -209,14 +209,14 @@ def build_router(
     @router.get("/artifacts/{artifact_id}")
     async def get_artifact(artifact_id: str, p: P) -> JSONResponse:
         try:
-            return JSONResponse(get_service().get_artifact(p, artifact_id))
+            return JSONResponse(await asyncio.to_thread(get_service().get_artifact, p, artifact_id))
         except MmiError as exc:
             raise _http(exc) from None
 
     @router.delete("/artifacts/{artifact_id}")
     async def revoke_artifact(artifact_id: str, p: P) -> JSONResponse:
         try:
-            return JSONResponse(get_service().revoke_artifact(p, artifact_id))
+            return JSONResponse(await asyncio.to_thread(get_service().revoke_artifact, p, artifact_id))
         except MmiError as exc:
             raise _http(exc) from None
 
@@ -249,12 +249,18 @@ def build_router(
                 idempotency_key=_string(body, "idempotencyKey", max_len=256),
                 deadline_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
             )
-            job = service.start_parse(p, artifact_id, request=request_v1, idempotency_key=request_v1.idempotency_key)
+            job = await asyncio.to_thread(
+                service.start_parse,
+                p,
+                artifact_id,
+                request=request_v1,
+                idempotency_key=request_v1.idempotency_key,
+            )
         except MmiError as exc:
             raise _http(exc) from None
         except ValueError:
             raise HTTPException(422, detail={"error": "INVALID_REQUEST"}) from None
-        return JSONResponse(service.get_job(p, job.id), status_code=202)
+        return JSONResponse(await asyncio.to_thread(service.get_job, p, job.id), status_code=202)
 
     @router.post("/jobs/{job_id}/run")
     async def run_job(job_id: str, p: P) -> JSONResponse:
@@ -265,21 +271,21 @@ def build_router(
             # Parsing and verification are CPU/IO-bound synchronous code. Running them
             # directly in the event loop would stall every other request in this worker.
             await asyncio.to_thread(service.run_job, p, job_id)
-            return JSONResponse(service.get_job(p, job_id))
+            return JSONResponse(await asyncio.to_thread(service.get_job, p, job_id))
         except MmiError as exc:
             raise _http(exc) from None
 
     @router.get("/jobs/{job_id}")
     async def get_job(job_id: str, p: P) -> JSONResponse:
         try:
-            return JSONResponse(get_service().get_job(p, job_id))
+            return JSONResponse(await asyncio.to_thread(get_service().get_job, p, job_id))
         except MmiError as exc:
             raise _http(exc) from None
 
     @router.post("/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str, p: P) -> JSONResponse:
         try:
-            return JSONResponse(get_service().cancel_job(p, job_id))
+            return JSONResponse(await asyncio.to_thread(get_service().cancel_job, p, job_id))
         except MmiError as exc:
             raise _http(exc) from None
 
@@ -288,7 +294,7 @@ def build_router(
         if len(q) > 2_000 or limit < 1 or limit > 50:
             raise HTTPException(422, detail={"error": "INVALID_QUERY"})
         try:
-            return JSONResponse(get_service().retrieve(p, artifact_id, q, limit=limit))
+            return JSONResponse(await asyncio.to_thread(get_service().retrieve, p, artifact_id, q, limit=limit))
         except MmiError as exc:
             raise _http(exc) from None
 
@@ -297,14 +303,15 @@ def build_router(
         body = await _json(request)
         question = _string(body, "question", max_len=2_000)
         try:
-            return JSONResponse(get_service().ask(p, artifact_id, question))
+            return JSONResponse(await asyncio.to_thread(get_service().ask, p, artifact_id, question))
         except MmiError as exc:
             raise _http(exc) from None
 
     @router.get("/jobs/{job_id}/citations")
     async def citations(job_id: str, p: P) -> JSONResponse:
         try:
-            return JSONResponse({"jobId": job_id, "citations": get_service().citations(p, job_id)})
+            citations = await asyncio.to_thread(get_service().citations, p, job_id)
+            return JSONResponse({"jobId": job_id, "citations": citations})
         except MmiError as exc:
             raise _http(exc) from None
 

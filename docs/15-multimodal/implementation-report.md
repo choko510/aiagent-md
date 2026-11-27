@@ -183,6 +183,22 @@ npm run build
 - P1-14: `/jobs/{id}/run` の同期処理をthreadへ退避。
 - 未解決: P1-08（at-rest暗号化・保持/tombstone）、P1-09（Task/Run/workspace/RLS結合）、P1-12/13（実jail・資源上限）、P1-15のAgent Runtime経由の回答。
 
+### 4.6 再レビュー R2 対応（HEAD d34cd95 以降）
+
+R2-01〜R2-12を再監査し、次のコード変更と回帰試験を追加した。**未解消項目を解消済みとして扱わない。**
+
+- R2-01（一部）: PDFの検証をページ全体の文字列一致から、候補の`normalized_bbox`と交差する`TextBlock`だけに限定した。bbox外の同一文字列ではanchorしない回帰試験を追加。ただし独立再parseは同じParser実装・同一信頼プロセス上で動くため、Parser実装の共通欠陥を排除する独立検証ではない。
+- R2-02（一部）: 正規化値の再計算結果が`None`（金額・日付以外の型、または通貨不明）の場合はanchorせず`unverified`にした。金額は生値の再parse、通貨、税条件を再計算し、金額/通貨の不一致は`contradicted`、税文脈の不一致は`unverified`とする。
+- R2-03（一部）: `2026/11/27`のようなスラッシュ日付を再parseしてanchorする回帰試験を追加。通貨記号の複数通貨性（`¥`/`$`）と、隣接セル以外の文脈依存は未解消。
+- R2-04（一部）: chunk publishを一意なtemp名＋`link()`の原子的公開に変更し、同一indexへの同時書込みが他方のバイトを上書きしないようにした。同時書込み試験を追加。finalizeとDB commitの間のクラッシュ回復は未解消。
+- R2-05: 未解消。finalizeのクロスプロセス排他、孤児blobの定期回収、commit不明時の照合は未実装。
+- R2-06: XLSXの`TableCell.value_state`/formula/cached errorを`TextSource`へ伝播し、cached formula値は`estimated`、cached errorは`unknown`のまま候補化する。`_build`はsourceより強いstateへ昇格せず、検証も`estimated`/`unknown`セルをanchorしない。回帰試験を追加。
+- R2-07（一部）: 既存のrevoke時job無効化・blob削除・GET/citation拒否を維持。HTTPリクエスト中のrevokeとの厳密な直列化は未解消。
+- R2-08（一部）: `/jobs/{id}/run`に加え、complete/get/revoke/start/get/cancel/retrieve/answer/citationsの同期service呼出しを`asyncio.to_thread`へ退避した。スレッド実行の強制停止、実cgroup/CPU/RSS/FD上限は未解消。
+- R2-09〜R2-12: 未解消。決定的extractive回答はAgent Runtime/Gateway経由ではなく、質問と行の意味照合、保持期限切れの物理削除、UIのcitation再照合は限定的。
+
+追加・実行した回帰試験: XLSX cached formulaの`estimated`/`unverified`、bbox外PDF文字列の非anchor、normalized値の非replay/不一致、スラッシュ日付のreplay、同一chunk同時publishの非上書き。
+
 ## 5. 状態の正直な区分
 
 | 項目 | Designed | Tested | Verified |

@@ -116,7 +116,9 @@ class Pipeline:
         extraction = extract_candidates(
             document, request.requested_fields, locale=request.preferred_locale, limits=self.limits
         )
-        verification = verify_candidates(document, extraction.candidates, raw, owner_revoked=owner_revoked)
+        verification = verify_candidates(
+            document, extraction.candidates, raw, owner_revoked=owner_revoked, locale=request.preferred_locale
+        )
         candidates = verification.candidates
         requested = tuple(request.requested_fields) or ("amount",)
         present = {c.field_key for c in candidates}

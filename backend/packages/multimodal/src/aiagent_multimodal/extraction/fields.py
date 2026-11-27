@@ -40,6 +40,10 @@ class TextSource:
     method: str
     confidence: float | None = None
     hidden: bool = False
+    value_state: str = "observed"
+    formula: str | None = None
+    cached_error: str | None = None
+    flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +212,10 @@ def _sources(document: Document) -> tuple[list[TextSource], bool]:
                     locator=cell.locator,
                     method=_cell_method(document.format),
                     hidden=hidden,
+                    value_state=cell.value_state,
+                    formula=cell.formula,
+                    cached_error=cell.cached_error,
+                    flags=cell.flags,
                 )
             )
         if len(out) >= _MAX_SOURCES:
@@ -248,6 +256,7 @@ def _money_candidate(
         conditions.append("hidden_source")
     if source.method == "ocr" and source.confidence is not None and source.confidence < 70:
         conditions.append("low_ocr_confidence")
+    conditions = list(_conditions(source, tuple(conditions)))
     if parsed.reason is not None:
         return _unknown(document, source, "amount", parsed.reason, raw=raw, conditions=tuple(conditions))
     normalized = {
@@ -321,6 +330,10 @@ def _generic_field(
                 locator=cell.locator,
                 method=_cell_method(document.format),
                 hidden=cell.hidden,
+                value_state=cell.value_state,
+                formula=cell.formula,
+                cached_error=cell.cached_error,
+                flags=cell.flags,
             )
             if not cell.text:
                 _add(out, seen, _unknown(document, source, field, "EMPTY_VALUE"), field)
@@ -370,6 +383,12 @@ def _conditions(source: TextSource, extra: tuple[str, ...]) -> tuple[str, ...]:
     out = list(extra)
     if source.hidden and "hidden_source" not in out:
         out.append("hidden_source")
+    if source.formula:
+        out.append("formula_not_evaluated")
+    if source.cached_error:
+        out.append("formula_cached_error")
+    if source.value_state == "estimated":
+        out.append("formula_cached_value")
     if source.method == "ocr":
         out.append("ocr_unverified")
         if source.confidence is not None and source.confidence < 70:
@@ -387,6 +406,10 @@ def _build(
     conditions: tuple[str, ...],
     missing_reason: str | None,
 ) -> MmiCandidate:
+    # A derived/observed candidate cannot be stronger than its source cell. A cached
+    # formula value stays estimated; an invalid/error cell stays unknown.
+    if source.value_state != "observed" and value_state in {"observed", "derived"}:
+        value_state = source.value_state
     return MmiCandidate(
         field_key=field,
         raw_text=raw,
