@@ -111,7 +111,7 @@ PDFフォントに幅情報がない場合、pdfminerが同じx座標のglyph bo
 
 OCR confidenceは「認識器の自己申告」であり真実ではない。confidenceが低い候補はestimated扱いにし、独立検証に失敗した値をanchoredにしない。未検出fieldはunknownのまま返す。
 
-さらに、隔離workerが返したDocument全体を非信頼入力として扱う。候補抽出はworkerのDocumentではなく、immutable bytesを独立に再parseしたDocumentから行う。OCR由来の値は同じbytesを再parseしてもテキストを pixel から独立再認識しない限り`unverified`であり、自己申告confidenceでanchoredにしない。
+さらに、隔離workerが返したDocument全体を非信頼入力として扱う。候補抽出はworkerのDocumentではなく、immutable bytesをTrusted側で再parseしたDocumentから行う。ただしこれは同一Parser実装による再parseであり、Parser共通の抽出欠陥を排除する独立検証ではない。OCR由来の値は同じbytesを再parseしてもテキストを pixel から独立再認識しない限り`unverified`であり、自己申告confidenceでanchoredにしない。
 
 ## 4. 実行した検証
 
@@ -125,11 +125,11 @@ $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
 ```
 
-結果: `core 24 passed`、`service 10 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed`、`migration 12 passed`（各グループを順に実行）。
+結果: `core 29 passed`、`service 10 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed`、`migration 12 passed`（各グループを順に実行）。
 
 内訳:
 
-- core 24: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor
+- core 29: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き
 - service 10: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復
 - PostgreSQL 4: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document
 - HTTP 2: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞
@@ -173,7 +173,7 @@ npm run build
 ### 4.5 PR #126 レビュー対応（2026-11-26）
 
 - P1-01: `profile=production` のMMI API全体を503にし、`/capabilities`も隔離・OCRを`unavailable`と返す。
-- P1-02: workerのDocumentを候補抽出に使わず、元バイトを独立再parseする回帰テストを追加。
+- P1-02: workerのDocumentを候補抽出に使わず、元バイトをTrusted側で再parseする回帰テストを追加。同一Parser実装のため、独立検証としては部分的（R2-01参照）。
 - P1-03: OCR候補は独立再parseでも`unverified`のままにする回帰テストを追加。
 - P1-04: revoke時に派生jobを`cancelled`にし、outcome/document/citationを消去・拒否。
 - P1-05: 期限切れleaseのfinish拒否と再claim、attempts上限、admission fenceを実PostgreSQLで試験。
