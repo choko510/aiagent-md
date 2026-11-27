@@ -62,11 +62,14 @@ CONTEXT_KEY=$(r); w context_artifact_keys "{\"active\":\"context-1\",\"keys\":{\
 BROWSER_KEY=$(r); w browser_storage_keys "{\"active\":\"browser-1\",\"keys\":{\"browser-1\":\"$BROWSER_KEY\"}}"
 NOTIFY_KEY=$(r); w notification_secret_keys "{\"active\":\"notify-1\",\"keys\":{\"notify-1\":\"$NOTIFY_KEY\"}}"
 w memory_tombstone_hmac_key "$(r)"
-w tool_gateway_rpc_keys "runtime=$RT,ops=$OPS"; w runtime_tool_rpc_key "$RT"
+API_TOOL=$(r)
+w tool_gateway_rpc_keys "runtime=$RT,ops=$OPS,api=$API_TOOL"; w runtime_tool_rpc_key "$RT"; w api_tool_rpc_key "$API_TOOL"
 API_SENTINEL=$(r)
 w sentinel_rpc_keys "tool_gateway=$TS,api=$API_SENTINEL"; w tool_sentinel_client_key "$TS"; w api_sentinel_rpc_key "$API_SENTINEL"
 EM=$(r); w egress_model_token "$EM"; w egress_static_tokens "model_gateway=$EM"
 w sentinel_permit_key "$(r)"; w sandbox_rpc_key "$(r)"; w sandbox_grant_key "$(r)"; w receiver_token "$(r)"
+w preview_capability_key "$(r)"; w preview_attestation_key "$(r)"
+[ -f "$D/github_binding_tokens" ] || w github_binding_tokens "{}"
 [ -f "$D/anthropic_api_key" ] || w anthropic_api_key ""
 if [ "$(id -u)" = "0" ]; then
   chown 0:"$SERVICE_GID" "$D"/*

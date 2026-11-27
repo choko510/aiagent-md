@@ -23,6 +23,9 @@ import logging
 import math
 import os
 import signal
+import socket
+import stat
+import struct
 import sys
 import threading
 import time
@@ -40,7 +43,7 @@ from aiagent_domain.rpcwire import (
     verify_request,
 )
 
-from .grant import GrantError, verify
+from .grant import GrantError, parse_preview_unix_endpoint_ref, verify, verify_preview_capability
 from .landlock import block_cross_task_process_access, disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
@@ -63,6 +66,39 @@ except OSError:
 if pid == 0:
     try:
         os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError:
+        os._exit(127)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status):
+    os._exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(125)
+"""
+
+# R4-02: Synchronized PID-namespace launcher that blocks on a start-barrier pipe FD
+# BEFORE calling os.fork(). The parent Supervisor attaches this bootstrap PID to the
+# target cgroup v2 BEFORE writing b"G", guaranteeing that EVERY forked descendant
+# (worker Python + Playwright + Chromium processes) inherits the cgroup atomically.
+_CGROUP_SYNC_PID_NAMESPACE_EXEC = """
+import os
+import sys
+
+try:
+    barrier_fd = int(sys.argv[1])
+    token = os.read(barrier_fd, 1)
+    os.close(barrier_fd)
+except OSError:
+    os._exit(125)
+if token != b"G":
+    os._exit(125)
+try:
+    pid = os.fork()
+except OSError:
+    os._exit(125)
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
     except OSError:
         os._exit(127)
 _, status = os.waitpid(pid, 0)
@@ -173,6 +209,28 @@ async def _run_with_revocation(
         await asyncio.gather(stopped, output, return_exceptions=True)
 
 
+def _collect_browser_ro_paths() -> tuple[tuple[Path, ...], Path]:
+    extra_ro: list[Path] = []
+    for candidate in (
+        Path(sys.prefix).resolve(),
+        Path(sys.base_prefix).resolve(),
+        Path(sys.executable).resolve().parent.parent,
+        Path(__file__).resolve().parents[4],
+    ):
+        if candidate.exists():
+            extra_ro.append(candidate)
+    pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or str(Path.home() / ".cache" / "ms-playwright")
+    pw_dir = Path(pw_path).resolve()
+    if pw_dir.exists():
+        extra_ro.append(pw_dir)
+    for sys_path_entry in sys.path:
+        if sys_path_entry:
+            sp = Path(sys_path_entry).resolve()
+            if sp.exists() and sp != Path("/"):
+                extra_ro.append(sp)
+    return tuple(dict.fromkeys(extra_ro)), pw_dir
+
+
 @dataclass
 class Limits:
     cpu_s: int = 30
@@ -180,6 +238,90 @@ class Limits:
     nproc: int = 64
     nofile: int = 256
     fsize_bytes: int = 64 * 1024 * 1024
+
+
+@dataclass
+class _BrowserCgroup:
+    """Per-cell cgroup v2 resource controller for Browser Cells (R3-04: memory.max, pids.max, cpu.max)."""
+
+    path: Path
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        memory_bytes: int,
+        pids_max: int,
+        cpu_quota_us: int,
+        cgroup_root: Path | None = None,
+    ) -> _BrowserCgroup | None:
+        base = cgroup_root
+        if base is None:
+            cg_root = Path("/sys/fs/cgroup")
+            if not (cg_root / "cgroup.controllers").exists():
+                return None
+            rel = ""
+            with contextlib.suppress(OSError):
+                for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
+                    if line.startswith("0::"):
+                        rel = line[3:].strip().lstrip("/")
+                        break
+            base = (cg_root / rel) if rel else cg_root
+        cell_dir = base / name
+        try:
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            (cell_dir / "memory.max").write_text(f"{memory_bytes}\n", encoding="utf-8")
+            swap_file = cell_dir / "memory.swap.max"
+            if swap_file.exists():
+                with contextlib.suppress(OSError):
+                    swap_file.write_text("0\n", encoding="utf-8")
+            (cell_dir / "pids.max").write_text(f"{pids_max}\n", encoding="utf-8")
+            (cell_dir / "cpu.max").write_text(f"{cpu_quota_us} 100000\n", encoding="utf-8")
+        except OSError:
+            with contextlib.suppress(OSError):
+                cell_dir.rmdir()
+            return None
+        return cls(cell_dir)
+
+    def attach(self, pid: int) -> bool:
+        try:
+            (self.path / "cgroup.procs").write_text(f"{pid}\n", encoding="utf-8")
+            return True
+        except OSError:
+            return False
+
+    def cleanup(self) -> None:
+        kill_file = self.path / "cgroup.kill"
+        if kill_file.exists():
+            with contextlib.suppress(OSError):
+                kill_file.write_text("1\n", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            self.path.rmdir()
+
+
+def _process_group_rss_bytes(pgid: int) -> int:
+    """Sum VmRSS across all processes in `pgid` from /proc as fallback memory enforcement in unprivileged dev/test."""
+    total = 0
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return 0
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            if os.getpgid(pid) != pgid:
+                continue
+            for line in (entry / "status").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        total += int(parts[1]) * 1024
+                    break
+        except OSError:
+            continue
+    return total
 
 
 @dataclass
@@ -193,7 +335,11 @@ class Supervisor:
     cell_uid: int | None = None
     cell_gid: int | None = None
     consumed_path: Path | None = None
+    preview_capability_key: bytes | None = None
+    require_browser_cgroup: bool = False
+    cgroup_root: Path | None = None
     _active: dict[str, tuple[str, str, str, asyncio.Event]] = field(default_factory=dict)
+    _active_previews: dict[str, tuple[str, asyncio.Event]] = field(default_factory=dict)
     _heartbeats: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -201,6 +347,11 @@ class Supervisor:
             raise RuntimeError("the execution supervisor requires Linux (kernel rlimits/namespaces)")
         if os.geteuid() == 0 and self.cell_uid in (None, 0):
             raise RuntimeError("refusing to run generated code as root: configure an unprivileged cell uid/gid")
+        if self.preview_capability_key is not None:
+            if len(self.preview_capability_key) < 32:
+                raise RuntimeError("preview_capability_key must be >= 32 bytes")
+            if self.preview_capability_key == self.grant_key:
+                raise RuntimeError("preview_capability_key must be distinct from grant_key")
         self.root.mkdir(parents=True, exist_ok=True)
         self.consumed_path = self.consumed_path or self.root / ".consumed-grants"
 
@@ -287,7 +438,17 @@ class Supervisor:
                 return
             await asyncio.sleep(min(0.1, max(0.001, heartbeat[0] - time.monotonic())))
 
-    def _preexec(self, wall_ms: int, memory_bytes: int, workspace: Path, source_fd: int | None = None) -> Any:
+    def _preexec(
+        self,
+        wall_ms: int,
+        memory_bytes: int,
+        workspace: Path,
+        source_fd: int | None = None,
+        *,
+        extra_ro_exec_paths: tuple[Path, ...] = (),
+        extra_rw_files: tuple[Path, ...] = (),
+        browser_mode: bool = False,
+    ) -> Any:
         import resource
 
         lim = self.limits
@@ -297,17 +458,26 @@ class Supervisor:
 
         def fn() -> None:
             os.setsid()  # new session + process group: the whole tree is killable
-            resource.setrlimit(resource.RLIMIT_CPU, (lim.cpu_s, lim.cpu_s))
-            mem = min(memory_bytes, lim.memory_bytes)
-            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
-            resource.setrlimit(resource.RLIMIT_NPROC, (lim.nproc, lim.nproc))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (lim.nofile, lim.nofile))
+            resource.setrlimit(resource.RLIMIT_CPU, (max(lim.cpu_s, 60) if browser_mode else lim.cpu_s,) * 2)
+            if not browser_mode:
+                mem = min(memory_bytes, lim.memory_bytes)
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                resource.setrlimit(resource.RLIMIT_NPROC, (lim.nproc, lim.nproc))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (lim.nofile, lim.nofile))
+            else:
+                resource.setrlimit(resource.RLIMIT_NPROC, (max(lim.nproc, 256), max(lim.nproc, 256)))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (max(lim.nofile, 1024), max(lim.nofile, 1024)))
             resource.setrlimit(resource.RLIMIT_FSIZE, (lim.fsize_bytes, lim.fsize_bytes))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             # Filesystem confinement is MANDATORY even in development / when netns is disabled.
             # Parent/cwd validation alone cannot prevent access to another tenant's files.
             try:
-                restrict_to_workspace(workspace, source_fd=source_fd)
+                restrict_to_workspace(
+                    workspace,
+                    source_fd=source_fd,
+                    extra_ro_exec_paths=extra_ro_exec_paths,
+                    extra_rw_files=extra_rw_files,
+                )
             except (OSError, ValueError) as e:
                 os.write(2, f"landlock_setup: {type(e).__name__}: {e}\n".encode()[:400])
                 os._exit(98)  # fail closed; no generated command was executed
@@ -322,6 +492,25 @@ class Supervisor:
                 os.unshare(CLONE_NEWUSER | CLONE_NEWPID | (CLONE_NEWNET if require_netns else 0))
             except (OSError, AttributeError):
                 os._exit(97)  # fail closed: mandatory PID namespace unavailable
+            if browser_mode and require_netns:
+                # Inside the fresh CLONE_NEWNET + CLONE_NEWUSER namespace (before execve drops namespace caps),
+                # bring up the child's PRIVATE `lo` interface so Chromium can reach ONLY the local Unix bridge.
+                # No external interface or host loopback exists in this netns.
+                import fcntl
+                import socket as _socket
+                import struct
+
+                _lo_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                try:
+                    _ifreq = struct.pack("16sH14s", b"lo", 0, b"")
+                    _res = fcntl.ioctl(_lo_sock.fileno(), 0x8913, _ifreq)  # SIOCGIFFLAGS
+                    _flags = struct.unpack("16sH14s", _res)[1]
+                    if not (_flags & 0x1):  # IFF_UP
+                        fcntl.ioctl(_lo_sock.fileno(), 0x8914, struct.pack("16sH14s", b"lo", _flags | 0x1, b""))
+                except OSError:
+                    os._exit(96)
+                finally:
+                    _lo_sock.close()
             # setuid and the NEWUSER transition may reset dumpability. Sibling
             # commands run with the same numeric UID; a ptrace window is unsafe.
             try:
@@ -337,6 +526,227 @@ class Supervisor:
                     os._exit(98)
 
         return fn
+
+    def cancel_preview(self, tenant_id: str, capability_id: str) -> bool:
+        entry = self._active_previews.get(capability_id)
+        if entry is None or entry[0] != tenant_id:
+            return False
+        entry[1].set()
+        return True
+
+    async def debug_preview(self, capability_token: Any) -> dict[str, Any]:
+        """Run Browser Debugger inside full Sandbox Cell isolation using a dedicated PreviewCapability (R3-02/R4-01..R4-03).
+
+        - Verifies PreviewCapability signed with `preview_capability_key` (distinct from `grant_key`).
+        - R4-03: Connects STRICTLY to the signed instance-owned Unix domain socket (`unix://<path>?ino=<ino>&pid=<pid>`)
+          verifying BOTH filesystem inode (`lstat`) AND kernel `SO_PEERCRED` PID on every connection (NEVER dials TCP port).
+        - R4-02: Uses `_CGROUP_SYNC_PID_NAMESPACE_EXEC` start-barrier pipe so `cgroup.attach(proc.pid)` completes BEFORE
+          the bootstrap calls `os.fork()`, guaranteeing all Chromium descendants inherit the cgroup atomically.
+        - R4-01: Executes self-contained `aiagent_sandbox.browser_debug_worker` with bridge socket placed inside the
+          writable `self.root` tmpfs (working on `read_only: true` Cell containers).
+        - Monitors capability expiry and live `preview.cancel` revocation during execution.
+        """
+        if self.preview_capability_key is None:
+            raise GrantError("PREVIEW_CAPABILITY_UNAVAILABLE")
+        cap = verify_preview_capability(self.preview_capability_key, capability_token)
+        preview_sock_path, expected_ino, expected_pid = parse_preview_unix_endpoint_ref(cap.endpoint_ref)
+        try:
+            st_pre = os.lstat(preview_sock_path)
+        except OSError as exc:
+            raise GrantError("PREVIEW_ENDPOINT_UNVERIFIED") from exc
+        if not stat.S_ISSOCK(st_pre.st_mode) or st_pre.st_ino != expected_ino:
+            raise GrantError("PREVIEW_ENDPOINT_UNVERIFIED")
+
+        self._consume(f"prv:{cap.capability_id}")
+        target_port = cap.target_port
+        ws, cwd = self.workspace(cap.tenant_id, cap.task_id, ".")
+        # Do NOT mkdir inside cell_uid-owned `ws` as root (cell container runs with cap_drop=ALL, no CAP_DAC_OVERRIDE);
+        # `browser_debug_worker` creates `ws/tmp` immediately after dropping to `cell_uid`.
+        tmp_dir = ws / "tmp"
+
+        cgroup = _BrowserCgroup.create(
+            name=f"aiagent-prv-{cap.capability_id[:16]}",
+            memory_bytes=cap.memory_bytes,
+            pids_max=cap.pids_max,
+            cpu_quota_us=cap.cpu_quota_us,
+            cgroup_root=self.cgroup_root,
+        )
+        if cgroup is None and self.require_browser_cgroup:
+            raise GrantError("BROWSER_CGROUP_REQUIRED")
+
+        # R4-01: Place bridge socket under writable self.root (tmpfs even on read_only: true Cell containers);
+        # fall back to /tmp only when self.root path would exceed Linux AF_UNIX sun_path limit (108 bytes).
+        candidate_sock = self.root / f"prv-{cap.capability_id[:16]}.sock"
+        if len(str(candidate_sock).encode("utf-8")) <= 96:
+            bridge_sock = candidate_sock
+        else:
+            bridge_sock = Path("/tmp") / f"aiag-prv-{cap.capability_id[:16]}.sock"  # noqa: S108
+        if bridge_sock.exists():
+            bridge_sock.unlink()
+
+        async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while chunk := await src.read(16384):
+                    dst.write(chunk)
+                    await dst.drain()
+            except (OSError, asyncio.CancelledError):
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    dst.close()
+
+        async def _bridge_conn(ur: asyncio.StreamReader, uw: asyncio.StreamWriter) -> None:
+            try:
+                st_now = os.lstat(preview_sock_path)
+                if not stat.S_ISSOCK(st_now.st_mode) or st_now.st_ino != expected_ino:
+                    uw.close()
+                    return
+                tr, tw = await asyncio.open_unix_connection(preview_sock_path)
+            except OSError:
+                uw.close()
+                return
+            try:
+                raw_sock = tw.get_extra_info("socket")
+                so_peercred = getattr(socket, "SO_PEERCRED", None)
+                if raw_sock is None or so_peercred is None:
+                    tw.close()
+                    uw.close()
+                    return
+                peer_pid, _peer_uid, _peer_gid = struct.unpack(
+                    "3i", raw_sock.getsockopt(socket.SOL_SOCKET, so_peercred, 12)
+                )
+                if peer_pid != expected_pid:
+                    tw.close()
+                    uw.close()
+                    return
+            except OSError:
+                tw.close()
+                uw.close()
+                return
+            t1 = asyncio.create_task(_pipe(ur, tw))
+            t2 = asyncio.create_task(_pipe(tr, uw))
+            await asyncio.gather(t1, t2, return_exceptions=True)
+
+        bridge_srv = await asyncio.start_unix_server(_bridge_conn, path=str(bridge_sock))
+        # Apply chmod BEFORE chown so cap_drop=ALL (no CAP_FOWNER) never fails on permission bits.
+        os.chmod(bridge_sock, 0o600)
+        if self.cell_uid is not None and os.geteuid() == 0:
+            os.chown(bridge_sock, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
+
+        extra_ro_paths, pw_dir = await asyncio.to_thread(_collect_browser_ro_paths)
+
+        clean_env: dict[str, str] = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(ws),
+            "TMPDIR": str(tmp_dir),
+            "XDG_CONFIG_HOME": str(tmp_dir),
+            "XDG_CACHE_HOME": str(tmp_dir),
+            "PLAYWRIGHT_BROWSERS_PATH": str(pw_dir),
+            "OPENSSL_CONF": "/dev/null",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if os.environ.get("PYTHONPATH"):
+            clean_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        worker_cmd = [
+            sys.executable,
+            "-m",
+            "aiagent_sandbox.browser_debug_worker",
+            "--bridge-sock",
+            str(bridge_sock),
+        ]
+        go_r, go_w = os.pipe()
+        os.set_inheritable(go_r, True)
+        bootstrap = [sys.executable, "-c", _CGROUP_SYNC_PID_NAMESPACE_EXEC, str(go_r), *worker_cmd]
+        payload = json.dumps(
+            {"targetUrl": cap.target_url, "leasedPort": target_port, "commitSha": cap.commit_sha}
+        ).encode("utf-8")
+
+        revoked = asyncio.Event()
+        self._active_previews[cap.capability_id] = (cap.tenant_id, revoked)
+        watcher: asyncio.Task[None] | None = None
+        memory_exceeded = False
+        go_r_closed = False
+        go_w_closed = False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *bootstrap,
+                cwd=str(cwd),
+                env=clean_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(go_r,),
+                preexec_fn=self._preexec(
+                    cap.wall_ms,
+                    cap.memory_bytes,
+                    ws,
+                    extra_ro_exec_paths=extra_ro_paths,
+                    extra_rw_files=(bridge_sock,),
+                    browser_mode=True,
+                ),
+            )
+            os.close(go_r)
+            go_r_closed = True
+            # R4-02: Attach bootstrap PID to cgroup BEFORE releasing the start barrier (before os.fork()!).
+            if cgroup is not None and not cgroup.attach(proc.pid) and self.require_browser_cgroup:
+                os.close(go_w)
+                go_w_closed = True
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
+                raise GrantError("BROWSER_CGROUP_ATTACH_FAILED")
+            os.write(go_w, b"G")
+            os.close(go_w)
+            go_w_closed = True
+
+            async def _watch_limits_and_expiry() -> None:
+                nonlocal memory_exceeded
+                while proc.returncode is None and not revoked.is_set():
+                    if time.time() >= cap.expires:
+                        revoked.set()
+                        return
+                    if cgroup is None and _process_group_rss_bytes(proc.pid) > cap.memory_bytes:
+                        memory_exceeded = True
+                        revoked.set()
+                        return
+                    await asyncio.sleep(0.2)
+
+            watcher = asyncio.create_task(_watch_limits_and_expiry())
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+            proc.stdin.close()
+            effective_wall = min(max(cap.wall_ms / 1000.0, 15.0), max(1.0, cap.expires - time.time()))
+            out, err, timed_out, truncated, was_revoked = await _run_with_revocation(proc, effective_wall, revoked)
+            return {
+                "status": "REVOKED" if was_revoked else "EXITED",
+                "attemptId": cap.attempt_id,
+                "capabilityId": cap.capability_id,
+                "exitCode": proc.returncode if proc.returncode is not None else -1,
+                "timedOut": timed_out,
+                "truncated": truncated,
+                "memoryExceeded": memory_exceeded,
+                "cgroupEnforced": cgroup is not None,
+                "stdout": out.decode("utf-8", "replace"),
+                "stderr": err.decode("utf-8", "replace"),
+            }
+        finally:
+            if not go_r_closed:
+                with contextlib.suppress(OSError):
+                    os.close(go_r)
+            if not go_w_closed:
+                with contextlib.suppress(OSError):
+                    os.close(go_w)
+            self._active_previews.pop(cap.capability_id, None)
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            if cgroup is not None:
+                cgroup.cleanup()
+            bridge_srv.close()
+            await bridge_srv.wait_closed()
+            with contextlib.suppress(OSError):
+                bridge_sock.unlink()
 
     async def execute(self, token: Any, argv: list[str], cwd_rel: str) -> dict[str, Any]:
         return await self._execute(token, argv, cwd_rel, source_fd=None)
@@ -611,14 +1021,20 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                 w.write(encode_frame({"type": "error", "code": "UNAUTHENTICATED"}))
                 return
             key = keys[caller]
-            if caller != "tool_gateway" or method not in (
-                "exec.run",
-                "exec.cancel",
-                "exec.heartbeat",
-                "source.receive",
-                "source.register",
-                "source.heartbeat",
-                "source.cancel",
+            if (
+                caller not in ("tool_gateway", "api")
+                or (caller == "api" and method != "preview.debug")
+                or method
+                not in (
+                    "exec.run",
+                    "exec.cancel",
+                    "exec.heartbeat",
+                    "preview.debug",
+                    "source.receive",
+                    "source.register",
+                    "source.heartbeat",
+                    "source.cancel",
+                )
             ):
                 w.write(encode_frame(sign_response(key, nonce, {"type": "error", "code": "FORBIDDEN_METHOD"})))
                 return
@@ -677,6 +1093,13 @@ async def serve(sup: Supervisor, keys: dict[str, bytes], endpoint: str, *, sourc
                         res = {"cancelled": sup.cancel_projected(*scoped)}
                     else:
                         res = {"renewed": sup.renew_projected(*scoped)}
+                elif method == "preview.debug":
+                    res = await sup.debug_preview(body.get("capability"))
+                elif method == "preview.cancel":
+                    t_id, cap_id = body.get("tenantId"), body.get("capabilityId")
+                    if not isinstance(t_id, str) or not isinstance(cap_id, str) or not t_id or not cap_id:
+                        raise GrantError("MALFORMED")
+                    res = {"cancelled": sup.cancel_preview(t_id, cap_id)}
                 else:
                     res = await sup.execute(
                         body.get("grant"), list(body.get("argv", [])), str(body.get("cwdRelative", ""))
@@ -885,6 +1308,17 @@ def main() -> None:
         limits.cpu_s = int(os.environ["AIAGENT_SANDBOX_CPU_LIMIT_SECONDS"])
         if not 512 * 1024**2 <= limits.memory_bytes <= 8 * 1024**3 or not 1 <= limits.cpu_s <= 300:
             raise RuntimeError("invalid source broker limits")
+    preview_cap_key: bytes | None = None
+    preview_cap_file = os.environ.get("AIAGENT_PREVIEW_CAPABILITY_KEY_FILE")
+    if preview_cap_file:
+        preview_cap_key = bytes.fromhex(Path(preview_cap_file).read_text().strip())
+    require_browser_cgroup = (
+        os.environ.get(
+            "AIAGENT_SANDBOX_REQUIRE_BROWSER_CGROUP",
+            "1" if os.environ.get("AIAGENT_PROFILE") == "production" else "0",
+        )
+        == "1"
+    )
     sup = Supervisor(
         Path(os.environ.get("AIAGENT_SANDBOX_ROOT", "/var/lib/aiagent/cells")),
         bytes.fromhex(key_hex),
@@ -892,6 +1326,8 @@ def main() -> None:
         require_netns=os.environ.get("AIAGENT_SANDBOX_REQUIRE_NETNS", "1") == "1",
         cell_uid=int(uid) if uid else None,
         cell_gid=int(uid) if uid else None,
+        preview_capability_key=preview_cap_key,
+        require_browser_cgroup=require_browser_cgroup,
     )
     rpc_key = bytes.fromhex(rpc)
     source_sessions = _configured_source_sessions(sup, rpc_key)

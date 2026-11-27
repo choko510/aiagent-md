@@ -1,4 +1,4 @@
-"""How the Tool Gateway reaches Sentinel: authenticated RPC in deployment, a direct object in unit tests."""
+"""How the Tool Gateway & API reach Sentinel: authenticated RPC in deployment, a direct object in unit tests."""
 
 from __future__ import annotations
 
@@ -19,34 +19,46 @@ class RpcSentinel:
         self.client = client
 
     def authorize(self, claim: Claim, intent_id: str, dest: Destination) -> str:
-        res = asyncio.run(
-            self.client.call(
-                "sentinel.authorize",
-                {
-                    "claim": claim.to_wire(),
-                    "intentId": intent_id,
-                    "scheme": dest.scheme,
-                    "host": dest.host,
-                    "port": dest.port,
-                    "method": dest.method,
-                },
-            )
-        )
+        payload: dict[str, Any] = {
+            "claim": claim.to_wire(),
+            "intentId": intent_id,
+            "scheme": dest.scheme,
+            "host": dest.host,
+            "port": dest.port,
+            "method": dest.method,
+        }
+        if dest.target_path is not None:
+            payload["targetPath"] = dest.target_path
+        if dest.body_sha256 is not None:
+            payload["bodySha256"] = dest.body_sha256
+        res = asyncio.run(self.client.call("sentinel.authorize", payload))
         return str(res["permit"])
 
     def authorize_reconcile(self, tenant_id: str, intent_id: str, dest: Destination) -> str:
-        res = asyncio.run(
-            self.client.call(
-                "sentinel.authorize_reconcile",
-                {
-                    "tenantId": tenant_id,
-                    "intentId": intent_id,
-                    "scheme": dest.scheme,
-                    "host": dest.host,
-                    "port": dest.port,
-                },
-            )
-        )
+        payload: dict[str, Any] = {
+            "tenantId": tenant_id,
+            "intentId": intent_id,
+            "scheme": dest.scheme,
+            "host": dest.host,
+            "port": dest.port,
+        }
+        if dest.target_path is not None:
+            payload["targetPath"] = dest.target_path
+        res = asyncio.run(self.client.call("sentinel.authorize_reconcile", payload))
+        return str(res["permit"])
+
+    def authorize_dev_pr_read(self, tenant_id: str, owner_user_id: str, intent_id: str, dest: Destination) -> str:
+        payload: dict[str, Any] = {
+            "tenantId": tenant_id,
+            "ownerUserId": owner_user_id,
+            "intentId": intent_id,
+            "scheme": dest.scheme,
+            "host": dest.host,
+            "port": dest.port,
+        }
+        if dest.target_path is not None:
+            payload["targetPath"] = dest.target_path
+        res = asyncio.run(self.client.call("sentinel.authorize_dev_pr_read", payload))
         return str(res["permit"])
 
     def authorize_human_takeover(
@@ -85,10 +97,43 @@ class LocalSentinel:
         self.s = sentinel
 
     def authorize(self, claim: Claim, intent_id: str, dest: Destination) -> str:
-        return str(self.s.authorize(claim, intent_id, dest.scheme, dest.host, dest.port, dest.method))
+        return str(
+            self.s.authorize(
+                claim,
+                intent_id,
+                dest.scheme,
+                dest.host,
+                dest.port,
+                dest.method,
+                target_path=dest.target_path,
+                body_sha256=dest.body_sha256,
+            )
+        )
 
     def authorize_reconcile(self, tenant_id: str, intent_id: str, dest: Destination) -> str:
-        return str(self.s.authorize_reconcile(tenant_id, intent_id, dest.scheme, dest.host, dest.port))
+        return str(
+            self.s.authorize_reconcile(
+                tenant_id,
+                intent_id,
+                dest.scheme,
+                dest.host,
+                dest.port,
+                target_path=dest.target_path,
+            )
+        )
+
+    def authorize_dev_pr_read(self, tenant_id: str, owner_user_id: str, intent_id: str, dest: Destination) -> str:
+        return str(
+            self.s.authorize_dev_pr_read(
+                tenant_id,
+                owner_user_id,
+                intent_id,
+                dest.scheme,
+                dest.host,
+                dest.port,
+                target_path=dest.target_path,
+            )
+        )
 
     def authorize_human_takeover(
         self,

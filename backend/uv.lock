@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12, <3.14"
 
 [manifest]
@@ -26,6 +26,7 @@ source = { editable = "packages/api" }
 dependencies = [
     { name = "aiagent-automation" },
     { name = "aiagent-core" },
+    { name = "aiagent-development" },
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
@@ -34,6 +35,7 @@ dependencies = [
 requires-dist = [
     { name = "aiagent-automation", editable = "packages/automation" },
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-development", editable = "packages/development" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "uvicorn", specifier = ">=0.38" },
 ]
@@ -188,6 +190,7 @@ dependencies = [
     { name = "aiagent-browser" },
     { name = "aiagent-context" },
     { name = "aiagent-core" },
+    { name = "aiagent-development" },
     { name = "aiagent-memory" },
     { name = "aiagent-sandbox" },
     { name = "cryptography" },
@@ -200,6 +203,7 @@ requires-dist = [
     { name = "aiagent-browser", editable = "packages/browser" },
     { name = "aiagent-context", editable = "packages/context" },
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-development", editable = "packages/development" },
     { name = "aiagent-memory", editable = "packages/memory" },
     { name = "aiagent-sandbox", editable = "packages/sandbox" },
     { name = "cryptography", specifier = "==50.0.2" },

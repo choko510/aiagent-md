@@ -9,6 +9,11 @@ import {
   type CapabilityItem,
   type ConsentItem,
   type ContextPolicyItem,
+  type DevCycleItem,
+  type DevDebugFindingItem,
+  type DevDesignDecisionItem,
+  type DevPrRecordItem,
+  type DevProjectItem,
   type DryRunPreview,
   type FullTaskView,
   type MemoryItem,
@@ -24,16 +29,18 @@ import AutomationAndNotifyPanel from "./components/AutomationAndNotifyPanel";
 import BrowserTakeoverPanel from "./components/BrowserTakeoverPanel";
 import CapabilitiesBanner from "./components/CapabilitiesBanner";
 import ConfirmDialog, { type ConfirmRequest } from "./components/ConfirmDialog";
+import DevelopmentPanel from "./components/DevelopmentPanel";
 import MemoryAndPolicyPanel from "./components/MemoryAndPolicyPanel";
 import TaskWorkspace from "./components/TaskWorkspace";
 
-type SubTab = "tasks" | "memory" | "browser" | "automation";
+type SubTab = "tasks" | "memory" | "browser" | "automation" | "development";
 
 const SUB_TABS: Array<[SubTab, string]> = [
   ["tasks", "Tasks・承認"],
   ["memory", "Memory・Policy"],
   ["browser", "Browser Takeover"],
   ["automation", "Automation・通知"],
+  ["development", "Development・自律開発"],
 ];
 
 const TERMINAL_TASK_STATES = new Set([
@@ -142,6 +149,13 @@ export default function ConsoleView() {
   const [watchPreview, setWatchPreview] = useState<DryRunPreview | null>(null);
   const [manualPreview, setManualPreview] = useState<DryRunPreview | null>(null);
   const [capabilities, setCapabilities] = useState<CapabilityItem[]>([]);
+  const [devProjects, setDevProjects] = useState<DevProjectItem[]>([]);
+  const [selectedDevProjectId, setSelectedDevProjectId] = useState<string | null>(null);
+  const [devCycles, setDevCycles] = useState<DevCycleItem[]>([]);
+  const [selectedDevCycleId, setSelectedDevCycleId] = useState<string | null>(null);
+  const [devDesigns, setDevDesigns] = useState<DevDesignDecisionItem[]>([]);
+  const [devDebugFindings, setDevDebugFindings] = useState<DevDebugFindingItem[]>([]);
+  const [devPrRecords, setDevPrRecords] = useState<DevPrRecordItem[]>([]);
 
   const csrfRef = useRef<string | null>(null);
   const authEpochRef = useRef(0);
@@ -149,16 +163,19 @@ export default function ConsoleView() {
   const taskEpochRef = useRef(0);
   const browserEpochRef = useRef(0);
   const campaignEpochRef = useRef(0);
+  const devEpochRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const taskAbortRef = useRef<AbortController | null>(null);
   const browserAbortRef = useRef<AbortController | null>(null);
   const campaignAbortRef = useRef<AbortController | null>(null);
+  const devAbortRef = useRef<AbortController | null>(null);
   const consoleBodyRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef<Record<SubTab, HTMLButtonElement | null>>({
     tasks: null,
     memory: null,
     browser: null,
     automation: null,
+    development: null,
   });
 
   const clearAllState = useCallback(() => {
@@ -167,10 +184,12 @@ export default function ConsoleView() {
     taskEpochRef.current += 1;
     browserEpochRef.current += 1;
     campaignEpochRef.current += 1;
+    devEpochRef.current += 1;
     abortRef.current?.abort();
     taskAbortRef.current?.abort();
     browserAbortRef.current?.abort();
     campaignAbortRef.current?.abort();
+    devAbortRef.current?.abort();
     csrfRef.current = null;
     setConfirmReq(null);
     setSession(null);
@@ -195,6 +214,13 @@ export default function ConsoleView() {
     setWatchPreview(null);
     setManualPreview(null);
     setCapabilities([]);
+    setDevProjects([]);
+    setSelectedDevProjectId(null);
+    setDevCycles([]);
+    setSelectedDevCycleId(null);
+    setDevDesigns([]);
+    setDevDebugFindings([]);
+    setDevPrRecords([]);
   }, []);
 
   const apiFetch = useMemo(
@@ -237,10 +263,12 @@ export default function ConsoleView() {
       apiFetch<{ items: NotificationBinding[] }>("/v1/notifications/bindings", { signal: ctrl.signal }),
       apiFetch<{ items: NotificationIntentItem[] }>("/v1/notifications", { signal: ctrl.signal }),
       apiFetch<{ capabilities: CapabilityItem[] }>("/v1/step4/capabilities", { signal: ctrl.signal }),
+      apiFetch<{ items: DevProjectItem[] }>("/v1/development/projects", { signal: ctrl.signal }),
+      apiFetch<{ items: DevCycleItem[] }>("/v1/development/cycles", { signal: ctrl.signal }),
     ]);
     if (isStale()) return;
 
-    const [tRes, bRes, cRes, wRes, conRes, bindRes, notRes, capRes] = settled;
+    const [tRes, bRes, cRes, wRes, conRes, bindRes, notRes, capRes, devProjRes, devCycRes] = settled;
     if (tRes.status === "fulfilled") setTasks(tRes.value.items);
     if (bRes.status === "fulfilled") setSessions(bRes.value.items);
     if (cRes.status === "fulfilled") setCampaigns(cRes.value.items);
@@ -249,6 +277,8 @@ export default function ConsoleView() {
     if (bindRes.status === "fulfilled") setBindings(bindRes.value.items);
     if (notRes.status === "fulfilled") setNotifications(notRes.value.items);
     if (capRes.status === "fulfilled") setCapabilities(capRes.value.capabilities);
+    if (devProjRes.status === "fulfilled") setDevProjects(devProjRes.value.items);
+    if (devCycRes.status === "fulfilled") setDevCycles(devCycRes.value.items);
 
     const partialFailures = settled
       .filter((r): r is PromiseRejectedResult => r.status === "rejected")
@@ -1129,6 +1159,148 @@ export default function ConsoleView() {
               runAction("通知を既読 (READ) にしました。", async () => {
                 await apiFetch(`/v1/notifications/${notificationId}/read`, { method: "POST" });
                 await refreshWorkspace();
+              })
+            }
+          />
+        )}
+
+        {subTab === "development" && (
+          <DevelopmentPanel
+            projects={devProjects}
+            selectedProjectId={selectedDevProjectId}
+            cycles={devCycles}
+            selectedCycleId={selectedDevCycleId}
+            designs={devDesigns}
+            debugFindings={devDebugFindings}
+            prRecords={devPrRecords}
+            busy={busy}
+            onSelectProject={(projectId) => {
+              setSelectedDevProjectId(projectId);
+              const myAuth = authEpochRef.current;
+              const myDev = devEpochRef.current + 1;
+              devEpochRef.current = myDev;
+              devAbortRef.current?.abort();
+              const ctrl = new AbortController();
+              devAbortRef.current = ctrl;
+              void apiFetch<{ cycles: DevCycleItem[]; prRecords: DevPrRecordItem[] }>(
+                `/v1/development/projects/${encodeURIComponent(projectId)}`,
+                { signal: ctrl.signal },
+              )
+                .then((res) => {
+                  if (authEpochRef.current !== myAuth || devEpochRef.current !== myDev || ctrl.signal.aborted) return;
+                  setDevCycles(res.cycles);
+                  setDevPrRecords(res.prRecords);
+                })
+                .catch((err) => {
+                  if (ctrl.signal.aborted) return;
+                  setErrorMsg(err instanceof ApiClientError ? `${err.status} (${err.code})` : String(err));
+                });
+            }}
+            onSelectCycle={(cycleId) => {
+              setSelectedDevCycleId(cycleId);
+              const myAuth = authEpochRef.current;
+              const myDev = devEpochRef.current + 1;
+              devEpochRef.current = myDev;
+              devAbortRef.current?.abort();
+              const ctrl = new AbortController();
+              devAbortRef.current = ctrl;
+              void apiFetch<{ designDecisions: DevDesignDecisionItem[]; debugFindings: DevDebugFindingItem[] }>(
+                `/v1/development/cycles/${encodeURIComponent(cycleId)}`,
+                { signal: ctrl.signal },
+              )
+                .then((res) => {
+                  if (authEpochRef.current !== myAuth || devEpochRef.current !== myDev || ctrl.signal.aborted) return;
+                  setDevDesigns(res.designDecisions);
+                  setDevDebugFindings(res.debugFindings);
+                })
+                .catch((err) => {
+                  if (ctrl.signal.aborted) return;
+                  setErrorMsg(err instanceof ApiClientError ? `${err.status} (${err.code})` : String(err));
+                });
+            }}
+            onCreateProject={(payload) =>
+              runAction("開発プロジェクトを登録しました。", async () => {
+                const res = await apiFetch<{ project: DevProjectItem }>("/v1/development/projects", {
+                  method: "POST",
+                  body: JSON.stringify(payload),
+                });
+                setSelectedDevProjectId(res.project.id);
+                await refreshWorkspace();
+              })
+            }
+            onSelectDesignCandidate={(cycleId, designRevision, candidateId) =>
+              runAction("Design 候補を選択しました。", async () => {
+                await apiFetch(`/v1/development/cycles/${encodeURIComponent(cycleId)}/design-decision`, {
+                  method: "POST",
+                  body: JSON.stringify({ designRevision, selectedCandidateId: candidateId }),
+                });
+                const detail = await apiFetch<{
+                  designDecisions: DevDesignDecisionItem[];
+                  debugFindings: DevDebugFindingItem[];
+                }>(`/v1/development/cycles/${encodeURIComponent(cycleId)}`);
+                setDevDesigns(detail.designDecisions);
+                setDevDebugFindings(detail.debugFindings);
+              })
+            }
+            onDecideDemo={(cycleId, designRevision, decision, demoSnapshotDigest, feedbackText) =>
+              askConfirmation(
+                {
+                  title: `Demo 判定の確認 (${decision})`,
+                  summary: `Design Rev ${designRevision} の Demo に対して ${decision} を記録します。`,
+                  details: [
+                    { label: "Cycle", value: cycleId },
+                    { label: "Snapshot Digest", value: demoSnapshotDigest.slice(0, 16) },
+                    { label: "判定", value: decision },
+                  ],
+                  warning:
+                    "この操作は UI Demo 合意の記録のみです。外部 Git Push・PR 作成・デプロイの Tool 承認にはなりません。",
+                  confirmLabel: `${decision} を確定`,
+                  danger: decision === "REJECTED",
+                },
+                () =>
+                  runAction(`Demo 判定 (${decision}) を記録しました。`, async () => {
+                    await apiFetch(`/v1/development/cycles/${encodeURIComponent(cycleId)}/demo-decision`, {
+                      method: "POST",
+                      body: JSON.stringify({
+                        designRevision,
+                        decision,
+                        demoSnapshotDigest,
+                        feedback: feedbackText,
+                      }),
+                    });
+                    const detail = await apiFetch<{
+                      designDecisions: DevDesignDecisionItem[];
+                      debugFindings: DevDebugFindingItem[];
+                    }>(`/v1/development/cycles/${encodeURIComponent(cycleId)}`);
+                    setDevDesigns(detail.designDecisions);
+                    setDevDebugFindings(detail.debugFindings);
+                  }),
+              )
+            }
+            onReconcilePr={(prRecordId) =>
+              runAction("PR 状態を読み取り専用で照合 (Reconcile) しました。", async () => {
+                await apiFetch(`/v1/development/prs/${encodeURIComponent(prRecordId)}/reconcile`, {
+                  method: "POST",
+                });
+                if (selectedDevProjectId) {
+                  const res = await apiFetch<{ cycles: DevCycleItem[]; prRecords: DevPrRecordItem[] }>(
+                    `/v1/development/projects/${encodeURIComponent(selectedDevProjectId)}`,
+                  );
+                  setDevPrRecords(res.prRecords);
+                }
+              })
+            }
+            onGuardianCheckPr={(prRecordId) =>
+              runAction("PR Guardian による CI・競合点検を実行しました。", async () => {
+                await apiFetch(`/v1/development/prs/${encodeURIComponent(prRecordId)}/guardian-check`, {
+                  method: "POST",
+                });
+                if (selectedDevProjectId) {
+                  const res = await apiFetch<{ cycles: DevCycleItem[]; prRecords: DevPrRecordItem[] }>(
+                    `/v1/development/projects/${encodeURIComponent(selectedDevProjectId)}`,
+                  );
+                  setDevPrRecords(res.prRecords);
+                }
               })
             }
           />

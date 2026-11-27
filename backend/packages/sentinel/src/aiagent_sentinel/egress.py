@@ -163,8 +163,25 @@ class EgressProxy:
                     body_sha,
                 )
             elif dest.needs_permit:
+                permit_body_sha: str | None = None
+                if method != "CONNECT":
+                    raw_cl = hmap.get("content-length", "0").strip()
+                    if raw_cl and not raw_cl.isdigit():
+                        raise EgressDenied("BODY_TOO_LARGE")
+                    cl_val = int(raw_cl or "0")
+                    if cl_val < 0 or cl_val > MAX_FORWARD_BODY:
+                        raise EgressDenied("BODY_TOO_LARGE")
+                    pre_read_body = await asyncio.wait_for(r.readexactly(cl_val), timeout=10) if cl_val else b""
+                    permit_body_sha = hashlib.sha256(pre_read_body).hexdigest()
                 tenant, pid = await asyncio.to_thread(
-                    self.sentinel.verify_and_consume, token, scheme, host, port, method
+                    self.sentinel.verify_and_consume,
+                    token,
+                    scheme,
+                    host,
+                    port,
+                    method,
+                    target_path=inner,
+                    body_sha256=permit_body_sha,
                 )
             else:
                 expected = self.config.static_tokens.get(identity, "")

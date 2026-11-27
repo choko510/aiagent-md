@@ -27,6 +27,7 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
     srv = RpcServer("sentinel", Endpoint(endpoint), keys)
 
     async def authorize(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
         try:
             claim = Claim.from_wire(body["claim"])
             args = (
@@ -36,11 +37,19 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
                 int(body["port"]),
                 str(body["method"]),
             )
+            target_path = str(body["targetPath"]) if body.get("targetPath") is not None else None
+            body_sha256 = str(body["bodySha256"]) if body.get("bodySha256") is not None else None
         except Exception:
             raise RpcError("BAD_REQUEST") from None
-        return {"permit": await asyncio.to_thread(s.authorize, claim, *args)}
+        return {
+            "permit": await asyncio.to_thread(
+                s.authorize, claim, *args, target_path=target_path, body_sha256=body_sha256
+            )
+        }
 
     async def authorize_reconcile(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        target_path = str(body["targetPath"]) if body.get("targetPath") is not None else None
         return {
             "permit": await asyncio.to_thread(
                 s.authorize_reconcile,
@@ -49,8 +58,25 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
                 str(body["scheme"]),
                 str(body["host"]),
                 int(body["port"]),
+                target_path=target_path,
             )
         }
+
+    async def authorize_dev_pr_read(caller: str, body: dict[str, Any]) -> dict[str, Any]:
+        del caller
+        try:
+            args = (
+                str(body["tenantId"]),
+                str(body["ownerUserId"]),
+                str(body["intentId"]),
+                str(body["scheme"]),
+                str(body["host"]),
+                int(body["port"]),
+            )
+            target_path = str(body["targetPath"]) if body.get("targetPath") is not None else None
+        except Exception:
+            raise RpcError("BAD_REQUEST") from None
+        return {"permit": await asyncio.to_thread(s.authorize_dev_pr_read, *args, target_path=target_path)}
 
     async def authorize_human_takeover(caller: str, body: dict[str, Any]) -> dict[str, Any]:
         del caller
@@ -98,6 +124,7 @@ def build_server(keys: dict[str, bytes], endpoint: str, s: Sentinel) -> RpcServe
 
     srv.register("sentinel.authorize", authorize, {"tool_gateway"})
     srv.register("sentinel.authorize_reconcile", authorize_reconcile, {"tool_gateway"})
+    srv.register("sentinel.authorize_dev_pr_read", authorize_dev_pr_read, {"api", "tool_gateway"})
     srv.register("sentinel.authorize_human_takeover", authorize_human_takeover, {"api"})
     srv.register("sentinel.authorize_notification", authorize_notification, {"api"})
     return srv

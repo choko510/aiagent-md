@@ -18,7 +18,7 @@ from typing import Any
 from aiagent_core import control
 from aiagent_core.control import Claim
 from aiagent_core.db import Database
-from aiagent_domain import uuid7
+from aiagent_domain import canonical_json, uuid7
 from aiagent_domain.rpcwire import RpcError
 from aiagent_domain.tools import TOOLS
 
@@ -27,7 +27,47 @@ from .netpolicy import EgressDenied, normalize_host
 PERMIT_TTL_S = 60
 _PG_PERMIT_HOST = re.compile(r"^[a-z0-9.-]{1,253}$")
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _derive_dev_github_pr_binding(safe_args: Any, *, intent_id: str, request_sha256: str) -> tuple[str, str]:
+    """Independently derive canonical GitHub PR path and POST body SHA-256 (with intent correlation marker) (R2-10/R3-07)."""
+    if not isinstance(safe_args, dict):
+        raise RpcError("APPROVAL_INVALID")
+    repo = str(safe_args.get("repository") or "")
+    branch = str(safe_args.get("branch") or "")
+    base_branch = str(safe_args.get("baseBranch") or "")
+    title = safe_args.get("title")
+    body = safe_args.get("body")
+    draft = safe_args.get("draft")
+    if (
+        not _REPO_RE.fullmatch(repo)
+        or any(part in (".", "..") for part in repo.split("/"))
+        or not branch
+        or not base_branch
+        or not isinstance(title, str)
+        or not title
+        or not isinstance(body, str)
+        or type(draft) is not bool
+        or not intent_id
+        or _SHA256_HEX_RE.fullmatch(request_sha256) is None
+    ):
+        raise RpcError("APPROVAL_INVALID")
+    expected_path = f"/repos/{repo}/pulls"
+    marker = f"<!-- aiagent-pr-intent:{intent_id}:{request_sha256[:16]} -->"
+    base_body = body[:1900]
+    rendered_body = f"{base_body}\n\n{marker}" if base_body else marker
+    payload = canonical_json(
+        {
+            "title": title[:200],
+            "body": rendered_body,
+            "head": branch,
+            "base": base_branch,
+            "draft": draft,
+        }
+    ).encode("utf-8")
+    return expected_path, hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -103,7 +143,18 @@ class Sentinel:
             raise ValueError("sentinel key must be >= 32 bytes")
         self.db, self.config, self.key = db, config, key
 
-    def authorize(self, claim: Claim, intent_id: str, scheme: str, host: str, port: int, method: str) -> str:
+    def authorize(
+        self,
+        claim: Claim,
+        intent_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        *,
+        target_path: str | None = None,
+        body_sha256: str | None = None,
+    ) -> str:
         try:
             host = normalize_host(host)
         except EgressDenied as e:
@@ -113,15 +164,24 @@ class Sentinel:
         dest = self.config.match(scheme, host, port)
         if dest is None or not dest.needs_permit or method not in dest.methods or "tool_gateway" not in dest.identities:
             raise RpcError("DESTINATION_NOT_ALLOWED")
+        if target_path is not None and (not target_path.startswith("/") or len(target_path) > 2048):
+            raise RpcError("BAD_REQUEST")
+        if body_sha256 is not None and _SHA256_HEX_RE.fullmatch(body_sha256) is None:
+            raise RpcError("BAD_REQUEST")
         with self.db.tx() as c:
             try:
                 control.check_current(c, claim)
             except control.ControlError as e:
                 raise RpcError(e.code) from None
             it = c.execute(
-                "SELECT i.tool_key, i.status_code, i.goal_revision, a.decision_code, a.goal_revision AS apr_goal"
-                " FROM agent.tool_intents i LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id"
-                " AND a.tool_intent_id=i.id WHERE i.tenant_id=%s AND i.id=%s AND i.run_id=%s",
+                "SELECT i.tool_key, i.status_code, i.goal_revision, i.request_sha256, i.safe_arguments_json,"
+                " t.owner_user_id, a.decision_code, a.goal_revision AS apr_goal,"
+                " a.owner_user_id AS apr_owner, a.request_sha256 AS apr_sha,"
+                " (a.expires_at > now()) AS apr_alive"
+                " FROM agent.tool_intents i"
+                " JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+                " LEFT JOIN agent.approval_records a ON a.tenant_id=i.tenant_id AND a.tool_intent_id=i.id"
+                " WHERE i.tenant_id=%s AND i.id=%s AND i.run_id=%s",
                 (claim.tenant_id, intent_id, claim.run_id),
             ).fetchone()
             if it is None:
@@ -129,30 +189,74 @@ class Sentinel:
             spec = TOOLS.get(it["tool_key"])
             if spec is None or dest.name not in spec.egress:
                 raise RpcError("DESTINATION_NOT_BOUND_TO_TOOL")
+            bound_path = target_path
+            bound_body_sha = body_sha256
+            if it["tool_key"] == "dev_github_pr" and method != "GET":
+                derived_path, derived_body_sha = _derive_dev_github_pr_binding(
+                    it["safe_arguments_json"],
+                    intent_id=str(intent_id),
+                    request_sha256=str(it["request_sha256"]),
+                )
+                if target_path is not None and target_path != derived_path:
+                    raise RpcError("APPROVAL_INVALID")
+                if body_sha256 is not None and body_sha256 != derived_body_sha:
+                    raise RpcError("APPROVAL_INVALID")
+                bound_path, bound_body_sha = derived_path, derived_body_sha
             allowed_states = ("SENDING", "UNKNOWN") if method == "GET" else ("SENDING",)
             if it["status_code"] not in allowed_states:
                 raise RpcError("INTENT_NOT_ADMITTED")
             if (
                 spec.approval_required
                 and method != "GET"
-                and (it["decision_code"] != "APPROVED" or it["apr_goal"] != claim.goal_revision)
+                and (
+                    it["decision_code"] != "APPROVED"
+                    or not it["apr_alive"]
+                    or it["apr_goal"] != claim.goal_revision
+                    or str(it["apr_owner"]) != str(it["owner_user_id"])
+                    or str(it["apr_sha"]) != str(it["request_sha256"])
+                )
             ):
                 raise RpcError("APPROVAL_INVALID")
             pid = uuid7()
             expires = int(time.time()) + PERMIT_TTL_S
             c.execute(
                 "INSERT INTO agent.egress_permits(tenant_id, id, tool_intent_id, run_id, run_lease_epoch, scheme, host,"
-                " port, method, max_uses, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1, to_timestamp(%s))",
-                (claim.tenant_id, pid, intent_id, claim.run_id, claim.lease_epoch, scheme, host, port, method, expires),
+                " port, method, target_path, body_sha256, max_uses, expires_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1, to_timestamp(%s))",
+                (
+                    claim.tenant_id,
+                    pid,
+                    intent_id,
+                    claim.run_id,
+                    claim.lease_epoch,
+                    scheme,
+                    host,
+                    port,
+                    method,
+                    bound_path,
+                    bound_body_sha,
+                    expires,
+                ),
             )
         return f"{claim.tenant_id}.{pid}.{expires}.{_mac(self.key, claim.tenant_id, pid, scheme, host, port, method, expires)}"
 
-    def authorize_reconcile(self, tenant_id: str, intent_id: str, scheme: str, host: str, port: int) -> str:
+    def authorize_reconcile(
+        self,
+        tenant_id: str,
+        intent_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        *,
+        target_path: str | None = None,
+    ) -> str:
         """Read-only receipt query for an UNKNOWN effect (operator reconciliation). GET only, never a send."""
         host = normalize_host(host)
         dest = self.config.match(scheme, host, port)
         if dest is None or "GET" not in dest.methods:
             raise RpcError("DESTINATION_NOT_ALLOWED")
+        if target_path is not None and (not target_path.startswith("/") or len(target_path) > 2048):
+            raise RpcError("BAD_REQUEST")
         with self.db.tx() as c:
             it = c.execute(
                 "SELECT i.tool_key, i.status_code, i.run_id, t.owner_user_id, t.workspace_id"
@@ -160,7 +264,12 @@ class Sentinel:
                 " WHERE i.tenant_id=%s AND i.id=%s",
                 (tenant_id, intent_id),
             ).fetchone()
-            if it is None or it["status_code"] not in ("UNKNOWN", "SENDING"):
+            allowed_statuses = (
+                ("UNKNOWN", "SENDING", "CONFIRMED")
+                if it and it["tool_key"] == "dev_github_pr"
+                else ("UNKNOWN", "SENDING")
+            )
+            if it is None or it["status_code"] not in allowed_statuses:
                 raise RpcError("INTENT_NOT_RECONCILABLE")
             if not control.scope_active(c, tenant_id, str(it["owner_user_id"]), str(it["workspace_id"])):
                 raise RpcError("SCOPE_REVOKED")
@@ -171,9 +280,84 @@ class Sentinel:
             expires = int(time.time()) + PERMIT_TTL_S
             c.execute(
                 "INSERT INTO agent.egress_permits(tenant_id, id, tool_intent_id, run_id, run_lease_epoch, scheme, host,"
-                " port, method, max_uses, expires_at) SELECT %s,%s,%s,%s, greatest(1, r.lease_epoch), %s,%s,%s,'GET',1,"
-                " to_timestamp(%s) FROM agent.runs r WHERE r.tenant_id=%s AND r.id=%s",
-                (tenant_id, pid, intent_id, it["run_id"], scheme, host, port, expires, tenant_id, it["run_id"]),
+                " port, method, target_path, max_uses, expires_at) SELECT %s,%s,%s,%s, greatest(1, r.lease_epoch),"
+                " %s,%s,%s,'GET',%s,1, to_timestamp(%s) FROM agent.runs r WHERE r.tenant_id=%s AND r.id=%s",
+                (
+                    tenant_id,
+                    pid,
+                    intent_id,
+                    it["run_id"],
+                    scheme,
+                    host,
+                    port,
+                    target_path,
+                    expires,
+                    tenant_id,
+                    it["run_id"],
+                ),
+            )
+        return f"{tenant_id}.{pid}.{expires}.{_mac(self.key, tenant_id, pid, scheme, host, port, 'GET', expires)}"
+
+    def authorize_dev_pr_read(
+        self,
+        tenant_id: str,
+        owner_user_id: str,
+        intent_id: str,
+        scheme: str,
+        host: str,
+        port: int,
+        *,
+        target_path: str | None = None,
+    ) -> str:
+        """Read-only GET permit for PR Guardian / ref inspection scoped to owner + approved repository (R2-04)."""
+        host = normalize_host(host)
+        dest = self.config.match(scheme, host, port)
+        if dest is None or "GET" not in dest.methods:
+            raise RpcError("DESTINATION_NOT_ALLOWED")
+        if not target_path or not target_path.startswith("/repos/") or len(target_path) > 2048:
+            raise RpcError("BAD_REQUEST")
+        with self.db.tx() as c:
+            it = c.execute(
+                "SELECT i.tool_key, i.status_code, i.run_id, i.safe_arguments_json, t.owner_user_id, t.workspace_id"
+                " FROM agent.tool_intents i JOIN agent.tasks t ON t.tenant_id=i.tenant_id AND t.id=i.task_id"
+                " WHERE i.tenant_id=%s AND i.id=%s",
+                (tenant_id, intent_id),
+            ).fetchone()
+            if (
+                it is None
+                or it["tool_key"] != "dev_github_pr"
+                or str(it["owner_user_id"]) != owner_user_id
+                or it["status_code"] not in ("SENDING", "UNKNOWN", "CONFIRMED")
+            ):
+                raise RpcError("INTENT_NOT_RECONCILABLE")
+            safe_args = it["safe_arguments_json"] if isinstance(it["safe_arguments_json"], dict) else {}
+            repo = str(safe_args.get("repository") or "")
+            if not repo or not target_path.startswith(f"/repos/{repo}/"):
+                raise RpcError("DESTINATION_NOT_BOUND_TO_TOOL")
+            if not control.scope_active(c, tenant_id, owner_user_id, str(it["workspace_id"])):
+                raise RpcError("SCOPE_REVOKED")
+            spec = TOOLS.get("dev_github_pr")
+            if spec is None or dest.name not in spec.egress:
+                raise RpcError("DESTINATION_NOT_BOUND_TO_TOOL")
+            pid = uuid7()
+            expires = int(time.time()) + PERMIT_TTL_S
+            c.execute(
+                "INSERT INTO agent.egress_permits(tenant_id, id, tool_intent_id, run_id, run_lease_epoch, scheme, host,"
+                " port, method, target_path, max_uses, expires_at) SELECT %s,%s,%s,%s, greatest(1, r.lease_epoch),"
+                " %s,%s,%s,'GET',%s,1, to_timestamp(%s) FROM agent.runs r WHERE r.tenant_id=%s AND r.id=%s",
+                (
+                    tenant_id,
+                    pid,
+                    intent_id,
+                    it["run_id"],
+                    scheme,
+                    host,
+                    port,
+                    target_path,
+                    expires,
+                    tenant_id,
+                    it["run_id"],
+                ),
             )
         return f"{tenant_id}.{pid}.{expires}.{_mac(self.key, tenant_id, pid, scheme, host, port, 'GET', expires)}"
 
@@ -535,7 +719,17 @@ class Sentinel:
             raise EgressDenied("PERMIT_INVALID_AT_SEND")
         return tenant, None
 
-    def verify_and_consume(self, token: str, scheme: str, host: str, port: int, method: str) -> tuple[str, str]:
+    def verify_and_consume(
+        self,
+        token: str,
+        scheme: str,
+        host: str,
+        port: int,
+        method: str,
+        *,
+        target_path: str | None = None,
+        body_sha256: str | None = None,
+    ) -> tuple[str, str]:
         """Called by the egress proxy at send time. Returns (tenant_id, permit_id) or raises EgressDenied."""
         try:
             tenant, pid, expires_s, mac = token.split(".")
@@ -562,15 +756,26 @@ class Sentinel:
                 " AND w.owner_user_id=t.owner_user_id WHERE tn.id=t.tenant_id AND tn.disabled_at IS NULL"
                 " AND m.disabled_at IS NULL AND u.disabled_at IS NULL AND w.disabled_at IS NULL)"
                 " AND p.method = %s AND p.host = %s AND p.port = %s AND p.scheme = %s"
+                " AND (p.target_path IS NULL OR p.target_path = %s)"
+                " AND (p.body_sha256 IS NULL OR p.body_sha256 = %s)"
                 " AND NOT r.pause_requested AND r.status_code <> 'PAUSED'"
-                " AND (p.method = 'GET' AND i.status_code = 'UNKNOWN' OR (NOT r.cancel_requested"
-                " AND r.status_code NOT IN ('CANCELLED','CANCELLING')"
-                " AND t.goal_revision=i.goal_revision AND r.lease_epoch = p.run_lease_epoch))"
-                " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN'))"
+                " AND ((p.method = 'GET' AND (i.status_code = 'UNKNOWN'"
+                "   OR (i.tool_key = 'dev_github_pr' AND i.status_code = 'CONFIRMED')))"
+                "   OR (NOT r.cancel_requested"
+                "   AND r.status_code NOT IN ('CANCELLED','CANCELLING')"
+                "   AND t.goal_revision=i.goal_revision AND r.lease_epoch = p.run_lease_epoch))"
+                " AND (i.status_code = 'SENDING' OR (p.method = 'GET' AND i.status_code = 'UNKNOWN')"
+                "   OR (p.method = 'GET' AND i.tool_key = 'dev_github_pr' AND i.status_code = 'CONFIRMED'))"
+                " AND (p.method = 'GET' OR i.risk_class <> 'external_irreversible'"
+                "   OR EXISTS (SELECT 1 FROM agent.approval_records a WHERE a.tenant_id=i.tenant_id"
+                "     AND a.tool_intent_id=i.id AND a.decision_code = 'APPROVED' AND a.expires_at > now()"
+                "     AND a.owner_user_id = t.owner_user_id AND a.goal_revision = t.goal_revision"
+                "     AND a.request_sha256 = i.request_sha256))"
                 " AND NOT EXISTS (SELECT 1 FROM agent.approval_records a WHERE a.tenant_id=i.tenant_id"
-                "   AND a.tool_intent_id=i.id AND a.decision_code <> 'APPROVED' AND p.method <> 'GET')"
+                "   AND a.tool_intent_id=i.id AND (a.decision_code <> 'APPROVED' OR a.expires_at <= now())"
+                "   AND p.method <> 'GET')"
                 " RETURNING p.id",
-                (tenant, pid, method, host, port, scheme),
+                (tenant, pid, method, host, port, scheme, target_path, body_sha256),
             ).fetchone()
         if row is None:
             raise EgressDenied("PERMIT_INVALID_AT_SEND")

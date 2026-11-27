@@ -1635,7 +1635,7 @@ def test_web_ui_regression_sse_races_confirm_mobile_and_a11y(
                 await page.keyboard.press("ArrowRight")
                 assert await page.get_by_test_id("tab-memory").get_attribute("aria-selected") == "true"
                 await page.keyboard.press("End")
-                assert await page.get_by_test_id("tab-automation").get_attribute("aria-selected") == "true"
+                assert await page.get_by_test_id("tab-development").get_attribute("aria-selected") == "true"
                 await page.keyboard.press("Home")
                 assert await page.get_by_test_id("tab-tasks").get_attribute("aria-selected") == "true"
 
