@@ -794,7 +794,11 @@ class PostgresStore:
         byte_length: int,
         expires_at: str,
     ) -> ArtifactRecord:
+        key = f"finalize:{principal.tenant_id}:{upload_id}"
         with self.db.tx(principal.tenant_id) as c:
+            # Cross-process finalize fence. The second finalizer waits, then observes the
+            # completed session and returns the first artifact instead of creating a second one.
+            c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
             session = c.execute(
                 "SELECT * FROM agent.mmi_upload_sessions WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
                 (principal.tenant_id, upload_id, principal.owner_user_id),

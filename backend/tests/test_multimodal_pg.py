@@ -194,6 +194,47 @@ def test_postgres_chunk_transaction_serializes_writers(pg, tenant) -> None:
     assert store.get_chunk(principal, upload_id, 0) == (4, "a" * 64)
 
 
+def test_postgres_complete_upload_is_cross_process_fenced(pg, tenant) -> None:
+    store = PostgresStore(pg.db("api", max_size=4))
+    principal = _principal(tenant)
+    upload_id = _upload(store, principal, key="finalize")
+    store.append_chunk(principal, upload_id=upload_id, index=0, byte_length=4, chunk_sha256="a" * 64)
+    entered = threading.Event()
+    outcome: list[BaseException | str] = []
+
+    def finalize() -> None:
+        entered.set()
+        artifact_id = str(uuid.uuid4())
+        try:
+            artifact = store.complete_upload(
+                principal,
+                upload_id=upload_id,
+                artifact_id=artifact_id,
+                detected_format="csv",
+                storage_key=f"{principal.tenant_id}/{artifact_id}.bin",
+                content_sha256=hashlib.sha256(b"a,b\n").hexdigest(),
+                byte_length=4,
+                expires_at="2030-01-01T00:00:00Z",
+            )
+            outcome.append(artifact.id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            outcome.append(exc)
+
+    with store.db.tx(principal.tenant_id) as c:
+        c.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"finalize:{principal.tenant_id}:{upload_id}",),
+        )
+        writer = threading.Thread(target=finalize)
+        writer.start()
+        assert entered.wait(2)
+        time.sleep(0.2)
+        assert writer.is_alive()
+    writer.join(5)
+    assert not writer.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], str)
+
+
 def test_postgres_expired_lease_and_revocation_fence(pg, tenant) -> None:
     store = PostgresStore(pg.db("api", max_size=4))
     principal = _principal(tenant)
