@@ -15,6 +15,8 @@ from typing import Final
 NORMALIZER_VERSION: Final[str] = "1.0.0"
 
 _CURRENCY_SYMBOL: Final[dict[str, str]] = {"¥": "JPY", "￥": "JPY", "$": "USD", "€": "EUR", "£": "GBP"}
+_ISO_CODE: Final = re.compile(r"\b(JPY|USD|EUR|GBP|CNY|CAD|AUD|CHF|KRW)\b", re.IGNORECASE)
+_UNIT_CURRENCY: Final[dict[str, str]] = {"円": "JPY", "ドル": "USD", "ユーロ": "EUR"}
 _AMOUNT = re.compile(
     r"(?P<sign>[+\-−△])?\s*(?P<symbol>[¥￥$€£])?\s*"
     r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,3})?)(?P<unit>円|ドル|ユーロ)?"
@@ -52,14 +54,22 @@ def parse_money(raw: str, *, locale: str | None = None, near_text: str = "") -> 
     sign = match.group("sign")
     number = match.group("number")
     unit = match.group("unit")
-    currency: str | None = _CURRENCY_SYMBOL.get(symbol or "") or (
-        {"円": "JPY", "ドル": "USD", "ユーロ": "EUR"}.get(unit or "")
-    )
-    if currency is None and locale:
-        language = locale.split("-", 1)[0].lower()
-        if language == "ja" or (language == "en" and "¥" in near_text):
-            currency = "JPY"
+    symbol_currency = _CURRENCY_SYMBOL.get(symbol or "")
+    unit_currency = _UNIT_CURRENCY.get(unit or "")
+    if symbol_currency is not None and unit_currency is not None and symbol_currency != unit_currency:
+        return MoneyParse(raw, None, None, "CONFLICTING_CURRENCY", ambiguous=True)
+    currency: str | None = symbol_currency or unit_currency
+    codes = {code.upper() for code in _ISO_CODE.findall(near_text)}
+    if len(codes) > 1:
+        return MoneyParse(raw, None, None, "AMBIGUOUS_CURRENCY", ambiguous=True)
+    if codes:
+        explicit = next(iter(codes))
+        if currency is not None and currency != explicit:
+            return MoneyParse(raw, None, None, "CONFLICTING_CURRENCY", ambiguous=True)
+        currency = explicit
     if currency is None:
+        # locale is a display hint, not evidence of the source currency. A caller must
+        # provide an explicit symbol/unit/ISO code in the value's nearby text.
         return MoneyParse(raw, None, None, "UNKNOWN_CURRENCY", ambiguous=True)
     if ("," in number and "." in number) or "," in number:
         normalized = number.replace(",", "")
@@ -72,6 +82,9 @@ def parse_money(raw: str, *, locale: str | None = None, near_text: str = "") -> 
         normalized = number
     else:
         normalized = number
+    digits = normalized.replace(".", "")
+    if len(digits) > 15:
+        return MoneyParse(raw, None, currency, "NUMBER_TOO_LARGE")
     try:
         value = Decimal(normalized)
     except InvalidOperation:
@@ -81,7 +94,10 @@ def parse_money(raw: str, *, locale: str | None = None, near_text: str = "") -> 
     if sign in {"-", "−", "△"}:
         value = -value
     scale = _DECIMALS.get(currency, 2)
-    quantized = value.quantize(Decimal(1).scaleb(-scale))
+    try:
+        quantized = value.quantize(Decimal(1).scaleb(-scale))
+    except InvalidOperation:
+        return MoneyParse(raw, None, currency, "INVALID_NUMBER")
     if quantized != value:
         return MoneyParse(raw, None, currency, "SUBPENNY_PRECISION")
     return MoneyParse(raw, format(quantized, "f"), currency, None)

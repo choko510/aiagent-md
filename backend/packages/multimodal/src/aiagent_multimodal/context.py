@@ -30,6 +30,9 @@ class ContextChunk:
     kind: str
     retrieval_score: float = 0.0
     untrusted: bool = True
+    value_state: str = "observed"
+    flags: tuple[str, ...] = ()
+    observations: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +42,9 @@ class ContextChunk:
             "kind": self.kind,
             "retrievalScore": self.retrieval_score,
             "untrusted": self.untrusted,
+            "valueState": self.value_state,
+            "flags": list(self.flags),
+            "observations": list(self.observations),
         }
 
 
@@ -52,12 +58,55 @@ def chunks_for(document: Document) -> list[ContextChunk]:
             by_row.setdefault(cell.row, []).append(cell)
         for row in sorted(by_row):
             cells = sorted(by_row[row], key=lambda c: c.column)
-            values = [f"{c.a1 or c.column}: {c.text if c.text is not None else '[unknown]'}" for c in cells]
+            values: list[str] = []
+            observations: list[dict[str, Any]] = []
+            states = {c.value_state for c in cells}
+            flags: set[str] = set()
+            for cell in cells:
+                marker = ""
+                if cell.value_state != "observed":
+                    marker += f" [{cell.value_state}]"
+                    flags.add(f"value_{cell.value_state}")
+                if cell.formula:
+                    marker += " [formula]"
+                    flags.add("formula_not_evaluated")
+                if cell.cached_error:
+                    marker += " [formula_error]"
+                    flags.add("formula_cached_error")
+                values.append(
+                    f"{cell.a1 or cell.column}: {cell.text if cell.text is not None else '[unknown]'}{marker}"
+                )
+                observations.append(
+                    {
+                        "row": cell.row,
+                        "column": cell.column,
+                        "a1": cell.a1,
+                        "text": cell.text,
+                        "valueState": cell.value_state,
+                        "formula": cell.formula,
+                        "cachedError": cell.cached_error,
+                        "hidden": cell.hidden,
+                        "merged": cell.merged,
+                        "flags": list(cell.flags),
+                        "locator": cell.locator.to_dict(),
+                    }
+                )
             text = " | ".join(values)
             if not text.strip():
                 continue
+            value_state = "unknown" if "unknown" in states else ("estimated" if "estimated" in states else "observed")
             locator = cells[0].locator
-            out.append(ContextChunk(f"row:{table.table_id}:{row}", text, locator, "table_row"))
+            out.append(
+                ContextChunk(
+                    f"row:{table.table_id}:{row}",
+                    text,
+                    locator,
+                    "table_row",
+                    value_state=value_state,
+                    flags=tuple(sorted(flags)),
+                    observations=tuple(observations),
+                )
+            )
     return out[:_MAX_CHUNKS]
 
 
@@ -81,7 +130,19 @@ def retrieve(document: Document, query: str, *, limit: int = 8, max_chars: int =
         if not terms:
             score = 1.0
         if score:
-            scored.append(ContextChunk(chunk.chunk_id, chunk.text, chunk.locator, chunk.kind, round(score, 3), True))
+            scored.append(
+                ContextChunk(
+                    chunk.chunk_id,
+                    chunk.text,
+                    chunk.locator,
+                    chunk.kind,
+                    round(score, 3),
+                    True,
+                    chunk.value_state,
+                    chunk.flags,
+                    chunk.observations,
+                )
+            )
     scored.sort(key=lambda c: (-c.retrieval_score, c.chunk_id))
     selected: list[ContextChunk] = []
     total = 0
@@ -93,7 +154,66 @@ def retrieve(document: Document, query: str, *, limit: int = 8, max_chars: int =
     return selected
 
 
-def grounded_answer(question: str, candidates: Sequence[MmiCandidate], *, limit: int = 5) -> dict[str, Any]:
+_QUESTION_STOPWORDS: Final = frozenset(
+    {
+        "a",
+        "amount",
+        "an",
+        "are",
+        "cost",
+        "count",
+        "date",
+        "do",
+        "does",
+        "how",
+        "is",
+        "it",
+        "much",
+        "of",
+        "please",
+        "price",
+        "quantity",
+        "that",
+        "the",
+        "this",
+        "total",
+        "value",
+        "was",
+        "what",
+        "when",
+        "which",
+        "数量",
+        "価格",
+        "金額",
+        "合計",
+        "料金",
+        "日付",
+    }
+)
+
+
+def _candidate_context(candidate: MmiCandidate, chunks: Sequence[ContextChunk]) -> str:
+    target = candidate.locator
+    if target is None:
+        return ""
+    wanted = target.to_dict()
+    for chunk in chunks:
+        if chunk.locator.to_dict() == wanted:
+            return chunk.text
+        for observation in chunk.observations:
+            locator = observation.get("locator")
+            if isinstance(locator, dict) and locator == wanted:
+                return chunk.text
+    return ""
+
+
+def grounded_answer(
+    question: str,
+    candidates: Sequence[MmiCandidate],
+    *,
+    limit: int = 5,
+    document: Document | None = None,
+) -> dict[str, Any]:
     """Extractive answer from anchored, observed candidates. Never invents a value."""
     anchored = [c for c in candidates if c.verification == "anchored" and c.value_state in {"observed", "derived"}]
     if not anchored:
@@ -108,11 +228,11 @@ def grounded_answer(question: str, candidates: Sequence[MmiCandidate], *, limit:
             for c in anchored
             if c.field_key in {"amount", "effective_price"}
             or (isinstance(c.normalized, dict) and c.normalized.get("schema") == "mmi.money/1")
-        ][:limit]
+        ]
     elif wants_date:
-        selected = [c for c in anchored if c.field_key == "date"][:limit]
+        selected = [c for c in anchored if c.field_key == "date"]
     elif wants_quantity:
-        selected = [c for c in anchored if c.field_key == "quantity"][:limit]
+        selected = [c for c in anchored if c.field_key == "quantity"]
     else:
         terms = {term.casefold() for term in _TOKEN.findall(lowered)}
         selected = [
@@ -120,7 +240,14 @@ def grounded_answer(question: str, candidates: Sequence[MmiCandidate], *, limit:
             for c in anchored
             if c.field_key.casefold() in terms
             or any(term in (c.raw_text or "").casefold() for term in terms if len(term) >= 2)
-        ][:limit]
+        ]
+    entity_terms = {term.casefold() for term in _TOKEN.findall(lowered)} - _QUESTION_STOPWORDS
+    if document is not None and entity_terms:
+        chunks = chunks_for(document)
+        selected = [
+            c for c in selected if any(term in _candidate_context(c, chunks).casefold() for term in entity_terms)
+        ]
+    selected = selected[:limit]
     if not selected:
         return _unknown()
     citations = [_candidate_citation(c) for c in selected]

@@ -21,7 +21,7 @@ from .extraction.normalization import parse_money, tax_condition
 from .parsers.base import Document, TextBlock
 
 _MAX_REASON = 500
-_DATE_RE = re.compile(r"(?P<y>20\d{2})\s*[-/年]\s*(?P<m>\d{1,2})\s*[-/月]\s*(?P<d>\d{1,2})")
+_DATE_RE = re.compile(r"(?P<y>20\d{2})\s*[-/年]\s*(?P<m>\d{1,2})\s*[-/月]\s*(?P<d>\d{1,2})\s*日?(?!\d)")
 
 
 @dataclass(frozen=True, slots=True)

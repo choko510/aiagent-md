@@ -24,7 +24,7 @@ _KNOWN_FIELDS: Final[frozenset[str]] = frozenset(
     {"amount", "currency", "tax", "effective_price", "date", "quantity", "unit"}
 )
 _ALIASES: Final[dict[str, str]] = {"price": "amount", "total": "amount", "effectiveprice": "effective_price"}
-_DATE = re.compile(r"(?P<y>20\d{2})\s*[-/年]\s*(?P<m>\d{1,2})\s*[-/月]\s*(?P<d>\d{1,2})\s*日?")
+_DATE = re.compile(r"(?P<y>20\d{2})\s*[-/年]\s*(?P<m>\d{1,2})\s*[-/月]\s*(?P<d>\d{1,2})\s*日?(?!\d)")
 _QUANTITY = re.compile(
     r"(?P<num>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<unit>個|点|枚|箱|袋|本|kg|g|ml|L|パック)"
 )
@@ -44,6 +44,8 @@ class TextSource:
     formula: str | None = None
     cached_error: str | None = None
     flags: tuple[str, ...] = ()
+    column_header: str = ""
+    row_context: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,11 +72,19 @@ def extract_candidates(
 
     for source in sources:
         tax = tax_condition(source.text)
-        money_parses = _money_matches(source.text, locale)
+        money_parses = _money_matches(source, locale)
         if "amount" in fields:
             for raw, parsed in money_parses:
                 candidate = _money_candidate(document, source, raw, parsed, tax, fields=("amount",))
                 _add(out, seen, candidate, "amount")
+            if not source.text and (source.cached_error or source.formula or source.value_state == "unknown"):
+                reason = "FORMULA_CACHED_ERROR" if source.cached_error else "UNKNOWN_FORMULA_VALUE"
+                _add(
+                    out,
+                    seen,
+                    _unknown(document, source, "amount", reason, conditions=_conditions(source, ())),
+                    "amount",
+                )
         if "currency" in fields and money_parses:
             raw, parsed = money_parses[0]
             if parsed.currency is None:
@@ -203,23 +213,35 @@ def _sources(document: Document) -> tuple[list[TextSource], bool]:
                     hidden=bool(block.locator.hidden_state and block.locator.hidden_state != "visible"),
                 )
             )
-    for cell in document.cells():
-        if cell.text:
-            hidden = cell.hidden or (cell.locator.hidden_state not in {None, "visible"})
-            out.append(
-                TextSource(
-                    text=cell.text,
-                    locator=cell.locator,
-                    method=_cell_method(document.format),
-                    hidden=hidden,
-                    value_state=cell.value_state,
-                    formula=cell.formula,
-                    cached_error=cell.cached_error,
-                    flags=cell.flags,
+    for table in document.tables():
+        headers = [h.strip() if h else "" for h in table.headers]
+        by_row: dict[int, list[str]] = {}
+        for cell in table.cells:
+            if cell.text:
+                by_row.setdefault(cell.row, []).append(cell.text)
+        for cell in table.cells:
+            header = headers[cell.column - 1] if 0 < cell.column <= len(headers) else ""
+            row_context = " ".join(by_row.get(cell.row) or [])
+            if cell.text or cell.formula or cell.cached_error or cell.value_state != "observed":
+                hidden = cell.hidden or (cell.locator.hidden_state not in {None, "visible"})
+                out.append(
+                    TextSource(
+                        text=cell.text or "",
+                        locator=cell.locator,
+                        method=_cell_method(document.format),
+                        hidden=hidden,
+                        value_state=cell.value_state,
+                        formula=cell.formula,
+                        cached_error=cell.cached_error,
+                        flags=cell.flags,
+                        column_header=header,
+                        row_context=row_context,
+                    )
                 )
-            )
-        if len(out) >= _MAX_SOURCES:
-            truncated = True
+            if len(out) >= _MAX_SOURCES:
+                truncated = True
+                break
+        if truncated:
             break
     if len(out) > _MAX_SOURCES:
         return out[:_MAX_SOURCES], True
@@ -232,13 +254,37 @@ def _cell_method(fmt: str) -> str:
     )
 
 
-def _money_matches(text: str, locale: str | None) -> list[tuple[str, MoneyParse]]:
+_MONEY_HEADERS: Final = frozenset(
+    {"price", "amount", "total", "cost", "unit price", "subtotal", "価格", "金額", "料金", "単価", "小計", "合計"}
+)
+_MONEY_LABEL: Final = re.compile(r"(?:price|amount|total|cost|価格|金額|料金|単価|合計)\s*[:：]", re.IGNORECASE)
+
+
+def _money_matches(source: TextSource, locale: str | None) -> list[tuple[str, MoneyParse]]:
+    text = source.text
+    near_text = f"{text} {source.row_context}"
+    has_explicit_currency = bool(re.search(r"[¥￥$€£]|円|ドル|ユーロ", text))
+    has_header = source.column_header.strip().casefold() in _MONEY_HEADERS
+    has_label = bool(_MONEY_LABEL.search(text))
+    if not (has_explicit_currency or has_header or has_label):
+        # A bare integer in a serial/quantity/date column is not a price. The caller may
+        # still request a generic field, but amount extraction must not guess.
+        return []
     out: list[tuple[str, MoneyParse]] = []
     for match in _AMOUNT.finditer(text):
-        raw = match.group(0).strip()
+        matched = match.group(0)
+        raw = matched.strip()
         if not raw or not any(ch.isdigit() for ch in raw):
             continue
-        out.append((raw, parse_money(raw, locale=locale, near_text=text)))
+        start = match.start() + len(matched) - len(matched.lstrip())
+        end = match.end() - len(matched) + len(raw)
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        if before.isalnum() or (before and before in "_,."):
+            continue
+        if after.isalnum() or (after and after in "_%,./"):
+            continue
+        out.append((raw, parse_money(raw, locale=locale, near_text=near_text)))
     return out
 
 

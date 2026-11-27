@@ -9,7 +9,7 @@ request body.
 import asyncio
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,10 +21,24 @@ from aiagent_multimodal.limits import MmiLimits
 from aiagent_multimodal.pipeline import InProcessParserExecutor, ParserExecutor
 from aiagent_multimodal.service import MultimodalService, ServiceConfig
 from aiagent_multimodal.store import PostgresStore, Principal
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 _MAX_JSON = 16 * 1024
+
+
+async def production_gate(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    """Reject the production MMI surface before any request body is read.
+
+    The router's own get_service() gate runs inside the handler, after FastAPI has
+    already consumed a JSON body. In production the whole admission surface is
+    disabled, so returning here keeps untrusted bytes out of the trusted API process.
+    Capabilities stays reachable to report why admission is unavailable.
+    """
+    path = request.url.path
+    if (path == "/v1/multimodal" or path.startswith("/v1/multimodal/")) and path != "/v1/multimodal/capabilities":
+        return JSONResponse({"detail": {"error": "MMI_PRODUCTION_DISABLED"}}, status_code=503)
+    return await call_next(request)
 
 
 def build_router(

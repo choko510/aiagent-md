@@ -134,9 +134,18 @@ class MultimodalService:
         self.blobs.put_chunk(principal.tenant_id, upload_id, index, data)
         # A retry is idempotent in the store. Never abort the whole staging directory because one
         # request failed: a lost ACK must remain recoverable.
-        updated = self.store.append_chunk(
-            principal, upload_id=upload_id, index=index, byte_length=len(data), chunk_sha256=digest
-        )
+        try:
+            updated = self.store.append_chunk(
+                principal, upload_id=upload_id, index=index, byte_length=len(data), chunk_sha256=digest
+            )
+        except Exception:
+            # FS-before-DB is intentional: a DB row must never claim bytes that are not durable.
+            # If the DB did not accept this chunk, remove only the exact bytes we published so a
+            # later request with different bytes is not permanently blocked by an orphan. Re-check
+            # the DB first because a concurrent identical writer may have committed the same bytes.
+            if self.store.get_chunk(principal, upload_id, index) is None:
+                self.blobs.delete_chunk(principal.tenant_id, upload_id, index, digest)
+            raise
         return {
             "uploadId": upload_id,
             "receivedBytes": updated.received_bytes,
@@ -375,7 +384,7 @@ class MultimodalService:
         job, document = self._succeeded_document(principal, artifact_id)
         outcome = job.outcome or {}
         candidates = [MmiCandidate.from_dict(c) for c in outcome.get("candidates", [])]
-        answer = grounded_answer(question, candidates)
+        answer = grounded_answer(question, candidates, document=document)
         answer["artifactId"] = artifact_id
         answer["jobId"] = job.id
         answer["contextChunks"] = [chunk.to_dict() for chunk in retrieve(document, question, limit=4)]

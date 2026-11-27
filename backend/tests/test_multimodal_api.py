@@ -7,7 +7,7 @@ import hashlib
 from types import SimpleNamespace
 
 from aiagent_api.app import create_app
-from aiagent_api.multimodal_api import build_router
+from aiagent_api.multimodal_api import build_router, production_gate
 from aiagent_core import admin
 from aiagent_multimodal.pipeline import InProcessParserExecutor
 from fastapi import FastAPI
@@ -123,3 +123,25 @@ def test_production_surface_is_disabled_even_with_inprocess_optin() -> None:
         )
         assert denied.status_code == 503
         assert denied.json()["detail"]["error"] == "MMI_PRODUCTION_DISABLED"
+
+
+def test_production_gate_rejects_before_reading_a_large_body() -> None:
+    scope = SimpleNamespace(
+        tenant_id="01980000-0000-7000-8000-000000000001",
+        user_id="01980000-0000-7000-8000-000000000002",
+        workspace_id="01980000-0000-7000-8000-000000000003",
+    )
+    app = FastAPI()
+    app.middleware("http")(production_gate)
+    app.include_router(build_router(lambda: None, lambda: scope, profile="production"))
+    with TestClient(app) as client:
+        denied = client.post(
+            "/v1/multimodal/uploads",
+            content=b'{"x":"' + b"a" * (256 * 1024) + b'"}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert denied.status_code == 503
+        assert denied.json()["detail"]["error"] == "MMI_PRODUCTION_DISABLED"
+        caps = client.get("/v1/multimodal/capabilities")
+        assert caps.status_code == 200
+        assert caps.json()["parserIsolation"] == "unavailable"

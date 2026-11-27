@@ -448,6 +448,77 @@ def test_normalized_value_without_replay_is_not_anchored() -> None:
     assert verify_candidates(doc, [no_replay], data).candidates[0].verification == "unverified"
 
 
+def test_amount_ignores_unrelated_bare_numbers() -> None:
+    data = "item,qty,code,price\nA,3\u500b,1234,100\u5186\n".encode()
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount", "quantity"], locale="ja-JP")
+    amounts = [c for c in extraction.candidates if c.field_key == "amount"]
+    assert [c.raw_text for c in amounts] == ["100\u5186"]
+    quantities = [c for c in extraction.candidates if c.field_key == "quantity"]
+    assert [c.raw_text for c in quantities] == ["3"]
+
+
+def test_conflicting_currency_evidence_is_not_normalized_to_a_guess() -> None:
+    data = b"amount,currency\n$100,CAD\n"
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount"])
+    candidate = next(c for c in extraction.candidates if c.field_key == "amount")
+    assert candidate.value_state == "unknown"
+    assert candidate.missing_reason == "CONFLICTING_CURRENCY"
+    assert candidate.normalized is None
+
+
+def test_bare_price_without_currency_evidence_is_unknown() -> None:
+    data = b"price\n100\n"
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount"])
+    candidate = next(c for c in extraction.candidates if c.field_key == "amount")
+    assert candidate.value_state == "unknown"
+    assert candidate.missing_reason == "UNKNOWN_CURRENCY"
+
+
+def test_malformed_grouping_and_truncated_date_are_not_values() -> None:
+    data = b'date,price\n2026/11/270,"1,23"\n'
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount", "date"])
+    assert not [c for c in extraction.candidates if c.field_key == "amount"]
+    assert not [c for c in extraction.candidates if c.field_key == "date"]
+
+
+def test_context_projects_formula_state_and_cell_locators() -> None:
+    from aiagent_multimodal.context import chunks_for
+
+    data = xlsx_bytes(
+        [["Item", "Price"], ["A", None]],
+        formulas={"B2": ("1+1", "100\u5186")},
+        formula_types={"B2": "str"},
+    )
+    doc = XlsxParser().parse(make_input("xlsx", data))
+    row = next(chunk for chunk in chunks_for(doc) if chunk.kind == "table_row" and "B2" in chunk.text)
+    assert row.value_state == "estimated"
+    assert "formula_not_evaluated" in row.flags
+    assert "[estimated]" in row.text
+    b2 = next(observation for observation in row.observations if observation["a1"] == "B2")
+    assert b2["valueState"] == "estimated"
+    assert b2["formula"] == "1+1"
+    assert b2["locator"]["cellA1"] == "B2"
+
+
+def test_formula_error_cell_is_an_explicit_unknown_candidate() -> None:
+    data = xlsx_bytes(
+        [["Item", "Price"], ["A", None]],
+        formulas={"B2": ("1/0", None)},
+        formula_types={"B2": "e"},
+    )
+    doc = XlsxParser().parse(make_input("xlsx", data))
+    extraction = extract_candidates(doc, ["amount"])
+    candidate = next(c for c in extraction.candidates if c.field_key == "amount")
+    assert candidate.value_state == "unknown"
+    assert candidate.missing_reason == "FORMULA_CACHED_ERROR"
+    assert candidate.locator is not None
+    assert candidate.locator.cell_a1 == "B2"
+
+
 def test_date_replay_accepts_slash_form() -> None:
     data = b"date\n2026/11/27\n"
     doc = CsvParser().parse(make_input("csv", data))

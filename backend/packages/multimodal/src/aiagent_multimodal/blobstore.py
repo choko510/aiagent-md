@@ -95,6 +95,18 @@ class QuarantineBlobStore:
             temp.unlink(missing_ok=True)
         return hashlib.sha256(data).hexdigest()
 
+    def delete_chunk(self, tenant_id: str, upload_id: str, index: int, expected_sha256: str) -> None:
+        """Remove an uncommitted chunk only when it is still the exact bytes this writer published."""
+        if not re.fullmatch(r"[0-9a-f-]{36}", tenant_id) or not re.fullmatch(r"[0-9a-f-]{36}", upload_id):
+            return
+        target = self._stage / tenant_id / upload_id / f"{index:05d}.part"
+        try:
+            if hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256:
+                return
+            target.unlink(missing_ok=True)
+        except OSError:
+            return
+
     def finalize(
         self,
         tenant_id: str,

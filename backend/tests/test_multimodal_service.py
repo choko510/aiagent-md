@@ -92,6 +92,21 @@ def test_upload_parse_retrieve_and_ask(service: MultimodalService) -> None:
     assert unrelated["citations"] == []
 
 
+def test_answer_binds_an_entity_to_its_own_row(service: MultimodalService) -> None:
+    principal = _principal()
+    data = "item,price\napple,\u00a5100\nbanana,\u00a5200\n".encode()
+    artifact_id = _upload(service, principal, data)
+    job = service.start_parse(principal, artifact_id, request=_request(artifact_id), idempotency_key="entity")
+    service.run_job(principal, job.id)
+    answer = service.ask(principal, artifact_id, "What is the price of banana?")
+    assert answer["status"] == "conditional"
+    assert "200" in answer["answer"]
+    assert "100" not in answer["answer"]
+    missing = service.ask(principal, artifact_id, "What is the price of orange?")
+    assert missing["status"] == "unknown"
+    assert missing["citations"] == []
+
+
 def test_chunk_replay_is_idempotent_and_conflicts_survive(service: MultimodalService) -> None:
     principal = _principal()
     data = b"a,b\n1,2\n"
@@ -120,6 +135,31 @@ def test_chunk_replay_is_idempotent_and_conflicts_survive(service: MultimodalSer
     service.put_chunk(principal, upload_id, 1, second, hashlib.sha256(second).hexdigest())
     artifact = service.complete_upload(principal, upload_id)
     assert artifact["quarantineState"] == "admitted"
+
+
+def test_failed_chunk_db_append_does_not_leave_a_blocking_blob(
+    service: MultimodalService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = _principal()
+    started = service.begin_upload(
+        principal,
+        original_filename="orphan.csv",
+        declared_media_type="text/csv",
+        expected_bytes=4,
+        content_sha256=hashlib.sha256(b"aaaa").hexdigest(),
+        idempotency_key="orphan",
+    )
+    upload_id = started["uploadId"]
+
+    def fail_append(*args, **kwargs):
+        raise RuntimeError("injected database failure")
+
+    monkeypatch.setattr(service.store, "append_chunk", fail_append)
+    with pytest.raises(RuntimeError):
+        service.put_chunk(principal, upload_id, 0, b"aaaa", hashlib.sha256(b"aaaa").hexdigest())
+    monkeypatch.undo()
+    retried = service.put_chunk(principal, upload_id, 0, b"bbbb", hashlib.sha256(b"bbbb").hexdigest())
+    assert retried["receivedBytes"] == 4
 
 
 def test_complete_retry_after_db_failure_keeps_staging(

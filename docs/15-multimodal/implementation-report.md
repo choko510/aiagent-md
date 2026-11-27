@@ -89,7 +89,7 @@
 - PR #122（Autonomous Development / Phase 7）が `0029` を主張している。
 - 本ブランチは仕様の連番規約に従い `0029_multimodal_ingestion` を追加した。
 - **merge順序により片方の番号を振り直す必要がある。** 本PRでは勝手にrenumberせず、衝突をここに記録する。
-- `aiagent_core.migrate.APP_SCHEMA_VERSION` を `29` へ更新し、既存のmigrationテスト12件も通した。
+- `aiagent_core.migrate.APP_SCHEMA_VERSION` を `29` へ更新し、既存のmigrationテスト13件も通した。
 - 本ブランチのDBテストは、このリポジトリの作業ツリーで `0029` まで適用した専用DBで実行した。
 
 ### 3.2 nested archive を拒否
@@ -125,15 +125,15 @@ $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
 ```
 
-結果: `core 29 passed`、`service 10 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed`、`migration 12 passed`（各グループを順に実行）。
+結果: `core 35 passed`、`service 12 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed / 1 skipped`、`migration 13 passed`（各グループを順に実行）。
 
 内訳:
 
-- core 29: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き
-- service 10: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復
+- core 35: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き、金額の境界・通貨競合・桁上限、contextのformula状態投影、formula errorの明示unknown
+- service 12: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復、DB append失敗時の未確定chunk回収、質問entityと行の結合
 - PostgreSQL 4: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document
-- HTTP 2: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞
-- migration 12: `0029` までの連番・schema version・既存テスト
+- HTTP 2（+1 skip）: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞、256KiB bodyを読む前のproduction gate
+- migration 13: `0029` までの連番・schema version・既存テスト
 
 ### 4.2 静的検査
 
@@ -168,7 +168,7 @@ npm run build
 6. questionへの回答が `status answered`、citationがamount
 7. 実PDF（`invoice.pdf`, 588 bytes）でもformat `pdf`、amount `100` が `anchored`、locator `page 1`、回答が `page 1` を引用
 
-この環境のAPIは `parserIsolation: in_process_dev` を返しており、UIにもその警告を表示した。**これは本番の隔離境界ではない。**
+この環境のAPIは `parserIsolation: in_process_dev` を返しており、UIにもその警告を表示した。**これは本番の隔離境界ではない。** この実ブラウザ確認は旧HEAD `d34cd95` 時点であり、現在のHEADでは再実行していない。
 
 ### 4.5 PR #126 レビュー対応（2026-11-26）
 
@@ -183,21 +183,27 @@ npm run build
 - P1-14: `/jobs/{id}/run` の同期処理をthreadへ退避。
 - 未解決: P1-08（at-rest暗号化・保持/tombstone）、P1-09（Task/Run/workspace/RLS結合）、P1-12/13（実jail・資源上限）、P1-15のAgent Runtime経由の回答。
 
-### 4.6 再レビュー R2 対応（HEAD d34cd95 以降）
+### 4.6 再レビュー R2/R3 対応（HEAD d34cd95 以降）
 
-R2-01〜R2-12を再監査し、次のコード変更と回帰試験を追加した。**未解消項目を解消済みとして扱わない。**
+R2-01〜R2-12とR3-01〜R3-08を再監査し、次のコード変更と回帰試験を追加した。**未解消項目を解消済みとして扱わない。**
 
 - R2-01（一部）: PDFの検証をページ全体の文字列一致から、候補の`normalized_bbox`と交差する`TextBlock`だけに限定した。bbox外の同一文字列ではanchorしない回帰試験を追加。ただし独立再parseは同じParser実装・同一信頼プロセス上で動くため、Parser実装の共通欠陥を排除する独立検証ではない。
 - R2-02（一部）: 正規化値の再計算結果が`None`（金額・日付以外の型、または通貨不明）の場合はanchorせず`unverified`にした。金額は生値の再parse、通貨、税条件を再計算し、金額/通貨の不一致は`contradicted`、税文脈の不一致は`unverified`とする。
-- R2-03（一部）: `2026/11/27`のようなスラッシュ日付を再parseしてanchorする回帰試験を追加。通貨記号の複数通貨性（`¥`/`$`）と、隣接セル以外の文脈依存は未解消。
-- R2-04（一部）: chunk publishを一意なtemp名＋`link()`の原子的公開に変更し、同一indexへの同時書込みが他方のバイトを上書きしないようにした。同時書込み試験を追加。finalizeとDB commitの間のクラッシュ回復は未解消。
+- R2-03（未解消）: 数字の存在と価格の意味の混同は残る。今回、金額候補に価格列・価格ラベル・明示通貨のいずれかを要求し、`型番1234`等の裸の数字を除外した。`$100 CAD`/`$100円`は`CONFLICTING_CURRENCY`としてunknownにし、localeだけでは通貨を推定しない。ただし記号の複数通貨性と文脈依存の意味解決は未解消。
+- R2-04（一部）: chunk publishを一意なtemp名＋`link()`の原子的公開に変更し、同一indexへの同時書込みが他方のバイトを上書きしないようにした。DB append失敗時は、DBに未確定かつ自分が公開したdigestと一致するchunkだけを削除し、後続の別バイトを恒久的にブロックしない。同時書込みとDB失敗の回帰試験を追加。DB/FSの予約・確定を単一トランザクションにする処理と、finalizeとDB commitの間のクラッシュ回復は未解消。
 - R2-05: 未解消。finalizeのクロスプロセス排他、孤児blobの定期回収、commit不明時の照合は未実装。
 - R2-06: XLSXの`TableCell.value_state`/formula/cached errorを`TextSource`へ伝播し、cached formula値は`estimated`、cached errorは`unknown`のまま候補化する。`_build`はsourceより強いstateへ昇格せず、検証も`estimated`/`unknown`セルをanchorしない。回帰試験を追加。
 - R2-07（一部）: 既存のrevoke時job無効化・blob削除・GET/citation拒否を維持。HTTPリクエスト中のrevokeとの厳密な直列化は未解消。
 - R2-08（一部）: `/jobs/{id}/run`に加え、complete/get/revoke/start/get/cancel/retrieve/answer/citationsの同期service呼出しを`asyncio.to_thread`へ退避した。スレッド実行の強制停止、実cgroup/CPU/RSS/FD上限は未解消。
-- R2-09〜R2-12: 未解消。決定的extractive回答はAgent Runtime/Gateway経由ではなく、質問と行の意味照合、保持期限切れの物理削除、UIのcitation再照合は限定的。
+- R2-09〜R2-12: 未解消。決定的extractive回答はAgent Runtime/Gateway経由ではなく、保持期限切れの物理削除、UIのcitation再照合は限定的。
+- R3-02（一部）: 金額の字句境界を厳格化し、桁数上限とquantize失敗を明示的に拒否した。`1,23`や`2026/11/270`のような不正な区切り・日付を候補にしない回帰試験を追加。
+- R3-03（一部）: `ContextChunk`に`valueState`/`flags`/`observations`を追加し、XLSXのestimated/formula/cached errorをcontextへ投影する。formula errorの空セルは`FORMULA_CACHED_ERROR`の明示unknown候補にした。Context consumerの全てがこの状態を保持する保証は未検証。
+- R3-04（一部）: 上記R2-04のDB append失敗時rollbackを追加。DB/FS間の予約順序・期限・孤児回収は未解消。
+- R3-05（一部）: `create_app`がproductionのとき、`/v1/multimodal/*`（`capabilities`を除く）をbody読取前に503にするASGI middlewareを追加。256KiB bodyで503になる回帰試験を追加。`build_router`を単独で組む呼出しにはmiddlewareが付かないため、本番構成は`create_app`経由に限定する。
+- R3-07（一部）: 回答時に質問のentity termと候補の行contextを照合し、`banana`の価格を聞いたとき`apple`の行を回答しないようにした。意味的同義語・複数行join・文脈の一般解決は未実装。
+- R3-01/R3-06/R3-08: 未解消。独立Parser/Verifier、source epochとTask/Run/workspace結合、実CPU/RSS/FD上限と強制停止は未実装。
 
-追加・実行した回帰試験: XLSX cached formulaの`estimated`/`unverified`、bbox外PDF文字列の非anchor、normalized値の非replay/不一致、スラッシュ日付のreplay、同一chunk同時publishの非上書き。
+追加・実行した回帰試験: XLSX cached formulaの`estimated`/`unverified`、bbox外PDF文字列の非anchor、normalized値の非replay/不一致、スラッシュ日付のreplay、同一chunk同時publishの非上書き、金額境界・通貨競合・裸の価格、contextのformula状態、formula errorの明示unknown、DB append失敗時のchunk回収、entityと行の結合、production body前gate。
 
 ## 5. 状態の正直な区分
 

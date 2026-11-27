@@ -54,7 +54,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
-from aiagent_api.multimodal_api import build_router
+from aiagent_api.multimodal_api import build_router, production_gate
 
 
 def _parse_keyring_secret(raw_json: str) -> tuple[str, bytes]:
@@ -466,6 +466,8 @@ def create_app(
             state["db"].close()
 
     app = FastAPI(title="aiagent-md API", version="0.3.0", lifespan=lifespan)
+    if config.profile() == "production":
+        app.middleware("http")(production_gate)
 
     def get_db() -> Database:
         return state["db"]
