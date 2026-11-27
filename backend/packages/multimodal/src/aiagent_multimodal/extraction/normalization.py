@@ -16,7 +16,8 @@ NORMALIZER_VERSION: Final[str] = "1.0.0"
 
 _CURRENCY_SYMBOL: Final[dict[str, str]] = {"¥": "JPY", "￥": "JPY", "$": "USD", "€": "EUR", "£": "GBP"}
 _AMOUNT = re.compile(
-    r"(?P<symbol>[¥￥$€£])?\s*(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,3})?)(?P<unit>円|ドル|ユーロ)?"
+    r"(?P<sign>[+\-−△])?\s*(?P<symbol>[¥￥$€£])?\s*"
+    r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,3})?)(?P<unit>円|ドル|ユーロ)?"
 )
 _TAX_INCLUDED = re.compile(r"税込|税込み|税込価格|内税|incl\.?\s*tax|tax\s*included", re.IGNORECASE)
 _TAX_EXCLUDED = re.compile(r"税抜|税別|外税|excl\.?\s*tax|tax\s*excluded|\+\s*tax", re.IGNORECASE)
@@ -44,10 +45,11 @@ def tax_condition(text: str) -> str:
 
 def parse_money(raw: str, *, locale: str | None = None, near_text: str = "") -> MoneyParse:
     text = raw.strip()
-    match = _AMOUNT.search(text)
+    match = _AMOUNT.fullmatch(text)
     if not match:
-        return MoneyParse(raw, None, None, "NO_NUMERIC_AMOUNT")
+        return MoneyParse(raw, None, None, "INVALID_AMOUNT_FORMAT")
     symbol = match.group("symbol")
+    sign = match.group("sign")
     number = match.group("number")
     unit = match.group("unit")
     currency: str | None = _CURRENCY_SYMBOL.get(symbol or "") or (
@@ -74,8 +76,10 @@ def parse_money(raw: str, *, locale: str | None = None, near_text: str = "") -> 
         value = Decimal(normalized)
     except InvalidOperation:
         return MoneyParse(raw, None, currency, "INVALID_NUMBER")
-    if not value.is_finite() or value < 0:
+    if not value.is_finite():
         return MoneyParse(raw, None, currency, "INVALID_NUMBER")
+    if sign in {"-", "−", "△"}:
+        value = -value
     scale = _DECIMALS.get(currency, 2)
     quantized = value.quantize(Decimal(1).scaleb(-scale))
     if quantized != value:

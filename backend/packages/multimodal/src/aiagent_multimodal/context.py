@@ -94,38 +94,58 @@ def retrieve(document: Document, query: str, *, limit: int = 8, max_chars: int =
 
 
 def grounded_answer(question: str, candidates: Sequence[MmiCandidate], *, limit: int = 5) -> dict[str, Any]:
-    """Extractive answer from anchored, normalized candidates. Never invents a value."""
-    anchored = [c for c in candidates if c.verification == "anchored"]
+    """Extractive answer from anchored, observed candidates. Never invents a value."""
+    anchored = [c for c in candidates if c.verification == "anchored" and c.value_state in {"observed", "derived"}]
     if not anchored:
-        return {
-            "status": "unknown",
-            "answer": "The source does not contain an independently anchored value for this question.",
-            "citations": [],
-            "synthesis": "deterministic_extractive",
-        }
+        return _unknown()
     lowered = question.lower()
     wants_price = any(word in lowered for word in ("price", "cost", "amount", "価格", "金額", "料金", "円"))
-    money = [c for c in anchored if isinstance(c.normalized, dict) and c.normalized.get("kind") == "money"]
-    if wants_price and money:
-        chosen = money[:limit]
-        parts = []
-        for candidate in chosen:
-            normalized = candidate.normalized or {}
-            amount = normalized.get("amount")
-            currency = normalized.get("currency")
-            tax = normalized.get("tax")
-            parts.append(f"{candidate.raw_text or amount} ({amount} {currency}, tax={tax})")
-        return {
-            "status": "answered",
-            "answer": "Anchored source value(s): " + "; ".join(parts) + ".",
-            "citations": [_candidate_citation(c) for c in chosen],
-            "synthesis": "deterministic_extractive",
-        }
-    selected = anchored[:limit]
+    wants_date = any(word in lowered for word in ("date", "when", "日付", "いつ"))
+    wants_quantity = any(word in lowered for word in ("quantity", "count", "数量", "個数"))
+    if wants_price:
+        selected = [
+            c
+            for c in anchored
+            if c.field_key in {"amount", "effective_price"}
+            or (isinstance(c.normalized, dict) and c.normalized.get("schema") == "mmi.money/1")
+        ][:limit]
+    elif wants_date:
+        selected = [c for c in anchored if c.field_key == "date"][:limit]
+    elif wants_quantity:
+        selected = [c for c in anchored if c.field_key == "quantity"][:limit]
+    else:
+        terms = {term.casefold() for term in _TOKEN.findall(lowered)}
+        selected = [
+            c
+            for c in anchored
+            if c.field_key.casefold() in terms
+            or any(term in (c.raw_text or "").casefold() for term in terms if len(term) >= 2)
+        ][:limit]
+    if not selected:
+        return _unknown()
+    citations = [_candidate_citation(c) for c in selected]
+    conditional = any(c.conditions for c in selected)
+    parts = [c.raw_text or c.field_key for c in selected]
+    detail = "; ".join(parts)
+    if conditional:
+        details = []
+        for candidate in selected:
+            if candidate.conditions:
+                details.append(f"{candidate.field_key}: {', '.join(candidate.conditions)}")
+        detail += f" (conditions: {'; '.join(details)})"
     return {
-        "status": "answered",
-        "answer": "Anchored source value(s): " + "; ".join(c.raw_text or c.field_key for c in selected) + ".",
-        "citations": [_candidate_citation(c) for c in selected],
+        "status": "conditional" if conditional else "answered",
+        "answer": "Anchored source value(s): " + detail + ".",
+        "citations": citations,
+        "synthesis": "deterministic_extractive",
+    }
+
+
+def _unknown() -> dict[str, Any]:
+    return {
+        "status": "unknown",
+        "answer": "The source does not contain an independently anchored value for this question.",
+        "citations": [],
         "synthesis": "deterministic_extractive",
     }
 
@@ -136,6 +156,7 @@ def _candidate_citation(candidate: MmiCandidate) -> dict[str, Any]:
         "rawText": candidate.raw_text,
         "normalized": candidate.normalized,
         "valueState": candidate.value_state,
+        "conditions": list(candidate.conditions),
         "verification": candidate.verification,
         "locator": candidate.locator.to_dict() if candidate.locator is not None else None,
     }

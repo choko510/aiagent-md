@@ -15,7 +15,7 @@ from aiagent_multimodal.errors import MmiError
 from aiagent_multimodal.extraction.fields import extract_candidates
 from aiagent_multimodal.limits import MmiLimits
 from aiagent_multimodal.parser_registry import ParserRegistry
-from aiagent_multimodal.parsers.base import ParseInput
+from aiagent_multimodal.parsers.base import Document, ParseInput, Section, TextBlock
 from aiagent_multimodal.parsers.csv import CsvParser
 from aiagent_multimodal.parsers.docx import DocxParser
 from aiagent_multimodal.parsers.image import ImageParser
@@ -338,3 +338,80 @@ def test_contract_locator_and_canonical_key() -> None:
     )
     assert base != changed
     assert len(base) == 64
+
+
+def test_ocr_candidate_is_never_anchored_by_self_reparse() -> None:
+    data = b"not-a-real-pdf"
+    sha = hashlib.sha256(data).hexdigest()
+    locator = MmiSourceLocator(
+        kind="pdf",
+        artifact_id="art_ocr",
+        source_sha256=sha,
+        page1=1,
+        layer="ocr",
+        rotation_deg=0,
+        normalized_bbox=(0.1, 0.1, 0.9, 0.2),
+    )
+    block = TextBlock(
+        block_id="ocr:1",
+        kind="paragraph",
+        text="100\u5186",
+        locator=locator,
+        recognition_confidence_raw=99.0,
+        extraction_method="ocr",
+    )
+    document = Document(
+        source_artifact_id="art_ocr",
+        source_sha256=sha,
+        format="pdf",
+        sections=[Section(section_id="page:1", kind="page", ordinal1=1, label="Page 1", locator=None, blocks=[block])],
+        parser_revision="test",
+        build_digest="test-build",
+    )
+    extraction = extract_candidates(document, ("amount",))
+    result = verify_candidates(document, extraction.candidates, data, locale="ja-JP")
+    assert result.candidates
+    assert all(candidate.verification == "unverified" for candidate in result.candidates)
+    assert result.anchored == 0
+
+
+def test_pipeline_ignores_worker_candidate_text_and_reparses_source() -> None:
+    from aiagent_multimodal.contracts import MmiRequestV1, MmiSource
+    from aiagent_multimodal.pipeline import Pipeline
+
+    data = b"amount,currency\n100,JPY\n"
+    sha = hashlib.sha256(data).hexdigest()
+
+    class PoisonedExecutor:
+        def execute(self, inp: ParseInput, deadline: float) -> Document:
+            return Document(
+                source_artifact_id=inp.source_artifact_id,
+                source_sha256=inp.source_sha256,
+                format="csv",
+                sections=[],
+                parser_revision="poisoned",
+                build_digest="poisoned",
+            )
+
+    pipeline = Pipeline(MmiLimits(), PoisonedExecutor())
+    detection = pipeline.detect(data, file_name="amount.csv", declared_mime="text/csv")
+    request = MmiRequestV1(
+        source_artifact_id="art_worker",
+        source=MmiSource(kind="user_upload", acquired_at="2026-01-01T00:00:00Z"),
+        requested_fields=("amount",),
+        idempotency_key="worker-trust",
+        deadline_at="2026-01-01T00:05:00Z",
+    )
+    result = pipeline.process(
+        source_artifact_id="art_worker",
+        source_sha256=sha,
+        raw=data,
+        request=request,
+        detection=detection,
+    )
+    # The poisoned worker document has no sections. A non-empty candidate set can only
+    # come from the pipeline re-reading the immutable source bytes itself.
+    amount = result.outcome["candidates"][0]
+    assert amount["rawText"] == "100"
+    assert amount["locator"]["kind"] == "csv"
+    assert amount["locator"]["kind"] == "csv"

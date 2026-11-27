@@ -60,11 +60,15 @@
 
 - `ParserExecutor` Protocol と `Pipeline`
 - API/Service は executor 未設定時に fail closed（`POLICY_DENIED`）。信頼済みruntimeへの暗黙fallbackはしない
-- `InProcessParserExecutor` は開発・テスト専用。`AIAGENT_MMI_ALLOW_INPROCESS=1` かつ production 以外でのみ有効
+- `InProcessParserExecutor` は開発・テスト専用。`AIAGENT_MMI_ALLOW_INPROCESS=1` は開発用の明示opt-inであり、`profile=production` ではこの設定や明示executor注入があってもMMI API全体を503で閉じる
 - stale lease（owner/epoch不一致）の結果はcommitしない
 - 同一parse keyのcanonical化、idempotent upload replay
 - parser build digest と入力digestの照合
 - 完了commit後にadmissionだけ失敗した場合、blobを消さずに再実行でadmissionを修復する
+- 同一chunk indexの再送は同一長・SHA-256ならidempotent、異なる内容は`CHUNK_CONFLICT`。失敗時にstaging全体をabortしない
+- parse jobは期限・attempts上限・lease owner/epochをCASで確認し、期限切れleaseは再claimできる。revoke後は派生job/outcome/document/citationを返さない
+- `/jobs/{id}/run` は同期parseを`asyncio.to_thread`へ逃がし、event loopを塞がない
+- workerが返したDocumentは信頼せず、パイプラインが元バイトを独立に再parseして候補を導出する。OCR候補は自己再parseでも`unverified`のまま
 
 ### 2.2 未実装（Verifiedではない）
 
@@ -103,30 +107,33 @@ ZIP内ZIPを許可すると、外側のentry/total/depth budgetを満たして�
 
 PDFフォントに幅情報がない場合、pdfminerが同じx座標のglyph boxを返すことがある。bboxを正規化するとzero widthになり契約違反になるため、その場合はbboxをunknownにし、page/line locatorだけ残す。citationの座標を捏造しない。
 
-### 3.5 OCR confidence
+### 3.5 OCR confidence と worker 出力の非信頼
 
 OCR confidenceは「認識器の自己申告」であり真実ではない。confidenceが低い候補はestimated扱いにし、独立検証に失敗した値をanchoredにしない。未検出fieldはunknownのまま返す。
 
+さらに、隔離workerが返したDocument全体を非信頼入力として扱う。候補抽出はworkerのDocumentではなく、immutable bytesを独立に再parseしたDocumentから行う。OCR由来の値は同じbytesを再parseしてもテキストを pixel から独立再認識しない限り`unverified`であり、自己申告confidenceでanchoredにしない。
+
 ## 4. 実行した検証
 
-環境: Windows、Python 3.12、portable PostgreSQL 16（127.0.0.1:55432）、npm/Vite。
+環境: Windows、Python 3.12、portable PostgreSQL 16（127.0.0.1:55433）、npm/Vite。
 
 ### 4.1 Pythonテスト
 
 ```powershell
-$env:AIAGENT_TEST_PG_URL='postgresql://postgres@127.0.0.1:55432/postgres'
+$env:AIAGENT_TEST_PG_URL='postgresql://postgres@127.0.0.1:55433/postgres'
 $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
 ```
 
-結果: `31 passed in 2.69s`
+結果: `core 24 passed`、`service 10 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed`、`migration 12 passed`（各グループを順に実行）。
 
 内訳:
 
-- core 22: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract。PDF tableは未試験
-- service 6: upload→parse→retrieve→ask、digest mismatch、revoke、stale lease、executor未設定のfail closed、完了commit後のadmission失敗からの再実行修復
-- PostgreSQL 2: RLS/owner isolation、lease CAS、latest document、idempotent upload replay
-- HTTP 1: 実 `TestClient(create_app(...))` でmultipart相当のchunk upload、parse、citation、answer、他owner 403
+- core 24: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor
+- service 10: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復
+- PostgreSQL 4: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document
+- HTTP 2: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞
+- migration 12: `0029` までの連番・schema version・既存テスト
 
 ### 4.2 静的検査
 
@@ -136,7 +143,7 @@ $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m mypy packages/multimodal/src packages/api/src/aiagent_api/multimodal_api.py
 ```
 
-結果: ruff all checks passed、format 39 files unchanged、mypy `Success: no issues found in 34 source files`。
+結果: ruff all checks passed、format 37 files unchanged、mypy `Success: no issues found in 33 source files`。
 
 ### 4.3 Web build
 
@@ -162,6 +169,19 @@ npm run build
 7. 実PDF（`invoice.pdf`, 588 bytes）でもformat `pdf`、amount `100` が `anchored`、locator `page 1`、回答が `page 1` を引用
 
 この環境のAPIは `parserIsolation: in_process_dev` を返しており、UIにもその警告を表示した。**これは本番の隔離境界ではない。**
+
+### 4.5 PR #126 レビュー対応（2026-11-26）
+
+- P1-01: `profile=production` のMMI API全体を503にし、`/capabilities`も隔離・OCRを`unavailable`と返す。
+- P1-02: workerのDocumentを候補抽出に使わず、元バイトを独立再parseする回帰テストを追加。
+- P1-03: OCR候補は独立再parseでも`unverified`のままにする回帰テストを追加。
+- P1-04: revoke時に派生jobを`cancelled`にし、outcome/document/citationを消去・拒否。
+- P1-05: 期限切れleaseのfinish拒否と再claim、attempts上限、admission fenceを実PostgreSQLで試験。
+- P1-06: chunk再送を同一index・長さ・digestでidempotentにし、内容差分は`CHUNK_CONFLICT`。
+- P1-07: finalizeはstagingをcommitまで保持し、失敗時に全体abortしない。
+- P1-10/11: 符号付き金額、`unknown`/`conditional`の伝播、無関係な質問の`unknown`を試験。
+- P1-14: `/jobs/{id}/run` の同期処理をthreadへ退避。
+- 未解決: P1-08（at-rest暗号化・保持/tombstone）、P1-09（Task/Run/workspace/RLS結合）、P1-12/13（実jail・資源上限）、P1-15のAgent Runtime経由の回答。
 
 ## 5. 状態の正直な区分
 

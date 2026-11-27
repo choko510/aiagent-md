@@ -6,6 +6,7 @@ principal and applies owner predicates; no tenant or owner id is read from a
 request body.
 """
 
+import asyncio
 import tempfile
 import threading
 from collections.abc import Callable
@@ -52,6 +53,11 @@ def build_router(
         return Path(tempfile.gettempdir()) / "aiagent-mmi-quarantine"
 
     def get_service() -> MultimodalService:
+        if profile == "production":
+            # There is no attested isolated worker implementation yet. Fail the entire MMI
+            # admission surface closed, not only start_parse: even format detection touches
+            # untrusted ZIP/XML/PDF bytes in the trusted API process.
+            raise HTTPException(503, detail={"error": "MMI_PRODUCTION_DISABLED"})
         with lock:
             if "service" not in holder:
                 chosen = executor
@@ -59,7 +65,7 @@ def build_router(
                 if enabled is None:
                     import os
 
-                    enabled = os.environ.get("AIAGENT_MMI_ALLOW_INPROCESS") == "1" and profile != "production"
+                    enabled = os.environ.get("AIAGENT_MMI_ALLOW_INPROCESS") == "1"
                 if chosen is None and enabled:
                     chosen = InProcessParserExecutor()
                 limits = MmiLimits()
@@ -118,6 +124,15 @@ def build_router(
 
     @router.get("/capabilities")
     async def capabilities() -> JSONResponse:
+        if profile == "production":
+            return JSONResponse(
+                {
+                    "parserIsolation": "unavailable",
+                    "externalVision": False,
+                    "localOcr": "unavailable",
+                    "note": "production multimodal admission is disabled until an attested isolated worker exists",
+                }
+            )
         service = get_service()
         if service.pipeline is None:
             isolation = "unavailable"
@@ -247,7 +262,9 @@ def build_router(
         if service.pipeline is None:
             raise HTTPException(503, detail={"error": "PARSER_ISOLATION_UNAVAILABLE"})
         try:
-            service.run_job(p, job_id)
+            # Parsing and verification are CPU/IO-bound synchronous code. Running them
+            # directly in the event loop would stall every other request in this worker.
+            await asyncio.to_thread(service.run_job, p, job_id)
             return JSONResponse(service.get_job(p, job_id))
         except MmiError as exc:
             raise _http(exc) from None

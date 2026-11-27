@@ -134,7 +134,8 @@ class QuarantineBlobStore:
         finally:
             if final_tmp.exists():
                 final_tmp.unlink(missing_ok=True)
-            shutil.rmtree(chunk_dir, ignore_errors=True)
+            # Staging is intentionally retained until the metadata transaction commits. The caller
+            # deletes it with cleanup_upload(); deleting it here made a DB failure unrecoverable.
 
     def _resolve(self, storage_key: str) -> Path:
         if not _KEY.fullmatch(storage_key):
@@ -163,7 +164,11 @@ class QuarantineBlobStore:
             return
         path.unlink(missing_ok=True)
 
-    def abort_upload(self, tenant_id: str, upload_id: str) -> None:
+    def cleanup_upload(self, tenant_id: str, upload_id: str) -> None:
+        """Remove staging after the metadata transaction committed."""
         if not re.fullmatch(r"[0-9a-f-]{36}", upload_id):
             return
         shutil.rmtree(self._stage / tenant_id / upload_id, ignore_errors=True)
+
+    def abort_upload(self, tenant_id: str, upload_id: str) -> None:
+        self.cleanup_upload(tenant_id, upload_id)

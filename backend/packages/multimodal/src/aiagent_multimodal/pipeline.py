@@ -104,9 +104,15 @@ class Pipeline:
             delimiter=detection.delimiter,
             deadline_monotonic=deadline,
         )
-        document = self.executor.execute(inp, deadline)
-        if document.source_sha256 != source_sha256 or document.source_artifact_id != source_artifact_id:
+        worker_document = self.executor.execute(inp, deadline)
+        if worker_document.source_sha256 != source_sha256 or worker_document.source_artifact_id != source_artifact_id:
             raise MmiError("SOURCE_MISMATCH", "parser returned a document for a different source")
+        # The worker output is untrusted. Re-read the immutable bytes through the verifier path and
+        # derive candidates from that independent document, not from the worker's copy. Without an
+        # executor/jail this is still an in-process re-read, so production admission stays closed.
+        document = self.registry.parse(inp)
+        if document.source_sha256 != source_sha256 or document.source_artifact_id != source_artifact_id:
+            raise MmiError("SOURCE_MISMATCH", "verifier returned a document for a different source")
         extraction = extract_candidates(
             document, request.requested_fields, locale=request.preferred_locale, limits=self.limits
         )
@@ -115,14 +121,19 @@ class Pipeline:
         requested = tuple(request.requested_fields) or ("amount",)
         present = {c.field_key for c in candidates}
         missing = tuple(field for field in requested if _canonical_field(field) not in present)
-        unresolved = {c.field_key for c in candidates if c.value_state == "unknown" or c.verification == "contradicted"}
+        unresolved = {
+            c.field_key for c in candidates if c.value_state in {"unknown", "estimated"} or c.verification != "anchored"
+        }
         warnings = list(extraction.warnings)
         warnings.extend(verification.warnings)
+        if document.partial:
+            warnings.append("DOCUMENT_PARTIAL")
+        warnings.extend(document.warnings)
         if verification.anchored == 0 and candidates:
             warnings.append("NO_ANCHORED_CANDIDATES")
         if missing:
             warnings.append("MISSING_FIELDS")
-        if candidates and not missing and not unresolved:
+        if candidates and not missing and not unresolved and not warnings and not document.partial:
             status = "complete"
         elif candidates:
             status = "partial"

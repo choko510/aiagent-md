@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import uuid
 from pathlib import Path
@@ -13,7 +14,7 @@ from aiagent_multimodal.errors import MmiError
 from aiagent_multimodal.limits import MmiLimits
 from aiagent_multimodal.pipeline import InProcessParserExecutor
 from aiagent_multimodal.service import MultimodalService
-from aiagent_multimodal.store import InMemoryStore, Principal
+from aiagent_multimodal.store import InMemoryStore, Principal, _now
 
 CSV = b"item,price\napple,\xc2\xa5100\n"
 
@@ -79,9 +80,123 @@ def test_upload_parse_retrieve_and_ask(service: MultimodalService) -> None:
     assert any("apple" in chunk["text"] for chunk in context["chunks"])
 
     answer = service.ask(principal, artifact_id, "What is the price?")
-    assert answer["status"] == "answered"
+    # The amount is anchored but tax treatment is unknown, so the answer is conditional rather than
+    # silently presenting a tax-inclusive price.
+    assert answer["status"] == "conditional"
     assert answer["citations"][0]["locator"]["kind"] == "csv"
+    assert "tax:unknown" in answer["citations"][0]["conditions"]
     assert "100" in answer["answer"]
+
+    unrelated = service.ask(principal, artifact_id, "What is the warranty period?")
+    assert unrelated["status"] == "unknown"
+    assert unrelated["citations"] == []
+
+
+def test_chunk_replay_is_idempotent_and_conflicts_survive(service: MultimodalService) -> None:
+    principal = _principal()
+    data = b"a,b\n1,2\n"
+    digest = hashlib.sha256(data).hexdigest()
+    started = service.begin_upload(
+        principal,
+        original_filename="two.csv",
+        declared_media_type="text/csv",
+        expected_bytes=len(data),
+        content_sha256=digest,
+        idempotency_key="replay",
+    )
+    upload_id = started["uploadId"]
+    first = data[:4]
+    second = data[4:]
+    first_digest = hashlib.sha256(first).hexdigest()
+    service.put_chunk(principal, upload_id, 0, first, first_digest)
+    replay = service.put_chunk(principal, upload_id, 0, first, first_digest)
+    assert replay["receivedBytes"] == len(first)
+    with pytest.raises(MmiError) as conflict:
+        service.put_chunk(principal, upload_id, 0, b"xxxx", hashlib.sha256(b"xxxx").hexdigest())
+    assert conflict.value.code == "CHUNK_CONFLICT"
+    with pytest.raises(MmiError) as gap:
+        service.put_chunk(principal, upload_id, 2, b"zz", hashlib.sha256(b"zz").hexdigest())
+    assert gap.value.code == "POLICY_DENIED"
+    service.put_chunk(principal, upload_id, 1, second, hashlib.sha256(second).hexdigest())
+    artifact = service.complete_upload(principal, upload_id)
+    assert artifact["quarantineState"] == "admitted"
+
+
+def test_complete_retry_after_db_failure_keeps_staging(
+    service: MultimodalService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = _principal()
+    data = b"a,b\n1,2\n"
+    digest = hashlib.sha256(data).hexdigest()
+    started = service.begin_upload(
+        principal,
+        original_filename="retry.csv",
+        declared_media_type="text/csv",
+        expected_bytes=len(data),
+        content_sha256=digest,
+        idempotency_key="retry",
+    )
+    upload_id = started["uploadId"]
+    service.put_chunk(principal, upload_id, 0, data, digest)
+    original = service.store.complete_upload
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("injected database failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.store, "complete_upload", fail_once)
+    with pytest.raises(RuntimeError):
+        service.complete_upload(principal, upload_id)
+    retried = service.complete_upload(principal, upload_id)
+    assert retried["quarantineState"] == "admitted"
+    assert calls == 2
+
+
+def test_revoke_clears_jobs_and_derived_access(service: MultimodalService) -> None:
+    principal = _principal()
+    artifact_id = _upload(service, principal)
+    job = service.start_parse(principal, artifact_id, request=_request(artifact_id), idempotency_key="revoke")
+    service.run_job(principal, job.id)
+    service.revoke_artifact(principal, artifact_id)
+    with pytest.raises(MmiError) as denied:
+        service.get_job(principal, job.id)
+    assert denied.value.code == "POLICY_DENIED"
+    assert service.citations(principal, job.id) == []
+    with pytest.raises(MmiError):
+        service.ask(principal, artifact_id, "What is the price?")
+    stored = service.store.get_job(principal, job.id)
+    assert stored is not None and stored.status == "cancelled" and stored.outcome is None
+
+
+def test_expired_lease_cannot_finish_and_can_be_reclaimed(service: MultimodalService) -> None:
+    principal = _principal()
+    artifact_id = _upload(service, principal)
+    job = service.start_parse(principal, artifact_id, request=_request(artifact_id), idempotency_key="lease")
+    claimed = service.store.claim_job(principal, job.id, lease_owner="worker-a", lease_seconds=60)
+    assert claimed.lease_epoch == 1
+    service.store._jobs[(principal.tenant_id, job.id)] = dataclasses.replace(
+        claimed, lease_expires_at="2000-01-01T00:00:00Z"
+    )
+    assert (
+        service.store.finish_job(
+            principal,
+            job.id,
+            lease_owner="worker-a",
+            lease_epoch=claimed.lease_epoch,
+            outcome={"status": "complete"},
+            document={},
+            error_code=None,
+        )
+        is False
+    )
+    reclaimed = service.store.claim_job(principal, job.id, lease_owner="worker-b", lease_seconds=60)
+    assert reclaimed.lease_epoch == 2
+    assert reclaimed.lease_owner == "worker-b"
+    assert reclaimed.lease_expires_at > _now()
 
 
 def test_upload_digest_mismatch_leaves_no_artifact(service: MultimodalService) -> None:

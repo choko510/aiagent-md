@@ -28,7 +28,7 @@ _DATE = re.compile(r"(?P<y>20\d{2})\s*[-/年]\s*(?P<m>\d{1,2})\s*[-/月]\s*(?P<d
 _QUANTITY = re.compile(
     r"(?P<num>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<unit>個|点|枚|箱|袋|本|kg|g|ml|L|パック)"
 )
-_AMOUNT = re.compile(r"[¥￥$€£]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,3})?\s*(?:円|ドル|ユーロ)?")
+_AMOUNT = re.compile(r"[+\-−△]?\s*[¥￥$€£]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,3})?\s*(?:円|ドル|ユーロ)?")
 _MAX_CANDIDATES = 250
 _MAX_SOURCES = 5_000
 

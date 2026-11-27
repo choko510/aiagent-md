@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ class MultimodalService:
         self.executor = executor
         self.pipeline = Pipeline(self.limits, executor) if executor is not None else None
         self.isolation_note = isolation_note
+        self._complete_lock = threading.Lock()
 
     # ------------------------------------------------------------------ upload
     def begin_upload(
@@ -121,19 +123,20 @@ class MultimodalService:
             raise MmiError("POLICY_DENIED", "upload is not open")
         if not data or len(data) > min(self.config.chunk_bytes, _CHUNK_MAX):
             raise MmiError("MAX_INPUT", "chunk size is outside the allowed range")
-        if session.received_bytes + len(data) > session.expected_bytes:
-            raise MmiError("MAX_INPUT", "upload exceeds declared size")
         digest = hashlib.sha256(data).hexdigest()
         if claimed_sha256 is not None and claimed_sha256 != digest:
             raise MmiError("SOURCE_MISMATCH", "chunk digest mismatch")
+        existing = self.store.get_chunk(principal, upload_id, index)
+        if existing is not None and existing != (len(data), digest):
+            raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
+        if existing is None and session.received_bytes + len(data) > session.expected_bytes:
+            raise MmiError("MAX_INPUT", "upload exceeds declared size")
         self.blobs.put_chunk(principal.tenant_id, upload_id, index, data)
-        try:
-            updated = self.store.append_chunk(
-                principal, upload_id=upload_id, index=index, byte_length=len(data), chunk_sha256=digest
-            )
-        except Exception:
-            self.blobs.abort_upload(principal.tenant_id, upload_id)
-            raise
+        # A retry is idempotent in the store. Never abort the whole staging directory because one
+        # request failed: a lost ACK must remain recoverable.
+        updated = self.store.append_chunk(
+            principal, upload_id=upload_id, index=index, byte_length=len(data), chunk_sha256=digest
+        )
         return {
             "uploadId": upload_id,
             "receivedBytes": updated.received_bytes,
@@ -142,6 +145,10 @@ class MultimodalService:
         }
 
     def complete_upload(self, principal: Principal, upload_id: str) -> dict[str, Any]:
+        with self._complete_lock:
+            return self._complete_upload_locked(principal, upload_id)
+
+    def _complete_upload_locked(self, principal: Principal, upload_id: str) -> dict[str, Any]:
         session = self.store.get_upload(principal, upload_id)
         if session is None:
             raise MmiError("POLICY_DENIED", "upload not found")
@@ -190,14 +197,16 @@ class MultimodalService:
                 expires_at=_plus(self.config.artifact_ttl_seconds),
             )
             committed = True
+            # The artifact row now owns the final blob. Staging is no longer needed, but its
+            # cleanup must happen only after this commit; finalize() deliberately retained it.
+            self.blobs.cleanup_upload(principal.tenant_id, upload_id)
             artifact = self.store.admit_artifact(principal, artifact.id)
             return _artifact_projection(artifact)
         except Exception:
-            # Once complete_upload committed, the row and blob must stay consistent. A retry can
-            # finish admission; deleting the blob here would leave a dangling artifact row.
+            # Before commit, keep staging so the same upload can be finalized again. The final
+            # blob (if rename succeeded) is an uncommitted orphan and can be dropped safely.
             if not committed:
                 self.blobs.delete(stored.storage_key)
-                self.blobs.abort_upload(principal.tenant_id, upload_id)
             raise
 
     def get_artifact(self, principal: Principal, artifact_id: str) -> dict[str, Any]:
@@ -264,7 +273,7 @@ class MultimodalService:
         owner = lease_owner or f"inprocess:{uuid7()}"
         job = self.store.claim_job(principal, job_id, lease_owner=owner, lease_seconds=self.config.lease_seconds)
         artifact = self.store.get_artifact(principal, job.artifact_id)
-        if artifact is None or artifact.quarantine_state == "revoked":
+        if artifact is None or artifact.quarantine_state != "admitted" or artifact.expires_at <= _now():
             self.store.finish_job(
                 principal,
                 job.id,
@@ -274,7 +283,7 @@ class MultimodalService:
                 document=None,
                 error_code="OWNER_REVOKED",
             )
-            raise MmiError("OWNER_REVOKED", "artifact revoked")
+            raise MmiError("OWNER_REVOKED", "artifact is no longer available")
         try:
             raw = self.blobs.read(artifact.storage_key, artifact.content_sha256, artifact.byte_length)
             request = MmiRequestV1.from_dict(job.request)
@@ -337,7 +346,12 @@ class MultimodalService:
         job = self.store.get_job(principal, job_id)
         if job is None:
             raise MmiError("POLICY_DENIED", "job not found")
+        if job.expires_at <= _now():
+            raise MmiError("POLICY_DENIED", "job expired")
         artifact = self.store.get_artifact(principal, job.artifact_id)
+        if artifact is None or artifact.quarantine_state == "revoked" or artifact.expires_at <= _now():
+            # Do not expose an outcome or citations derived from a revoked/expired source.
+            raise MmiError("POLICY_DENIED", "job not found")
         return _job_projection(job, artifact)
 
     def cancel_job(self, principal: Principal, job_id: str) -> dict[str, Any]:
@@ -369,10 +383,16 @@ class MultimodalService:
 
     def _succeeded_document(self, principal: Principal, artifact_id: str) -> tuple[JobRecord, Document]:
         artifact = self.store.get_artifact(principal, artifact_id)
-        if artifact is None or artifact.quarantine_state != "admitted":
+        if artifact is None or artifact.quarantine_state != "admitted" or artifact.expires_at <= _now():
             raise MmiError("POLICY_DENIED", "artifact not found")
         job = self.store.latest_job(principal, artifact_id)
-        if job is None or job.status != "succeeded" or job.document is None or job.outcome is None:
+        if (
+            job is None
+            or job.status != "succeeded"
+            or job.document is None
+            or job.outcome is None
+            or job.expires_at <= _now()
+        ):
             raise MmiError("POLICY_DENIED", "no succeeded parse job for artifact")
         try:
             document = Document.from_dict(job.document)
@@ -382,10 +402,10 @@ class MultimodalService:
 
     def citations(self, principal: Principal, job_id: str) -> list[dict[str, Any]]:
         job = self.store.get_job(principal, job_id)
-        if job is None or job.outcome is None:
+        if job is None or job.outcome is None or job.expires_at <= _now():
             return []
         artifact = self.store.get_artifact(principal, job.artifact_id)
-        if artifact is None:
+        if artifact is None or artifact.quarantine_state != "admitted" or artifact.expires_at <= _now():
             return []
         return citations_from_outcome(
             job.outcome, fmt=artifact.detected_format, artifact_id=artifact.id, sha=artifact.content_sha256
@@ -428,7 +448,13 @@ def _job_projection(job: JobRecord, artifact: ArtifactRecord | None) -> dict[str
         "updatedAt": job.updated_at,
         "leaseEpoch": job.lease_epoch,
     }
-    if job.outcome is not None and artifact is not None:
+    if (
+        job.outcome is not None
+        and artifact is not None
+        and artifact.quarantine_state == "admitted"
+        and artifact.expires_at > _now()
+        and job.expires_at > _now()
+    ):
         payload["outcome"] = job.outcome
         payload["citations"] = citations_from_outcome(
             job.outcome, fmt=artifact.detected_format, artifact_id=artifact.id, sha=artifact.content_sha256

@@ -75,6 +75,7 @@ class JobRecord:
     attempts: int
     created_at: str
     updated_at: str
+    expires_at: str
 
 
 class Store(Protocol):
@@ -92,6 +93,8 @@ class Store(Protocol):
     ) -> UploadSession: ...
 
     def get_upload(self, principal: Principal, upload_id: str) -> UploadSession | None: ...
+
+    def get_chunk(self, principal: Principal, upload_id: str, index: int) -> tuple[int, str] | None: ...
 
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
@@ -227,6 +230,16 @@ class InMemoryStore:
             item = self._uploads.get((principal.tenant_id, upload_id))
             return item if item and item.principal.owner_user_id == principal.owner_user_id else None
 
+    def get_chunk(self, principal: Principal, upload_id: str, index: int) -> tuple[int, str] | None:
+        with self._lock:
+            item = self.get_upload(principal, upload_id)
+            if item is None:
+                return None
+            for chunk in self._chunks.get((principal.tenant_id, upload_id), []):
+                if chunk[0] == index:
+                    return chunk[1], chunk[2]
+            return None
+
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
     ) -> UploadSession:
@@ -235,6 +248,11 @@ class InMemoryStore:
             if item is None or item.state != "open":
                 raise MmiError("POLICY_DENIED", "upload is not open")
             chunks = self._chunks[(principal.tenant_id, upload_id)]
+            existing = next((c for c in chunks if c[0] == index), None)
+            if existing is not None:
+                if existing[1] != byte_length or existing[2] != chunk_sha256:
+                    raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
+                return item
             if index != len(chunks):
                 raise MmiError("POLICY_DENIED", "chunks must be sent in order")
             if index > 65535 or item.received_bytes + byte_length > item.expected_bytes:
@@ -350,6 +368,7 @@ class InMemoryStore:
             item = self.get_artifact(principal, artifact_id)
             if item is None:
                 raise MmiError("POLICY_DENIED", "artifact not found")
+            revoked_at = _now()
             updated = ArtifactRecord(
                 item.id,
                 item.principal,
@@ -362,9 +381,31 @@ class InMemoryStore:
                 "revoked",
                 item.created_at,
                 item.expires_at,
-                _now(),
+                revoked_at,
             )
             self._artifacts[(principal.tenant_id, artifact_id)] = updated
+            for key, job in list(self._jobs.items()):
+                if key[0] != principal.tenant_id or job.artifact_id != artifact_id:
+                    continue
+                self._jobs[key] = JobRecord(
+                    job.id,
+                    job.principal,
+                    job.artifact_id,
+                    job.parse_key,
+                    job.request_sha256,
+                    job.request,
+                    "cancelled",
+                    job.lease_owner,
+                    job.lease_epoch,
+                    job.lease_expires_at,
+                    None,
+                    None,
+                    "OWNER_REVOKED",
+                    job.attempts,
+                    job.created_at,
+                    revoked_at,
+                    job.expires_at,
+                )
             return updated
 
     def create_job(
@@ -406,6 +447,7 @@ class InMemoryStore:
                 0,
                 _now(),
                 _now(),
+                expires_at,
             )
             self._jobs[(principal.tenant_id, job_id)] = job
             return job
@@ -433,7 +475,10 @@ class InMemoryStore:
                 raise MmiError("POLICY_DENIED", "job not found")
             if job.status == "cancelled":
                 raise MmiError("CANCELLED", "job cancelled")
-            if job.status not in ("queued", "failed"):
+            if job.expires_at <= _now():
+                raise MmiError("POLICY_DENIED", "job expired")
+            lease_live = job.status == "leased" and (job.lease_expires_at or "") > _now()
+            if lease_live or job.status not in ("queued", "failed", "leased"):
                 raise MmiError("STALE_LEASE", "job is not claimable")
             if job.attempts >= 3:
                 raise MmiError("STALE_LEASE", "job attempt limit reached")
@@ -454,6 +499,7 @@ class InMemoryStore:
                 job.attempts + 1,
                 job.created_at,
                 _now(),
+                job.expires_at,
             )
             self._jobs[(principal.tenant_id, job_id)] = claimed
             return claimed
@@ -476,7 +522,12 @@ class InMemoryStore:
                 or job.status != "leased"
                 or job.lease_owner != lease_owner
                 or job.lease_epoch != lease_epoch
+                or (job.lease_expires_at or "") <= _now()
+                or job.expires_at <= _now()
             ):
+                return False
+            artifact = self.get_artifact(principal, job.artifact_id)
+            if artifact is None or artifact.quarantine_state != "admitted" or artifact.expires_at <= _now():
                 return False
             status = "succeeded" if outcome is not None else "failed"
             finished = JobRecord(
@@ -496,6 +547,7 @@ class InMemoryStore:
                 job.attempts,
                 job.created_at,
                 _now(),
+                job.expires_at,
             )
             self._jobs[(principal.tenant_id, job_id)] = finished
             return True
@@ -524,6 +576,7 @@ class InMemoryStore:
                 job.attempts,
                 job.created_at,
                 _now(),
+                job.expires_at,
             )
             self._jobs[(principal.tenant_id, job_id)] = cancelled
             return cancelled
@@ -599,6 +652,16 @@ class PostgresStore:
         )
         return _upload(row) if row else None
 
+    def get_chunk(self, principal: Principal, upload_id: str, index: int) -> tuple[int, str] | None:
+        row = self._one(
+            principal,
+            "SELECT c.byte_length, c.chunk_sha256 FROM agent.mmi_upload_chunks c"
+            " JOIN agent.mmi_upload_sessions s ON s.tenant_id=c.tenant_id AND s.id=c.upload_id"
+            " WHERE c.tenant_id=%s AND c.upload_id=%s AND c.chunk_index=%s AND s.owner_user_id=%s",
+            (principal.tenant_id, upload_id, index, principal.owner_user_id),
+        )
+        return (int(row["byte_length"]), str(row["chunk_sha256"])) if row else None
+
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
     ) -> UploadSession:
@@ -609,6 +672,19 @@ class PostgresStore:
             ).fetchone()
             if row is None or row["state"] != "open":
                 raise MmiError("POLICY_DENIED", "upload is not open")
+            existing = c.execute(
+                "SELECT byte_length, chunk_sha256 FROM agent.mmi_upload_chunks"
+                " WHERE tenant_id=%s AND upload_id=%s AND chunk_index=%s",
+                (principal.tenant_id, upload_id, index),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["byte_length"]) != byte_length or str(existing["chunk_sha256"]) != chunk_sha256:
+                    raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
+                count = c.execute(
+                    "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
+                    (principal.tenant_id, upload_id),
+                ).fetchone()["n"]
+                return _upload({**row, "chunk_count": count})
             count = c.execute(
                 "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
                 (principal.tenant_id, upload_id),
@@ -722,6 +798,14 @@ class PostgresStore:
             ).fetchone()
             if row is None:
                 raise MmiError("POLICY_DENIED", "artifact not found")
+            # Revocation fences every derived projection and any still-running lease. A worker
+            # returning afterwards cannot commit because finish_job also checks the live artifact.
+            c.execute(
+                "UPDATE agent.mmi_parse_jobs SET status='cancelled', outcome_json=NULL,"
+                " document_json=NULL, error_code='OWNER_REVOKED', updated_at=now()"
+                " WHERE tenant_id=%s AND artifact_id=%s AND owner_user_id=%s",
+                (principal.tenant_id, artifact_id, principal.owner_user_id),
+            )
             return _artifact(row)
 
     def create_job(
@@ -792,7 +876,11 @@ class PostgresStore:
                 "UPDATE agent.mmi_parse_jobs SET status='leased', lease_owner=%s,"
                 " lease_epoch=lease_epoch+1, lease_expires_at=now()+(%s || ' seconds')::interval,"
                 " attempts=attempts+1, updated_at=now() WHERE tenant_id=%s AND id=%s AND owner_user_id=%s"
-                " AND status IN ('queued','failed') AND attempts<3 RETURNING *",
+                " AND expires_at>now() AND attempts<3 AND (status IN ('queued','failed')"
+                " OR (status='leased' AND lease_expires_at<=now()))"
+                " AND EXISTS (SELECT 1 FROM agent.mmi_artifacts a WHERE a.tenant_id=agent.mmi_parse_jobs.tenant_id"
+                " AND a.id=agent.mmi_parse_jobs.artifact_id AND a.owner_user_id=agent.mmi_parse_jobs.owner_user_id"
+                " AND a.quarantine_state='admitted' AND a.expires_at>now()) RETURNING *",
                 (lease_owner, str(lease_seconds), principal.tenant_id, job_id, principal.owner_user_id),
             ).fetchone()
             if row is None:
@@ -820,9 +908,12 @@ class PostgresStore:
 
         with self.db.tx(principal.tenant_id) as c:
             row = c.execute(
-                "UPDATE agent.mmi_parse_jobs SET status=%s, outcome_json=%s, document_json=%s, error_code=%s,"
-                " updated_at=now() WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND status='leased'"
-                " AND lease_owner=%s AND lease_epoch=%s RETURNING id",
+                "UPDATE agent.mmi_parse_jobs AS j SET status=%s, outcome_json=%s, document_json=%s, error_code=%s,"
+                " updated_at=now() WHERE j.tenant_id=%s AND j.id=%s AND j.owner_user_id=%s AND j.status='leased'"
+                " AND j.lease_owner=%s AND j.lease_epoch=%s AND j.lease_expires_at>now() AND j.expires_at>now()"
+                " AND EXISTS (SELECT 1 FROM agent.mmi_artifacts a WHERE a.tenant_id=j.tenant_id"
+                " AND a.id=j.artifact_id AND a.owner_user_id=j.owner_user_id AND a.quarantine_state='admitted'"
+                " AND a.expires_at>now()) RETURNING j.id",
                 (
                     "succeeded" if outcome is not None else "failed",
                     Jsonb(outcome) if outcome is not None else None,
@@ -908,4 +999,5 @@ def _job(row: dict[str, Any]) -> JobRecord:
         row["attempts"],
         _iso(row["created_at"]) or "",
         _iso(row["updated_at"]) or "",
+        _iso(row["expires_at"]) or "",
     )

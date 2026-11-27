@@ -179,10 +179,13 @@ export default function MultimodalView() {
         body: "{}",
       });
       setJob(ran);
+      const coverage = ran.outcome?.status;
       setStatus(
-        ran.status === "succeeded"
-          ? "Parse complete. Only independently anchored values are usable; other values remain unknown."
-          : `Parse ended with status ${ran.status}.`
+        ran.status === "succeeded" && coverage === "complete"
+          ? "Parse complete. Every requested value is independently anchored."
+          : ran.status === "succeeded"
+            ? `Parse ${coverage ?? "partial"}. Unanchored, unknown, or condition-bearing values are not treated as complete.`
+            : `Parse ended with status ${ran.status}.`
       );
     } catch (caught) {
       setError(readableError(caught));

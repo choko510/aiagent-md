@@ -53,6 +53,7 @@ UPLOAD_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "UPLOAD_SIZE_MISMATCH",
         "UPLOAD_OWNER_MISMATCH",
         "UPLOAD_IDEMPOTENCY_CONFLICT",
+        "CHUNK_CONFLICT",
     }
 )
 
@@ -64,6 +65,7 @@ _HTTP_STATUS: Final[dict[str, int]] = {
     "OWNER_REVOKED": 410,
     "STALE_LEASE": 409,
     "SOURCE_MISMATCH": 409,
+    "CHUNK_CONFLICT": 409,
     "CANCELLED": 409,
     "MAX_INPUT": 413,
     "MODEL_BUDGET": 402,

@@ -62,6 +62,10 @@ def _verify_one(document: Document, candidate: MmiCandidate, raw_bytes: bytes, l
     locator = candidate.locator
     if locator is None:
         return "unverified", "candidate has no locator"
+    if candidate.extraction_method == "ocr" or "ocr_unverified" in candidate.conditions:
+        # OCR is model output, not source text. Re-reading the same OCR result through the parser
+        # would be self-verification; keep it unverified until a separate pixel-level check exists.
+        return "unverified", "OCR text is not independently verifiable"
     if locator.artifact_id != document.source_artifact_id:
         return "contradicted", "locator belongs to a different artifact"
     if locator.source_sha256 != document.source_sha256:

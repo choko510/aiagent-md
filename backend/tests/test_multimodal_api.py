@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import gc
 import hashlib
+from types import SimpleNamespace
 
 from aiagent_api.app import create_app
+from aiagent_api.multimodal_api import build_router
 from aiagent_core import admin
 from aiagent_multimodal.pipeline import InProcessParserExecutor
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 CSV = "item,price\napple,\u00a5100\n".encode()
@@ -79,9 +82,44 @@ def _exercise(*, client: TestClient, tenant, pg) -> None:
             json={"question": "What is the price?"},
         )
         assert answer.status_code == 200, answer.text
-        assert answer.json()["status"] == "answered"
+        assert answer.json()["status"] == "conditional"
         assert answer.json()["citations"][0]["fieldKey"] == "amount"
+        assert "tax:unknown" in answer.json()["citations"][0]["conditions"]
 
         other = admin.add_user(pg.owner, tenant["tenantId"])
         denied = client.get(f"/v1/multimodal/artifacts/{artifact_id}", headers=_headers(other["token"]))
         assert denied.status_code == 403
+
+
+def test_production_surface_is_disabled_even_with_inprocess_optin() -> None:
+    scope = SimpleNamespace(
+        tenant_id="01980000-0000-7000-8000-000000000001",
+        user_id="01980000-0000-7000-8000-000000000002",
+        workspace_id="01980000-0000-7000-8000-000000000003",
+    )
+    app = FastAPI()
+    app.include_router(
+        build_router(
+            lambda: None,
+            lambda: scope,
+            profile="production",
+            allow_inprocess=True,
+            executor=InProcessParserExecutor(),
+        )
+    )
+    with TestClient(app) as client:
+        caps = client.get("/v1/multimodal/capabilities")
+        assert caps.status_code == 200
+        assert caps.json()["parserIsolation"] == "unavailable"
+        denied = client.post(
+            "/v1/multimodal/uploads",
+            json={
+                "fileName": "x.csv",
+                "declaredMediaType": "text/csv",
+                "byteLength": 4,
+                "sha256": "0" * 64,
+                "idempotencyKey": "prod",
+            },
+        )
+        assert denied.status_code == 503
+        assert denied.json()["detail"]["error"] == "MMI_PRODUCTION_DISABLED"
