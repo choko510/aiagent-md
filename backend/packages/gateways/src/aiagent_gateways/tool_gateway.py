@@ -1029,12 +1029,15 @@ class ToolGateway:
             )
         except ScopeDenied as exc:
             raise RpcError("DENIED", str(exc)) from None
+        # R4-04: Derive task_id and run_id strictly from the DB-verified lease/cycle (NEVER trust caller-supplied IDs).
+        if (task_id and task_id != lease.task_id) or (run_id and run_id != lease.run_id):
+            raise RpcError("DENIED", "PREVIEW_TASK_OR_RUN_MISMATCH")
 
         target_url = f"http://127.0.0.1:{target_port}{path}"
 
         def _lease_alive() -> bool:
             try:
-                broker.verify_lease_details(
+                live = broker.verify_lease_details(
                     tenant_id,
                     owner_user_id,
                     lease_id,
@@ -1042,16 +1045,20 @@ class ToolGateway:
                     target_port,
                     expected_cycle_id=cycle_id,
                 )
-                return True
-            except ScopeDenied:
+                return (
+                    live.task_id == lease.task_id
+                    and live.run_id == lease.run_id
+                    and live.goal_revision == lease.goal_revision
+                )
+            except Exception:
                 return False
 
         try:
             report = await run_sandbox_cell_preview_debug_async(
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
-                task_id=task_id or cycle_id,
-                run_id=run_id or lease_id,
+                task_id=lease.task_id,
+                run_id=lease.run_id,
                 lease=lease,
                 target_url=target_url,
                 lease_alive_check=_lease_alive,

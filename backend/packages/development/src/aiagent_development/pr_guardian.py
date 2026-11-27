@@ -20,6 +20,8 @@ from .contracts import ProjectScope, ScopeDenied, require_sha
 
 _FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "cancelled", "stale"})
 _KNOWN_CONCLUSIONS = _FAIL_CONCLUSIONS | {"success", "neutral", "skipped"}
+_PASS_MERGEABLE_STATES = frozenset({"clean"})
+_BLOCKED_MERGEABLE_STATES = frozenset({"blocked", "behind", "draft", "unstable"})
 _MAX_CHECK_PAGES = 10
 _PER_PAGE = 100
 
@@ -41,6 +43,20 @@ class GuardianEvaluation:
     mergeable_state: str
     should_repair: bool
     escalated: bool
+    merge_readiness: str = "UNKNOWN"  # MERGEABLE | CONFLICT | PENDING | BLOCKED | UNKNOWN
+
+
+def _classify_merge_readiness(mergeable: Any, mergeable_state: str) -> str:
+    """Separately classify PR merge readiness using an explicit PASS allowlist (R4-07)."""
+    if mergeable is False or mergeable_state == "dirty":
+        return "CONFLICT"
+    if mergeable is None or mergeable_state == "unknown":
+        return "PENDING"
+    if mergeable is True and mergeable_state in _PASS_MERGEABLE_STATES:
+        return "MERGEABLE"
+    if mergeable_state in _BLOCKED_MERGEABLE_STATES:
+        return "BLOCKED"
+    return "UNKNOWN"
 
 
 def _merge_required_rules(
@@ -105,7 +121,8 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
 
     mergeable_state = str(pr_payload.get("mergeable_state") or "unknown").lower()
     mergeable = pr_payload.get("mergeable")
-    if mergeable is False or mergeable_state == "dirty":
+    merge_readiness = _classify_merge_readiness(mergeable, mergeable_state)
+    if merge_readiness == "CONFLICT":
         exhausted = repair_attempts >= max_repair_attempts
         return GuardianEvaluation(
             ci_state="ESCALATED_LIMIT_REACHED" if exhausted else "CONFLICT",
@@ -115,15 +132,20 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             mergeable_state=mergeable_state,
             should_repair=not exhausted,
             escalated=exhausted,
+            merge_readiness="CONFLICT",
         )
 
     runs = check_runs_payload.get("check_runs")
     if not isinstance(runs, list):
-        return GuardianEvaluation("UNKNOWN", (), rule_names, observed_sha, mergeable_state, False, False)
+        return GuardianEvaluation(
+            "UNKNOWN", (), rule_names, observed_sha, mergeable_state, False, False, merge_readiness
+        )
 
     total_count = check_runs_payload.get("total_count")
     if not pagination_complete or (isinstance(total_count, int) and total_count > len(runs)):
-        return GuardianEvaluation("UNKNOWN", (), rule_names, observed_sha, mergeable_state, False, False)
+        return GuardianEvaluation(
+            "UNKNOWN", (), rule_names, observed_sha, mergeable_state, False, False, merge_readiness
+        )
 
     failing: list[str] = []
     pending = False
@@ -157,9 +179,13 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
         unknown_conclusion = True
     elif commit_status_payload is not None:
         statuses = commit_status_payload.get("statuses")
+        status_total = commit_status_payload.get("total_count")
+        agg_state = str(commit_status_payload.get("state") or "").strip().lower()
         if not isinstance(statuses, list):
             unknown_conclusion = True
         else:
+            if type(status_total) is int and status_total > len(statuses):
+                unknown_conclusion = True
             for st_item in statuses:
                 if not isinstance(st_item, dict):
                     unknown_conclusion = True
@@ -174,6 +200,19 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
                     succeeded_names.add(ctx)
                 else:
                     unknown_conclusion = True
+            # R4-07: Cross-check aggregate commit status `state` against individual `statuses` & `total_count`.
+            if agg_state in ("failure", "error"):
+                if not failing:
+                    failing.append("commit_status:aggregate")
+            elif agg_state == "pending":
+                # GitHub returns state="pending" with total_count=0/statuses=[] when no commit statuses exist.
+                if len(statuses) > 0 or (type(status_total) is int and status_total > 0):
+                    pending = True
+            elif agg_state == "success":
+                if len(statuses) == 0 and (status_total is None or (type(status_total) is int and status_total > 0)):
+                    unknown_conclusion = True
+            elif agg_state:
+                unknown_conclusion = True
 
     if failing:
         exhausted = repair_attempts >= max_repair_attempts
@@ -185,6 +224,7 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             mergeable_state=mergeable_state,
             should_repair=not exhausted,
             escalated=exhausted,
+            merge_readiness=merge_readiness,
         )
 
     missing_list: list[str] = []
@@ -196,7 +236,7 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             missing_list.append(rule.context)
     missing_req = tuple(missing_list)
 
-    if pending or mergeable is None or mergeable_state == "unknown":
+    if pending or merge_readiness == "PENDING":
         return GuardianEvaluation(
             ci_state="PENDING",
             failing_checks=(),
@@ -205,11 +245,12 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             mergeable_state=mergeable_state,
             should_repair=False,
             escalated=False,
+            merge_readiness=merge_readiness,
         )
 
-    # R2-08 / R3-10: Never return PASS without a non-empty authoritative required check policy, exact App ID match,
-    # or complete branch protection / ruleset / commit status visibility.
-    if unknown_conclusion or not all_rules or missing_req or mergeable_state == "blocked" or not succeeded_names:
+    # R2-08 / R3-10 / R4-07: Require complete authoritative required check policy, exact App ID match,
+    # complete commit status visibility, AND explicit allowlisted merge_readiness == "MERGEABLE" for PASS.
+    if unknown_conclusion or not all_rules or missing_req or merge_readiness != "MERGEABLE" or not succeeded_names:
         return GuardianEvaluation(
             ci_state="UNKNOWN",
             failing_checks=(),
@@ -218,6 +259,7 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
             mergeable_state=mergeable_state,
             should_repair=False,
             escalated=False,
+            merge_readiness=merge_readiness,
         )
 
     return GuardianEvaluation(
@@ -228,6 +270,7 @@ def evaluate_pr_checks(  # noqa: PLR0911, PLR0912, PLR0915
         mergeable_state=mergeable_state,
         should_repair=False,
         escalated=False,
+        merge_readiness="MERGEABLE",
     )
 
 
@@ -312,6 +355,42 @@ class PrGuardian:
 
         return _merge_required_rules((), rules), True
 
+    def _fetch_commit_statuses(
+        self, scope: ProjectScope, intent_ref: str, head_sha: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Fetch and paginate GitHub commit statuses, failing closed if total_count exceeds fetched items (R4-07)."""
+        st_status, status_data = self._read(scope, intent_ref, f"/repos/{scope.repository}/commits/{head_sha}/status")
+        if st_status != 200 or not isinstance(status_data, dict):
+            return None, False
+        raw_statuses = status_data.get("statuses")
+        if not isinstance(raw_statuses, list):
+            return None, False
+        all_statuses = list(raw_statuses)
+        status_total = status_data.get("total_count")
+        if type(status_total) is int and status_total > len(all_statuses):
+            for spage in range(2, _MAX_CHECK_PAGES + 1):
+                st_s2, s2_data = self._read(
+                    scope,
+                    intent_ref,
+                    f"/repos/{scope.repository}/commits/{head_sha}/status?per_page={_PER_PAGE}&page={spage}",
+                )
+                if st_s2 != 200 or not isinstance(s2_data, dict) or not isinstance(s2_data.get("statuses"), list):
+                    return None, False
+                page_st = s2_data["statuses"]
+                all_statuses.extend(page_st)
+                if not page_st or len(all_statuses) >= status_total:
+                    break
+            if len(all_statuses) < status_total:
+                return None, False
+        return (
+            {
+                **status_data,
+                "statuses": all_statuses,
+                "total_count": status_total if type(status_total) is int else len(all_statuses),
+            },
+            True,
+        )
+
     def inspect_pr(
         self,
         *,
@@ -364,8 +443,7 @@ class PrGuardian:
             if total_count is None or len(all_runs) < total_count:
                 pagination_complete = False
 
-        st_status, status_data = self._read(scope, intent_ref, f"/repos/{scope.repository}/commits/{head_sha}/status")
-        status_ok = st_status == 200 and isinstance(status_data, dict)
+        merged_status_payload, status_ok = self._fetch_commit_statuses(scope, intent_ref, head_sha)
         return evaluate_pr_checks(
             pr_payload=pr_data,
             check_runs_payload={
@@ -373,7 +451,7 @@ class PrGuardian:
                 "check_runs": all_runs,
             },
             expected_head_sha=head_sha,
-            commit_status_payload=status_data if status_ok else None,
+            commit_status_payload=merged_status_payload if status_ok else None,
             commit_status_ok=status_ok,
             required_checks=required_checks,
             required_check_rules=bp_rules,

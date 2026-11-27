@@ -23,6 +23,9 @@ import logging
 import math
 import os
 import signal
+import socket
+import stat
+import struct
 import sys
 import threading
 import time
@@ -40,7 +43,7 @@ from aiagent_domain.rpcwire import (
     verify_request,
 )
 
-from .grant import GrantError, verify, verify_preview_capability
+from .grant import GrantError, parse_preview_unix_endpoint_ref, verify, verify_preview_capability
 from .landlock import block_cross_task_process_access, disable_dumpability, restrict_to_workspace
 
 MAX_OUTPUT = 64 * 1024
@@ -63,6 +66,39 @@ except OSError:
 if pid == 0:
     try:
         os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError:
+        os._exit(127)
+_, status = os.waitpid(pid, 0)
+if os.WIFEXITED(status):
+    os._exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(125)
+"""
+
+# R4-02: Synchronized PID-namespace launcher that blocks on a start-barrier pipe FD
+# BEFORE calling os.fork(). The parent Supervisor attaches this bootstrap PID to the
+# target cgroup v2 BEFORE writing b"G", guaranteeing that EVERY forked descendant
+# (worker Python + Playwright + Chromium processes) inherits the cgroup atomically.
+_CGROUP_SYNC_PID_NAMESPACE_EXEC = """
+import os
+import sys
+
+try:
+    barrier_fd = int(sys.argv[1])
+    token = os.read(barrier_fd, 1)
+    os.close(barrier_fd)
+except OSError:
+    os._exit(125)
+if token != b"G":
+    os._exit(125)
+try:
+    pid = os.fork()
+except OSError:
+    os._exit(125)
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
     except OSError:
         os._exit(127)
 _, status = os.waitpid(pid, 0)
@@ -499,23 +535,34 @@ class Supervisor:
         return True
 
     async def debug_preview(self, capability_token: Any) -> dict[str, Any]:
-        """Run Browser Debugger inside full Sandbox Cell isolation using a dedicated PreviewCapability (R3-02/R3-04/R3-05).
+        """Run Browser Debugger inside full Sandbox Cell isolation using a dedicated PreviewCapability (R3-02/R4-01..R4-03).
 
         - Verifies PreviewCapability signed with `preview_capability_key` (distinct from `grant_key`).
-        - Binds target_port, target_url, endpoint_ref, commit_sha, preview_instance_id, instance_generation,
-          lease_id, resource caps, and single-use capability_id exclusively from the signed capability.
-        - Enforces per-cell cgroup v2 (`memory.max`, `pids.max`, `cpu.max`) with production fail-closed and
-          process-group RSS watcher fallback in unprivileged dev/test environments.
+        - R4-03: Connects STRICTLY to the signed instance-owned Unix domain socket (`unix://<path>?ino=<ino>&pid=<pid>`)
+          verifying BOTH filesystem inode (`lstat`) AND kernel `SO_PEERCRED` PID on every connection (NEVER dials TCP port).
+        - R4-02: Uses `_CGROUP_SYNC_PID_NAMESPACE_EXEC` start-barrier pipe so `cgroup.attach(proc.pid)` completes BEFORE
+          the bootstrap calls `os.fork()`, guaranteeing all Chromium descendants inherit the cgroup atomically.
+        - R4-01: Executes self-contained `aiagent_sandbox.browser_debug_worker` with bridge socket placed inside the
+          writable `self.root` tmpfs (working on `read_only: true` Cell containers).
         - Monitors capability expiry and live `preview.cancel` revocation during execution.
         """
         if self.preview_capability_key is None:
             raise GrantError("PREVIEW_CAPABILITY_UNAVAILABLE")
         cap = verify_preview_capability(self.preview_capability_key, capability_token)
+        preview_sock_path, expected_ino, expected_pid = parse_preview_unix_endpoint_ref(cap.endpoint_ref)
+        try:
+            st_pre = os.lstat(preview_sock_path)
+        except OSError as exc:
+            raise GrantError("PREVIEW_ENDPOINT_UNVERIFIED") from exc
+        if not stat.S_ISSOCK(st_pre.st_mode) or st_pre.st_ino != expected_ino:
+            raise GrantError("PREVIEW_ENDPOINT_UNVERIFIED")
+
         self._consume(f"prv:{cap.capability_id}")
         target_port = cap.target_port
         ws, cwd = self.workspace(cap.tenant_id, cap.task_id, ".")
+        # Do NOT mkdir inside cell_uid-owned `ws` as root (cell container runs with cap_drop=ALL, no CAP_DAC_OVERRIDE);
+        # `browser_debug_worker` creates `ws/tmp` immediately after dropping to `cell_uid`.
         tmp_dir = ws / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
 
         cgroup = _BrowserCgroup.create(
             name=f"aiagent-prv-{cap.capability_id[:16]}",
@@ -527,8 +574,13 @@ class Supervisor:
         if cgroup is None and self.require_browser_cgroup:
             raise GrantError("BROWSER_CGROUP_REQUIRED")
 
-        # Keep AF_UNIX path short (<108 bytes Linux sun_path limit); Landlock grants access ONLY to this exact socket file.
-        bridge_sock = Path("/tmp") / f"aiag-prv-{cap.capability_id[:16]}.sock"  # noqa: S108
+        # R4-01: Place bridge socket under writable self.root (tmpfs even on read_only: true Cell containers);
+        # fall back to /tmp only when self.root path would exceed Linux AF_UNIX sun_path limit (108 bytes).
+        candidate_sock = self.root / f"prv-{cap.capability_id[:16]}.sock"
+        if len(str(candidate_sock).encode("utf-8")) <= 96:
+            bridge_sock = candidate_sock
+        else:
+            bridge_sock = Path("/tmp") / f"aiag-prv-{cap.capability_id[:16]}.sock"  # noqa: S108
         if bridge_sock.exists():
             bridge_sock.unlink()
 
@@ -545,8 +597,30 @@ class Supervisor:
 
         async def _bridge_conn(ur: asyncio.StreamReader, uw: asyncio.StreamWriter) -> None:
             try:
-                tr, tw = await asyncio.open_connection("127.0.0.1", target_port)
+                st_now = os.lstat(preview_sock_path)
+                if not stat.S_ISSOCK(st_now.st_mode) or st_now.st_ino != expected_ino:
+                    uw.close()
+                    return
+                tr, tw = await asyncio.open_unix_connection(preview_sock_path)
             except OSError:
+                uw.close()
+                return
+            try:
+                raw_sock = tw.get_extra_info("socket")
+                so_peercred = getattr(socket, "SO_PEERCRED", None)
+                if raw_sock is None or so_peercred is None:
+                    tw.close()
+                    uw.close()
+                    return
+                peer_pid, _peer_uid, _peer_gid = struct.unpack(
+                    "3i", raw_sock.getsockopt(socket.SOL_SOCKET, so_peercred, 12)
+                )
+                if peer_pid != expected_pid:
+                    tw.close()
+                    uw.close()
+                    return
+            except OSError:
+                tw.close()
                 uw.close()
                 return
             t1 = asyncio.create_task(_pipe(ur, tw))
@@ -554,11 +628,10 @@ class Supervisor:
             await asyncio.gather(t1, t2, return_exceptions=True)
 
         bridge_srv = await asyncio.start_unix_server(_bridge_conn, path=str(bridge_sock))
+        # Apply chmod BEFORE chown so cap_drop=ALL (no CAP_FOWNER) never fails on permission bits.
+        os.chmod(bridge_sock, 0o600)
         if self.cell_uid is not None and os.geteuid() == 0:
             os.chown(bridge_sock, self.cell_uid, self.cell_gid if self.cell_gid is not None else self.cell_uid)
-            os.chmod(bridge_sock, 0o600)
-        else:
-            os.chmod(bridge_sock, 0o600)
 
         extra_ro_paths, pw_dir = await asyncio.to_thread(_collect_browser_ro_paths)
 
@@ -577,11 +650,13 @@ class Supervisor:
         worker_cmd = [
             sys.executable,
             "-m",
-            "aiagent_development.browser_debug_worker",
+            "aiagent_sandbox.browser_debug_worker",
             "--bridge-sock",
             str(bridge_sock),
         ]
-        bootstrap = [sys.executable, "-c", _PID_NAMESPACE_EXEC, *worker_cmd]
+        go_r, go_w = os.pipe()
+        os.set_inheritable(go_r, True)
+        bootstrap = [sys.executable, "-c", _CGROUP_SYNC_PID_NAMESPACE_EXEC, str(go_r), *worker_cmd]
         payload = json.dumps(
             {"targetUrl": cap.target_url, "leasedPort": target_port, "commitSha": cap.commit_sha}
         ).encode("utf-8")
@@ -590,6 +665,8 @@ class Supervisor:
         self._active_previews[cap.capability_id] = (cap.tenant_id, revoked)
         watcher: asyncio.Task[None] | None = None
         memory_exceeded = False
+        go_r_closed = False
+        go_w_closed = False
         try:
             proc = await asyncio.create_subprocess_exec(
                 *bootstrap,
@@ -598,6 +675,7 @@ class Supervisor:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                pass_fds=(go_r,),
                 preexec_fn=self._preexec(
                     cap.wall_ms,
                     cap.memory_bytes,
@@ -607,10 +685,19 @@ class Supervisor:
                     browser_mode=True,
                 ),
             )
+            os.close(go_r)
+            go_r_closed = True
+            # R4-02: Attach bootstrap PID to cgroup BEFORE releasing the start barrier (before os.fork()!).
             if cgroup is not None and not cgroup.attach(proc.pid) and self.require_browser_cgroup:
+                os.close(go_w)
+                go_w_closed = True
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
                 raise GrantError("BROWSER_CGROUP_ATTACH_FAILED")
+            os.write(go_w, b"G")
+            os.close(go_w)
+            go_w_closed = True
 
             async def _watch_limits_and_expiry() -> None:
                 nonlocal memory_exceeded
@@ -644,6 +731,12 @@ class Supervisor:
                 "stderr": err.decode("utf-8", "replace"),
             }
         finally:
+            if not go_r_closed:
+                with contextlib.suppress(OSError):
+                    os.close(go_r)
+            if not go_w_closed:
+                with contextlib.suppress(OSError):
+                    os.close(go_w)
             self._active_previews.pop(cap.capability_id, None)
             if watcher is not None:
                 watcher.cancel()

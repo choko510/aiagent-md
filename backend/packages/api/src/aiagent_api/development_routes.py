@@ -454,16 +454,25 @@ def register_development_routes(
 
             def _emit_revoked() -> None:
                 with get_db().tx(tenant=s.tenant_id) as c:
-                    append_event(
-                        c,
-                        tenant_id=s.tenant_id,
-                        aggregate_type="workspace",
-                        aggregate_id=s.workspace_id,
-                        kind="dev.preview_revoked",
-                        payload={"leaseId": lease_id},
-                        actor={"type": "user", "id": s.user_id},
-                        owner_user_id=s.user_id,
-                    )
+                    meta = c.execute(
+                        "SELECT cy.task_id, cy.run_id FROM agent.preview_leases l"
+                        " JOIN agent.dev_cycles cy ON cy.tenant_id=l.tenant_id AND cy.id=l.cycle_id"
+                        " WHERE l.tenant_id=%s AND l.id=%s AND l.owner_user_id=%s",
+                        (s.tenant_id, lease_id, s.user_id),
+                    ).fetchone()
+                    if meta is not None:
+                        append_event(
+                            c,
+                            tenant_id=s.tenant_id,
+                            aggregate_type="task",
+                            aggregate_id=str(meta["task_id"]),
+                            kind="dev.preview_revoked",
+                            payload={"leaseId": lease_id},
+                            actor={"type": "user", "id": s.user_id},
+                            owner_user_id=s.user_id,
+                            task_id=str(meta["task_id"]),
+                            run_id=str(meta["run_id"]),
+                        )
 
             await asyncio.to_thread(_emit_revoked)
             return {"schemaVersion": "1.0", "leaseId": lease_id, "status": "REVOKED"}

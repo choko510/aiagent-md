@@ -112,7 +112,24 @@ def verify(
 PREVIEW_CAPABILITY_TTL_S = 60
 _PREVIEW_CAP_DOMAIN = b"aiagent-preview-cap-v1:"
 _SHA_HEX_RE = re.compile(r"^[0-9a-f]{40,64}$")
-_ENDPOINT_REF_RE = re.compile(r"^sandbox-cell://127\.0\.0\.1:([0-9]{4,5})$")
+# R4-03: Preview endpoint MUST bind an instance-owned Unix domain socket + kernel inode + listening PID
+# (NEVER a raw unauthenticated loopback TCP port that another process could hijack after exit).
+_PREVIEW_UNIX_ENDPOINT_RE = re.compile(
+    r"^unix://(/[A-Za-z0-9._/-]{1,180})\?ino=([1-9][0-9]{0,20})&pid=([1-9][0-9]{0,9})$"
+)
+
+
+def parse_preview_unix_endpoint_ref(endpoint_ref: str) -> tuple[str, int, int]:
+    """Parse and validate an instance-bound Unix socket endpoint_ref (`unix://<abs_path>?ino=<ino>&pid=<pid>`)."""
+    if not isinstance(endpoint_ref, str) or len(endpoint_ref) > 256:
+        raise GrantError("PREVIEW_CAP_ENDPOINT_MISMATCH")
+    m = _PREVIEW_UNIX_ENDPOINT_RE.fullmatch(endpoint_ref)
+    if m is None:
+        raise GrantError("PREVIEW_CAP_ENDPOINT_MISMATCH")
+    sock_path = m.group(1)
+    if ".." in sock_path.split("/") or "//" in sock_path:
+        raise GrantError("PREVIEW_CAP_ENDPOINT_MISMATCH")
+    return sock_path, int(m.group(2)), int(m.group(3))
 
 
 @dataclass(frozen=True)
@@ -208,9 +225,7 @@ def verify_preview_capability(key: bytes, token: Any, *, now: float | None = Non
     pu = urlsplit(cap.target_url)
     if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port != cap.target_port:
         raise GrantError("PREVIEW_CAP_TARGET_MISMATCH")
-    m = _ENDPOINT_REF_RE.fullmatch(cap.endpoint_ref)
-    if m is None or int(m.group(1)) != cap.target_port:
-        raise GrantError("PREVIEW_CAP_ENDPOINT_MISMATCH")
+    parse_preview_unix_endpoint_ref(cap.endpoint_ref)
     if cap.expires < (now if now is not None else time.time()):
         raise GrantError("PREVIEW_CAP_EXPIRED")
     return cap

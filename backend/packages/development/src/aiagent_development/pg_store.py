@@ -417,10 +417,33 @@ def _resolve_preview_attestation_key(explicit_key: bytes | None = None) -> bytes
 
 _MAX_RECEIPT_TTL_S = 60
 _LAUNCH_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+# R4-03: Instance-owned Unix domain socket + kernel inode + listening PID (NEVER raw loopback TCP port).
+_PREVIEW_UNIX_ENDPOINT_RE = re.compile(
+    r"^unix://(/[A-Za-z0-9._/-]{1,180})\?ino=([1-9][0-9]{0,20})&pid=([1-9][0-9]{0,9})$"
+)
+_INACTIVE_RUN_STATUSES = frozenset({"CANCELLED", "CANCELLING", "PAUSED", "FAILED", "EXPIRED", "BUDGET_EXHAUSTED"})
 
 
-def default_preview_endpoint_ref(target_port: int) -> str:
-    return f"sandbox-cell://127.0.0.1:{target_port}"
+def format_preview_unix_endpoint_ref(socket_path: str, *, inode: int, pid: int) -> str:
+    """Build a canonical instance-bound Unix socket endpoint_ref validated by PreviewBroker and Sandbox Supervisor."""
+    ref = f"unix://{socket_path}?ino={inode}&pid={pid}"
+    if len(ref) > 256 or _PREVIEW_UNIX_ENDPOINT_RE.fullmatch(ref) is None or ".." in socket_path.split("/"):
+        raise ScopeDenied("INVALID_PREVIEW_ENDPOINT_REF")
+    return ref
+
+
+def _validate_preview_endpoint_ref(endpoint_ref: str | None) -> str:
+    if (
+        not isinstance(endpoint_ref, str)
+        or len(endpoint_ref) > 256
+        or _PREVIEW_UNIX_ENDPOINT_RE.fullmatch(endpoint_ref) is None
+    ):
+        raise ScopeDenied("INVALID_PREVIEW_ENDPOINT_REF")
+    sock_path = _PREVIEW_UNIX_ENDPOINT_RE.fullmatch(endpoint_ref)
+    assert sock_path is not None
+    if ".." in sock_path.group(1).split("/") or "//" in sock_path.group(1):
+        raise ScopeDenied("INVALID_PREVIEW_ENDPOINT_REF")
+    return endpoint_ref
 
 
 @dataclass(frozen=True)
@@ -431,6 +454,9 @@ class PreviewLeaseDetails:
     project_id: str
     cycle_id: str
     workspace_id: str
+    task_id: str
+    run_id: str
+    goal_revision: int
     commit_sha: str
     target_port: int
     endpoint_ref: str
@@ -454,12 +480,12 @@ def sign_preview_launch_receipt(
     launch_nonce: str,
     issued_at_epoch: int,
     expires_at_epoch: int,
-    endpoint_ref: str | None = None,
+    endpoint_ref: str,
 ) -> str:
-    """Sign a short-lived, single-use Preview Worker launch receipt binding scope, commit, endpoint, nonce & generation (R3-05)."""
+    """Sign a short-lived, single-use Preview Worker launch receipt binding scope, commit, instance Unix socket, nonce & generation (R3-05/R4-03)."""
     if len(key) < 32:
         raise ValueError("preview attestation key must be >= 32 bytes")
-    ep_ref = endpoint_ref or default_preview_endpoint_ref(target_port)
+    ep_ref = _validate_preview_endpoint_ref(endpoint_ref)
     msg = canonical_json(
         {
             "v": 2,
@@ -526,9 +552,7 @@ class PreviewBroker:
         now_s = int(datetime.now(UTC).timestamp())
         if now_s > expires_at_epoch or issued_at_epoch > now_s + 10:
             raise ScopeDenied("EXPIRED_PREVIEW_LAUNCH_RECEIPT")
-        ep_ref = endpoint_ref or default_preview_endpoint_ref(target_port)
-        if ep_ref != default_preview_endpoint_ref(target_port):
-            raise ScopeDenied("INVALID_PREVIEW_ENDPOINT_REF")
+        ep_ref = _validate_preview_endpoint_ref(endpoint_ref)
         if len(process_attestation_sha256) != 64 or any(
             ch not in "0123456789abcdef" for ch in process_attestation_sha256
         ):
@@ -567,7 +591,7 @@ class PreviewBroker:
         launch_nonce: str,
         issued_at_epoch: int,
         expires_at_epoch: int,
-        endpoint_ref: str | None = None,
+        endpoint_ref: str,
         runner_kind: str = "sandbox_cell",
         generation: int = 1,
         heartbeat_ttl_s: int = 120,
@@ -798,6 +822,7 @@ class PreviewBroker:
         *,
         expected_cycle_id: str | None = None,
     ) -> PreviewLeaseDetails:
+        """Authoritatively verify lease, instance, workspace scope, cycle, task, run & goal revision from DB (R4-04)."""
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with self._db.tx(tenant=tenant_id) as c:
             row = c.execute(
@@ -805,15 +830,26 @@ class PreviewBroker:
                 " l.status, l.expires_at, l.cycle_id, l.preview_instance_id, l.instance_generation,"
                 " i.status AS inst_status, i.target_port AS inst_port, i.endpoint_ref AS inst_endpoint_ref,"
                 " i.commit_sha AS inst_sha, i.generation AS inst_generation, i.heartbeat_expires_at,"
-                " (i.heartbeat_expires_at > now()) AS inst_alive"
+                " (i.heartbeat_expires_at > now()) AS inst_alive,"
+                " cy.owner_user_id AS cy_owner, cy.workspace_id AS cy_workspace, cy.project_id AS cy_project,"
+                " cy.phase AS cy_phase, cy.task_id AS cy_task_id, cy.run_id AS cy_run_id, cy.cycle_json,"
+                " t.owner_user_id AS task_owner, t.workspace_id AS task_workspace,"
+                " t.goal_revision AS live_goal_revision, t.active_run_id,"
+                " r.status_code AS run_status, r.cancel_requested, r.pause_requested"
                 " FROM agent.preview_leases l"
                 " JOIN agent.dev_preview_instances i ON i.tenant_id=l.tenant_id AND i.id=l.preview_instance_id"
+                " JOIN agent.dev_cycles cy ON cy.tenant_id=l.tenant_id AND cy.id=l.cycle_id"
+                " JOIN agent.tasks t ON t.tenant_id=cy.tenant_id AND t.id=cy.task_id"
+                " JOIN agent.runs r ON r.tenant_id=cy.tenant_id AND r.task_id=cy.task_id AND r.id=cy.run_id"
                 " WHERE l.tenant_id=%s AND l.id=%s AND l.owner_user_id=%s",
                 (tenant_id, lease_id, owner_user_id),
             ).fetchone()
+            if row is None:
+                raise ScopeDenied("invalid, expired, or superseded preview lease")
+            if not control.scope_active(c, tenant_id, owner_user_id, str(row["workspace_id"])):
+                raise ScopeDenied("SCOPE_REVOKED: workspace or tenant membership inactive")
         if (
-            row is None
-            or row["status"] != "ACTIVE"
+            row["status"] != "ACTIVE"
             or row["inst_status"] != "RUNNING"
             or not row["inst_alive"]
             or int(row["inst_generation"]) != int(row["instance_generation"])
@@ -826,6 +862,25 @@ class PreviewBroker:
             raise ScopeDenied("invalid, expired, or superseded preview lease")
         if expected_cycle_id is not None and str(row["cycle_id"] or "") != expected_cycle_id:
             raise ScopeDenied("preview lease bound to a different cycle")
+        if (
+            str(row["cy_owner"]) != owner_user_id
+            or str(row["cy_workspace"]) != str(row["workspace_id"])
+            or str(row["cy_project"]) != str(row["project_id"])
+            or str(row["cy_phase"]) != "CODE_READY"
+            or str(row["task_owner"]) != owner_user_id
+            or str(row["task_workspace"]) != str(row["workspace_id"])
+            or str(row["active_run_id"]) != str(row["cy_run_id"])
+            or bool(row["cancel_requested"])
+            or bool(row["pause_requested"])
+            or str(row["run_status"]) in _INACTIVE_RUN_STATUSES
+        ):
+            raise ScopeDenied("PREVIEW_RUN_OR_CYCLE_INACTIVE")
+        cj = dict(row["cycle_json"]) if isinstance(row.get("cycle_json"), dict) else {}
+        raw_run = cj.get("run")
+        cy_goal_rev = int(raw_run.get("goal_revision", 0)) if isinstance(raw_run, dict) else 0
+        if cy_goal_rev < 1 or int(row["live_goal_revision"]) != cy_goal_rev:
+            raise ScopeDenied("STALE_GOAL_REVISION: task goal changed since preview cycle")
+        ep_ref = _validate_preview_endpoint_ref(str(row["inst_endpoint_ref"]))
         return PreviewLeaseDetails(
             lease_id=str(row["id"]),
             instance_id=str(row["preview_instance_id"]),
@@ -833,9 +888,12 @@ class PreviewBroker:
             project_id=str(row["project_id"]),
             cycle_id=str(row["cycle_id"] or ""),
             workspace_id=str(row["workspace_id"]),
+            task_id=str(row["cy_task_id"]),
+            run_id=str(row["cy_run_id"]),
+            goal_revision=int(row["live_goal_revision"]),
             commit_sha=str(row["commit_sha"]),
             target_port=int(row["inst_port"]),
-            endpoint_ref=str(row["inst_endpoint_ref"]),
+            endpoint_ref=ep_ref,
             lease_expires_at=row["expires_at"],
             heartbeat_expires_at=row["heartbeat_expires_at"],
         )

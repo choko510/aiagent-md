@@ -293,3 +293,133 @@ def test_phase7_production_compose_rpc_and_secret_separation() -> None:
     assert tg_info["distinct_keys"] is True
     assert tg_info["has_gh_tokens"] is True
     assert tg_info["cell_rpc_code"] == "GRANT_PREVIEW_CAP_MALFORMED", tg_info
+
+    # 3. R4-01 + R4-03: Verify live production Cell container carries ZERO DB/gateway packages AND executes
+    # REAL headless Chromium Browser Debugger via a valid signed PreviewCapability bound to an instance Unix socket!
+    r_cell_pkg = dc(
+        "exec",
+        "-T",
+        "cell",
+        "python",
+        "-c",
+        (
+            "import importlib.util, json\n"
+            "print(json.dumps({"
+            "'has_worker': importlib.util.find_spec('aiagent_sandbox.browser_debug_worker') is not None, "
+            "'has_playwright': importlib.util.find_spec('playwright.async_api') is not None, "
+            "'has_psycopg': importlib.util.find_spec('psycopg') is not None, "
+            "'has_gateways': importlib.util.find_spec('aiagent_gateways') is not None, "
+            "'has_core': importlib.util.find_spec('aiagent_core') is not None}))\n"
+        ),
+    )
+    assert r_cell_pkg.returncode == 0, r_cell_pkg.stderr
+    cell_pkg = json.loads(r_cell_pkg.stdout.strip())
+    assert cell_pkg == {
+        "has_worker": True,
+        "has_playwright": True,
+        "has_psycopg": False,
+        "has_gateways": False,
+        "has_core": False,
+    }, cell_pkg
+
+    # Boot a short-lived instance-owned AF_UNIX Preview HTTP server inside the live `cell` container
+    r_start_prv = dc(
+        "exec",
+        "-T",
+        "cell",
+        "python",
+        "-c",
+        (
+            "import json, os, subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "sock = Path('/var/lib/aiagent/cells/prv-compose-e2e.sock')\n"
+            "sock.unlink(missing_ok=True)\n"
+            "code = '''\n"
+            "import asyncio, os\n"
+            "from pathlib import Path\n"
+            "sock = Path('/var/lib/aiagent/cells/prv-compose-e2e.sock')\n"
+            "async def handle(r, w):\n"
+            "  try:\n"
+            "    head = await asyncio.wait_for(r.readuntil(b'\\\\r\\\\n\\\\r\\\\n'), timeout=5.0)\n"
+            "    path = head.decode('latin-1').split('\\\\r\\\\n', 1)[0].split(' ')[1]\n"
+            "    if path == '/api/broken':\n"
+            "      b = b'{\"err\":1}'\n"
+            "      w.write(b'HTTP/1.1 500 Internal Server Error\\\\r\\\\nContent-Length: %d\\\\r\\\\nConnection: close\\\\r\\\\n\\\\r\\\\n%s' % (len(b), b))\n"
+            "    else:\n"
+            "      html = b\"<!doctype html><html><body style='margin:0'><div style='width:900px;height:40px'>overflow</div><script>console.error('Leak Bearer compose_secret_123');fetch('/api/broken');</script></body></html>\"\n"
+            "      w.write(b'HTTP/1.1 200 OK\\\\r\\\\nContent-Type: text/html\\\\r\\\\nContent-Length: %d\\\\r\\\\nConnection: close\\\\r\\\\n\\\\r\\\\n%s' % (len(html), html))\n"
+            "    await w.drain()\n"
+            "  finally:\n"
+            "    w.close()\n"
+            "async def main():\n"
+            "  srv = await asyncio.start_unix_server(handle, path=str(sock))\n"
+            "  os.chmod(sock, 0o600)\n"
+            "  await asyncio.sleep(60)\n"
+            "  srv.close()\n"
+            "asyncio.run(main())\n"
+            "'''\n"
+            "p = subprocess.Popen([sys.executable, '-c', code], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "for _ in range(50):\n"
+            "  if sock.exists():\n"
+            "    break\n"
+            "  time.sleep(0.1)\n"
+            "st = os.lstat(sock)\n"
+            "print(json.dumps({'pid': p.pid, 'ino': st.st_ino, 'sock': str(sock)}))\n"
+        ),
+    )
+    assert r_start_prv.returncode == 0, r_start_prv.stderr
+    prv_meta = json.loads(r_start_prv.stdout.strip())
+    endpoint_ref = f"unix://{prv_meta['sock']}?ino={prv_meta['ino']}&pid={prv_meta['pid']}"
+
+    try:
+        r_e2e_dbg = dc(
+            "exec",
+            "-T",
+            "tool-gateway",
+            "python",
+            "-c",
+            (
+                "import asyncio, json, os, secrets, time\n"
+                "from pathlib import Path\n"
+                "from aiagent_core.rpc import RpcClient\n"
+                "from aiagent_domain import uuid7\n"
+                "from aiagent_sandbox.grant import PreviewCapability, sign_preview_capability\n"
+                "pk = bytes.fromhex(Path(os.environ['AIAGENT_PREVIEW_CAPABILITY_KEY_FILE']).read_text().strip())\n"
+                "rk = bytes.fromhex(Path(os.environ['AIAGENT_SANDBOX_RPC_KEY_FILE']).read_text().strip())\n"
+                "ep = os.environ['AIAGENT_SANDBOX_ENDPOINT']\n"
+                f"endpoint_ref = {endpoint_ref!r}\n"
+                "cap = PreviewCapability(\n"
+                "  capability_id=f'prvcap-{secrets.token_hex(12)}',\n"
+                "  tenant_id=uuid7(), owner_user_id=uuid7(), project_id='compose-p1', cycle_id='compose-c1',\n"
+                "  workspace_id=uuid7(), task_id=uuid7(), run_id=uuid7(), lease_id=uuid7(),\n"
+                "  preview_instance_id=uuid7(), instance_generation=1, target_port=4173,\n"
+                "  target_url='http://127.0.0.1:4173/', endpoint_ref=endpoint_ref, commit_sha='a'*40,\n"
+                "  wall_ms=30000, memory_bytes=1536*1024*1024, pids_max=256, cpu_quota_us=100000,\n"
+                "  expires=int(time.time())+45, attempt_id='compose-dbg-1',\n"
+                ")\n"
+                "signed = sign_preview_capability(pk, cap)\n"
+                "async def run():\n"
+                "  cli = RpcClient(ep, 'tool_gateway', rk, timeout_s=60.0)\n"
+                "  return await cli.call('preview.debug', {'capability': signed})\n"
+                "print(json.dumps(asyncio.run(run())))\n"
+            ),
+        )
+        assert r_e2e_dbg.returncode == 0, r_e2e_dbg.stderr
+        dbg_res = json.loads(r_e2e_dbg.stdout.strip())
+        assert dbg_res["status"] == "EXITED", dbg_res
+        assert dbg_res["exitCode"] == 0, dbg_res
+        report = json.loads(dbg_res["stdout"])
+        assert report["status"] == "OPEN", report
+        assert any("[REDACTED]" in m for m in report["consoleErrors"]), report
+        assert all("compose_secret_123" not in m for m in report["consoleErrors"]), report
+        assert any("HTTP 500 /api/broken" in m for m in report["networkErrors"]), report
+        assert any("[mobile] horizontal overflow" in m for m in report["layoutIssues"]), report
+    finally:
+        dc(
+            "exec",
+            "-T",
+            "cell",
+            "python",
+            "-c",
+            f"import os, signal; from pathlib import Path\ntry:\n os.kill({int(prv_meta['pid'])}, signal.SIGKILL)\nexcept OSError:\n pass\nPath({prv_meta['sock']!r}).unlink(missing_ok=True)\n",
+        )

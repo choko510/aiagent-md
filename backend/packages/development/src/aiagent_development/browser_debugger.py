@@ -96,7 +96,7 @@ def _parse_debug_result(res: dict[str, Any], *, expected_attempt_id: str) -> Deb
     )
 
 
-async def run_sandbox_cell_preview_debug_async(
+async def run_sandbox_cell_preview_debug_async(  # noqa: PLR0912, PLR0915
     *,
     tenant_id: str,
     owner_user_id: str,
@@ -122,6 +122,8 @@ async def run_sandbox_cell_preview_debug_async(
     pu = urlsplit(target_url)
     if pu.scheme != "http" or pu.hostname != "127.0.0.1" or pu.port != lease.target_port:
         raise ScopeDenied("browser debugger permits attested loopback 127.0.0.1 preview origin only")
+    if task_id != lease.task_id or run_id != lease.run_id:
+        raise ScopeDenied("PREVIEW_TASK_OR_RUN_MISMATCH")
 
     if sandbox_endpoint and sandbox_rpc_key and preview_capability_key:
         endpoint, rpc_key, cap_key = sandbox_endpoint, sandbox_rpc_key, preview_capability_key
@@ -146,8 +148,8 @@ async def run_sandbox_cell_preview_debug_async(
         project_id=lease.project_id,
         cycle_id=lease.cycle_id,
         workspace_id=lease.workspace_id,
-        task_id=task_id,
-        run_id=run_id,
+        task_id=lease.task_id,
+        run_id=lease.run_id,
         lease_id=lease.lease_id,
         preview_instance_id=lease.instance_id,
         instance_generation=lease.generation,
@@ -167,33 +169,51 @@ async def run_sandbox_cell_preview_debug_async(
 
     call_task = asyncio.create_task(client.call("preview.debug", {"capability": signed_cap}))
     watch_task: asyncio.Task[None] | None = None
+    watcher_triggered = False
     if lease_alive_check is not None:
 
         async def _watch_lease() -> None:
+            nonlocal watcher_triggered
             cancel_client = RpcClient(endpoint, caller_identity, rpc_key, timeout_s=5.0)
             while not call_task.done():
                 await asyncio.sleep(0.3)
                 if call_task.done():
                     return
-                alive = await asyncio.to_thread(lease_alive_check)
+                try:
+                    alive = bool(await asyncio.to_thread(lease_alive_check))
+                except Exception:  # noqa: BLE001 - R4-04: fail closed on any watcher/DB error
+                    alive = False
                 if not alive:
+                    watcher_triggered = True
                     with contextlib.suppress(RpcError, RpcAuthError, OSError, TimeoutError):
                         await cancel_client.call(
                             "preview.cancel", {"tenantId": tenant_id, "capabilityId": capability_id}
                         )
+                    # Fail closed even if cancel RPC could not immediately terminate the call.
+                    await asyncio.sleep(0.5)
+                    if not call_task.done():
+                        call_task.cancel()
                     return
 
         watch_task = asyncio.create_task(_watch_lease())
 
     try:
         res: dict[str, Any] = await call_task
+    except asyncio.CancelledError:
+        if watcher_triggered:
+            raise ScopeDenied("PREVIEW_LEASE_REVOKED_OR_WATCHER_FAILED") from None
+        raise
     except (RpcError, RpcAuthError, OSError, TimeoutError) as exc:
+        if watcher_triggered:
+            raise ScopeDenied("PREVIEW_LEASE_REVOKED_OR_WATCHER_FAILED") from None
         raise RuntimeError(f"BROWSER_DEBUG_SANDBOX_RPC_FAILED:{type(exc).__name__}:{exc}") from exc
     finally:
         if watch_task is not None:
             watch_task.cancel()
             await asyncio.gather(watch_task, return_exceptions=True)
 
+    if watcher_triggered:
+        raise ScopeDenied("PREVIEW_LEASE_REVOKED_OR_WATCHER_FAILED")
     return _parse_debug_result(res, expected_attempt_id=attempt_id)
 
 
@@ -261,6 +281,8 @@ class AutonomousBrowserDebugger:
             port,
             expected_cycle_id=cycle_id,
         )
+        if (task_id and task_id != lease.task_id) or (run_id and run_id != lease.run_id):
+            raise ScopeDenied("PREVIEW_TASK_OR_RUN_MISMATCH")
         target_url = f"http://127.0.0.1:{port}{path}"
         try:
             if probe_fn is not None:
@@ -268,18 +290,22 @@ class AutonomousBrowserDebugger:
 
             def _is_alive() -> bool:
                 try:
-                    self._previews.verify_lease_details(
+                    live = self._previews.verify_lease_details(
                         tenant_id, owner_user_id, lease_id, token, port, expected_cycle_id=cycle_id
                     )
-                    return True
-                except ScopeDenied:
+                    return (
+                        live.task_id == lease.task_id
+                        and live.run_id == lease.run_id
+                        and live.goal_revision == lease.goal_revision
+                    )
+                except Exception:  # noqa: BLE001
                     return False
 
             return run_sandbox_cell_browser_debug(
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
-                task_id=task_id or cycle_id,
-                run_id=run_id or lease_id,
+                task_id=lease.task_id,
+                run_id=lease.run_id,
                 lease=lease,
                 target_url=target_url,
                 lease_alive_check=_is_alive,

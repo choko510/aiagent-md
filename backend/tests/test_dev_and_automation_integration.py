@@ -264,7 +264,7 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         "fixture",
         commit=CommitEvidence("a" * 40, "b" * 40, "c" * 64, "synthetic", "synthetic"),
     )
-    from aiagent_development.pg_store import sign_preview_launch_receipt
+    from aiagent_development.pg_store import format_preview_unix_endpoint_ref, sign_preview_launch_receipt
     from aiagent_development.store import PostgresDevStore
     from aiagent_domain import uuid7
 
@@ -278,12 +278,14 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         default_branch="feat/fixture",
     )
     PostgresCycleStore(dbs["api"]).create(fixture)
+    import os as _os
     import time as _time
 
     attest_key = b"k" * 32
     broker = PreviewBroker(dbs["api"], attestation_key=attest_key)
     now_s = int(_time.time())
     nonce_1 = f"fixture-nonce-{uuid7()[:12]}"
+    ep_ref = format_preview_unix_endpoint_ref("/tmp/preview-fixture.sock", inode=10001, pid=max(1, _os.getpid()))
     receipt = sign_preview_launch_receipt(
         attest_key,
         tenant_id=scope.tenant_id,
@@ -293,6 +295,7 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
         workspace_id=scope.workspace_id,
         commit_sha="b" * 40,
         target_port=4173,
+        endpoint_ref=ep_ref,
         runner_kind="sandbox_cell",
         process_attestation_sha256="d" * 64,
         generation=1,
@@ -303,6 +306,7 @@ def test_preview_broker_lease_with_synthetic_code_ready_fixture(
     broker.register_instance(
         fixture,
         target_port=4173,
+        endpoint_ref=ep_ref,
         process_attestation_sha256="d" * 64,
         launch_receipt_hmac=receipt,
         launch_nonce=nonce_1,

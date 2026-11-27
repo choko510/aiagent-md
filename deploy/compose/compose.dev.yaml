@@ -61,11 +61,11 @@ services:
     image: "aiagent/cell:${TAG:-dev}"
     networks: [rpc]
     read_only: true
-    tmpfs: ["/var/lib/aiagent/cells:exec,mode=1777"]
+    tmpfs: ["/var/lib/aiagent/cells:exec,mode=1777", "/tmp:mode=1777,size=64m"]
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, SYS_ADMIN, CHOWN, KILL]
     security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
-    deploy: {resources: {limits: {pids: 256, memory: 1g}}}
+    deploy: {resources: {limits: {pids: 512, memory: 2g}}}
     secrets: [sandbox_rpc_key, sandbox_grant_key, preview_capability_key]
     environment:
       AIAGENT_SANDBOX_RPC_KEY_FILE: /run/secrets/sandbox_rpc_key

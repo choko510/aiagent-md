@@ -95,22 +95,57 @@ REVOKE ALL ON FUNCTION agent.verify_dev_review_source_artifact(uuid, uuid, uuid,
 GRANT EXECUTE ON FUNCTION agent.verify_dev_review_source_artifact(uuid, uuid, uuid, uuid, uuid)
   TO aiagent_api, aiagent_runtime, aiagent_tool_gateway, aiagent_ops;
 
+-- Narrow SECURITY DEFINER authority helper verifying a persisted raw Demo render artifact in
+-- agent.context_artifacts without exposing ciphertext to least-privilege API/runtime roles (R4-05).
+CREATE FUNCTION agent.verify_dev_demo_source_artifact(
+  p_tenant uuid,
+  p_owner uuid,
+  p_task uuid,
+  p_run uuid,
+  p_artifact uuid
+) RETURNS TABLE(
+  artifact_id uuid,
+  kind text,
+  content_sha256 char(64),
+  byte_length integer
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, agent AS $$
+BEGIN
+  RETURN QUERY
+  SELECT a.id, a.kind, a.content_sha256, a.byte_length
+    FROM agent.context_artifacts a
+   WHERE a.tenant_id = p_tenant
+     AND a.id = p_artifact
+     AND a.owner_user_id = p_owner
+     AND a.task_id = p_task
+     AND a.run_id = p_run
+     AND a.kind = 'raw'
+     AND a.revoked_at IS NULL
+     AND a.ciphertext IS NOT NULL
+     AND a.expires_at > clock_timestamp();
+END $$;
+REVOKE ALL ON FUNCTION agent.verify_dev_demo_source_artifact(uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.verify_dev_demo_source_artifact(uuid, uuid, uuid, uuid, uuid)
+  TO aiagent_api, aiagent_runtime, aiagent_tool_gateway, aiagent_ops;
+
 CREATE TABLE agent.dev_demo_artifacts (
   tenant_id uuid NOT NULL,
   id uuid NOT NULL,
   owner_user_id uuid NOT NULL,
   project_id text NOT NULL,
   cycle_id text NOT NULL,
+  source_artifact_id uuid NOT NULL,
   candidate_id text NOT NULL,
   commit_sha text NOT NULL CHECK (commit_sha ~ '^[a-f0-9]{40,64}$'),
   viewport text NOT NULL CHECK (viewport ~ '^[0-9]{2,5}x[0-9]{2,5}(@[a-z0-9_-]{1,16})?$'),
   fixture_ref text NOT NULL CHECK (length(fixture_ref) BETWEEN 1 AND 256),
   content_sha256 char(64) NOT NULL CHECK (content_sha256 ~ '^[a-f0-9]{64}$'),
-  byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 4194304),
+  byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 2000000),
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, id),
   FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
-  FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id)
+  FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id),
+  FOREIGN KEY (tenant_id, source_artifact_id) REFERENCES agent.context_artifacts(tenant_id, id)
 );
 
 CREATE INDEX dev_demo_artifacts_cycle_idx
@@ -218,10 +253,43 @@ CREATE UNIQUE INDEX dev_preview_instances_running_port_uniq
   ON agent.dev_preview_instances (target_port)
   WHERE status = 'RUNNING';
 
+CREATE UNIQUE INDEX dev_preview_instances_running_endpoint_uniq
+  ON agent.dev_preview_instances (endpoint_ref)
+  WHERE status = 'RUNNING';
+
 ALTER TABLE agent.preview_leases
   ADD COLUMN IF NOT EXISTS cycle_id text,
   ADD COLUMN IF NOT EXISTS preview_instance_id uuid,
   ADD COLUMN IF NOT EXISTS instance_generation bigint NOT NULL DEFAULT 1;
+
+-- Authoritative Reviewer Assignment ledger binding an independent reviewer Task/Run to a specific
+-- Cycle, Role, Target SHA, Artifact Kind, and execution purpose (R4-06).
+CREATE TABLE agent.dev_review_assignments (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
+  project_id text NOT NULL,
+  cycle_id text NOT NULL,
+  builder_task_id uuid NOT NULL,
+  reviewer_task_id uuid NOT NULL,
+  reviewer_run_id uuid NOT NULL,
+  reviewer_role text NOT NULL CHECK (reviewer_role IN ('functional', 'security', 'ui-e2e')),
+  target_sha text NOT NULL CHECK (target_sha ~ '^[a-f0-9]{40,64}$'),
+  expected_artifact_kind text NOT NULL DEFAULT 'raw' CHECK (expected_artifact_kind IN ('raw', 'summary')),
+  purpose text NOT NULL DEFAULT 'independent_code_review' CHECK (purpose = 'independent_code_review'),
+  status text NOT NULL DEFAULT 'ASSIGNED' CHECK (status IN ('ASSIGNED', 'COMPLETED', 'REVOKED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, id),
+  UNIQUE (tenant_id, reviewer_task_id, reviewer_run_id),
+  CHECK (builder_task_id <> reviewer_task_id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
+  FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id),
+  FOREIGN KEY (tenant_id, reviewer_task_id, reviewer_run_id) REFERENCES agent.runs(tenant_id, task_id, id)
+);
+
+CREATE INDEX dev_review_assignments_cycle_idx
+  ON agent.dev_review_assignments (tenant_id, project_id, cycle_id, target_sha, reviewer_role);
 
 CREATE TABLE agent.dev_review_artifacts (
   tenant_id uuid NOT NULL,
@@ -231,6 +299,7 @@ CREATE TABLE agent.dev_review_artifacts (
   owner_user_id uuid NOT NULL,
   project_id text NOT NULL,
   cycle_id text NOT NULL,
+  assignment_id uuid NOT NULL,
   source_artifact_id uuid NOT NULL,
   reviewer_role text NOT NULL CHECK (reviewer_role IN ('functional', 'security', 'ui-e2e')),
   target_sha text NOT NULL CHECK (target_sha ~ '^[a-f0-9]{40,64}$'),
@@ -243,6 +312,7 @@ CREATE TABLE agent.dev_review_artifacts (
   FOREIGN KEY (tenant_id, task_id, run_id) REFERENCES agent.runs(tenant_id, task_id, id),
   FOREIGN KEY (tenant_id, project_id) REFERENCES agent.dev_projects(tenant_id, id),
   FOREIGN KEY (tenant_id, cycle_id) REFERENCES agent.dev_cycles(tenant_id, id),
+  FOREIGN KEY (tenant_id, assignment_id) REFERENCES agent.dev_review_assignments(tenant_id, id),
   FOREIGN KEY (tenant_id, source_artifact_id) REFERENCES agent.context_artifacts(tenant_id, id)
 );
 
@@ -289,6 +359,7 @@ BEGIN
     'dev_design_decisions',
     'dev_pr_records',
     'dev_preview_instances',
+    'dev_review_assignments',
     'dev_review_artifacts',
     'dev_debug_findings'
   ] LOOP
@@ -308,6 +379,7 @@ GRANT SELECT, INSERT, UPDATE ON
   agent.dev_design_decisions,
   agent.dev_pr_records,
   agent.dev_preview_instances,
+  agent.dev_review_assignments,
   agent.dev_review_artifacts,
   agent.dev_debug_findings
   TO aiagent_api, aiagent_runtime, aiagent_tool_gateway;
@@ -317,6 +389,7 @@ GRANT SELECT ON
   agent.dev_design_decisions,
   agent.dev_pr_records,
   agent.dev_preview_instances,
+  agent.dev_review_assignments,
   agent.dev_review_artifacts,
   agent.dev_debug_findings
   TO aiagent_ops;

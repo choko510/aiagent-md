@@ -273,9 +273,14 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
                 "SELECT a.id, a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id,"
-                " a.source_artifact_id, a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256,"
-                " a.passed, a.findings_json, t.workspace_id, r.status_code"
+                " a.assignment_id, a.source_artifact_id, a.reviewer_role, a.target_sha, a.evidence_sha256,"
+                " a.verdict_digest_sha256, a.passed, a.findings_json, t.workspace_id, r.status_code,"
+                " asg.builder_task_id AS asg_builder_task_id, asg.reviewer_task_id AS asg_task_id,"
+                " asg.reviewer_run_id AS asg_run_id, asg.project_id AS asg_project_id, asg.cycle_id AS asg_cycle_id,"
+                " asg.reviewer_role AS asg_role, asg.target_sha AS asg_sha,"
+                " asg.expected_artifact_kind AS asg_kind, asg.purpose AS asg_purpose, asg.status AS asg_status"
                 " FROM agent.dev_review_artifacts a"
+                " JOIN agent.dev_review_assignments asg ON asg.tenant_id=a.tenant_id AND asg.id=a.assignment_id"
                 " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
                 " JOIN agent.runs r ON r.tenant_id=a.tenant_id AND r.task_id=a.task_id AND r.id=a.run_id"
                 " WHERE a.tenant_id=%s AND a.id=%s",
@@ -293,6 +298,16 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
             row is None
             or src_art is None
             or str(src_art["content_sha256"]) != str(row["evidence_sha256"])
+            or str(src_art["kind"]) != str(row["asg_kind"])
+            or str(row["asg_purpose"]) != "independent_code_review"
+            or str(row["asg_status"]) not in ("ASSIGNED", "COMPLETED")
+            or str(row["asg_builder_task_id"]) != builder_run.task_id
+            or str(row["asg_task_id"]) != str(row["task_id"])
+            or str(row["asg_run_id"]) != str(row["run_id"])
+            or str(row["asg_project_id"]) != scope.project_id
+            or str(row["asg_cycle_id"]) != cycle_id
+            or str(row["asg_role"]) != str(row["reviewer_role"])
+            or str(row["asg_sha"]) != str(row["target_sha"])
             or str(row["task_id"]) == builder_run.task_id
             or str(row["owner_user_id"]) != scope.owner_user_id
             or str(row["workspace_id"]) != scope.workspace_id
@@ -301,7 +316,7 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
             or str(row["status_code"]) != "SUCCEEDED"
         ):
             raise ScopeDenied(
-                "review artifact missing, source artifact invalid/revoked, self-reviewed, or reviewer run did not SUCCEED"
+                "review artifact missing, assignment/purpose mismatch, source artifact invalid/revoked, self-reviewed, or reviewer run did not SUCCEED"
             )
         raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
         norm_findings = _normalize_review_findings(raw_findings)
@@ -346,10 +361,15 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
 
         with self._db.tx(tenant=scope.tenant_id) as c:
             row = c.execute(
-                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id, a.source_artifact_id,"
-                " a.reviewer_role, a.target_sha, a.evidence_sha256, a.verdict_digest_sha256, a.passed, a.findings_json,"
-                " t.workspace_id, r.status_code"
+                "SELECT a.task_id, a.run_id, a.owner_user_id, a.project_id, a.cycle_id,"
+                " a.assignment_id, a.source_artifact_id, a.reviewer_role, a.target_sha, a.evidence_sha256,"
+                " a.verdict_digest_sha256, a.passed, a.findings_json, t.workspace_id, r.status_code,"
+                " asg.builder_task_id AS asg_builder_task_id, asg.reviewer_task_id AS asg_task_id,"
+                " asg.reviewer_run_id AS asg_run_id, asg.project_id AS asg_project_id, asg.cycle_id AS asg_cycle_id,"
+                " asg.reviewer_role AS asg_role, asg.target_sha AS asg_sha,"
+                " asg.expected_artifact_kind AS asg_kind, asg.purpose AS asg_purpose, asg.status AS asg_status"
                 " FROM agent.dev_review_artifacts a"
+                " JOIN agent.dev_review_assignments asg ON asg.tenant_id=a.tenant_id AND asg.id=a.assignment_id"
                 " JOIN agent.tasks t ON t.tenant_id=a.tenant_id AND t.id=a.task_id"
                 " JOIN agent.runs r ON r.tenant_id=a.tenant_id AND r.task_id=a.task_id AND r.id=a.run_id"
                 " WHERE a.tenant_id=%s AND a.id=%s",
@@ -367,6 +387,16 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 row is None
                 or src_art is None
                 or str(src_art["content_sha256"]) != str(row["evidence_sha256"])
+                or str(src_art["kind"]) != str(row["asg_kind"])
+                or str(row["asg_purpose"]) != "independent_code_review"
+                or str(row["asg_status"]) not in ("ASSIGNED", "COMPLETED")
+                or str(row["asg_builder_task_id"]) != builder_run.task_id
+                or str(row["asg_task_id"]) != verdict.reviewer_task_id
+                or str(row["asg_run_id"]) != str(row["run_id"])
+                or str(row["asg_project_id"]) != scope.project_id
+                or (cycle_id is not None and str(row["asg_cycle_id"]) != cycle_id)
+                or str(row["asg_role"]) != verdict.reviewer_role
+                or str(row["asg_sha"]) != verdict.target_sha
                 or str(row["task_id"]) != verdict.reviewer_task_id
                 or str(row["owner_user_id"]) != scope.owner_user_id
                 or str(row["workspace_id"]) != scope.workspace_id
@@ -378,7 +408,7 @@ class PostgresReviewAttestationPort(ReviewAttestationPort):
                 or str(row["status_code"]) != "SUCCEEDED"
             ):
                 raise ScopeDenied(
-                    "review artifact missing, source artifact invalid/revoked, mismatched, or reviewer run did not SUCCEED"
+                    "review artifact missing, assignment/purpose mismatch, source artifact invalid/revoked, mismatched, or reviewer run did not SUCCEED"
                 )
             raw_findings = list(row["findings_json"]) if isinstance(row["findings_json"], list) else []
             norm_stored = _normalize_review_findings(raw_findings)
@@ -495,8 +525,74 @@ class PostgresDevStore:
             ).fetchone()
         return _project_dto(dict(row)) if row is not None else None
 
-    # ------------------------------------------------------------------ Review Evidence Artifacts (R2-07 / R3-06)
-    def record_review_artifact(
+    # ------------------------------------------------------------------ Review Assignments & Evidence Artifacts (R2-07 / R3-06 / R4-06)
+    def assign_reviewer(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        project_id: str,
+        cycle_id: str,
+        reviewer_task_id: str,
+        reviewer_run_id: str,
+        reviewer_role: str,
+        target_sha: str,
+        expected_artifact_kind: str = "raw",
+    ) -> str:
+        """Authoritatively assign an independent reviewer Task/Run to a specific Cycle, Role, SHA & Artifact Kind (R4-06)."""
+        if not is_uuid7(reviewer_task_id) or not is_uuid7(reviewer_run_id):
+            raise InvalidEvidence("reviewer_task_id and reviewer_run_id must be uuid7")
+        if reviewer_role not in ("functional", "security", "ui-e2e"):
+            raise InvalidEvidence("invalid reviewer_role")
+        if expected_artifact_kind not in ("raw", "summary"):
+            raise InvalidEvidence("invalid expected_artifact_kind")
+        require_sha(target_sha)
+        asg_id = uuid7()
+        with self._db.tx(tenant=tenant_id) as c:
+            cy = c.execute(
+                "SELECT workspace_id, task_id FROM agent.dev_cycles"
+                " WHERE tenant_id=%s AND id=%s AND project_id=%s AND owner_user_id=%s",
+                (tenant_id, cycle_id, project_id, owner_user_id),
+            ).fetchone()
+            if cy is None:
+                raise ScopeDenied("cycle not found for owner/project")
+            builder_task_id = str(cy["task_id"])
+            if builder_task_id == reviewer_task_id:
+                raise ScopeDenied("SELF_REVIEW_ASSIGNMENT_FORBIDDEN")
+            rev_run = c.execute(
+                "SELECT t.owner_user_id, t.workspace_id"
+                " FROM agent.tasks t JOIN agent.runs r ON r.tenant_id=t.tenant_id AND r.task_id=t.id"
+                " WHERE t.tenant_id=%s AND t.id=%s AND r.id=%s",
+                (tenant_id, reviewer_task_id, reviewer_run_id),
+            ).fetchone()
+            if (
+                rev_run is None
+                or str(rev_run["owner_user_id"]) != owner_user_id
+                or str(rev_run["workspace_id"]) != str(cy["workspace_id"])
+            ):
+                raise ScopeDenied("reviewer task/run not in owner workspace")
+            c.execute(
+                "INSERT INTO agent.dev_review_assignments(tenant_id, id, owner_user_id, project_id, cycle_id,"
+                " builder_task_id, reviewer_task_id, reviewer_run_id, reviewer_role, target_sha,"
+                " expected_artifact_kind, purpose, status)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'independent_code_review','ASSIGNED')",
+                (
+                    tenant_id,
+                    asg_id,
+                    owner_user_id,
+                    project_id,
+                    cycle_id,
+                    builder_task_id,
+                    reviewer_task_id,
+                    reviewer_run_id,
+                    reviewer_role,
+                    target_sha,
+                    expected_artifact_kind,
+                ),
+            )
+        return asg_id
+
+    def record_review_artifact(  # noqa: PLR0912
         self,
         *,
         tenant_id: str,
@@ -508,11 +604,10 @@ class PostgresDevStore:
         source_artifact_id: str,
         evidence_payload: Mapping[str, Any] | bytes,
     ) -> str:
-        """Materialize a verified dev_review_artifacts row strictly from a persisted context_artifacts payload (R3-06).
+        """Materialize a verified dev_review_artifacts row bound to an authoritative Reviewer Assignment & context_artifact (R3-06/R4-06).
 
-        Refuses self-declared hashes without raw payload AND refuses payloads that do not match the reviewer run's
-        persisted `agent.context_artifacts` row (byte_length + content_sha256). Derives `reviewerRole`, `targetSha`,
-        `passed`, and `findings` authoritatively from the verified payload itself.
+        Refuses unassigned reviewer runs, purpose/role/kind mismatches, self-declared hashes without raw payload, and
+        payloads that do not match the reviewer run's persisted `agent.context_artifacts` row (byte_length + sha256).
         """
         if not is_uuid7(source_artifact_id):
             raise InvalidEvidence("source_artifact_id must be a persisted context_artifacts uuid7")
@@ -531,6 +626,13 @@ class PostgresDevStore:
             raise InvalidEvidence("review evidence payload must be a JSON object")
 
         computed_sha = hashlib.sha256(raw_bytes).hexdigest()
+        purpose = str(doc.get("purpose") or "").strip()
+        if purpose != "independent_code_review":
+            raise InvalidEvidence("review artifact payload must declare purpose='independent_code_review'")
+        if doc.get("cycleId") is not None and str(doc["cycleId"]) != cycle_id:
+            raise InvalidEvidence("review artifact payload cycleId mismatch")
+        if doc.get("projectId") is not None and str(doc["projectId"]) != project_id:
+            raise InvalidEvidence("review artifact payload projectId mismatch")
         reviewer_role = str(doc.get("reviewerRole") or "").strip()
         target_sha = str(doc.get("targetSha") or "").strip()
         passed = doc.get("passed")
@@ -561,23 +663,41 @@ class PostgresDevStore:
         )
         art_id = uuid7()
         with self._db.tx(tenant=tenant_id) as c:
+            asg = c.execute(
+                "SELECT id, reviewer_role, target_sha, expected_artifact_kind, purpose, status"
+                " FROM agent.dev_review_assignments"
+                " WHERE tenant_id=%s AND owner_user_id=%s AND project_id=%s AND cycle_id=%s"
+                " AND reviewer_task_id=%s AND reviewer_run_id=%s FOR UPDATE",
+                (tenant_id, owner_user_id, project_id, cycle_id, task_id, run_id),
+            ).fetchone()
+            if (
+                asg is None
+                or str(asg["status"]) not in ("ASSIGNED", "COMPLETED")
+                or str(asg["purpose"]) != "independent_code_review"
+                or str(asg["reviewer_role"]) != reviewer_role
+                or str(asg["target_sha"]) != target_sha
+            ):
+                raise ScopeDenied(
+                    "REVIEWER_ASSIGNMENT_MISMATCH: task/run lacks an active assignment matching cycle, role, purpose, and target SHA"
+                )
             src_art = c.execute(
                 "SELECT * FROM agent.verify_dev_review_source_artifact(%s,%s,%s,%s,%s)",
                 (tenant_id, owner_user_id, task_id, run_id, source_artifact_id),
             ).fetchone()
             if (
                 src_art is None
+                or str(src_art["kind"]) != str(asg["expected_artifact_kind"])
                 or str(src_art["content_sha256"]) != computed_sha
                 or int(src_art["byte_length"]) != len(raw_bytes)
             ):
                 raise ScopeDenied(
-                    "SOURCE_ARTIFACT_MISMATCH: review payload must exactly match reviewer run's context_artifacts entry"
+                    "SOURCE_ARTIFACT_MISMATCH: review payload must exactly match reviewer run's context_artifacts entry and expected kind"
                 )
             c.execute(
                 "INSERT INTO agent.dev_review_artifacts(tenant_id, id, task_id, run_id, owner_user_id,"
-                " project_id, cycle_id, source_artifact_id, reviewer_role, target_sha, evidence_sha256,"
-                " verdict_digest_sha256, passed, findings_json)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " project_id, cycle_id, assignment_id, source_artifact_id, reviewer_role, target_sha,"
+                " evidence_sha256, verdict_digest_sha256, passed, findings_json)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     tenant_id,
                     art_id,
@@ -586,6 +706,7 @@ class PostgresDevStore:
                     owner_user_id,
                     project_id,
                     cycle_id,
+                    asg["id"],
                     source_artifact_id,
                     reviewer_role,
                     target_sha,
@@ -594,6 +715,11 @@ class PostgresDevStore:
                     passed,
                     Jsonb(norm_findings),
                 ),
+            )
+            c.execute(
+                "UPDATE agent.dev_review_assignments SET status='COMPLETED', updated_at=now()"
+                " WHERE tenant_id=%s AND id=%s",
+                (tenant_id, asg["id"]),
             )
         return art_id
 
@@ -768,7 +894,7 @@ class PostgresDevStore:
             ).fetchall()
         return [_design_dto(dict(r)) for r in rows]
 
-    # ------------------------------------------------------------------ Demo Render Artifacts (R3-08)
+    # ------------------------------------------------------------------ Demo Render Artifacts (R3-08 / R4-05)
     def record_demo_render_artifact(
         self,
         *,
@@ -778,9 +904,12 @@ class PostgresDevStore:
         candidate_id: str,
         viewport: str,
         fixture_ref: str,
+        source_artifact_id: str,
         render_bytes: bytes,
     ) -> dict[str, Any]:
-        """Persist a real rendered Demo artifact bound to (cycle, candidate, commit_sha, viewport, fixture_ref) (R3-08)."""
+        """Bind a real persisted raw Demo render artifact in `agent.context_artifacts` to (cycle, candidate, commit, viewport, fixture) (R4-05)."""
+        if not is_uuid7(source_artifact_id):
+            raise InvalidEvidence("sourceArtifactId must be a persisted context_artifacts uuid7")
         if not candidate_id.strip():
             raise InvalidEvidence("candidateId is required")
         if not re.fullmatch(r"[0-9]{2,5}x[0-9]{2,5}(@[a-z0-9_-]{1,16})?", viewport.strip()):
@@ -788,13 +917,14 @@ class PostgresDevStore:
         clean_fix = fixture_ref.strip()
         if not clean_fix or len(clean_fix) > 256:
             raise InvalidEvidence("invalid demo fixtureRef")
-        if not isinstance(render_bytes, (bytes, bytearray)) or not 1 <= len(render_bytes) <= 4_194_304:
-            raise InvalidEvidence("render_bytes must be non-empty bytes <= 4MiB")
+        if not isinstance(render_bytes, (bytes, bytearray)) or not 1 <= len(render_bytes) <= 2_000_000:
+            raise InvalidEvidence("render_bytes must be non-empty bytes <= 2MB matching context_artifacts")
         content_sha = hashlib.sha256(bytes(render_bytes)).hexdigest()
         art_id = uuid7()
         with self._db.tx(tenant=tenant_id) as c:
             cy = c.execute(
-                "SELECT project_id, cycle_json FROM agent.dev_cycles WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
+                "SELECT project_id, task_id, run_id, cycle_json FROM agent.dev_cycles"
+                " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s",
                 (tenant_id, cycle_id, owner_user_id),
             ).fetchone()
             if cy is None:
@@ -805,16 +935,30 @@ class PostgresDevStore:
                 str(raw_commit["commit_sha"]) if isinstance(raw_commit, dict) and raw_commit.get("commit_sha") else ""
             )
             require_sha(commit_sha)
+            # R4-05: Require the exact rendered bytes to already exist encrypted in canonical `agent.context_artifacts`.
+            src_art = c.execute(
+                "SELECT * FROM agent.verify_dev_demo_source_artifact(%s,%s,%s,%s,%s)",
+                (tenant_id, owner_user_id, cy["task_id"], cy["run_id"], source_artifact_id),
+            ).fetchone()
+            if (
+                src_art is None
+                or str(src_art["content_sha256"]) != content_sha
+                or int(src_art["byte_length"]) != len(render_bytes)
+            ):
+                raise ScopeDenied(
+                    "DEMO_SOURCE_ARTIFACT_MISMATCH: render bytes must match persisted raw entry in agent.context_artifacts"
+                )
             row = c.execute(
                 "INSERT INTO agent.dev_demo_artifacts(tenant_id, id, owner_user_id, project_id, cycle_id,"
-                " candidate_id, commit_sha, viewport, fixture_ref, content_sha256, byte_length)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                " source_artifact_id, candidate_id, commit_sha, viewport, fixture_ref, content_sha256, byte_length)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (
                     tenant_id,
                     art_id,
                     owner_user_id,
                     str(cy["project_id"]),
                     cycle_id,
+                    source_artifact_id,
                     candidate_id.strip(),
                     commit_sha,
                     viewport.strip(),
@@ -828,6 +972,7 @@ class PostgresDevStore:
             "id": str(row["id"]),
             "projectId": str(row["project_id"]),
             "cycleId": str(row["cycle_id"]),
+            "sourceArtifactId": str(row["source_artifact_id"]),
             "candidateId": str(row["candidate_id"]),
             "commitSha": str(row["commit_sha"]),
             "viewport": str(row["viewport"]),
@@ -844,6 +989,8 @@ class PostgresDevStore:
         tenant_id: str,
         owner_user_id: str,
         cycle_id: str,
+        task_id: str,
+        run_id: str,
         selected_candidate_id: str,
         commit_sha: str | None,
         cand_fixture: str,
@@ -851,7 +998,7 @@ class PostgresDevStore:
         demo_artifact_ref: str | None,
         demo_artifact_sha256: str | None,
     ) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
-        """Resolve and validate persisted rendered Demo artifact binding without fallback hashing (R3-08)."""
+        """Resolve and validate persisted rendered Demo artifact + backing context_artifacts entry (R3-08 / R4-05)."""
         render_row: dict[str, Any] | None = None
         if demo_render_artifact_id is not None:
             found = c.execute(
@@ -878,8 +1025,15 @@ class PostgresDevStore:
                 raise InvalidEvidence("RENDERED_DEMO_ARTIFACT_REQUIRED: unverified demoArtifactSha256 rejected")
             return None, None, None, None, None, None
 
+        src_art = c.execute(
+            "SELECT * FROM agent.verify_dev_demo_source_artifact(%s,%s,%s,%s,%s)",
+            (tenant_id, owner_user_id, task_id, run_id, render_row["source_artifact_id"]),
+        ).fetchone()
         if (
-            (commit_sha and str(render_row["commit_sha"]) != commit_sha)
+            src_art is None
+            or str(src_art["content_sha256"]) != str(render_row["content_sha256"])
+            or int(src_art["byte_length"]) != int(render_row["byte_length"])
+            or (commit_sha and str(render_row["commit_sha"]) != commit_sha)
             or str(render_row["fixture_ref"]) != cand_fixture
             or (demo_artifact_sha256 is not None and str(render_row["content_sha256"]) != demo_artifact_sha256)
         ):
@@ -888,7 +1042,7 @@ class PostgresDevStore:
         resolved_ref = (
             redact_dev_text(demo_artifact_ref.strip(), limit=256)
             if demo_artifact_ref and demo_artifact_ref.strip()
-            else f"demo-artifact://{resolved_render_id}"
+            else f"context-artifact://{render_row['source_artifact_id']}"
         )
         return (
             resolved_render_id,
@@ -965,6 +1119,8 @@ class PostgresDevStore:
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
                 cycle_id=cycle_id,
+                task_id=str(cy_row["task_id"]),
+                run_id=str(cy_row["run_id"]),
                 selected_candidate_id=selected_candidate_id,
                 commit_sha=commit_sha,
                 cand_fixture=cand_fixture,
@@ -1086,6 +1242,20 @@ class PostgresDevStore:
                     " WHERE tenant_id=%s AND id=%s AND owner_user_id=%s AND cycle_id=%s",
                     (tenant_id, render_id, owner_user_id, cycle_id),
                 ).fetchone()
+                src_art = (
+                    c.execute(
+                        "SELECT * FROM agent.verify_dev_demo_source_artifact(%s,%s,%s,%s,%s)",
+                        (
+                            tenant_id,
+                            owner_user_id,
+                            cy_row["task_id"],
+                            cy_row["run_id"],
+                            render_row["source_artifact_id"],
+                        ),
+                    ).fetchone()
+                    if render_row is not None
+                    else None
+                )
                 matched_cand = next(
                     (
                         x
@@ -1096,6 +1266,9 @@ class PostgresDevStore:
                 )
                 if (
                     render_row is None
+                    or src_art is None
+                    or str(src_art["content_sha256"]) != str(render_row["content_sha256"])
+                    or int(src_art["byte_length"]) != int(render_row["byte_length"])
                     or matched_cand is None
                     or str(render_row["candidate_id"]) != str(cur_row["selected_candidate_id"])
                     or not commit_sha

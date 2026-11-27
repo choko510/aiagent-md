@@ -746,3 +746,68 @@ def test_dev11_pr_guardian_evaluation_and_repair_ceiling() -> None:
         required_checks=("static",),
     )
     assert ev_prot_404.ci_state == "UNKNOWN"
+
+    # R4-07: Strict Commit Status completeness + explicit PASS mergeable_state allowlist + separate merge_readiness!
+    # 1. Incomplete commit statuses (total_count > len(statuses)) -> UNKNOWN (never PASS)
+    ev_st_incomplete = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        commit_status_payload={
+            "state": "success",
+            "total_count": 5,
+            "statuses": [{"context": "legacy/ci", "state": "success"}],
+        },
+        expected_head_sha=sha,
+        required_checks=("static",),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_st_incomplete.ci_state == "UNKNOWN" and ev_st_incomplete.merge_readiness == "MERGEABLE"
+
+    # 2. Aggregate commit status state="failure" triggers FAIL even if statuses array is empty
+    ev_st_agg_fail = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        commit_status_payload={"state": "failure", "total_count": 0, "statuses": []},
+        expected_head_sha=sha,
+        required_checks=("static",),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_st_agg_fail.ci_state == "FAIL" and "commit_status:aggregate" in ev_st_agg_fail.failing_checks
+
+    # 3. GitHub empty commit status default (state="pending", total_count=0, statuses=[]) still allows PASS
+    ev_st_empty_ok = evaluate_pr_checks(
+        pr_payload={"mergeable": True, "mergeable_state": "clean", "head": {"sha": sha}},
+        check_runs_payload={
+            "total_count": 1,
+            "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+        },
+        commit_status_payload={"state": "pending", "total_count": 0, "statuses": []},
+        expected_head_sha=sha,
+        required_checks=("static",),
+        repair_attempts=0,
+        max_repair_attempts=3,
+    )
+    assert ev_st_empty_ok.ci_state == "PASS" and ev_st_empty_ok.merge_readiness == "MERGEABLE"
+
+    # 4. Non-clean mergeable_state ("behind", "draft", "unstable", "future_state") MUST NOT PASS
+    for bad_state, expected_mr in (("behind", "BLOCKED"), ("draft", "BLOCKED"), ("future_state", "UNKNOWN")):
+        ev_bad_ms = evaluate_pr_checks(
+            pr_payload={"mergeable": True, "mergeable_state": bad_state, "head": {"sha": sha}},
+            check_runs_payload={
+                "total_count": 1,
+                "check_runs": [{"name": "static", "status": "completed", "conclusion": "success"}],
+            },
+            expected_head_sha=sha,
+            required_checks=("static",),
+            repair_attempts=0,
+            max_repair_attempts=3,
+        )
+        assert ev_bad_ms.ci_state == "UNKNOWN" and ev_bad_ms.merge_readiness == expected_mr
