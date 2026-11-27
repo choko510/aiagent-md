@@ -166,13 +166,15 @@ asserts that the enabled-catalog surface is under 1% of the full body bytes, and
 
 ## 8. Review hardening (2026-11-14)
 
-Commit `ca224d5` addresses the PR #125 review findings that can be closed without inventing a production review UI
-or Gateway integration:
+Commits `ca224d5`..`c331174` address the PR #125 review findings that can be closed without inventing a production
+review UI or Gateway integration. GitHub Actions run `45956073812` is green on `c331174`; the PostgreSQL integration
+test seeds a real owned Run and exercises migration `0029`, RLS, CAS, receipts/audit and pin persistence:
 
 - Atomic lifecycle transactions: `_receipt` now runs the state mutation, receipt, and audit append in one PostgreSQL
   transaction, serialized per tenant with an advisory lock. The in-memory store snapshots and restores on failure.
 - Run pins require a run authorizer. The API supplies `run_is_owned`, which checks tenant, task owner, and terminal run
-  status; the registry fails closed when no authorizer is configured.
+  status; the PostgreSQL integration test seeds a real owned Run and verifies the pin FK. The registry fails closed
+  when no authorizer is configured.
 - Run pins capture the exact enabled dependency closure (release, content digest, installation, generation, version),
   and enable re-resolves required dependencies before activation.
 - Pinned body loading uses the pin's release, so an update cannot swap the body under a running Run; revocation is
