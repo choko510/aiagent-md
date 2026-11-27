@@ -136,25 +136,34 @@ class MultimodalService:
         digest = hashlib.sha256(data).hexdigest()
         if claimed_sha256 is not None and claimed_sha256 != digest:
             raise MmiError("SOURCE_MISMATCH", "chunk digest mismatch")
-        existing = self.store.get_chunk(principal, upload_id, index)
-        if existing is not None and existing != (len(data), digest):
-            raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
-        if existing is None and session.received_bytes + len(data) > session.expected_bytes:
-            raise MmiError("MAX_INPUT", "upload exceeds declared size")
-        self.blobs.put_chunk(principal.tenant_id, upload_id, index, data)
-        # A retry is idempotent in the store. Never abort the whole staging directory because one
-        # request failed: a lost ACK must remain recoverable.
+        published = False
         try:
-            updated = self.store.append_chunk(
-                principal, upload_id=upload_id, index=index, byte_length=len(data), chunk_sha256=digest
-            )
+            # The DB transaction owns a per-(upload,index) lock for the whole FS-publish -> DB-append
+            # sequence. Cleanup reacquires the same lock, so a concurrent accepted writer cannot be
+            # unlinked between the DB check and the unlink (the previous TOCTOU bug).
+            with self.store.chunk_transaction(principal, upload_id, index) as chunk:
+                existing = chunk.get()
+                if existing is not None and existing != (len(data), digest):
+                    raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
+                if existing is None and session.received_bytes + len(data) > session.expected_bytes:
+                    raise MmiError("MAX_INPUT", "upload exceeds declared size")
+                self.blobs.put_chunk(principal.tenant_id, upload_id, index, data)
+                published = True
+                updated = chunk.append(byte_length=len(data), chunk_sha256=digest)
         except Exception:
             # FS-before-DB is intentional: a DB row must never claim bytes that are not durable.
             # If the DB did not accept this chunk, remove only the exact bytes we published so a
-            # later request with different bytes is not permanently blocked by an orphan. Re-check
-            # the DB first because a concurrent identical writer may have committed the same bytes.
-            if self.store.get_chunk(principal, upload_id, index) is None:
-                self.blobs.delete_chunk(principal.tenant_id, upload_id, index, digest)
+            # later request with different bytes is not permanently blocked by an orphan. The
+            # cleanup transaction holds the same lock while it re-checks and unlinks.
+            if published:
+                try:
+                    with self.store.chunk_transaction(principal, upload_id, index) as chunk:
+                        if chunk.get() is None:
+                            self.blobs.delete_chunk(principal.tenant_id, upload_id, index, digest)
+                except Exception:
+                    # DB unavailable: keep the bytes. An orphan is recoverable; deleting an accepted
+                    # chunk because the confirming read failed is not.
+                    pass
             raise
         return {
             "uploadId": upload_id,
@@ -185,7 +194,7 @@ class MultimodalService:
         if session.received_bytes != session.expected_bytes:
             raise MmiError("MAX_INPUT", "upload is incomplete")
         artifact_id = uuid7()
-        committed = False
+        commit_attempted = False
         stored = self.blobs.finalize(
             principal.tenant_id,
             upload_id,
@@ -205,6 +214,11 @@ class MultimodalService:
                 if self.pipeline is not None
                 else _detect(raw, session, self.limits)
             )
+            # From this point the DB may have committed even if the client loses the ACK. Never
+            # delete the final blob on an exception: an orphan is recoverable, a referenced blob is
+            # not. A duplicate finalizer that loses the race gets the existing artifact and removes
+            # only its own unreferenced final blob.
+            commit_attempted = True
             artifact = self.store.complete_upload(
                 principal,
                 upload_id=upload_id,
@@ -215,16 +229,18 @@ class MultimodalService:
                 byte_length=stored.byte_length,
                 expires_at=_plus(self.config.artifact_ttl_seconds),
             )
-            committed = True
+            if artifact.storage_key != stored.storage_key:
+                self.blobs.delete(stored.storage_key)
             # The artifact row now owns the final blob. Staging is no longer needed, but its
             # cleanup must happen only after this commit; finalize() deliberately retained it.
             self.blobs.cleanup_upload(principal.tenant_id, upload_id)
             artifact = self.store.admit_artifact(principal, artifact.id)
             return _artifact_projection(artifact)
         except Exception:
-            # Before commit, keep staging so the same upload can be finalized again. The final
-            # blob (if rename succeeded) is an uncommitted orphan and can be dropped safely.
-            if not committed:
+            # Before the DB call, keep staging so the same upload can be finalized again. Once the
+            # DB call is attempted, keep the final blob even on exception because COMMIT may have
+            # succeeded and the ACK may have been lost.
+            if not commit_attempted:
                 self.blobs.delete(stored.storage_key)
             raise
 

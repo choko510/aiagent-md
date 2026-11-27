@@ -125,13 +125,13 @@ $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
 ```
 
-結果: `core 35 passed`、`service 13 passed`、`PostgreSQL 4 passed`、`HTTP 3 passed`、`migration 12 passed`（各グループを順に実行）。
+結果: `core 38 passed`、`service 15 passed`、`PostgreSQL 5 passed`、`HTTP 3 passed`、`migration 12 passed`（合計73、各グループを順に実行）。
 
 内訳:
 
-- core 35: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き、金額の境界・通貨競合・桁上限、contextのformula状態投影、formula errorの明示unknown
-- service 13: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復、DB append失敗時の未確定chunk回収、質問entityと行の結合、期限切れrequest deadlineの非parse
-- PostgreSQL 4: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document
+- core 38: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き、金額の境界・通貨競合・桁上限、contextのformula状態投影、formula errorの明示unknown、送料ラベルの非amount化、hidden sheetのunknown化、OCR blockのestimated投影
+- service 15: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復、DB append失敗時の未確定chunk回収、質問entityと行の結合、期限切れrequest deadlineの非parse、chunk slot排他、commit ACK喪失後のblob保持
+- PostgreSQL 5: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document、chunk transactionのadvisory lock排他
 - HTTP 3: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞、256KiB bodyを読む前のproduction gate
 - migration 12: `0029` までの連番・schema version・既存テスト
 
@@ -205,6 +205,22 @@ R2-01〜R2-12とR3-01〜R3-08を再監査し、次のコード変更と回帰試
 - R3-01/R3-06/R3-08: 未解消。独立Parser/Verifier、source epochとTask/Run/workspace結合、実CPU/RSS/FD上限と強制停止は未実装。
 
 追加・実行した回帰試験: XLSX cached formulaの`estimated`/`unverified`、bbox外PDF文字列の非anchor、normalized値の非replay/不一致、スラッシュ日付のreplay、同一chunk同時publishの非上書き、金額境界・通貨競合・裸の価格、contextのformula状態、formula errorの明示unknown、DB append失敗時のchunk回収、entityと行の結合、production body前gate。
+
+### 4.7 第4回レビュー R4 対応（HEAD b509fd2 以降）
+
+R4-01〜R4-12を再監査し、次の限定的な変更と回帰試験を追加した。**部分解消を解消済みと扱わない。**
+
+- R4-01（一部）: chunk slotを`Store.chunk_transaction`で排他し、FS publish→DB append→失敗時cleanupを同一ロック内に置いた。PostgreSQLは`pg_advisory_xact_lock`、in-memoryはper-index RLockを使う。DB append失敗後に別writerが受理済みのchunkをunlinkするTOCTOUを塞いだ。回帰試験はservice 2件、PostgreSQL 1件。
+- R4-02（一部）: DB commitを試行した後に例外が起きてもfinal blobを削除しない。duplicate finalizerが既存artifactを受け取った場合は自分の未参照blobだけを削除する。**finalizeのクロスプロセス排他、orphan GC、commit不明時のDB照合は未実装。**
+- R4-03（一部）: hidden sourceを`unknown`にし、normalized値を消す。`価格: 100円、送料: 500円`では送料をamountにしない。**金額のrole/conditionを型付きで表す完全な意味解決は未実装。**
+- R4-04（一部）: OCR blockとhidden block/cellをContextで`estimated`/`unknown`、`ocr_unverified`/`hidden_source`、observation付きで投影する。**全consumerが状態を保持する保証は未検証。**
+- R4-05（一部）: 質問のentityは全term一致かつASCII単語境界で照合する。`apple red`はapple行で回答せず、`pineapple`はappleに一致しない。**比較・複数行join・意味的同義語は未実装。**
+- R4-06: 未解消。Context chunkの取得上限はあるが、consumerごとのcoverage/budgetのend-to-end保証はない。
+- R4-07: 未解消。独立Parser/Verifier、VM/jail、network/UID/capability分離はない。
+- R4-08（一部）: production gateはbody読取前に503、request deadlineはparse前に拒否する。**development/testの同期I/Oと実スレッド停止は未解消。**
+- R4-09/R4-10/R4-11/R4-12: 未解消。revoke/source epochの厳密な直列化、FS ACL/symlink/所有権、Runtime/Gateway回答、Task/Run/workspace RLS・at-rest暗号化・restoreは未実装。
+
+`INTEGRATED_VERIFIED=0`。上記はローカルunit/HTTP/PostgreSQLの範囲を出ない。
 
 ## 5. 状態の正直な区分
 

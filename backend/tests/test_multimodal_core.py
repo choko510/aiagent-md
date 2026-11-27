@@ -468,6 +468,15 @@ def test_conflicting_currency_evidence_is_not_normalized_to_a_guess() -> None:
     assert candidate.normalized is None
 
 
+def test_shipping_label_is_not_the_price_amount() -> None:
+    data = 'label,value\n"価格: 100円","送料: 500円"\n'.encode()
+    doc = CsvParser().parse(make_input("csv", data))
+    extraction = extract_candidates(doc, ["amount"])
+    amounts = [c for c in extraction.candidates if c.field_key == "amount"]
+    assert [c.raw_text for c in amounts] == ["100円"]
+    assert amounts[0].value_state == "observed"
+
+
 def test_bare_price_without_currency_evidence_is_unknown() -> None:
     data = b"price\n100\n"
     doc = CsvParser().parse(make_input("csv", data))
@@ -502,6 +511,50 @@ def test_context_projects_formula_state_and_cell_locators() -> None:
     assert b2["valueState"] == "estimated"
     assert b2["formula"] == "1+1"
     assert b2["locator"]["cellA1"] == "B2"
+
+
+def test_hidden_sheet_price_is_unknown_and_flagged() -> None:
+    from aiagent_multimodal.context import chunks_for
+
+    data = xlsx_bytes([["Item", "Price"], ["A", "100"]], hidden_sheet=True)
+    doc = XlsxParser().parse(make_input("xlsx", data))
+    extraction = extract_candidates(doc, ["amount"])
+    amount = next(c for c in extraction.candidates if c.field_key == "amount")
+    assert amount.value_state == "unknown"
+    assert "hidden_source" in amount.conditions
+    row = next(chunk for chunk in chunks_for(doc) if chunk.kind == "table_row" and "A" in chunk.text)
+    assert row.value_state == "unknown"
+    assert "hidden_source" in row.flags
+
+
+def test_ocr_block_context_is_estimated_with_confidence() -> None:
+    from aiagent_multimodal.context import ContextChunk, _append_block
+    from aiagent_multimodal.parsers.base import TextBlock
+
+    locator = MmiSourceLocator(
+        kind="image",
+        artifact_id="a",
+        source_sha256="0" * 64,
+        source_width_px=100,
+        source_height_px=50,
+        normalized_bbox=(0.1, 0.1, 0.5, 0.2),
+        transform_id="t",
+        layer="ocr",
+    )
+    block = TextBlock(
+        block_id="ocr:1",
+        kind="paragraph",
+        text="100",
+        locator=locator,
+        recognition_confidence_raw=42.0,
+        extraction_method="ocr",
+    )
+    out: list[ContextChunk] = []
+    _append_block(out, block)
+    assert out[0].value_state == "estimated"
+    assert "ocr_unverified" in out[0].flags
+    assert "[estimated]" in out[0].text
+    assert out[0].observations[0]["recognitionConfidenceRaw"] == 42.0
 
 
 def test_formula_error_cell_is_an_explicit_unknown_candidate() -> None:

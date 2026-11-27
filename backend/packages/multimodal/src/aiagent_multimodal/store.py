@@ -10,6 +10,8 @@ a stale worker cannot overwrite a newer attempt.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
@@ -78,6 +80,14 @@ class JobRecord:
     expires_at: str
 
 
+class ChunkTxn(Protocol):
+    """One serialized chunk slot. FS publish, DB append and cleanup happen under this lock."""
+
+    def get(self) -> tuple[int, str] | None: ...
+
+    def append(self, *, byte_length: int, chunk_sha256: str) -> UploadSession: ...
+
+
 class Store(Protocol):
     def create_upload(
         self,
@@ -95,6 +105,10 @@ class Store(Protocol):
     def get_upload(self, principal: Principal, upload_id: str) -> UploadSession | None: ...
 
     def get_chunk(self, principal: Principal, upload_id: str, index: int) -> tuple[int, str] | None: ...
+
+    def chunk_transaction(
+        self, principal: Principal, upload_id: str, index: int
+    ) -> AbstractContextManager[ChunkTxn]: ...
 
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
@@ -177,6 +191,7 @@ class InMemoryStore:
         self._lock = threading.RLock()
         self._uploads: dict[tuple[str, str], UploadSession] = {}
         self._chunks: dict[tuple[str, str], list[tuple[int, int, str]]] = {}
+        self._chunk_locks: dict[tuple[str, str, int], threading.RLock] = {}
         self._artifacts: dict[tuple[str, str], ArtifactRecord] = {}
         self._jobs: dict[tuple[str, str], JobRecord] = {}
 
@@ -240,12 +255,20 @@ class InMemoryStore:
                     return chunk[1], chunk[2]
             return None
 
+    @contextmanager
+    def chunk_transaction(self, principal: Principal, upload_id: str, index: int) -> Iterator[ChunkTxn]:
+        key = (principal.tenant_id, upload_id, index)
+        with self._lock:
+            lock = self._chunk_locks.setdefault(key, threading.RLock())
+        with lock:
+            yield _MemoryChunkTxn(self, principal, upload_id, index)
+
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
     ) -> UploadSession:
         with self._lock:
             item = self.get_upload(principal, upload_id)
-            if item is None or item.state != "open":
+            if item is None or item.state != "open" or item.expires_at < _now():
                 raise MmiError("POLICY_DENIED", "upload is not open")
             chunks = self._chunks[(principal.tenant_id, upload_id)]
             existing = next((c for c in chunks if c[0] == index), None)
@@ -582,6 +605,90 @@ class InMemoryStore:
             return cancelled
 
 
+class _MemoryChunkTxn:
+    def __init__(self, store: InMemoryStore, principal: Principal, upload_id: str, index: int) -> None:
+        self._store = store
+        self._principal = principal
+        self._upload_id = upload_id
+        self._index = index
+
+    def get(self) -> tuple[int, str] | None:
+        return self._store.get_chunk(self._principal, self._upload_id, self._index)
+
+    def append(self, *, byte_length: int, chunk_sha256: str) -> UploadSession:
+        return self._store.append_chunk(
+            self._principal,
+            upload_id=self._upload_id,
+            index=self._index,
+            byte_length=byte_length,
+            chunk_sha256=chunk_sha256,
+        )
+
+
+def _append_chunk_row(
+    c: Any, principal: Principal, upload_id: str, index: int, byte_length: int, chunk_sha256: str
+) -> UploadSession:
+    row = c.execute(
+        "SELECT * FROM agent.mmi_upload_sessions WHERE tenant_id=%s AND id=%s AND owner_user_id=%s"
+        " AND expires_at > now() FOR UPDATE",
+        (principal.tenant_id, upload_id, principal.owner_user_id),
+    ).fetchone()
+    if row is None or row["state"] != "open":
+        raise MmiError("POLICY_DENIED", "upload is not open")
+    existing = c.execute(
+        "SELECT byte_length, chunk_sha256 FROM agent.mmi_upload_chunks"
+        " WHERE tenant_id=%s AND upload_id=%s AND chunk_index=%s",
+        (principal.tenant_id, upload_id, index),
+    ).fetchone()
+    if existing is not None:
+        if int(existing["byte_length"]) != byte_length or str(existing["chunk_sha256"]) != chunk_sha256:
+            raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
+        count = c.execute(
+            "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
+            (principal.tenant_id, upload_id),
+        ).fetchone()["n"]
+        return _upload({**row, "chunk_count": count})
+    count = c.execute(
+        "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
+        (principal.tenant_id, upload_id),
+    ).fetchone()["n"]
+    if index != count:
+        raise MmiError("POLICY_DENIED", "chunks must be sent in order")
+    if row["received_bytes"] + byte_length > row["expected_bytes"]:
+        raise MmiError("MAX_INPUT", "upload exceeds declared size")
+    c.execute(
+        "INSERT INTO agent.mmi_upload_chunks(tenant_id,upload_id,chunk_index,byte_length,"
+        "chunk_sha256) VALUES (%s,%s,%s,%s,%s)",
+        (principal.tenant_id, upload_id, index, byte_length, chunk_sha256),
+    )
+    row = c.execute(
+        "UPDATE agent.mmi_upload_sessions SET received_bytes=received_bytes+%s WHERE"
+        " tenant_id=%s AND id=%s RETURNING *, %s AS chunk_count",
+        (byte_length, principal.tenant_id, upload_id, count + 1),
+    ).fetchone()
+    return _upload(row)
+
+
+class _PgChunkTxn:
+    def __init__(self, c: Any, principal: Principal, upload_id: str, index: int) -> None:
+        self._c = c
+        self._principal = principal
+        self._upload_id = upload_id
+        self._index = index
+
+    def get(self) -> tuple[int, str] | None:
+        row = self._c.execute(
+            "SELECT c.byte_length, c.chunk_sha256 FROM agent.mmi_upload_chunks c"
+            " JOIN agent.mmi_upload_sessions s ON s.tenant_id=c.tenant_id AND s.id=c.upload_id"
+            " WHERE c.tenant_id=%s AND c.upload_id=%s AND c.chunk_index=%s AND s.owner_user_id=%s",
+            (self._principal.tenant_id, self._upload_id, self._index, self._principal.owner_user_id),
+        ).fetchone()
+        return (int(row["byte_length"]), str(row["chunk_sha256"])) if row else None
+
+    def append(self, *, byte_length: int, chunk_sha256: str) -> UploadSession:
+        return _append_chunk_row(self._c, self._principal, self._upload_id, self._index, byte_length, chunk_sha256)
+
+
 class PostgresStore:
     """PostgreSQL metadata store. Raw bytes stay in the quarantine blob store."""
 
@@ -662,48 +769,18 @@ class PostgresStore:
         )
         return (int(row["byte_length"]), str(row["chunk_sha256"])) if row else None
 
+    @contextmanager
+    def chunk_transaction(self, principal: Principal, upload_id: str, index: int) -> Iterator[ChunkTxn]:
+        key = f"{principal.tenant_id}:{upload_id}:{index}"
+        with self.db.tx(principal.tenant_id) as c:
+            c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+            yield _PgChunkTxn(c, principal, upload_id, index)
+
     def append_chunk(
         self, principal: Principal, *, upload_id: str, index: int, byte_length: int, chunk_sha256: str
     ) -> UploadSession:
         with self.db.tx(principal.tenant_id) as c:
-            row = c.execute(
-                "SELECT * FROM agent.mmi_upload_sessions WHERE tenant_id=%s AND id=%s AND owner_user_id=%s FOR UPDATE",
-                (principal.tenant_id, upload_id, principal.owner_user_id),
-            ).fetchone()
-            if row is None or row["state"] != "open":
-                raise MmiError("POLICY_DENIED", "upload is not open")
-            existing = c.execute(
-                "SELECT byte_length, chunk_sha256 FROM agent.mmi_upload_chunks"
-                " WHERE tenant_id=%s AND upload_id=%s AND chunk_index=%s",
-                (principal.tenant_id, upload_id, index),
-            ).fetchone()
-            if existing is not None:
-                if int(existing["byte_length"]) != byte_length or str(existing["chunk_sha256"]) != chunk_sha256:
-                    raise MmiError("CHUNK_CONFLICT", "chunk replay differs from the accepted chunk")
-                count = c.execute(
-                    "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
-                    (principal.tenant_id, upload_id),
-                ).fetchone()["n"]
-                return _upload({**row, "chunk_count": count})
-            count = c.execute(
-                "SELECT count(*) AS n FROM agent.mmi_upload_chunks WHERE tenant_id=%s AND upload_id=%s",
-                (principal.tenant_id, upload_id),
-            ).fetchone()["n"]
-            if index != count:
-                raise MmiError("POLICY_DENIED", "chunks must be sent in order")
-            if row["received_bytes"] + byte_length > row["expected_bytes"]:
-                raise MmiError("MAX_INPUT", "upload exceeds declared size")
-            c.execute(
-                "INSERT INTO agent.mmi_upload_chunks(tenant_id,upload_id,chunk_index,byte_length,"
-                "chunk_sha256) VALUES (%s,%s,%s,%s,%s)",
-                (principal.tenant_id, upload_id, index, byte_length, chunk_sha256),
-            )
-            row = c.execute(
-                "UPDATE agent.mmi_upload_sessions SET received_bytes=received_bytes+%s WHERE"
-                " tenant_id=%s AND id=%s RETURNING *, %s AS chunk_count",
-                (byte_length, principal.tenant_id, upload_id, count + 1),
-            ).fetchone()
-            return _upload(row)
+            return _append_chunk_row(c, principal, upload_id, index, byte_length, chunk_sha256)
 
     def complete_upload(
         self,

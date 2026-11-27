@@ -60,13 +60,18 @@ def chunks_for(document: Document) -> list[ContextChunk]:
             cells = sorted(by_row[row], key=lambda c: c.column)
             values: list[str] = []
             observations: list[dict[str, Any]] = []
-            states = {c.value_state for c in cells}
+            states: set[str] = set()
             flags: set[str] = set()
             for cell in cells:
+                hidden = cell.hidden or cell.locator.hidden_state not in {None, "visible"}
+                cell_state = "unknown" if hidden else cell.value_state
+                states.add(cell_state)
                 marker = ""
-                if cell.value_state != "observed":
-                    marker += f" [{cell.value_state}]"
-                    flags.add(f"value_{cell.value_state}")
+                if cell_state != "observed":
+                    marker += f" [{cell_state}]"
+                    flags.add(f"value_{cell_state}")
+                if hidden:
+                    flags.add("hidden_source")
                 if cell.formula:
                     marker += " [formula]"
                     flags.add("formula_not_evaluated")
@@ -82,7 +87,7 @@ def chunks_for(document: Document) -> list[ContextChunk]:
                         "column": cell.column,
                         "a1": cell.a1,
                         "text": cell.text,
-                        "valueState": cell.value_state,
+                        "valueState": cell_state,
                         "formula": cell.formula,
                         "cachedError": cell.cached_error,
                         "hidden": cell.hidden,
@@ -114,9 +119,39 @@ def _append_block(out: list[ContextChunk], block: TextBlock) -> None:
     text = block.text.strip()
     if not text:
         return
+    hidden = bool(block.locator.hidden_state and block.locator.hidden_state != "visible")
+    if hidden:
+        state = "unknown"
+    elif block.extraction_method == "ocr" or "estimated" in block.flags:
+        state = "estimated"
+    else:
+        state = "observed"
+    flags = set(block.flags)
+    if hidden:
+        flags.add("hidden_source")
+    if block.extraction_method == "ocr":
+        flags.add("ocr_unverified")
+    marker = " [estimated]" if state == "estimated" else (" [hidden]" if state == "unknown" else "")
+    observation = {
+        "valueState": state,
+        "extractionMethod": block.extraction_method,
+        "recognitionConfidenceRaw": block.recognition_confidence_raw,
+        "flags": sorted(flags),
+        "locator": block.locator.to_dict(),
+    }
     parts = [text[i : i + _MAX_CHUNK_CHARS] for i in range(0, len(text), _MAX_CHUNK_CHARS)]
     for index, part in enumerate(parts):
-        out.append(ContextChunk(f"block:{block.block_id}:{index}", part, block.locator, block.kind))
+        out.append(
+            ContextChunk(
+                f"block:{block.block_id}:{index}",
+                f"{part}{marker}",
+                block.locator,
+                block.kind,
+                value_state=state,
+                flags=tuple(sorted(flags)),
+                observations=(observation,),
+            )
+        )
 
 
 def retrieve(document: Document, query: str, *, limit: int = 8, max_chars: int = 12_000) -> list[ContextChunk]:
@@ -157,28 +192,39 @@ def retrieve(document: Document, query: str, *, limit: int = 8, max_chars: int =
 _QUESTION_STOPWORDS: Final = frozenset(
     {
         "a",
+        "about",
         "amount",
         "an",
+        "and",
         "are",
         "cost",
         "count",
         "date",
         "do",
         "does",
+        "for",
+        "from",
         "how",
         "is",
         "it",
         "much",
+        "item",
+        "me",
         "of",
+        "or",
         "please",
+        "product",
         "price",
         "quantity",
+        "show",
+        "sku",
         "that",
         "the",
         "this",
         "total",
         "value",
         "was",
+        "with",
         "what",
         "when",
         "which",
@@ -190,6 +236,12 @@ _QUESTION_STOPWORDS: Final = frozenset(
         "日付",
     }
 )
+
+
+def _entity_present(term: str, text: str) -> bool:
+    if term.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+    return term in text
 
 
 def _candidate_context(candidate: MmiCandidate, chunks: Sequence[ContextChunk]) -> str:
@@ -245,7 +297,9 @@ def grounded_answer(
     if document is not None and entity_terms:
         chunks = chunks_for(document)
         selected = [
-            c for c in selected if any(term in _candidate_context(c, chunks).casefold() for term in entity_terms)
+            c
+            for c in selected
+            if all(_entity_present(term, _candidate_context(c, chunks).casefold()) for term in entity_terms)
         ]
     selected = selected[:limit]
     if not selected:

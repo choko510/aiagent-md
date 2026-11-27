@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 import uuid
 
 import pytest
@@ -161,6 +163,35 @@ def test_postgres_chunk_replay_and_conflict(pg, tenant) -> None:
         store.append_chunk(principal, upload_id=upload_id, index=0, byte_length=4, chunk_sha256="b" * 64)
     assert conflict.value.code == "CHUNK_CONFLICT"
     assert store.get_upload(principal, upload_id).received_bytes == 4
+
+
+def test_postgres_chunk_transaction_serializes_writers(pg, tenant) -> None:
+    store = PostgresStore(pg.db("api", max_size=4))
+    principal = _principal(tenant)
+    upload_id = _upload(store, principal, key="lock")
+    entered = threading.Event()
+    failure: list[BaseException] = []
+
+    def second_writer() -> None:
+        entered.set()
+        try:
+            with store.chunk_transaction(principal, upload_id, 0) as chunk:
+                chunk.append(byte_length=4, chunk_sha256="a" * 64)
+        except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
+            failure.append(exc)
+
+    with store.chunk_transaction(principal, upload_id, 0) as chunk:
+        assert chunk.get() is None
+        writer = threading.Thread(target=second_writer)
+        writer.start()
+        assert entered.wait(2)
+        time.sleep(0.2)
+        assert writer.is_alive()
+        assert store.get_chunk(principal, upload_id, 0) is None
+    writer.join(5)
+    assert not writer.is_alive()
+    assert failure == []
+    assert store.get_chunk(principal, upload_id, 0) == (4, "a" * 64)
 
 
 def test_postgres_expired_lease_and_revocation_fence(pg, tenant) -> None:

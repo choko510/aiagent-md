@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -105,6 +107,10 @@ def test_answer_binds_an_entity_to_its_own_row(service: MultimodalService) -> No
     missing = service.ask(principal, artifact_id, "What is the price of orange?")
     assert missing["status"] == "unknown"
     assert missing["citations"] == []
+    # Every entity term must be in the row: an apple row does not answer a red-apple question.
+    assert service.ask(principal, artifact_id, "What is the price of apple red?")["status"] == "unknown"
+    # Whole-token matching: apple is not a substring of pineapple.
+    assert service.ask(principal, artifact_id, "What is the price of pineapple?")["status"] == "unknown"
 
 
 def test_chunk_replay_is_idempotent_and_conflicts_survive(service: MultimodalService) -> None:
@@ -160,6 +166,80 @@ def test_failed_chunk_db_append_does_not_leave_a_blocking_blob(
     monkeypatch.undo()
     retried = service.put_chunk(principal, upload_id, 0, b"bbbb", hashlib.sha256(b"bbbb").hexdigest())
     assert retried["receivedBytes"] == 4
+
+
+def test_chunk_publish_and_cleanup_are_serialized(service: MultimodalService) -> None:
+    principal = _principal()
+    data = b"aaaa"
+    digest = hashlib.sha256(data).hexdigest()
+    started = service.begin_upload(
+        principal,
+        original_filename="race.csv",
+        declared_media_type="text/csv",
+        expected_bytes=len(data),
+        content_sha256=digest,
+        idempotency_key="race",
+    )
+    upload_id = started["uploadId"]
+    entered = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def retry_same_bytes() -> None:
+        entered.set()
+        outcome["value"] = service.put_chunk(principal, upload_id, 0, data, digest)
+
+    with service.store.chunk_transaction(principal, upload_id, 0) as chunk:
+        assert chunk.get() is None
+        service.blobs.put_chunk(principal.tenant_id, upload_id, 0, data)
+        writer = threading.Thread(target=retry_same_bytes)
+        writer.start()
+        assert entered.wait(2)
+        time.sleep(0.1)
+        # The retry must not append while the first writer still owns the slot. If it did,
+        # cleanup after the first writer's failure could unlink an accepted chunk.
+        assert writer.is_alive()
+        assert service.store.get_chunk(principal, upload_id, 0) is None
+    writer.join(5)
+    assert not writer.is_alive()
+    assert outcome.get("value") is not None
+    assert service.store.get_chunk(principal, upload_id, 0) == (len(data), digest)
+    part = service.blobs._stage / principal.tenant_id / upload_id / "00000.part"
+    assert part.read_bytes() == data
+
+
+def test_commit_then_lost_ack_never_deletes_the_referenced_blob(
+    service: MultimodalService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = _principal()
+    data = b"a,b\n1,2\n"
+    digest = hashlib.sha256(data).hexdigest()
+    started = service.begin_upload(
+        principal,
+        original_filename="ack.csv",
+        declared_media_type="text/csv",
+        expected_bytes=len(data),
+        content_sha256=digest,
+        idempotency_key="ack",
+    )
+    upload_id = started["uploadId"]
+    service.put_chunk(principal, upload_id, 0, data, digest)
+    original = service.store.complete_upload
+
+    def commit_then_raise(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("connection lost after commit")
+
+    monkeypatch.setattr(service.store, "complete_upload", commit_then_raise)
+    with pytest.raises(RuntimeError):
+        service.complete_upload(principal, upload_id)
+    monkeypatch.undo()
+    session = service.store.get_upload(principal, upload_id)
+    assert session is not None and session.state == "completed" and session.artifact_id
+    artifact = service.store.get_artifact(principal, session.artifact_id)
+    assert artifact is not None
+    assert service.blobs.read(artifact.storage_key, artifact.content_sha256, artifact.byte_length) == data
+    repaired = service.complete_upload(principal, upload_id)
+    assert repaired["quarantineState"] == "admitted"
 
 
 def test_complete_retry_after_db_failure_keeps_staging(

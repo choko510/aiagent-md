@@ -204,13 +204,16 @@ def _sources(document: Document) -> tuple[list[TextSource], bool]:
     truncated = False
     for block in document.blocks():
         if block.text:
+            hidden = bool(block.locator.hidden_state and block.locator.hidden_state != "visible")
             out.append(
                 TextSource(
                     text=block.text,
                     locator=block.locator,
                     method=block.extraction_method,
                     confidence=block.recognition_confidence_raw,
-                    hidden=bool(block.locator.hidden_state and block.locator.hidden_state != "visible"),
+                    hidden=hidden,
+                    value_state="unknown" if hidden else "observed",
+                    flags=block.flags,
                 )
             )
     for table in document.tables():
@@ -230,7 +233,7 @@ def _sources(document: Document) -> tuple[list[TextSource], bool]:
                         locator=cell.locator,
                         method=_cell_method(document.format),
                         hidden=hidden,
-                        value_state=cell.value_state,
+                        value_state="unknown" if hidden else cell.value_state,
                         formula=cell.formula,
                         cached_error=cell.cached_error,
                         flags=cell.flags,
@@ -258,6 +261,9 @@ _MONEY_HEADERS: Final = frozenset(
     {"price", "amount", "total", "cost", "unit price", "subtotal", "価格", "金額", "料金", "単価", "小計", "合計"}
 )
 _MONEY_LABEL: Final = re.compile(r"(?:price|amount|total|cost|価格|金額|料金|単価|合計)\s*[:：]", re.IGNORECASE)
+_NON_PRICE_LABEL: Final = re.compile(
+    r"(?:送料|手数料|消費税|税|割引|値引|ポイント|shipping|tax|discount|fee|handling)\s*[:：]", re.IGNORECASE
+)
 
 
 def _money_matches(source: TextSource, locale: str | None) -> list[tuple[str, MoneyParse]]:
@@ -277,12 +283,19 @@ def _money_matches(source: TextSource, locale: str | None) -> list[tuple[str, Mo
         if not raw or not any(ch.isdigit() for ch in raw):
             continue
         start = match.start() + len(matched) - len(matched.lstrip())
-        end = match.end() - len(matched) + len(raw)
+        end = start + len(raw)
         before = text[start - 1] if start else ""
         after = text[end] if end < len(text) else ""
         if before.isalnum() or (before and before in "_,."):
             continue
         if after.isalnum() or (after and after in "_%,./"):
+            continue
+        # A non-price label closer to this amount than any price label marks shipping/tax/fee,
+        # not the price. `価格: 100円、送料: 500円` must not report both as amount.
+        prefix = text[:start]
+        last_price = max((m.start() for m in _MONEY_LABEL.finditer(prefix)), default=-1)
+        last_other = max((m.start() for m in _NON_PRICE_LABEL.finditer(prefix)), default=-1)
+        if last_other > last_price:
             continue
         out.append((raw, parse_money(raw, locale=locale, near_text=near_text)))
     return out
@@ -456,6 +469,10 @@ def _build(
     # formula value stays estimated; an invalid/error cell stays unknown.
     if source.value_state != "observed" and value_state in {"observed", "derived"}:
         value_state = source.value_state
+    if value_state == "unknown":
+        # An unknown/hidden/formula-error value must not smuggle a normalized amount that a
+        # consumer could mistake for an observed fact.
+        normalized = None
     return MmiCandidate(
         field_key=field,
         raw_text=raw,
