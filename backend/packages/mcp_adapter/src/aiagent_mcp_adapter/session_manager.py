@@ -9,10 +9,9 @@ and call single-flight are enforced by their own locks instead.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
 
 from .config import AdapterLimits, ProviderConfig, require_enabled
 from .credentials import CredentialBroker
@@ -46,9 +45,13 @@ class SessionManager:
         self,
         provider: ProviderConfig,
         *,
-        on_list_changed: Any,
+        on_list_changed: Callable[[], Awaitable[None] | None],
         run_id: str | None = None,
         permit: str | None = None,
+        effect_tool: str | None = None,
+        effect_arguments_digest: str | None = None,
+        before_effect_send: Callable[[], Awaitable[None]] | None = None,
+        expected_credential_version: int | None = None,
     ) -> AsyncIterator[SdkSession]:
         require_enabled()
         if not provider.enabled:
@@ -56,8 +59,19 @@ class SessionManager:
         if provider.provider_id in self._revoked:
             raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
         credential: Credential | None = await self.credentials.resolve(provider, run_id=run_id)
+        # Re-check after the broker await: a revoke/rotate may have happened while waiting.
+        if provider.provider_id in self._revoked:
+            raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
+        if not provider.enabled:
+            raise McpError(ErrorCode.ADAPTER_DISABLED, "provider_disabled")
         if provider.auth_mode != "none" and credential is None:
             raise McpError(ErrorCode.CREDENTIAL_UNAVAILABLE, "credential_required")
+        if (
+            credential is not None
+            and expected_credential_version is not None
+            and credential.version != expected_credential_version
+        ):
+            raise McpError(ErrorCode.CREDENTIAL_STALE, "credential_version_mismatch")
         async with self._semaphore:
             self._active += 1
             try:
@@ -67,6 +81,9 @@ class SessionManager:
                     on_list_changed=on_list_changed,
                     limits=self.limits,
                     permit=permit,
+                    effect_tool=effect_tool,
+                    effect_arguments_digest=effect_arguments_digest,
+                    before_effect_send=before_effect_send,
                 ) as session:
                     yield session
             finally:

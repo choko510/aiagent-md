@@ -33,7 +33,7 @@ jobs:
         run: uv run python tools/gen_contracts.py --check
       - run: uv run ruff check . ../deploy/kvm
       - run: uv run ruff format --check . ../deploy/kvm
-      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src packages/browser/src packages/context/src packages/memory/src packages/development/src packages/automation/src ../deploy/kvm
+      - run: uv run mypy packages/domain/src packages/core/src packages/gateways/src packages/sentinel/src packages/api/src packages/sandbox/src packages/runtime/src packages/browser/src packages/context/src packages/memory/src packages/development/src packages/automation/src packages/mcp_adapter/src ../deploy/kvm
 
   integration:
     name: integration (py${{ matrix.python }})

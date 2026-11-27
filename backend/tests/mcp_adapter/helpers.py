@@ -32,6 +32,7 @@ def provider(**overrides: Any) -> ProviderConfig:
         "enabled": True,
         "auth_mode": "none",
         "allowed_tools": ("echo",),
+        "policy_revision": 2,
     }
     data.update(overrides)
     return ProviderConfig(**data)
@@ -86,7 +87,7 @@ def snapshot(*entries: ToolEntry, **overrides: Any):
         policy_revision=overrides.pop("policy_revision", first.policy_revision),
         credential_version=first.credential_version,
         protocol_revision=overrides.pop("protocol_revision", "2025-11-25"),
-        endpoint_fingerprint=overrides.pop("endpoint_fingerprint", "fp"),
+        endpoint_fingerprint=overrides.pop("endpoint_fingerprint", provider().endpoint_fingerprint),
         entries=list(entries),
         ttl_s=overrides.pop("ttl_s", 600.0),
         **overrides,

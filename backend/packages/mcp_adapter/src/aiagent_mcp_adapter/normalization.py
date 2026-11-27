@@ -20,6 +20,7 @@ from .errors import ErrorCode, McpError
 from .schema_validation import CompiledSchema, compile_schema, validate_output
 
 _CONTROL_ALLOWED = {"\n": "\n", "\r": "\r", "\t": "\t"}
+_MAX_CONTENT_BLOCKS = 512
 
 
 def _clean_text(value: str, limit: int) -> tuple[str, bool]:
@@ -56,6 +57,8 @@ def normalize_result(
         blocks_raw = []
     if not isinstance(blocks_raw, list):
         raise McpError(ErrorCode.RESULT_UNSUPPORTED, "content_not_list")
+    if len(blocks_raw) > _MAX_CONTENT_BLOCKS:
+        raise McpError(ErrorCode.RESULT_TRUNCATED, "content_block_limit")
     structured = raw.get("structuredContent")
     if structured is not None:
         if not isinstance(structured, dict):
@@ -184,20 +187,25 @@ def normalize_result(
 
     if unsupported:
         notes.append(f"unsupported_blocks:{unsupported}")
-    if not blocks:
+    if not blocks and structured is None:
         return NormalizedResult(
             status="UNSUPPORTED",
             structured=structured,
             notes=tuple(dict.fromkeys(notes)),
         )
-    status = "TOOL_ERROR" if bool(raw.get("isError")) else "OK"
+    if bool(raw.get("isError")):
+        status = "TOOL_ERROR"
+    elif unsupported:
+        status = "UNSUPPORTED"
+    else:
+        status = "OK"
     joined = "\n".join(text_parts)
     return NormalizedResult(
         status=status,  # type: ignore[arg-type]
         blocks=tuple(blocks),
         text=joined,
         structured=structured,
-        truncated=truncated_any,
+        truncated=truncated_any or bool(unsupported),
         notes=tuple(dict.fromkeys(notes)),
     )
 

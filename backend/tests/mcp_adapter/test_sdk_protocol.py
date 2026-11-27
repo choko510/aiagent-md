@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import pytest
 import uvicorn
+from aiagent_mcp_adapter.canonical import digest
 from aiagent_mcp_adapter.config import AdapterLimits, ProviderConfig
 from aiagent_mcp_adapter.egress import ForwardProxyEgress
 from aiagent_mcp_adapter.errors import ErrorCode, McpError
@@ -182,8 +183,12 @@ async def running_server(*, paginate: bool = True):
 
 
 class FakeIssuer:
-    async def issue(self, **_: Any) -> str:
-        return "permit-e2e"
+    def __init__(self) -> None:
+        self.purposes: list[str] = []
+
+    async def issue(self, *, purpose: str, **_: Any) -> str:
+        self.purposes.append(purpose)
+        return f"control-{len(self.purposes)}"
 
 
 class FakeBroker:
@@ -210,13 +215,14 @@ def make_provider(port: int, *, auth: bool = False) -> ProviderConfig:
 
 
 def make_transport(proxy_port: int, origin: str, *, max_bytes: int = 1024 * 1024):
+    issuer = FakeIssuer()
     egress = ForwardProxyEgress(
         f"http://127.0.0.1:{proxy_port}",
-        permit_issuer=FakeIssuer(),
+        permit_issuer=issuer,
         allowed_origins=frozenset({origin}),
         allow_loopback=True,
     )
-    return SdkStreamableHttpTransport(egress, permit_issuer=FakeIssuer()), egress
+    return SdkStreamableHttpTransport(egress, permit_issuer=issuer), egress
 
 
 @pytest.fixture(autouse=True)
@@ -243,13 +249,39 @@ async def test_initialize_paginated_list_and_call(monkeypatch: pytest.MonkeyPatc
                 assert first.next_cursor == "page-2"
                 second = await session.list_page("page-2", timeout_s=5.0)
                 assert [t["name"] for t in second.tools] == ["other"]
+            async with transport.open(
+                provider=provider,
+                credential=None,
+                on_list_changed=lambda: None,
+                limits=AdapterLimits(),
+                permit="gateway-admitted-permit",
+                effect_tool="echo",
+                effect_arguments_digest=digest({"text": "hello"}),
+            ) as session:
                 raw = await session.call_tool("echo", {"text": "hello"}, timeout_s=5.0)
                 assert raw["content"][0]["text"] == "echo:hello"
                 assert raw["structuredContent"] == {"receipt": "rcpt-e2e"}
             assert server.list_calls == 2
             assert server.call_calls == [("echo", {"text": "hello"})]
             assert proxy.requests[0].startswith(b"POST http://127.0.0.1:")
-            assert all(b"Proxy-Authorization: Aiagent tool_gateway:permit-e2e" in r for r in proxy.requests)
+            effect_posts = [
+                request
+                for request in proxy.requests
+                if b"Proxy-Authorization: Aiagent tool_gateway:gateway-admitted-permit" in request
+            ]
+            assert len(effect_posts) == 1
+            assert b'"method":"tools/call"' in effect_posts[0]
+            purposes = transport._permit_issuer.purposes
+            assert purposes.count("mcp_initialize") >= 1
+            assert purposes.count("mcp_list") == 2
+            assert "mcp_notification" in purposes
+            assert set(purposes) <= {
+                "mcp_initialize",
+                "mcp_notification",
+                "mcp_list",
+                "mcp_stream",
+                "mcp_close",
+            }
     finally:
         await proxy.stop()
 
@@ -323,11 +355,17 @@ async def test_admitted_permit_is_used_instead_of_minting_another() -> None:
                 on_list_changed=lambda: None,
                 limits=AdapterLimits(),
                 permit="gateway-admitted-permit",
+                effect_tool="echo",
+                effect_arguments_digest=digest({"text": "permit"}),
             ) as session:
                 await session.call_tool("echo", {"text": "permit"}, timeout_s=5.0)
             assert server.call_calls == [("echo", {"text": "permit"})]
             posts = [r for r in proxy.requests if r.startswith(b"POST ")]
             assert posts
-            assert all(b"Proxy-Authorization: Aiagent tool_gateway:gateway-admitted-permit" in r for r in posts)
+            effect_posts = [
+                r for r in posts if b"Proxy-Authorization: Aiagent tool_gateway:gateway-admitted-permit" in r
+            ]
+            assert len(effect_posts) == 1
+            assert b'"method":"tools/call"' in effect_posts[0]
     finally:
         await proxy.stop()

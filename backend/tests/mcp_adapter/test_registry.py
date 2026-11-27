@@ -120,4 +120,31 @@ async def test_revoked_provider_requires_explicit_admin_reenable() -> None:
     with pytest.raises(McpError):
         await store.pin_run(first, run_id="run-after-revoke")
     await store.unrevoke_provider(key)
-    await store.publish(snapshot(entry(), generation=1), expected_generation=0)
+    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+
+
+async def test_generation_never_restarts_after_ttl_expiry() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    later = utc_now() + timedelta(seconds=601)
+    assert store.sweep(now=later) == 1
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry()), expected_generation=0)
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+
+
+async def test_expired_pin_is_not_silently_re_pinned() -> None:
+    store = SnapshotStore(limits())
+    snap = snapshot(entry())
+    await store.publish(snap, expected_generation=0)
+    start = utc_now()
+    await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start)
+    with pytest.raises(McpError) as err:
+        await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start + timedelta(seconds=2))
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+    assert store.sweep(now=start + timedelta(seconds=2)) == 0
+    with pytest.raises(McpError) as err2:
+        await store.pin_run(snap, run_id="run-expiring", ttl_s=1.0, now=start + timedelta(seconds=3))
+    assert err2.value.code is ErrorCode.SNAPSHOT_EXPIRED

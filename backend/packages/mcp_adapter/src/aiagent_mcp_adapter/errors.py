@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     ADAPTER_DISABLED = "ADAPTER_DISABLED"
     ENDPOINT_DENIED = "ENDPOINT_DENIED"
     EGRESS_DENIED = "EGRESS_DENIED"
+    EGRESS_PRE_SEND_DENIED = "EGRESS_PRE_SEND_DENIED"
     CREDENTIAL_UNAVAILABLE = "CREDENTIAL_UNAVAILABLE"
     CREDENTIAL_REVOKED = "CREDENTIAL_REVOKED"
     CREDENTIAL_STALE = "CREDENTIAL_STALE"
@@ -72,7 +73,11 @@ _EFFECT_UNCERTAIN = frozenset(
         ErrorCode.TRANSPORT_TIMEOUT,
         ErrorCode.TRANSPORT_RESET,
         ErrorCode.HTTP_SESSION_LOST,
+        ErrorCode.HTTP_UNAUTHORIZED,
+        ErrorCode.HTTP_FORBIDDEN,
+        ErrorCode.HTTP_RATE_LIMITED,
         ErrorCode.HTTP_SERVER_ERROR,
+        ErrorCode.HTTP_UNEXPECTED_STATUS,
         ErrorCode.INVALID_JSONRPC,
         ErrorCode.INVALID_REQUEST_ID,
         ErrorCode.INVALID_CONTENT_TYPE,
@@ -85,10 +90,10 @@ _EFFECT_UNCERTAIN = frozenset(
 
 _RETRYABLE = frozenset(
     {
+        # Only a failure proven to happen before any request byte can reach the proxy. A response
+        # status (429/5xx) or a post-drain reset may still have produced an external effect.
         ErrorCode.CONNECT_TIMEOUT,
         ErrorCode.CONNECT_FAILED,
-        ErrorCode.HTTP_RATE_LIMITED,
-        ErrorCode.HTTP_SERVER_ERROR,
     }
 )
 

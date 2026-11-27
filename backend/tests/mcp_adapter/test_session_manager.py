@@ -28,8 +28,23 @@ class FakeTransport:
         on_list_changed: Any,
         limits: AdapterLimits,
         permit: str | None = None,
+        effect_tool: str | None = None,
+        effect_arguments_digest: str | None = None,
+        before_effect_send: Any = None,
+        expected_credential_version: int | None = None,
     ):
-        self.calls.append({"provider": provider, "credential": credential, "limits": limits, "permit": permit})
+        self.calls.append(
+            {
+                "provider": provider,
+                "credential": credential,
+                "limits": limits,
+                "permit": permit,
+                "effect_tool": effect_tool,
+                "effect_arguments_digest": effect_arguments_digest,
+                "before_effect_send": before_effect_send,
+                "expected_credential_version": expected_credential_version,
+            }
+        )
         yield object()
 
 

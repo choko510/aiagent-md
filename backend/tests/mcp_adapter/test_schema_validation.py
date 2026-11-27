@@ -28,7 +28,7 @@ def test_external_ref_is_rejected() -> None:
     with pytest.raises(McpError) as err:
         compile_schema(schema, limits(), where="input")
     assert err.value.code is ErrorCode.SCHEMA_INVALID
-    assert "external_ref" in err.value.detail
+    assert "ref_not_in_safe_subset" in err.value.detail
 
 
 def test_dynamic_ref_and_absolute_id_rejected() -> None:

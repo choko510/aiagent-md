@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable
+import inspect
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +25,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError as SdkMcpError
 
+from .canonical import digest
 from .config import AdapterLimits, ProviderConfig
 from .egress import EgressHttpTransport, EgressRequest, McpEgress, PermitIssuer
 from .errors import ErrorCode, McpError
@@ -40,13 +43,15 @@ _PRE_SEND_CODES = frozenset(
         ErrorCode.ADAPTER_DISABLED,
         ErrorCode.CONFIG_INVALID,
         ErrorCode.ENDPOINT_DENIED,
-        ErrorCode.EGRESS_DENIED,
+        ErrorCode.EGRESS_PRE_SEND_DENIED,
         ErrorCode.CREDENTIAL_UNAVAILABLE,
         ErrorCode.CREDENTIAL_STALE,
-        ErrorCode.HTTP_UNAUTHORIZED,
-        ErrorCode.HTTP_FORBIDDEN,
         ErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
         ErrorCode.CAPABILITY_MISSING,
+        ErrorCode.BINDING_MISMATCH,
+        ErrorCode.ARGUMENTS_INVALID,
+        ErrorCode.POLICY_DENIED,
+        ErrorCode.STALE_TOOL_REF,
     }
 )
 _EFFECT_UNCERTAIN_CODES = frozenset(
@@ -158,15 +163,26 @@ class SdkStreamableHttpTransport:
         self._egress = egress
         self._permit_issuer = permit_issuer
 
+    async def _issue_control(self, provider: ProviderConfig, target: Any, purpose: str) -> str:
+        return await self._permit_issuer.issue(
+            provider_id=provider.provider_id,
+            tenant_id=provider.tenant_id,
+            target=target,
+            purpose=purpose,
+        )
+
     @asynccontextmanager
     async def open(
         self,
         *,
         provider: ProviderConfig,
         credential: Credential | None,
-        on_list_changed: Callable[[], None],
+        on_list_changed: Callable[[], Awaitable[None] | None],
         limits: AdapterLimits,
         permit: str | None = None,
+        effect_tool: str | None = None,
+        effect_arguments_digest: str | None = None,
+        before_effect_send: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[SdkSession]:
         if provider.auth_mode != "none" and credential is None:
             raise McpError(ErrorCode.CREDENTIAL_UNAVAILABLE, "credential_required")
@@ -181,23 +197,53 @@ class SdkStreamableHttpTransport:
             value = credential.header_value()
             headers[header] = f"Bearer {value}" if provider.auth_mode == "bearer" else value
 
+        effect_spent = False
+        list_changed = asyncio.Event()
+
         async def permit_for(request: EgressRequest) -> str:
             from .egress import EgressTarget
 
+            nonlocal effect_spent
             target: EgressTarget = request.target
             if target.origin != origin:
                 raise McpError(ErrorCode.EGRESS_DENIED, "origin_not_allowlisted")
-            if permit is not None and request.method.upper() == "POST":
-                # An admitted Gateway call must spend the permit issued for that exact intent, not mint
-                # a fresh one from provider configuration. A GET SSE stream is not the admitted effect;
-                # it still needs a Sentinel-issued permit, so fall through to the provider-scoped issuer.
+            method = request.method.upper()
+            if method == "GET":
+                return await self._issue_control(provider, target, "mcp_stream")
+            if method == "DELETE":
+                return await self._issue_control(provider, target, "mcp_close")
+            if method != "POST":
+                raise McpError(ErrorCode.EGRESS_DENIED, "method_not_allowed")
+
+            envelope = _jsonrpc_envelope(request.body)
+            rpc_method = envelope.get("method")
+            if not isinstance(rpc_method, str) or not rpc_method:
+                raise McpError(ErrorCode.INVALID_JSONRPC, "missing_jsonrpc_method")
+            if rpc_method == "tools/call":
+                # The Gateway's effect permit is spendable for exactly one matching tools/call.
+                # Initialization, notifications, list, GET and close always use separate control
+                # permits, so a one-use Sentinel permit is never consumed before the effect.
+                if permit is None or effect_tool is None or effect_arguments_digest is None:
+                    raise McpError(ErrorCode.BINDING_MISMATCH, "effect_permit_not_bound")
+                if effect_spent:
+                    raise McpError(ErrorCode.BINDING_MISMATCH, "effect_permit_already_spent")
+                if list_changed.is_set():
+                    raise McpError(ErrorCode.STALE_TOOL_REF, "list_changed_before_effect")
+                params = envelope.get("params")
+                if not isinstance(params, dict):
+                    raise McpError(ErrorCode.BINDING_MISMATCH, "tool_call_params_missing")
+                if params.get("name") != effect_tool:
+                    raise McpError(ErrorCode.BINDING_MISMATCH, "tool_name_mismatch")
+                arguments = params.get("arguments", {})
+                if not isinstance(arguments, dict) or digest(arguments) != effect_arguments_digest:
+                    raise McpError(ErrorCode.BINDING_MISMATCH, "tool_arguments_digest_mismatch")
+                if before_effect_send is not None:
+                    await before_effect_send()
+                effect_spent = True
                 return permit
-            return await self._permit_issuer.issue(
-                provider_id=provider.provider_id,
-                tenant_id=provider.tenant_id,
-                target=target,
-                purpose="mcp",
-            )
+            # An admitted call must not be reusable as a broad control credential; every
+            # non-effect request mints a narrowly-purposed control permit instead.
+            return await self._issue_control(provider, target, _control_purpose(rpc_method))
 
         transport = EgressHttpTransport(
             self._egress,
@@ -225,7 +271,10 @@ class SdkStreamableHttpTransport:
 
         async def handle_message(message: Any) -> None:
             if isinstance(message, types.ToolListChangedNotification):
-                on_list_changed()
+                list_changed.set()
+                result = on_list_changed()
+                if inspect.isawaitable(result):
+                    await result
                 return
             if isinstance(message, BaseException):
                 holder = session_holder.get("session")
@@ -315,6 +364,7 @@ def _map_sdk_error(error: SdkMcpError, *, context: str) -> McpError:
         return McpError(
             ErrorCode.ARGUMENTS_INVALID if context == "call" else ErrorCode.INVALID_JSONRPC,
             "invalid_params",
+            effect_uncertain=context == "call",
         )
     if code == -32600 and "session terminated" in str(getattr(error, "message", "")).lower():
         if context == "call":
@@ -350,3 +400,24 @@ def _map_transport_exception(exc: BaseException, *, context: str) -> McpError:
     if "EndOfStream" in text or "BrokenResource" in text or "ClosedResource" in text:
         return McpError(ErrorCode.SESSION_CLOSED, "session_closed", effect_uncertain=context == "call")
     return McpError(ErrorCode.SESSION_FAILED, "session_failure", effect_uncertain=context == "call")
+
+
+def _jsonrpc_envelope(body: bytes) -> dict[str, Any]:
+    """Return one JSON-RPC object from an already size-bounded request body. Fail closed on batches."""
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise McpError(ErrorCode.INVALID_JSONRPC, "invalid_request_body") from exc
+    if not isinstance(value, dict):
+        raise McpError(ErrorCode.INVALID_JSONRPC, "batch_or_non_object_request")
+    return value
+
+
+def _control_purpose(rpc_method: str) -> str:
+    if rpc_method == "initialize":
+        return "mcp_initialize"
+    if rpc_method.startswith("notifications/"):
+        return "mcp_notification"
+    if rpc_method == "tools/list":
+        return "mcp_list"
+    return "mcp_control"

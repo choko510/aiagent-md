@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .config import AdapterLimits
-from .contracts import RegistrySnapshot, ToolEntry, ToolRef, utc_now
+from .contracts import RegistrySnapshot, ToolEntry, ToolRef, compute_surface_digest, utc_now
 from .errors import ErrorCode, McpError
 
 
@@ -34,6 +34,7 @@ class RunPin:
     credential_version: int
     pinned_at: datetime
     expires_at: datetime
+    endpoint_fingerprint: str = ""
     revoked: bool = False
 
 
@@ -44,6 +45,7 @@ class SnapshotStore:
     _history: dict[SnapshotKey, list[RegistrySnapshot]] = field(default_factory=dict)
     _pins: dict[str, RunPin] = field(default_factory=dict)
     _revoked_keys: set[SnapshotKey] = field(default_factory=set)
+    _last_generation: dict[SnapshotKey, int] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     history_depth: int = 4
 
@@ -54,9 +56,12 @@ class SnapshotStore:
         async with self._lock:
             if key in self._revoked_keys:
                 raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
+            _validate_snapshot(snapshot)
             current = self._live(key)
+            last_generation = self._last_generation.get(key, 0)
             if current is None:
-                if expected_generation != 0 or snapshot.generation != 1:
+                # Expiry, revocation and a fresh process must never restart the sequence at 1.
+                if expected_generation != last_generation or snapshot.generation != last_generation + 1:
                     raise McpError(ErrorCode.BINDING_MISMATCH, "generation_cas_failed")
             else:
                 if current.generation != expected_generation:
@@ -65,6 +70,7 @@ class SnapshotStore:
                     raise McpError(ErrorCode.BINDING_MISMATCH, "generation_not_monotonic")
             frozen = snapshot.model_copy(deep=True)
             self._current[key] = frozen
+            self._last_generation[key] = frozen.generation
             history = self._history.setdefault(key, [])
             history.append(frozen)
             del history[: max(0, len(history) - self.history_depth)]
@@ -102,6 +108,8 @@ class SnapshotStore:
     ) -> RunPin:
         if not run_id:
             raise McpError(ErrorCode.BINDING_MISMATCH, "run_id_required")
+        _validate_snapshot(snapshot)
+        key = SnapshotKey(snapshot.tenant_id, snapshot.owner_user_id, snapshot.provider_id)
         pinned_at = now or utc_now()
         pin = RunPin(
             run_id=run_id,
@@ -112,6 +120,7 @@ class SnapshotStore:
             credential_version=snapshot.credential_version,
             pinned_at=pinned_at,
             expires_at=pinned_at + timedelta(seconds=ttl_s or self.limits.snapshot_ttl_s),
+            endpoint_fingerprint=snapshot.endpoint_fingerprint,
         )
         async with self._lock:
             existing = self._pins.get(run_id)
@@ -122,12 +131,24 @@ class SnapshotStore:
                     raise McpError(ErrorCode.POLICY_DENIED, "run_revoked")
                 if existing.key != pin.key:
                     raise McpError(ErrorCode.BINDING_MISMATCH, "run_scope_mismatch")
-                if existing.generation != pin.generation or existing.surface_digest != pin.surface_digest:
-                    # A run must never be silently re-pinned to a newer tool surface.
+                if (
+                    existing.generation != pin.generation
+                    or existing.surface_digest != pin.surface_digest
+                    or existing.endpoint_fingerprint != pin.endpoint_fingerprint
+                ):
+                    # A run must never be silently re-pinned to a newer tool surface or endpoint.
                     raise McpError(ErrorCode.BINDING_MISMATCH, "run_pin_immutable")
                 if pinned_at >= existing.expires_at:
                     raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "run_pin_expired")
                 return existing
+            current = self._live(key, now=pinned_at)
+            if (
+                current is None
+                or current.generation != snapshot.generation
+                or current.surface_digest != snapshot.surface_digest
+                or current.endpoint_fingerprint != snapshot.endpoint_fingerprint
+            ):
+                raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "run_pin_requires_current_snapshot")
             self._pins[run_id] = pin
         return pin
 
@@ -146,11 +167,46 @@ class SnapshotStore:
         if ref.generation != pin.generation:
             raise McpError(ErrorCode.STALE_TOOL_REF, "generation_mismatch")
         snapshot = self._snapshot_for_generation(pin.key, pin.generation)
-        if snapshot is None or snapshot.surface_digest != pin.surface_digest:
+        if (
+            snapshot is None
+            or snapshot.surface_digest != pin.surface_digest
+            or snapshot.endpoint_fingerprint != pin.endpoint_fingerprint
+        ):
             raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "pinned_snapshot_missing")
         if snapshot.is_expired(moment):
             raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "pinned_snapshot_expired")
         return _entry_for(snapshot, ref)
+
+    async def invalidate_pins(self, key: SnapshotKey) -> int:
+        """Fence all active runs for one provider after list_changed or an admin revocation."""
+        count = 0
+        async with self._lock:
+            for run_id, pin in list(self._pins.items()):
+                if pin.key == key and not pin.revoked:
+                    self._pins[run_id] = RunPin(
+                        run_id=pin.run_id,
+                        key=pin.key,
+                        generation=pin.generation,
+                        surface_digest=pin.surface_digest,
+                        policy_revision=pin.policy_revision,
+                        credential_version=pin.credential_version,
+                        pinned_at=pin.pinned_at,
+                        expires_at=pin.expires_at,
+                        endpoint_fingerprint=pin.endpoint_fingerprint,
+                        revoked=True,
+                    )
+                    count += 1
+        return count
+
+    def pinned_endpoint_fingerprint(self, run_id: str, ref: ToolRef) -> str:
+        pin = self._pins.get(run_id)
+        if pin is None:
+            raise McpError(ErrorCode.BINDING_MISMATCH, "run_not_pinned")
+        if pin.key != SnapshotKey(ref.tenant_id, ref.owner_user_id, ref.provider_id):
+            raise McpError(ErrorCode.BINDING_MISMATCH, "run_scope_mismatch")
+        if pin.revoked:
+            raise McpError(ErrorCode.POLICY_DENIED, "run_revoked")
+        return pin.endpoint_fingerprint
 
     def _snapshot_for_generation(self, key: SnapshotKey, generation: int) -> RegistrySnapshot | None:
         for snapshot in reversed(self._history.get(key, [])):
@@ -171,6 +227,7 @@ class SnapshotStore:
                     credential_version=pin.credential_version,
                     pinned_at=pin.pinned_at,
                     expires_at=pin.expires_at,
+                    endpoint_fingerprint=pin.endpoint_fingerprint,
                     revoked=True,
                 )
 
@@ -204,11 +261,9 @@ class SnapshotStore:
             if snapshot.is_expired(moment):
                 self._current.pop(key, None)
                 removed += 1
-        for run_id, pin in list(self._pins.items()):
-            # Keep revoked tombstones: removing one would let a later prepare() re-pin the same run.
-            if not pin.revoked and moment >= pin.expires_at:
-                self._pins.pop(run_id, None)
-                removed += 1
+        # Keep expired and revoked tombstones. Removing one would let a later prepare() re-pin
+        # the same run identifier after TTL expiry. A separate retention job may prune them only
+        # after the run is terminally settled.
         return removed
 
 
@@ -244,3 +299,23 @@ def ref_from_entry(entry: ToolEntry) -> ToolRef:
         policy_revision=entry.policy_revision,
         credential_version=entry.credential_version,
     )
+
+
+def _validate_snapshot(snapshot: RegistrySnapshot) -> None:
+    if not snapshot.endpoint_fingerprint:
+        raise McpError(ErrorCode.BINDING_MISMATCH, "endpoint_fingerprint_missing")
+    if compute_surface_digest(snapshot.entries) != snapshot.surface_digest:
+        raise McpError(ErrorCode.SCHEMA_INVALID, "surface_digest_mismatch")
+    for entry in snapshot.entries:
+        if (
+            entry.tenant_id != snapshot.tenant_id
+            or entry.owner_user_id != snapshot.owner_user_id
+            or entry.provider_id != snapshot.provider_id
+            or entry.generation != snapshot.generation
+        ):
+            raise McpError(ErrorCode.BINDING_MISMATCH, "entry_scope_mismatch")
+        if entry.policy_revision != snapshot.policy_revision:
+            raise McpError(ErrorCode.BINDING_MISMATCH, "policy_revision_mismatch")
+        if entry.credential_version != snapshot.credential_version:
+            raise McpError(ErrorCode.CREDENTIAL_STALE, "credential_version_mismatch")
+        entry.verify_digests()

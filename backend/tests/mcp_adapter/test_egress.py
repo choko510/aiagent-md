@@ -120,7 +120,7 @@ async def test_authenticated_proxy_denial_is_pre_send_but_spoofed_is_not() -> No
     )
     with pytest.raises(McpError) as err:
         await send(denial)
-    assert err.value.code is ErrorCode.EGRESS_DENIED
+    assert err.value.code is ErrorCode.EGRESS_PRE_SEND_DENIED
     assert err.value.effect_uncertain is False
 
     spoofed = (

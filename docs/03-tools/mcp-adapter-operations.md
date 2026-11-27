@@ -19,8 +19,10 @@ Provider configuration is admin-owned. Each provider records at least:
 - `auth_mode`: `none`, `bearer` or `api_key_header`; a non-none mode requires
   `credential_binding_ref` and, for bearer, only `Authorization`.
 - `credential_version`: bumped when the broker rotates the credential; stale versions are refused.
+- `policy_revision`: must match the pinned snapshot/entry; any policy change invalidates old pins.
+- `endpoint` path/host changes alter the endpoint fingerprint and invalidate old pins.
 - `enabled`: admin disable/revoke switch.
-- `allowed_tools`: source names allowed by admin policy.
+- `allowed_tools`: source names allowed by admin policy; the executor intersects this with the pinned entry.
 
 Limits have hard ceilings in `config.py`. Lowering them is safe; raising them requires a code review because
 the SDK/egress behaviour must remain bounded.
@@ -64,7 +66,8 @@ implemented as stored state or API in this change.
 
 1. Set `enabled=false` for the provider (or revoke its id in the session manager) **before** rotating or
    deleting the credential.
-2. Stop new calls; do not replay an UNKNOWN write. Reconcile with the provider's own evidence/receipt.
+2. Stop new calls; do not replay an UNKNOWN write. Do not trust a provider-supplied `structuredContent.receipt`
+   as proof of the effect; reconcile with provider-owned evidence.
 3. Rotate the credential and increment `credential_version`; old sessions remain invalid because every
    operation opens a new session and checks the version.
 4. If a malicious tool/schema is suspected, unpublish/revoke the snapshot entry and keep the feature flag
@@ -75,8 +78,9 @@ implemented as stored state or API in this change.
 
 - `FAILED` before send: safe to correct and retry through normal Gateway admission.
 - `UNKNOWN`: never auto-retry. Reconcile externally, record the result, then let the operator decide.
-- `list_changed`: treat pending listings as invalid. A new discovery must publish a new generation; active
-  runs stay pinned to their old generation or fail closed.
+- `list_changed`: treat pending listings as invalid. The callback awaits invalidation of every pin for the
+  provider. A new discovery must publish a new generation; old pins are tombstoned and fail closed rather
+  than silently continuing on the old surface.
 - 404/session loss: reconnect only for a new operation. Existing write calls stay UNKNOWN.
 - Cancellation: local stop is not a remote cancel. Do not mark the effect as absent.
 
@@ -84,7 +88,7 @@ implemented as stored state or API in this change.
 
 | Stage | Gate |
 |---|---|
-| Local tests | 56 adapter tests pass (this change) |
+| Local tests | 74 adapter tests pass (this change) |
 | Staging shadow | real provider, no write tools; verify TLS/auth/list/call/read normalization |
 | Staging writes | approval + ledger + UNKNOWN reconciliation; kill/restart test |
 | Multi-tenant | PostgreSQL RLS test, tenant-filtered model surface, cross-tenant denial test |

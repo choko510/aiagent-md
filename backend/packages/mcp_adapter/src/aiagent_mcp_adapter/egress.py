@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import httpx2
 
 from .errors import ErrorCode, McpError, classify_http_status
+from .schema_validation import loads_strict
 
 _ALLOWED_METHODS = frozenset({"GET", "POST", "DELETE"})
 _HOP_BY_HOP = frozenset(
@@ -147,7 +148,12 @@ class ForwardProxyEgress:
         timeout_s: float,
         max_bytes: int,
     ) -> EgressResponse:
-        if not permit or permit.strip().lower() in {"none", "null", "test", "fake"}:
+        if (
+            not permit
+            or len(permit) > 4096
+            or any(ch in permit for ch in ("\r", "\n", "\0"))
+            or permit.strip().lower() in {"none", "null", "test", "fake"}
+        ):
             raise McpError(ErrorCode.EGRESS_DENIED, "missing_permit")
         if request.method not in _ALLOWED_METHODS:
             raise McpError(ErrorCode.EGRESS_DENIED, "method_not_allowed")
@@ -166,20 +172,22 @@ class ForwardProxyEgress:
             )
         except (TimeoutError, OSError) as exc:
             raise McpError(ErrorCode.CONNECT_FAILED, "proxy_unreachable") from exc
-        sent = False
+        may_have_sent = False
         try:
             payload = self._build_payload(request, permit)
+            # Move to MAY_HAVE_SENT before handing the first byte to the writer. A drain timeout,
+            # reset, or cancellation after this point can no longer be classified as pre-send.
+            may_have_sent = True
             writer.write(payload)
             await asyncio.wait_for(writer.drain(), timeout=min(timeout_s, self._connect_timeout))
-            sent = True
             return await self._read_response(reader, timeout_s=timeout_s, max_bytes=max_bytes, permit=permit)
         except TimeoutError as exc:
-            code = ErrorCode.TRANSPORT_TIMEOUT if sent else ErrorCode.CONNECT_TIMEOUT
+            code = ErrorCode.TRANSPORT_TIMEOUT if may_have_sent else ErrorCode.CONNECT_TIMEOUT
             raise McpError(code, "egress_timeout") from exc
         except McpError:
             raise
         except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
-            code = ErrorCode.TRANSPORT_RESET if sent else ErrorCode.CONNECT_FAILED
+            code = ErrorCode.TRANSPORT_RESET if may_have_sent else ErrorCode.CONNECT_FAILED
             raise McpError(code, "egress_io_error") from exc
         finally:
             writer.close()
@@ -229,6 +237,8 @@ class ForwardProxyEgress:
             raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "invalid_status_line")
         status = int(match.group(1))
         headers: list[tuple[str, str]] = []
+        if len(lines) > 128:
+            raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "too_many_headers")
         for line in lines[1:]:
             if not line or line[0] in " \t" or ":" not in line:
                 raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "invalid_header")
@@ -239,15 +249,34 @@ class ForwardProxyEgress:
             if name.lower() in ("set-cookie", "proxy-authenticate", "proxy-authorization"):
                 continue
             headers.append((name, value))
-        lowered = {k.lower(): v for k, v in headers}
+        lowered: dict[str, str] = {}
+        for name, value in headers:
+            key = name.lower()
+            if key in lowered and key in (
+                "content-length",
+                "transfer-encoding",
+                "content-encoding",
+                "x-aiagent-egress",
+                "x-aiagent-egress-proof",
+            ):
+                raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "duplicate_security_header")
+            lowered[key] = value
+        transfer = lowered.get("transfer-encoding", "").lower().strip()
+        if transfer and transfer != "chunked":
+            raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "unsupported_transfer_encoding")
+        if transfer and "content-length" in lowered:
+            raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "te_and_content_length")
+        content_encoding = lowered.get("content-encoding", "").lower().strip()
+        if content_encoding not in ("", "identity"):
+            raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "content_encoding_not_identity")
 
         if 300 <= status <= 399:
-            raise McpError(ErrorCode.EGRESS_DENIED, "redirect_forbidden")
+            raise McpError(ErrorCode.EGRESS_DENIED, "redirect_forbidden", effect_uncertain=True)
         if status == 403 and lowered.get("x-aiagent-egress") == "denied":
             proof = lowered.get("x-aiagent-egress-proof", "")
             code = proof.partition(":")[0]
             if _proxy_denial_verified(permit, code, proof):
-                raise McpError(ErrorCode.EGRESS_DENIED, f"proxy_denied:{code}")
+                raise McpError(ErrorCode.EGRESS_PRE_SEND_DENIED, f"proxy_denied:{code}")
         if status == 401:
             raise McpError(ErrorCode.HTTP_UNAUTHORIZED, "http_401")
         if status == 403:
@@ -289,6 +318,8 @@ class _Reader:
         while True:
             idx = self._buffer.find(token)
             if idx >= 0:
+                if idx > limit:
+                    raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "response_line_too_long")
                 out = bytes(self._buffer[:idx])
                 del self._buffer[: idx + len(token)]
                 return out
@@ -351,6 +382,8 @@ async def _read_body(
                 size = int(size_text, 16)
             except ValueError as exc:
                 raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "invalid_chunk_size") from exc
+            if size < 0:
+                raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "invalid_chunk_size")
             if size == 0:
                 while True:
                     trailer = await reader.read_until(b"\r\n", 8192)
@@ -423,6 +456,10 @@ class EgressHttpTransport(httpx2.AsyncBaseTransport):
         body = await request.aread()
         if len(body) > self._max_request_bytes:
             raise McpError(ErrorCode.BYTES_LIMIT_EXCEEDED, "request_body_too_large")
+        if body and request.method.upper() == "POST":
+            # The SDK serializes this body, but validate the exact bytes at the wire seam so a
+            # duplicate key or non-finite number can never be silently normalized by a later parser.
+            loads_strict(body, max_bytes=self._max_request_bytes)
         headers = tuple((name.decode("latin-1"), value.decode("latin-1")) for name, value in request.headers.raw)
         egress_request = EgressRequest(
             method=request.method.upper(),
@@ -439,6 +476,20 @@ class EgressHttpTransport(httpx2.AsyncBaseTransport):
         )
         if result.truncated:
             raise McpError(ErrorCode.RESULT_TRUNCATED, "egress_response_truncated")
+        response_content_type = next(
+            (value.lower() for name, value in result.headers if name.lower() == "content-type"),
+            "",
+        )
+        if result.body and response_content_type.startswith("application/json"):
+            try:
+                loads_strict(result.body, max_bytes=self._max_bytes)
+            except McpError as exc:
+                # The server already responded; a malformed body cannot prove the effect is absent.
+                raise McpError(
+                    ErrorCode.INVALID_JSONRPC,
+                    f"response_{exc.detail}",
+                    effect_uncertain=True,
+                ) from exc
         response_headers = [
             (name, value)
             for name, value in result.headers

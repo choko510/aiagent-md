@@ -33,7 +33,15 @@ class ToolPolicy:
 @dataclass(frozen=True)
 class PolicyDecision:
     policy: ToolPolicy | None
-    reason: Literal["approved", "not_allowlisted", "unclassified", "descriptor_changed", "disabled", "revoked"]
+    reason: Literal[
+        "approved",
+        "not_allowlisted",
+        "unclassified",
+        "descriptor_changed",
+        "disabled",
+        "revoked",
+        "provider_mismatch",
+    ]
 
 
 class PolicySet:
@@ -64,6 +72,11 @@ class PolicySet:
             return PolicyDecision(None, "not_allowlisted")
         policy = self._policies.get(name)
         if policy is None:
+            return PolicyDecision(None, "unclassified")
+        if policy.provider_id != self.provider_id:
+            # A policy record cannot be transplanted from another provider with the same tool name.
+            return PolicyDecision(None, "provider_mismatch")
+        if not policy.approved_by.strip():
             return PolicyDecision(None, "unclassified")
         if not policy.enabled:
             return PolicyDecision(None, "disabled")
