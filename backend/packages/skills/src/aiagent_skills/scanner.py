@@ -14,6 +14,7 @@ from .contracts import ScanResult, SecurityFinding, Severity, SkillFile
 from .digest import findings_digest
 
 ENGINE_VERSION = "skill-scan/1"
+MAX_FINDINGS = 500
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,8 @@ def scan_files(files: dict[str, bytes], entries: tuple[SkillFile, ...]) -> ScanR
     findings: list[SecurityFinding] = []
     media = {entry.relative_path: entry.media_type for entry in entries}
     for path, payload in sorted(files.items()):
+        if len(findings) >= MAX_FINDINGS:
+            break
         if path.casefold().startswith(("scripts/", "bin/")) or media.get(path) == "text/x-shellscript":
             findings.append(
                 SecurityFinding(
@@ -207,7 +210,7 @@ def scan_files(files: dict[str, bytes], entries: tuple[SkillFile, ...]) -> ScanR
                         heuristic=True,
                     )
                 )
-                if len(findings) >= 500:
+                if len(findings) >= MAX_FINDINGS:
                     break
     unique = {(f.rule_id, f.path, f.line, f.column): f for f in findings}
     ordered = tuple(unique[key] for key in sorted(unique, key=lambda k: (k[0], k[1], k[2] or 0, k[3] or 0)))

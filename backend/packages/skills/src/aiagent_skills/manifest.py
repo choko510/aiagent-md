@@ -297,6 +297,16 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
         )
     compatibility = data.get("compatibility") or {}
     signature_data = data.get("signature")
+    signature = None
+    if isinstance(signature_data, dict):
+        unknown = set(signature_data) - {"alg", "signature", "keyId"}
+        if unknown:
+            raise ManifestInvalid("unknown signature fields", fields=sorted(unknown))
+        signature = Signature(
+            alg=_string(signature_data.get("alg"), "signature.alg", maximum=32),
+            signature=_string(signature_data.get("signature"), "signature.signature", maximum=4096),
+            key_id=_string(signature_data.get("keyId"), "signature.keyId", maximum=128),
+        )
     manifest = SkillManifestV1(
         name=validate_skill_name(data.get("name")),
         version=validate_semver(data.get("version")),
@@ -310,7 +320,7 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
         license=data.get("license"),
         publisher_id=data.get("publisherId"),
         publisher_handle=data.get("publisherHandle"),
-        signature=Signature(**signature_data) if isinstance(signature_data, dict) else None,
+        signature=signature,
         provenance=dict(data.get("provenance") or {}),
     )
     if manifest.entry != "SKILL.md":

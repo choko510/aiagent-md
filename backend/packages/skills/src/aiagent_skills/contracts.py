@@ -276,6 +276,7 @@ class SkillInstallation:
     created_at: str
     updated_at: str
     revoked_at: str | None = None
+    revocation_epoch: int = 0
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -286,6 +287,7 @@ class SkillInstallation:
             "effective": self.effective.value,
             "recordVersion": self.record_version,
             "activationGeneration": self.activation_generation,
+            "revocationEpoch": self.revocation_epoch,
             "policyRevision": self.policy_revision,
             "approvedReleaseDigest": self.approved_release_digest,
             "createdAt": self.created_at,
@@ -379,6 +381,7 @@ class RunSkillPin:
     created_at: str
     dependencies: tuple[DependencyPin, ...] = ()
     dependency_snapshot_digest: str = ""
+    revocation_epoch: int = 0
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -387,6 +390,7 @@ class RunSkillPin:
             "releaseId": self.release_id,
             "contentDigest": self.content_digest,
             "activationGeneration": self.activation_generation,
+            "revocationEpoch": self.revocation_epoch,
             "policyRevision": self.policy_revision,
             "capabilityDigest": self.capability_digest,
             "dependencyDigest": self.dependency_digest,

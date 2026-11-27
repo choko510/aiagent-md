@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .bundle import ValidatedBundle, inspect_zip
+from .bundle import BundleLimits, ValidatedBundle, _entry_kind, inspect_zip, normalize_member_path
 from .contracts import SkillSource, SourceKind
 from .digest import sha256_bytes
 from .errors import ArchiveRejected, ManifestInvalid, OwnerNotVerifiable, SourceUnavailable
@@ -26,13 +26,38 @@ GITHUB_LOCATOR_RE = re.compile(
 )
 COMMIT_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+SEMVER_RE = re.compile(
+    r"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?\Z"
+)
 
 
 def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
     """Strip GitHub's single zipball wrapper and optional subdirectory without executing anything."""
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as original:
-            infos = [info for info in original.infolist() if not info.is_dir()]
+            all_infos = original.infolist()
+            if len(all_infos) > 4096:
+                raise ArchiveRejected("GitHub archive has too many entries")
+            limits = BundleLimits()
+            declared_raw_total = 0
+            for info in all_infos:
+                normalize_member_path(info.filename, limits)
+                kind = _entry_kind(info)
+                if kind == "dir":
+                    continue
+                if info.flag_bits & 0x1:
+                    raise ArchiveRejected("encrypted GitHub archive entries are not supported")
+                if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    raise ArchiveRejected("unsupported GitHub archive compression")
+                if info.file_size > 0 and info.compress_size == 0:
+                    raise ArchiveRejected("GitHub archive entry has an invalid compression ratio")
+                if info.compress_size and info.file_size > info.compress_size * limits.max_compression_ratio:
+                    raise ArchiveRejected("GitHub archive entry exceeds the compression ratio limit")
+                declared_raw_total += info.file_size
+                if declared_raw_total > 64 * 1024 * 1024:
+                    raise ArchiveRejected("GitHub archive expands beyond the safe limit")
+            infos = [info for info in all_infos if not info.is_dir()]
             if not infos:
                 raise SourceUnavailable("GitHub archive is empty")
             roots = {info.filename.split("/", 1)[0] for info in infos}
@@ -54,8 +79,9 @@ def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
                     total += info.file_size
                     if info.file_size > 2 * 1024 * 1024 or total > 8 * 1024 * 1024:
                         raise ArchiveRejected("GitHub archive expands beyond the safe limit")
-                    payload = original.read(info)
-                    if len(payload) != info.file_size:
+                    with original.open(info) as stream:
+                        payload = stream.read(2 * 1024 * 1024 + 1)
+                    if len(payload) > 2 * 1024 * 1024 or len(payload) != info.file_size:
                         raise ArchiveRejected("GitHub archive entry size mismatch")
                     rewritten.writestr(relative, payload)
             return buffer.getvalue()
@@ -150,7 +176,7 @@ class GitHubResolver:
             artifact_digest=sha256_bytes(archive),
             catalog_key=(
                 f"github:{owner_login.casefold()}/{locator.repo.casefold()}"
-                + (f"#{locator.subdir}" if locator.subdir else "")
+                + (f"#{locator.subdir.strip('/')}" if locator.subdir else "")
             ),
             subdir=locator.subdir,
         )
@@ -177,6 +203,8 @@ def _required_string(mapping: Mapping[str, object], key: str, *, what: str) -> s
 
 def parse_clawhub_release(payload: Mapping[str, object]) -> ClawHubRelease:
     version = _required_string(payload, "version", what="ClawHub release")
+    if not SEMVER_RE.match(version):
+        raise OwnerNotVerifiable("ClawHub release version is not exact SemVer")
     artifact = payload.get("artifact")
     if not isinstance(artifact, dict):
         raise OwnerNotVerifiable("ClawHub release artifact is missing")
@@ -195,10 +223,9 @@ def parse_clawhub_release(payload: Mapping[str, object]) -> ClawHubRelease:
     if commit is not None and (not isinstance(commit, str) or not COMMIT_RE.match(commit)):
         raise OwnerNotVerifiable("ClawHub commit SHA is malformed")
     slug = payload.get("slug")
-    if slug is not None and (
-        not isinstance(slug, str) or not re.match(r"\A[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z", slug)
-    ):
-        raise OwnerNotVerifiable("ClawHub slug is malformed")
+    if not isinstance(slug, str) or not re.match(r"\A[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z", slug):
+        # Without the release slug, two different ClawHub Skills from one publisher collapse to the same lineage.
+        raise OwnerNotVerifiable("ClawHub slug is required and must be a valid Skill name")
     return ClawHubRelease(version, digest, url, publisher_id, publisher_handle, commit, slug)
 
 
@@ -225,11 +252,7 @@ def resolve_clawhub(
         publisher_handle=release.publisher_handle,
         commit_sha=release.commit_sha,
         artifact_digest=release.artifact_sha256,
-        catalog_key=(
-            f"clawhub:{release.publisher_handle}:{release.slug}"
-            if release.slug
-            else f"clawhub:{release.publisher_handle}"
-        ),
+        catalog_key=f"clawhub:{release.publisher_handle}:{release.slug}",
     )
     return ResolvedSource(source=source, archive=archive, publisher_verified=True)
 

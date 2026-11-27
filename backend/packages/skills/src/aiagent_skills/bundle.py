@@ -61,6 +61,8 @@ _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
 )
 _BINARY_MAGIC = (b"\x7fELF", b"MZ", b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe", b"\x00asm")
+_ARCHIVE_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"\x1f\x8b", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07")
+_RESERVED_ROOT_NAMES = frozenset({".complete", ".manifest"})
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,8 @@ def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, limits: BundleLimits
     data = bytes(out)
     if data.startswith(_BINARY_MAGIC):
         _reject("EXECUTABLE_FILE", "binary executable payloads are not supported")
+    if data.startswith(_ARCHIVE_MAGIC):
+        _reject("NESTED_ARCHIVE_MAGIC", "archive payloads are not supported inside a Skill bundle")
     return data
 
 
@@ -197,13 +201,14 @@ def inspect_zip(data: bytes, *, limits: BundleLimits | None = None, require_entr
             _reject("TOO_MANY_ENTRIES", "archive has too many entries")
         seen_exact: set[str] = set()
         seen_folded: set[str] = set()
+        path_kinds: dict[str, str] = {}
         declared_total = 0
         files: dict[str, bytes] = {}
         for info in infos:
             path = normalize_member_path(info.filename, limits)
             kind = _entry_kind(info)
-            if kind == "dir":
-                continue
+            if path.casefold() in _RESERVED_ROOT_NAMES:
+                _reject("RESERVED_PATH", "archive uses a quarantine-internal marker name")
             if path in seen_exact:
                 _reject("DUPLICATE_ENTRY", "duplicate archive entry")
             folded = path.casefold()
@@ -211,12 +216,24 @@ def inspect_zip(data: bytes, *, limits: BundleLimits | None = None, require_entr
                 _reject("CASE_COLLISION", "case-insensitive archive entry collision")
             seen_exact.add(path)
             seen_folded.add(folded)
+            path_kinds[folded] = kind
+            if kind == "dir":
+                continue
             declared_total += info.file_size
             if declared_total > limits.max_bundle_bytes:
                 _reject("BUNDLE_TOO_LARGE", "uncompressed bundle exceeds the byte limit")
             files[path] = _read_entry(zf, info, limits)
         if len(files) > limits.max_files:
             _reject("TOO_MANY_FILES", "archive has too many files")
+        # A file cannot also be a directory: `a` + `a/b` would create a prefix collision on extraction.
+        for folded, kind in path_kinds.items():
+            if kind != "file":
+                continue
+            parts = folded.split("/")
+            for index in range(1, len(parts)):
+                ancestor = "/".join(parts[:index])
+                if path_kinds.get(ancestor) == "file":
+                    _reject("PATH_PREFIX_COLLISION", "archive contains a file/directory prefix collision")
         if require_entry:
             if "SKILL.md" not in files:
                 _reject("MISSING_SKILL_MD", "SKILL.md is required at the bundle root")

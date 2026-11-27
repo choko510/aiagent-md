@@ -259,3 +259,45 @@ def test_feature_flag_off_hides_routes(tmp_path: Path) -> None:
         ).status_code
         == 404
     )
+
+
+def test_enable_retry_after_disable_returns_the_original_receipt(tmp_path: Path) -> None:
+    client, registry = build_client(tmp_path)
+    ingested = client.post(
+        "/v1/extensions/skills/ingest",
+        content=make_zip(),
+        headers={"Content-Type": "application/zip", "Idempotency-Key": "replay-ingest"},
+    )
+    release_id = ingested.json()["receipt"]["releaseId"]
+    release = registry.store.get_release(TENANT, release_id)
+    installed = client.post(
+        f"/v1/extensions/skills/releases/{release_id}/install",
+        json={"expectedContentDigest": release.content_digest},
+        headers={"Idempotency-Key": "replay-install"},
+    )
+    installation_id = installed.json()["receipt"]["installationId"]
+    installation = registry.store.get_installation(TENANT, installation_id)
+    enable_body = {
+        "expectedRevision": installation.record_version,
+        "expectedContentDigest": release.content_digest,
+    }
+    first = client.post(
+        f"/v1/extensions/skills/installations/{installation_id}/enable",
+        json=enable_body,
+        headers={"Idempotency-Key": "replay-enable"},
+    )
+    assert first.status_code == 200, first.text
+    enabled = registry.store.get_installation(TENANT, installation_id)
+    disabled = client.post(
+        f"/v1/extensions/skills/installations/{installation_id}/disable",
+        json={"expectedRevision": enabled.record_version},
+        headers={"Idempotency-Key": "replay-disable"},
+    )
+    assert disabled.status_code == 200, disabled.text
+    replay = client.post(
+        f"/v1/extensions/skills/installations/{installation_id}/enable",
+        json=enable_body,
+        headers={"Idempotency-Key": "replay-enable"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["receipt"] == first.json()["receipt"]

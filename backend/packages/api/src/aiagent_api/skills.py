@@ -11,15 +11,18 @@ from collections.abc import Callable
 from typing import Annotated, Any
 from uuid import UUID
 
+from aiagent_domain.canonical import canonical_json, sha256_hex
 from aiagent_skills.contracts import ReleaseState, SkillApproval, SkillRelease
 from aiagent_skills.digest import capability_digest
 from aiagent_skills.errors import SkillError
 from aiagent_skills.policy import validate_requested
 from aiagent_skills.registry import SkillRegistry, make_approval
 from aiagent_skills.sources import upload_source
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.responses import Response
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_BYTES = 64 * 1024
@@ -86,6 +89,23 @@ def _uuid_or_404(value: str) -> str:
         return str(UUID(value))
     except (TypeError, ValueError):
         raise HTTPException(404, detail={"error": "SKILL_NOT_FOUND"}) from None
+
+
+def _replay(
+    registry: SkillRegistry,
+    *,
+    tenant_id: str,
+    actor_user_id: str,
+    request_id: str,
+    action: str,
+    payload: dict[str, Any],
+) -> Any | None:
+    existing = registry.store.get_receipt(tenant_id, actor_user_id, request_id)
+    if existing is None:
+        return None
+    if existing.action != action or existing.payload_sha256 != sha256_hex(canonical_json(payload)):
+        raise HTTPException(409, detail={"error": "IDEMPOTENCY_KEY_REUSED"})
+    return existing
 
 
 def _requested_digest(release: SkillRelease) -> str:
@@ -270,7 +290,8 @@ def build_skills_router(
         archive = b"".join(chunks)
         tenant_id, user_id = _ids(scope)
         try:
-            receipt = registry_factory().ingest(
+            receipt = await run_in_threadpool(
+                registry_factory().ingest,
                 tenant_id=tenant_id,
                 owner_user_id=user_id,
                 actor_user_id=user_id,
@@ -291,12 +312,26 @@ def build_skills_router(
     ) -> dict[str, Any]:
         require_enabled()
         key = key_or_400(idempotency_key)
-        release = get_release(scope, release_id)
-        if release.content_digest != body.expected_content_digest:
-            raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
         policy = policy_or_400(body.policy_revision)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="install",
+            payload={
+                "releaseId": release_id,
+                "expectedContentDigest": body.expected_content_digest,
+                "policyRevision": policy,
+            },
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
+        release = get_release(scope, release_id)
+        if release.content_digest != body.expected_content_digest:
+            raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
         approval = _approval(
             scope=scope,
             action="install",
@@ -333,6 +368,22 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
+        policy = policy_or_400(body.policy_revision)
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="enable",
+            payload={
+                "installationId": installation_id,
+                "expectedRevision": body.expected_revision,
+                "expectedContentDigest": body.expected_content_digest,
+                "policyRevision": policy,
+            },
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         try:
             installation = registry.store.get_installation(tenant_id, installation_id)
         except SkillError as exc:
@@ -342,7 +393,6 @@ def build_skills_router(
         release = get_release(scope, installation.release_id)
         if release.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
-        policy = policy_or_400(body.policy_revision)
         approval = _approval(
             scope=scope,
             action="enable",
@@ -380,8 +430,19 @@ def build_skills_router(
         installation_id = _uuid_or_404(installation_id)
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
+        registry = registry_factory()
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="disable",
+            payload={"installationId": installation_id, "expectedRevision": body.expected_revision},
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         try:
-            receipt = registry_factory().disable(
+            receipt = registry.disable(
                 tenant_id=tenant_id,
                 owner_user_id=user_id,
                 actor_user_id=user_id,
@@ -405,10 +466,27 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
+        policy = policy_or_400(body.policy_revision)
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="update",
+            payload={
+                "installationId": installation_id,
+                "targetReleaseId": body.target_release_id,
+                "expectedRevision": body.expected_revision,
+                "expectedContentDigest": body.expected_content_digest,
+                "enableAfter": body.enable_after,
+                "policyRevision": policy,
+            },
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         target = get_release(scope, body.target_release_id)
         if target.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
-        policy = policy_or_400(body.policy_revision)
         approval = _approval(
             scope=scope,
             action="update",
@@ -451,10 +529,27 @@ def build_skills_router(
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
         registry = registry_factory()
+        policy = policy_or_400(body.policy_revision)
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="rollback",
+            payload={
+                "installationId": installation_id,
+                "targetReleaseId": body.target_release_id,
+                "expectedRevision": body.expected_revision,
+                "expectedContentDigest": body.expected_content_digest,
+                "reenable": body.reenable,
+                "policyRevision": policy,
+            },
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         target = get_release(scope, body.target_release_id)
         if target.content_digest != body.expected_content_digest:
             raise HTTPException(409, detail={"error": "STALE_CONTENT_DIGEST"})
-        policy = policy_or_400(body.policy_revision)
         approval = _approval(
             scope=scope,
             action="rollback",
@@ -496,8 +591,19 @@ def build_skills_router(
         installation_id = _uuid_or_404(installation_id)
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
+        registry = registry_factory()
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="remove",
+            payload={"installationId": installation_id, "expectedRevision": body.expected_revision},
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         try:
-            receipt = registry_factory().remove(
+            receipt = registry.remove(
                 tenant_id=tenant_id,
                 owner_user_id=user_id,
                 actor_user_id=user_id,
@@ -519,8 +625,19 @@ def build_skills_router(
         installation_id = _uuid_or_404(installation_id)
         key = key_or_400(idempotency_key)
         tenant_id, user_id = _ids(scope)
+        registry = registry_factory()
+        replayed = _replay(
+            registry,
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            request_id=key,
+            action="revoke",
+            payload={"installationId": installation_id},
+        )
+        if replayed is not None:
+            return {"receipt": replayed.to_wire()}
         try:
-            receipt = registry_factory().revoke(
+            receipt = registry.revoke(
                 tenant_id=tenant_id,
                 owner_user_id=user_id,
                 actor_user_id=user_id,

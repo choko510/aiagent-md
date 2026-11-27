@@ -48,6 +48,7 @@ def create_run_pin(
         release_id=release.id,
         content_digest=release.content_digest,
         activation_generation=installation.activation_generation,
+        revocation_epoch=installation.revocation_epoch,
         policy_revision=installation.policy_revision,
         capability_digest=capability_digest,
         dependency_digest=dependency_digest,
@@ -75,6 +76,7 @@ def verify_run_pin(
         and pin.installation_id == installation.id
         and pin.release_id == release.id
         and pin.content_digest == release.content_digest
+        and pin.revocation_epoch == installation.revocation_epoch
     )
     if not snapshot:
         checks = checks and (

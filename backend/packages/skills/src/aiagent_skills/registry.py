@@ -27,7 +27,7 @@ from .contracts import (
     SkillText,
 )
 from .dependency import DependencyResolution, DependencyResolver
-from .digest import capability_digest, sha256_bytes
+from .digest import capability_digest, dependency_digest, sha256_bytes
 from .errors import (
     IdempotencyKeyReused,
     InstallationConflict,
@@ -98,6 +98,7 @@ def _pin_identity(pin: RunSkillPin) -> tuple[object, ...]:
         pin.release_id,
         pin.content_digest,
         pin.activation_generation,
+        pin.revocation_epoch,
         pin.policy_revision,
         pin.capability_digest,
         pin.dependency_digest,
@@ -462,11 +463,8 @@ class SkillRegistry:
             action="install",
             payload={
                 "releaseId": release_id,
-                "contentDigest": approval.content_digest,
-                "publisherId": approval.publisher_id,
-                "scanDigest": approval.scan_digest,
+                "expectedContentDigest": approval.content_digest,
                 "policyRevision": policy_revision,
-                "capabilityDigest": capability_digest_value,
             },
             operation=operation,
         )
@@ -527,11 +525,9 @@ class SkillRegistry:
             action="enable",
             payload={
                 "installationId": installation_id,
-                "contentDigest": approval.content_digest,
-                "scanDigest": approval.scan_digest,
-                "revision": expected_revision,
+                "expectedRevision": expected_revision,
+                "expectedContentDigest": approval.content_digest,
                 "policyRevision": policy_revision,
-                "capabilityDigest": capability_digest_value,
             },
             operation=operation,
         )
@@ -561,7 +557,7 @@ class SkillRegistry:
             actor_user_id=actor_user_id,
             request_id=request_id,
             action="disable",
-            payload={"installationId": installation_id, "revision": expected_revision},
+            payload={"installationId": installation_id, "expectedRevision": expected_revision},
             operation=operation,
         )
 
@@ -646,12 +642,10 @@ class SkillRegistry:
             payload={
                 "installationId": installation_id,
                 "targetReleaseId": target_release_id,
-                "contentDigest": approval.content_digest,
-                "scanDigest": approval.scan_digest,
-                "revision": expected_revision,
-                "policyRevision": policy_revision,
-                "capabilityDigest": capability_digest_value,
+                "expectedRevision": expected_revision,
+                "expectedContentDigest": approval.content_digest,
                 "enableAfter": enable_after,
+                "policyRevision": policy_revision,
             },
             operation=operation,
         )
@@ -728,12 +722,10 @@ class SkillRegistry:
             payload={
                 "installationId": installation_id,
                 "targetReleaseId": target_release_id,
-                "contentDigest": approval.content_digest,
-                "scanDigest": approval.scan_digest,
-                "revision": expected_revision,
-                "policyRevision": policy_revision,
-                "capabilityDigest": capability_digest_value,
+                "expectedRevision": expected_revision,
+                "expectedContentDigest": approval.content_digest,
                 "reenable": reenable,
+                "policyRevision": policy_revision,
             },
             operation=operation,
         )
@@ -764,7 +756,7 @@ class SkillRegistry:
             actor_user_id=actor_user_id,
             request_id=request_id,
             action="remove",
-            payload={"installationId": installation_id, "revision": expected_revision},
+            payload={"installationId": installation_id, "expectedRevision": expected_revision},
             operation=operation,
         )
 
@@ -809,6 +801,11 @@ class SkillRegistry:
                 continue
             release = self.store.get_release(tenant_id, installation.release_id)
             if release.state is ReleaseState.REVOKED:
+                continue
+            try:
+                self.resolve_dependencies(tenant_id, owner_user_id, release)
+            except SkillError:
+                # A skill whose required dependency is disabled, revoked or moved is not discoverable.
                 continue
             catalog.add(installation, release)
         return catalog
@@ -856,6 +853,42 @@ class SkillRegistry:
             exact=exact,
         )
 
+    def _authorize_run(self, tenant_id: str, run_id: str, installation: SkillInstallation) -> None:
+        if self.run_authorizer is None:
+            raise SkillScopeViolation("run ownership cannot be verified; refusing an unowned run pin")
+        if not self.run_authorizer(tenant_id, run_id, installation.owner_user_id):
+            raise SkillScopeViolation("run does not belong to this tenant and owner")
+
+    def _assert_dependencies_current(self, tenant_id: str, owner_user_id: str, pin: RunSkillPin) -> None:
+        """Fail closed if any dependency in the snapshot was disabled, revoked, or moved."""
+        if dependency_digest({item.skill_name: item.version for item in pin.dependencies}) != pin.dependency_digest:
+            raise SkillScopeViolation("pinned dependency digest is inconsistent with the snapshot")
+        for dependency in pin.dependencies:
+            installation = self.store.get_installation(tenant_id, dependency.installation_id)
+            if installation.owner_user_id != owner_user_id:
+                raise SkillScopeViolation("pinned dependency belongs to another owner")
+            release = self.store.get_release(tenant_id, dependency.release_id)
+            if installation.effective is not InstallationState.ENABLED or release.state is ReleaseState.REVOKED:
+                raise ReleaseRevoked("pinned dependency is no longer enabled")
+            if (
+                installation.release_id != dependency.release_id
+                or installation.skill_name != dependency.skill_name
+                or installation.activation_generation != dependency.activation_generation
+                or release.content_digest != dependency.content_digest
+                or release.manifest.name != dependency.skill_name
+                or release.manifest.version != dependency.version
+            ):
+                raise SkillScopeViolation("pinned dependency was updated or replaced")
+
+    def _assert_live_installation(self, installation: SkillInstallation, pin: RunSkillPin) -> None:
+        if installation.effective is not InstallationState.ENABLED:
+            raise ReleaseRevoked("pinned Skill is no longer enabled")
+        # disable/remove/revoke increment this epoch; re-enabling must not revive an earlier Run's pin.
+        if installation.revocation_epoch != pin.revocation_epoch:
+            raise ReleaseRevoked("pinned Skill was revoked after this Run started")
+        if installation.policy_revision != pin.policy_revision:
+            raise ReleaseRevoked("pinned Skill policy revision changed")
+
     def pin_for_run(
         self,
         *,
@@ -866,36 +899,49 @@ class SkillRegistry:
         dependency_digest_value: str,
         now: str | None = None,
     ) -> RunSkillPin:
-        installation = self.store.get_installation(tenant_id, installation_id)
-        if self.run_authorizer is None:
-            raise SkillScopeViolation("run ownership cannot be verified; refusing an unowned run pin")
-        if not self.run_authorizer(tenant_id, run_id, installation.owner_user_id):
-            raise SkillScopeViolation("run does not belong to this tenant and owner")
-        release = self.store.get_release(tenant_id, installation.release_id)
-        if installation.effective is InstallationState.REVOKED:
-            raise ReleaseRevoked("installation is revoked")
-        catalog = self.catalog(tenant_id, installation.owner_user_id)
-        if installation.skill_name not in {entry.name for entry in catalog.all_entries()}:
-            raise SkillScopeViolation("Skill is not enabled")
-        requested = validate_requested(release.manifest.requested_capabilities)
-        if capability_digest_value != capability_digest(requested):
-            raise SkillScopeViolation("pinned capability digest does not match the release request")
-        resolution = self.resolve_dependencies(tenant_id, installation.owner_user_id, release)
-        if dependency_digest_value != resolution.digest:
-            raise SkillScopeViolation("pinned dependency digest does not match the enabled dependency set")
-        pin = create_run_pin(
-            tenant_id=tenant_id,
-            run_id=run_id,
-            installation=installation,
-            release=release,
-            capability_digest=capability_digest_value,
-            dependency_digest=dependency_digest_value,
-            skill_surface_digest=catalog.surface_digest(),
-            dependencies=resolution.exact,
-            now=now or utc_instant(),
-        )
-        self.store.put_pin(pin)
-        return pin
+        timestamp = now or utc_instant()
+        with self.store.atomic(tenant_id):
+            installation = self.store.get_installation(tenant_id, installation_id)
+            self._authorize_run(tenant_id, run_id, installation)
+            existing = self.store.get_pin(tenant_id, run_id, installation_id)
+            if existing is not None:
+                if (
+                    existing.capability_digest != capability_digest_value
+                    or existing.dependency_digest != dependency_digest_value
+                    or existing.activation_generation != installation.activation_generation
+                    or existing.revocation_epoch != installation.revocation_epoch
+                    or existing.policy_revision != installation.policy_revision
+                    or existing.release_id != installation.release_id
+                ):
+                    raise LifecycleConflict("run pin no longer matches the live installation")
+                return existing
+            release = self.store.get_release(tenant_id, installation.release_id)
+            if installation.effective is not InstallationState.ENABLED:
+                raise ReleaseRevoked("installation is not enabled")
+            if release.state is ReleaseState.REVOKED:
+                raise ReleaseRevoked("release is revoked")
+            catalog = self.catalog(tenant_id, installation.owner_user_id)
+            if installation.skill_name not in {entry.name for entry in catalog.all_entries()}:
+                raise SkillScopeViolation("Skill is not enabled")
+            requested = validate_requested(release.manifest.requested_capabilities)
+            if capability_digest_value != capability_digest(requested):
+                raise SkillScopeViolation("pinned capability digest does not match the release request")
+            resolution = self.resolve_dependencies(tenant_id, installation.owner_user_id, release)
+            if dependency_digest_value != resolution.digest:
+                raise SkillScopeViolation("pinned dependency digest does not match the enabled dependency set")
+            pin = create_run_pin(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                installation=installation,
+                release=release,
+                capability_digest=capability_digest_value,
+                dependency_digest=dependency_digest_value,
+                skill_surface_digest=catalog.surface_digest(),
+                dependencies=resolution.exact,
+                now=timestamp,
+            )
+            self.store.put_pin(pin)
+            return pin
 
     def load_pinned_body(
         self,
@@ -911,12 +957,13 @@ class SkillRegistry:
         pin = self.store.get_pin(tenant_id, run_id, installation_id)
         if pin is None:
             raise SkillScopeViolation("run has no Skill pin")
-        if installation.effective is InstallationState.REVOKED:
-            raise ReleaseRevoked("installation is revoked")
+        self._authorize_run(tenant_id, run_id, installation)
         # The pin names the exact release this Run started with. An update must not silently swap the body.
         release = self.store.get_release(tenant_id, pin.release_id)
+        self._assert_live_installation(installation, pin)
         if release.state is ReleaseState.REVOKED:
             raise ReleaseRevoked("release is revoked")
+        self._assert_dependencies_current(tenant_id, installation.owner_user_id, pin)
         if self.quarantine is None:
             raise QuarantineUnavailable("quarantine is not configured")
         bundle_digest_value = str(release.manifest.provenance.get("bundleDigest", ""))
@@ -949,9 +996,12 @@ class SkillRegistry:
         pin = self.store.get_pin(tenant_id, run_id, installation_id)
         if pin is None:
             raise SkillScopeViolation("run has no Skill pin")
-        if installation.effective is InstallationState.REVOKED or release.state is ReleaseState.REVOKED:
+        self._authorize_run(tenant_id, run_id, installation)
+        self._assert_live_installation(installation, pin)
+        if release.state is ReleaseState.REVOKED:
             raise ReleaseRevoked("pinned Skill is revoked")
         verify_run_pin(pin, installation=installation, release=release, snapshot=True)
+        self._assert_dependencies_current(tenant_id, installation.owner_user_id, pin)
         assert_manifest_consistent(release, files)
         backend = ImmutableSkillBackend(files)
         body = backend.read_bytes(release.manifest.entry)

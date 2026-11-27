@@ -109,7 +109,11 @@ def lineage_key(source: SkillSource, owner_scope: str) -> str:
     if source.kind in (SourceKind.GITHUB, SourceKind.CLAWHUB):
         if not source.publisher_id or not source.catalog_key:
             raise ManifestInvalid("external Skill source lacks a stable publisher/catalog identity")
-        return f"{source.kind.value}:{source.publisher_id.casefold()}:{source.catalog_key.casefold()}"
+        # Repository names are case-insensitive, but a GitHub subdirectory is a case-sensitive path.
+        # Casefolding the whole catalog key would let an update move between #Skills/Foo and #skills/foo.
+        catalog, separator, subdir = source.catalog_key.partition("#")
+        normalized_catalog = catalog.casefold() + (separator + subdir if separator else "")
+        return f"{source.kind.value}:{source.publisher_id.casefold()}:{normalized_catalog}"
     return f"{source.kind.value}:{owner_scope}"
 
 

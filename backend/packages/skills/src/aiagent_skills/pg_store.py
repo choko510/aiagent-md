@@ -171,11 +171,13 @@ class PostgresSkillStore:
                 cur = conn.execute(
                     """INSERT INTO agent.skill_installations
                        (id, tenant_id, owner_user_id, skill_name, release_id, desired, effective, record_version,
-                        activation_generation, policy_revision, approved_release_digest, created_at, updated_at, revoked_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        activation_generation, revocation_epoch, policy_revision, approved_release_digest,
+                        created_at, updated_at, revoked_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT (tenant_id, id) DO UPDATE SET
                          release_id=EXCLUDED.release_id, desired=EXCLUDED.desired, effective=EXCLUDED.effective,
                          record_version=EXCLUDED.record_version, activation_generation=EXCLUDED.activation_generation,
+                         revocation_epoch=EXCLUDED.revocation_epoch,
                          policy_revision=EXCLUDED.policy_revision, approved_release_digest=EXCLUDED.approved_release_digest,
                          updated_at=EXCLUDED.updated_at, revoked_at=EXCLUDED.revoked_at
                        WHERE agent.skill_installations.record_version = EXCLUDED.record_version - 1""",
@@ -189,6 +191,7 @@ class PostgresSkillStore:
                         installation.effective.value,
                         installation.record_version,
                         installation.activation_generation,
+                        installation.revocation_epoch,
                         installation.policy_revision,
                         installation.approved_release_digest,
                         installation.created_at,
@@ -288,9 +291,9 @@ class PostgresSkillStore:
             cur = conn.execute(
                 """INSERT INTO agent.skill_run_pins
                    (tenant_id, run_id, installation_id, release_id, content_digest, activation_generation,
-                    policy_revision, capability_digest, dependency_digest, dependency_snapshot_digest,
+                    revocation_epoch, policy_revision, capability_digest, dependency_digest, dependency_snapshot_digest,
                     dependency_snapshot, skill_surface_digest, created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT DO NOTHING""",
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT DO NOTHING""",
                 (
                     pin.tenant_id,
                     pin.run_id,
@@ -298,6 +301,7 @@ class PostgresSkillStore:
                     pin.release_id,
                     pin.content_digest,
                     pin.activation_generation,
+                    pin.revocation_epoch,
                     pin.policy_revision,
                     pin.capability_digest,
                     pin.dependency_digest,
@@ -316,6 +320,7 @@ class PostgresSkillStore:
                     str(stored["release_id"]),
                     str(stored["content_digest"]),
                     int(stored["activation_generation"]),
+                    int(stored["revocation_epoch"]),
                     str(stored["policy_revision"]),
                     str(stored["capability_digest"]),
                     str(stored["dependency_digest"]),
@@ -325,6 +330,7 @@ class PostgresSkillStore:
                     pin.release_id,
                     pin.content_digest,
                     pin.activation_generation,
+                    pin.revocation_epoch,
                     pin.policy_revision,
                     pin.capability_digest,
                     pin.dependency_digest,
@@ -348,6 +354,7 @@ class PostgresSkillStore:
             release_id=str(row["release_id"]),
             content_digest=str(row["content_digest"]),
             activation_generation=int(row["activation_generation"]),
+            revocation_epoch=int(row["revocation_epoch"]),
             policy_revision=str(row["policy_revision"]),
             capability_digest=str(row["capability_digest"]),
             dependency_digest=str(row["dependency_digest"]),
@@ -444,6 +451,7 @@ class PostgresSkillStore:
             effective=InstallationState(row["effective"]),
             record_version=int(row["record_version"]),
             activation_generation=int(row["activation_generation"]),
+            revocation_epoch=int(row["revocation_epoch"]),
             policy_revision=str(row["policy_revision"]),
             approved_release_digest=row["approved_release_digest"],
             created_at=_instant(row["created_at"]) or "",

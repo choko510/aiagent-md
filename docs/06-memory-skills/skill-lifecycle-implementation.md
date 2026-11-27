@@ -192,3 +192,39 @@ test seeds a real owned Run and exercises migration `0029`, RLS, CAS, receipts/a
 Still open / partial: independent persisted reviewer identity and one-time approval consumption (P1-01/P1-02), Gateway
 effective-capability evidence (P1-06), owner-aware RLS beyond application scoping (P1-11), signature verification,
 quarantine GC, API pagination, and live runtime wiring. These are not represented as fixed.
+
+## 9. Second-review hardening (A2/B2, still Draft)
+
+This pass keeps `AIAGENT_SKILLS_ENABLED` default-off and does not claim `CODE_READY` or `MERGE_READY`. The
+original review IDs are authoritative; the earlier PR-body P2-05..P2-10 numbering was shifted and is not used to close
+findings.
+
+Implemented in the working tree after `690292d`:
+
+- **A2-02 revocation epoch:** `SkillInstallation` and `RunSkillPin` carry a monotonic `revocation_epoch`.
+  Disable, remove and revoke increment it; enable/update/rollback preserve it. Pinned load verifies the epoch, so
+  disable -> re-enable cannot revive an old Run pin. Normal update still allows the old Run to read its immutable
+  snapshot, while a new pin for that Run is refused.
+- **A2-02 dependency closure:** the enabled catalog now omits a Skill whose required dependency is disabled, revoked,
+  moved or otherwise unresolvable. Pinned loads recompute the closure digest and verify each dependency's exact
+  release, installation, generation, content digest, name and version.
+- **A2-03/A2-04 fences:** pin replay is checked against the live installation generation/epoch/release; the public
+  mutations look up an existing receipt before release/state prechecks, so a retry after a later mutation returns the
+  original receipt instead of a stale-revision error. Idempotency payloads mirror the HTTP request body.
+- **A2-06 ingest:** upload parsing, scanning and quarantine writes run in Starlette's bounded thread pool instead of
+  blocking the event loop. This is bounded threadpool offload, not a durable job queue.
+- **A2-09/B2-03/B2-06 bundle hardening:** raw GitHub zip metadata is validated before wrapper rewrite (entry count,
+  encryption, compression method/ratio, traversal, symlinks, total expansion, bounded member reads); bundles reject
+  file/directory prefix collisions, reserved `.complete`/`.manifest` markers and nested archive magic; manifest
+  signature wire parsing maps `keyId` explicitly and rejects unknown fields.
+- **B2-02/B2-05 identity:** GitHub subdirectory case is preserved in the catalog key; ClawHub requires an exact SemVer
+  and a slug that is bound into the catalog key. The scanner's 500-finding cap is global across files.
+
+Additional tests: 21 regressions in `backend/packages/skills/tests/test_review_regressions.py`, one API receipt-replay
+test, and a PostgreSQL disable -> re-enable pin test. Local package/API runs are green; PostgreSQL and the live
+runtime path still require CI/deployment evidence.
+
+Still open after this pass: independent persisted reviewer identity and one-time approval consumption (A2-01/A2-05),
+run-scoped runtime graph/backend and Gateway-mediated Skill loading (A2-03/A2-07), owner-aware RLS (A2-07), publisher
+evidence/raw artifact digest (A2-08), quarantine GC and a durable ingest queue (A2-06), signature verification/trust
+policy, and the independent review UI.

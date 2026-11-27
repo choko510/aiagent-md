@@ -13,7 +13,7 @@ from aiagent_core.commands import Scope, submit_task
 from aiagent_core.db import Database
 from aiagent_skills.contracts import InstallationState, ReleaseState
 from aiagent_skills.digest import capability_digest, dependency_digest
-from aiagent_skills.errors import SkillNotFound
+from aiagent_skills.errors import SkillError, SkillNotFound
 from aiagent_skills.pg_store import PostgresSkillStore, run_is_owned
 from aiagent_skills.policy import validate_requested
 from aiagent_skills.quarantine import QuarantineStore
@@ -157,6 +157,47 @@ def test_postgres_lifecycle_rls_and_least_privilege(
     assert stored_pin.release_id == pin.release_id
     assert stored_pin.content_digest == pin.content_digest
     assert stored_pin.dependency_digest == pin.dependency_digest
+    assert stored_pin.revocation_epoch == 0
+
+    registry.disable(
+        tenant_id=tenant_id,
+        owner_user_id=owner_id,
+        actor_user_id=owner_id,
+        installation_id=installation.id,
+        expected_revision=enabled.record_version,
+        request_id="pg-disable-after-pin",
+    )
+    suspended = store.get_installation(tenant_id, installation.id)
+    assert suspended.revocation_epoch == 1
+    resume = make_approval(
+        tenant_id=tenant_id,
+        owner_user_id=owner_id,
+        actor_user_id=owner_id,
+        action="enable",
+        release=release,
+        capability_digest_value=capability,
+        policy_revision="policy:pg",
+        request_id="pg-reenable-after-pin",
+        expected_installation_revision=suspended.record_version,
+        installation_id=installation.id,
+    )
+    registry.enable(
+        tenant_id=tenant_id,
+        owner_user_id=owner_id,
+        actor_user_id=owner_id,
+        installation_id=installation.id,
+        approval=resume,
+        capability_digest_value=capability,
+        policy_revision="policy:pg",
+        expected_revision=suspended.record_version,
+        request_id="pg-reenable-after-pin",
+    )
+    with pytest.raises(SkillError):
+        registry.load_pinned_body(
+            tenant_id=tenant_id,
+            run_id=seeded["runId"],
+            installation_id=installation.id,
+        )
 
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         with memory_dbs["runtime"].tx(tenant_id) as conn:

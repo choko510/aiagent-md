@@ -180,6 +180,7 @@ def begin_disable(
         desired=DesiredState.DISABLED,
         effective=InstallationState.SUSPENDED,
         record_version=installation.record_version + 1,
+        revocation_epoch=installation.revocation_epoch + 1,
         updated_at=now,
     )
 
@@ -330,6 +331,7 @@ def begin_remove(installation: SkillInstallation, *, expected_revision: int, now
         desired=DesiredState.DISABLED,
         effective=InstallationState.REMOVING,
         record_version=installation.record_version + 1,
+        revocation_epoch=installation.revocation_epoch + 1,
         updated_at=now,
     )
 
@@ -353,6 +355,7 @@ def revoke_installation(installation: SkillInstallation, *, now: str) -> SkillIn
         effective=InstallationState.REVOKED,
         revoked_at=now,
         record_version=installation.record_version + 1,
+        revocation_epoch=installation.revocation_epoch + 1,
         updated_at=now,
     )
 
