@@ -18,6 +18,8 @@ pub enum PairingError {
     Invalid,
     Offline,
     SigningDenied,
+    /// The completion request may have reached the server; reconcile before retrying.
+    OutcomeUnknown,
 }
 
 fn decode(raw: &str, kind: &str) -> Result<Map<String, Value>, PairingError> {
@@ -192,18 +194,18 @@ impl PairingSession {
         self.socket
             .send_text(&raw)
             .await
-            .map_err(|_| PairingError::Offline)?;
+            .map_err(|_| PairingError::OutcomeUnknown)?;
         let response = self
             .socket
             .receive_text()
             .await
-            .map_err(|_| PairingError::Offline)?;
-        let frame = decode(&response, "PAIRED")?;
+            .map_err(|_| PairingError::OutcomeUnknown)?;
+        let frame = decode(&response, "PAIRED").map_err(|_| PairingError::OutcomeUnknown)?;
         let (_, _, identity, device) = self.identity.pairing_scope();
         if frame.get("identityId").and_then(Value::as_str) != Some(identity)
             || frame.get("deviceId").and_then(Value::as_str) != Some(device)
         {
-            return Err(PairingError::Invalid);
+            return Err(PairingError::OutcomeUnknown);
         }
         self.socket.close().await;
         Ok(self.identity)
@@ -213,6 +215,18 @@ impl PairingSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use rustls::{pki_types::PrivatePkcs8KeyDer, RootCertStore, ServerConfig};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use tokio_tungstenite::{
+        accept_hdr_async,
+        tungstenite::{
+            handshake::server::{Request, Response},
+            Message,
+        },
+    };
 
     #[test]
     fn rejects_expiry_and_clock_rollback_before_consumption() {
@@ -222,5 +236,73 @@ mod tests {
         assert!(!still_valid(99, 100, 200, now, deadline));
         assert!(!still_valid(200, 100, 200, now, deadline));
         assert!(!still_valid(101, 100, 200, deadline, deadline));
+    }
+
+    #[tokio::test]
+    async fn lost_completion_reply_is_unknown() {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = cert.der().clone();
+        let config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.clone()],
+                    PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
+                )
+                .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let identity =
+            crate::identity::test_identity_for_origin(&format!("https://localhost:{port}"));
+        let digest = hex_digest(&identity.binding_digest());
+        let key_hash = hex_digest(&Sha256::digest(identity.public_key()));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .unwrap();
+            #[allow(clippy::result_large_err)]
+            fn protocol(
+                _: &Request,
+                mut response: Response,
+            ) -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse>
+            {
+                response.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    "aiagent-device.v1".parse().unwrap(),
+                );
+                Ok(response)
+            }
+            let mut socket = accept_hdr_async(tls, protocol).await.unwrap();
+            let attach = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            decode(&attach, "ATTACH").unwrap();
+            socket.send(Message::Text(json!({"version":"1.0", "kind":"CODE", "code":"12345678", "publicKeySha256":key_hash, "bindingDigest":digest}).to_string().into())).await.unwrap();
+            let consume = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            decode(&consume, "CONSUME").unwrap();
+            // Simulate a committed registration whose response was lost.
+        });
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let socket = ServerVerifiedSocket::connect_with_test_ca(
+            &format!("wss://localhost:{port}/v1/device/pair"),
+            roots,
+        )
+        .await
+        .unwrap();
+        let now = now_ms().unwrap();
+        let bootstrap =
+            PairingBootstrap::new([1; 16], [2; 32], now, now + 30_000, [3; 32]).unwrap();
+        let session = PairingSession::attach(socket, identity, bootstrap)
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.finish().await,
+            Err(PairingError::OutcomeUnknown)
+        ));
+        server.await.unwrap();
     }
 }
