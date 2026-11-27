@@ -140,10 +140,10 @@ $env:PYTHONPATH='packages/multimodal/src'
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check packages/multimodal packages/api/src/aiagent_api/multimodal_api.py tests/test_multimodal_*.py tests/multimodal_fixtures.py
 .\.venv\Scripts\python.exe -m ruff format --check ...
-.\.venv\Scripts\python.exe -m mypy packages/multimodal/src packages/api/src/aiagent_api/multimodal_api.py
+.\.venv\Scripts\python.exe -m mypy packages/multimodal/src packages/api/src
 ```
 
-結果: ruff all checks passed、format 37 files unchanged、mypy `Success: no issues found in 33 source files`。
+結果: ruff all checks passed、format 7 files unchanged、mypy `Success: no issues found in 35 source files`（multimodal + API source）。
 
 ### 4.3 Web build
 
