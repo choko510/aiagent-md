@@ -63,13 +63,29 @@ fn policy() -> LocalPolicy {
     p
 }
 fn new_agent(path: &std::path::Path, owner: &str) -> Agent<MockChannel, MockAdapters> {
+    let mut journal = LocalJournal::open(path, &scope(owner)).unwrap();
+    // Simulator fixtures explicitly provision control before mock execution.
+    if journal
+        .load_control(vec!["MISSING_FIXTURE_CONTROL".into()])
+        .unwrap()
+        .audit
+        == ["MISSING_FIXTURE_CONTROL"]
+    {
+        journal
+            .save_control(&aiagent_device_core::ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec!["SIMULATOR_FIXTURE".into()],
+            })
+            .unwrap();
+    }
     Agent::new(
         scope(owner),
         fence(),
         MockChannel::online_mock(),
         MockAdapters::default(),
         policy(),
-        LocalJournal::open(path, &scope(owner)).unwrap(),
+        journal,
     )
 }
 
@@ -199,6 +215,13 @@ fn restarted_started_is_unknown_and_never_auto_retried() {
     let r = request("A", "one", Operation::DesktopClick);
     {
         let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+        journal
+            .save_control(&aiagent_device_core::ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec!["SIMULATOR_FIXTURE".into()],
+            })
+            .unwrap();
         assert_eq!(
             journal
                 .begin(

@@ -437,7 +437,8 @@ impl LocalJournal {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        if let Some((stopped, revoked, sealed)) = control {
+        {
+            let (stopped, revoked, sealed) = control.ok_or("MISSING_LOCAL_CONTROL")?;
             if is_legacy_payload(&sealed) {
                 return Err("LEGACY_CONTROL_REQUIRES_MIGRATION".into());
             }
@@ -885,6 +886,38 @@ mod tests {
         assert!(journal
             .begin("intent", "fingerprint", "1", "grant", "permit")
             .is_err());
+        assert!(journal.state("intent").unwrap().is_none());
+    }
+
+    #[test]
+    fn deleted_control_blocks_start_even_for_existing_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .conn
+            .execute("DELETE FROM local_control", [])
+            .unwrap();
+        assert_eq!(
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap_err(),
+            "MISSING_LOCAL_CONTROL"
+        );
         assert!(journal.state("intent").unwrap().is_none());
     }
 }
