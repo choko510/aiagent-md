@@ -96,6 +96,9 @@ def loads_strict(
         raise McpError(ErrorCode.SCHEMA_INVALID, "invalid_utf8") from exc
     except json.JSONDecodeError as exc:
         raise McpError(ErrorCode.SCHEMA_INVALID, "invalid_json") from exc
+    except RecursionError as exc:
+        # CPython can raise this before object_pairs_hook returns for deeply nested arrays/objects.
+        raise McpError(ErrorCode.SCHEMA_INVALID, "json_nesting_too_deep") from exc
     _bound_json_value(parsed, max_depth=max_depth, max_nodes=max_nodes)
     return parsed
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -126,6 +127,53 @@ async def test_credential_is_passed_only_to_the_transport(monkeypatch: pytest.Mo
     assert broker.calls and broker.calls[0][1] == "run-1"
     assert transport.calls[0]["credential"] == credential
     assert mgr.active == 0
+
+
+async def test_before_open_runs_after_the_semaphore_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_ADAPTER_ENABLED", "1")
+    mgr, _, _ = manager(limits=limits(max_sessions=1))
+    first_entered = asyncio.Event()
+    release = asyncio.Event()
+    second_open = asyncio.Event()
+
+    async def hold_first() -> None:
+        async with mgr.session(provider(), on_list_changed=lambda: None):
+            first_entered.set()
+            await release.wait()
+
+    async def mark_open() -> None:
+        second_open.set()
+
+    async def second() -> None:
+        async with mgr.session(
+            provider(),
+            on_list_changed=lambda: None,
+            before_open=mark_open,
+        ):
+            pass
+
+    first = asyncio.create_task(hold_first())
+    await first_entered.wait()
+    queued = asyncio.create_task(second())
+    await asyncio.sleep(0.02)
+    assert not second_open.is_set()
+    release.set()
+    await asyncio.gather(first, queued)
+    assert second_open.is_set()
+
+
+async def test_expired_deadline_is_refused_after_the_semaphore_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_ADAPTER_ENABLED", "1")
+    mgr, transport, _ = manager()
+    with pytest.raises(McpError) as err:
+        async with mgr.session(
+            provider(),
+            on_list_changed=lambda: None,
+            deadline_epoch_s=time.time() - 1,
+        ):
+            pass
+    assert err.value.code is ErrorCode.BUDGET_EXCEEDED
+    assert transport.calls == []
 
 
 async def test_call_slot_bounds_concurrency() -> None:

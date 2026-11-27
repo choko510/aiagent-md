@@ -91,6 +91,14 @@ class McpToolExecutor:
             raise ExecutorFailed(f"{exc.code}:{exc.detail}") from exc
         if entry.source_name not in provider.allowed_tools:
             raise ExecutorFailed("mcp_tool_not_allowlisted")
+        if provider.tenant_id != entry.tenant_id or provider.owner_user_id != entry.owner_user_id:
+            raise ExecutorFailed("mcp_provider_scope_mismatch")
+        if provider.policy_revision != entry.policy_revision:
+            raise ExecutorFailed("mcp_policy_revision_changed")
+        if provider.credential_version != entry.credential_version:
+            raise ExecutorFailed("mcp_credential_version_changed")
+        if snapshot.endpoint_fingerprint != provider.endpoint_fingerprint:
+            raise ExecutorFailed("mcp_endpoint_fingerprint_changed")
         await self.store.pin_run(snapshot, run_id=run_id)
         ctx = McpCallContext(
             effect_key=effect_key,
@@ -152,7 +160,6 @@ class McpToolExecutor:
 
         try:
             async with self.sessions.call_slot(provider.provider_id):
-                remaining = max(0.001, deadline_epoch_s - time.time())
                 async with self.sessions.session(
                     provider,
                     on_list_changed=on_list_changed,
@@ -161,8 +168,11 @@ class McpToolExecutor:
                     effect_tool=entry.source_name,
                     effect_arguments_digest=ctx.arguments_digest,
                     before_effect_send=before_effect_send,
+                    before_open=lambda: self._before_effect_send(ctx, deadline_epoch_s),
                     expected_credential_version=entry.credential_version,
+                    deadline_epoch_s=deadline_epoch_s,
                 ) as session:
+                    remaining = max(0.001, deadline_epoch_s - time.time())
                     raw = await session.call_tool(entry.source_name, copied, timeout_s=remaining)
             result = normalize_result(
                 raw,
@@ -248,9 +258,9 @@ class McpToolExecutor:
         if result.status == "OK" and not result.truncated:
             if entry.risk_class == "read":
                 return None
-            # A write is only CONFIRMED when the server returned a non-empty successful result.
-            # Empty success is not proof that the effect happened; it is UNKNOWN, never retried.
-            if result.text or result.blocks or result.structured is not None:
+            # A write is only CONFIRMED by a non-empty text body or a non-empty structured result.
+            # A resource link, binary digest or empty text/object is not proof the effect happened.
+            if result.text.strip() or (result.structured is not None and bool(result.structured)):
                 return None
             return McpError(ErrorCode.EFFECT_UNCERTAIN, "empty_write_result", effect_uncertain=True)
         if entry.risk_class == "read":

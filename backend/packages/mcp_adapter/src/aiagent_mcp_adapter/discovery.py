@@ -68,6 +68,14 @@ async def discover_tools(
 ) -> DiscoveryResult:
     if generation < 1:
         raise McpError(ErrorCode.BINDING_MISMATCH, "generation_must_be_positive")
+    if not policy.matches_scope(
+        provider_id=provider.provider_id,
+        tenant_id=provider.tenant_id,
+        owner_user_id=provider.owner_user_id,
+    ):
+        raise McpError(ErrorCode.POLICY_DENIED, "policy_scope_mismatch")
+    if policy.revision != provider.policy_revision:
+        raise McpError(ErrorCode.POLICY_DENIED, "policy_revision_mismatch")
     start_marker = generation_marker() if started_at_generation is None else started_at_generation
     seen_cursors: set[str] = set()
     seen_names: set[str] = set()
@@ -99,6 +107,10 @@ async def discover_tools(
                 raise McpError(ErrorCode.DUPLICATE_TOOL_NAME, descriptor.source_name[:64])
             seen_names.add(descriptor.source_name)
             decision = policy.decide(descriptor)
+            if decision.reason in ("provider_mismatch", "scope_mismatch"):
+                # A policy record transplanted across provider/tenant/owner is a configuration
+                # error, not a tool that merely needs review. Fail the scan closed.
+                raise McpError(ErrorCode.POLICY_DENIED, f"policy_{decision.reason}")
             if decision.policy is None:
                 pending.append(PendingTool(descriptor.source_name, decision.reason))
                 continue

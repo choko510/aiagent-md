@@ -22,7 +22,7 @@ client/catalog half of the canonical adapter:
 | Egress | `egress.py` | absolute-form HTTP through the existing forward proxy, `Proxy-Authorization: Aiagent tool_gateway:{permit}`, no redirect following in the adapter, HMAC denial proof check |
 | SDK transport | `sdk_transport.py` | pinned `mcp 2.3.0` streamable HTTP client, explicit `ListToolsRequest` / `CallToolRequest`, bounded timeouts, session-loss and transport-error classification |
 | Normalization | `normalization.py` | strips control characters, caps text, hashes binary content instead of inlining it, keeps resource links inert, validates `structuredContent` against the pinned output schema |
-| Snapshot store | `registry_snapshot.py` | compare-and-swap publish, monotonic generation high-watermark, TTL, current-snapshot-only run pin, tombstoned pins, revoke, strict `ToolRef` resolution (provider, schema digest, risk class, policy revision, credential version, endpoint fingerprint) |
+| Snapshot store | `registry_snapshot.py` | compare-and-swap publish, monotonic generation high-watermark, TTL, invalidation epoch, current-snapshot-only run pin, live-descriptor recheck, tombstoned pins, revoke, strict `ToolRef` resolution (provider, schema digest, risk class, policy revision, credential version, endpoint fingerprint) |
 | Credentials | `credentials.py` | broker Protocol; production default refuses; static broker is explicitly test-only |
 | Sessions | `session_manager.py` | fail-closed feature flag, provider enable/revoke, credential presence check, bounded sessions and admitted-call slots, one SDK session per operation |
 | Telemetry | `telemetry.py` | bounded, secret-free event sink |
@@ -65,16 +65,18 @@ untrusted data. `annotations.readOnlyHint` never grants authority; risk class an
   request through `McpEgress` with a Sentinel-issued permit. The environment proxy is ignored and redirects
   are not followed by the adapter (a redirected request would need a new permit).
 - **HTTPS deployment caveat.** The current forward-proxy contract is absolute-form HTTP and explicitly
-  forbids `CONNECT` (canonical registry/marketplace dependency). The adapter does not terminate TLS and the
-  local E2E fixture uses plain HTTP loopback. A production HTTPS MCP endpoint therefore requires a reviewed
-  TLS-terminating egress connector that preserves the Sentinel permit and destination checks. That
-  connector is **not** included here; do not point this adapter at a remote HTTPS provider until it exists.
+  forbids `CONNECT`. The adapter itself does not terminate TLS, but the Sentinel/proxy egress path can
+  terminate TLS through a reviewed connector. Remote HTTPS is therefore **unimplemented/unexecuted**, not
+  inherently impossible. The connector must preserve the Sentinel permit and destination checks. It is not
+  included here; do not point this adapter at a remote HTTPS provider until it exists and is exercised.
 - **No stdio.** Only `streamable_http` is accepted. There is no command, shell, Docker socket, SSH, or
   arbitrary local executable path in the provider model or call request.
 - **No stale execution.** `SnapshotStore.resolve_pinned` checks generation, schema digest, policy revision,
-  credential version, risk class and endpoint fingerprint against the run pin. A pin may only be created
-  from the currently committed, unexpired snapshot; expired/revoked pins remain tombstoned and cannot be
-  re-pinned. The executor re-checks the current provider config and pinned endpoint before opening a
+  credential version, risk class and endpoint fingerprint against the run pin, then requires the live
+  current snapshot to still contain the same descriptor. Invalidation removes the current surface and bumps
+  a per-provider epoch, so a stale scan cannot publish and an old pin cannot execute a deleted/changed tool.
+  A pin may only be created from the currently committed, unexpired snapshot; expired/revoked pins remain
+  tombstoned and cannot be re-pinned. The executor re-checks the current provider config and pinned endpoint before opening a
   session and again at the actual-send fence. `tools/list_changed` is awaited and invalidates every pin
   for that provider, so an old ref cannot be dispatched after the notification.
 - **No blind retry.** A 404/session loss or timeout after a write produces `ExecutorUnknown` for non-read
@@ -165,7 +167,7 @@ refusal through the adapter transport. They do not contact an external service.
 
 ## 8. Test evidence
 
-`75` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
+`90` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
 `docs/11-qa/mcp-adapter-verification.md`. This is local execution evidence only; it is not a production
 verification or a remote-provider certification.
 
@@ -177,13 +179,15 @@ verification or a remote-provider certification.
   notification path is unit-tested with a callback. `EgressHttpTransport` buffers a complete response, so
   it cannot hold a long-lived GET SSE stream; a streaming egress connector is required for real
   server-initiated notifications.
-- The generation high-watermark and pin tombstones are process-local. A restart loses them until the
-  PostgreSQL-backed store is added; do not treat the in-memory store as a durable anti-replay boundary.
+- The generation high-watermark, invalidation epoch and pin tombstones are process-local. A restart loses
+  them until the PostgreSQL-backed store is added; do not treat the in-memory store as a durable
+  anti-replay boundary.
 - The Gateway-to-executor admitted-context/destination port and the tenant-scoped dynamic model surface
   remain unimplemented; the executor is not registered in the production Gateway path.
-- No real remote MCP/OAuth provider was contacted. The current egress path is absolute-form HTTP without
-  TLS termination; a production HTTPS connector is a prerequisite. OAuth refresh/revocation and
-  provider-specific reconciliation are not verified.
+- No real remote MCP/OAuth provider was contacted. The current egress path is absolute-form HTTP; the
+  adapter does not terminate TLS. A reviewed Sentinel/proxy TLS-terminating connector is an unexecuted
+  prerequisite, not a claimed TLS impossibility. OAuth refresh/revocation and provider-specific
+  reconciliation are not verified.
 - No Web UI, Marketplace candidate flow, API router, or provider-health projection is included.
 - No Kubernetes/KVM isolation test, load test, or cost benchmark.
 - MCP resources/prompts/sampling/elicitation are intentionally not exposed.

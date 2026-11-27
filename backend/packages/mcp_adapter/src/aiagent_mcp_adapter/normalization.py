@@ -59,11 +59,12 @@ def normalize_result(
         raise McpError(ErrorCode.RESULT_UNSUPPORTED, "content_not_list")
     if len(blocks_raw) > _MAX_CONTENT_BLOCKS:
         raise McpError(ErrorCode.RESULT_TRUNCATED, "content_block_limit")
+    is_error = bool(raw.get("isError"))
     structured = raw.get("structuredContent")
     if structured is not None:
         if not isinstance(structured, dict):
             raise McpError(ErrorCode.RESULT_UNSUPPORTED, "structured_content_not_object")
-        if output_schema is not None:
+        if output_schema is not None and not is_error:
             compiled = _compiled_output(output_schema, limits)
             errors = validate_output(compiled, structured)
             if errors:
@@ -73,6 +74,10 @@ def normalize_result(
             pass
         if len(canonical_json(structured).encode("utf-8")) > limits.max_text_bytes:
             raise McpError(ErrorCode.RESULT_TRUNCATED, "structured_content_too_large")
+    elif output_schema is not None and not is_error:
+        # An output schema is a contract, not a suggestion. Missing structuredContent cannot be
+        # treated as success for a write or a read, even if the server also returned text.
+        raise McpError(ErrorCode.OUTPUT_SCHEMA_MISMATCH, "structured_content_required")
 
     blocks: list[ContentBlock] = []
     notes: list[str] = []
@@ -94,9 +99,12 @@ def normalize_result(
             if truncated:
                 truncated_any = True
                 notes.append("text_truncated")
-            if cleaned:
-                text_parts.append(cleaned)
-                text_used += len(cleaned.encode("utf-8"))
+            if not cleaned.strip():
+                # Empty/whitespace-only content is not evidence that an effect happened.
+                notes.append("empty_text_block")
+                continue
+            text_parts.append(cleaned)
+            text_used += len(cleaned.encode("utf-8"))
             blocks.append(ContentBlock(kind="text", text=cleaned, size_bytes=len(cleaned.encode("utf-8"))))
         elif kind in ("image", "audio"):
             data = item.get("data")
@@ -149,6 +157,9 @@ def normalize_result(
                 if truncated:
                     truncated_any = True
                     notes.append("text_truncated")
+                if not cleaned.strip():
+                    notes.append("empty_text_block")
+                    continue
                 text_parts.append(cleaned)
                 text_used += len(cleaned.encode("utf-8"))
                 blocks.append(
@@ -187,18 +198,22 @@ def normalize_result(
 
     if unsupported:
         notes.append(f"unsupported_blocks:{unsupported}")
+    if is_error:
+        return NormalizedResult(
+            status="TOOL_ERROR",
+            blocks=tuple(blocks),
+            text="\n".join(text_parts),
+            structured=structured,
+            truncated=truncated_any or bool(unsupported),
+            notes=tuple(dict.fromkeys(notes)),
+        )
     if not blocks and structured is None:
         return NormalizedResult(
             status="UNSUPPORTED",
             structured=structured,
             notes=tuple(dict.fromkeys(notes)),
         )
-    if bool(raw.get("isError")):
-        status = "TOOL_ERROR"
-    elif unsupported:
-        status = "UNSUPPORTED"
-    else:
-        status = "OK"
+    status = "UNSUPPORTED" if unsupported else "OK"
     joined = "\n".join(text_parts)
     return NormalizedResult(
         status=status,  # type: ignore[arg-type]

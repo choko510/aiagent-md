@@ -130,6 +130,7 @@ class RegistrySnapshot(BaseModel):
     owner_user_id: str
     provider_id: str
     generation: int = Field(ge=1)
+    invalidation_epoch: int = Field(default=0, ge=0)
     policy_revision: int = Field(ge=1)
     credential_version: int = Field(ge=1)
     protocol_revision: str
@@ -321,6 +322,7 @@ def snapshot_from_entries(
     entries: list[ToolEntry],
     ttl_s: float,
     now: datetime | None = None,
+    invalidation_epoch: int = 0,
 ) -> RegistrySnapshot:
     created = now or utc_now()
     return RegistrySnapshot(
@@ -328,6 +330,7 @@ def snapshot_from_entries(
         owner_user_id=owner_user_id,
         provider_id=provider_id,
         generation=generation,
+        invalidation_epoch=invalidation_epoch,
         policy_revision=policy_revision,
         credential_version=credential_version,
         protocol_revision=protocol_revision,

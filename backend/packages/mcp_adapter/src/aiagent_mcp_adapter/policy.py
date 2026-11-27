@@ -18,6 +18,8 @@ from .errors import ErrorCode, McpError
 @dataclass(frozen=True)
 class ToolPolicy:
     provider_id: str
+    tenant_id: str
+    owner_user_id: str
     tool_name: str
     descriptor_revision: str
     input_digest: str
@@ -41,6 +43,7 @@ class PolicyDecision:
         "disabled",
         "revoked",
         "provider_mismatch",
+        "scope_mismatch",
     ]
 
 
@@ -51,6 +54,8 @@ class PolicySet:
         self,
         *,
         provider_id: str,
+        tenant_id: str = "",
+        owner_user_id: str = "",
         revision: int,
         allowlist: frozenset[str],
         policies: dict[str, ToolPolicy] | None = None,
@@ -59,6 +64,8 @@ class PolicySet:
         if revision < 1:
             raise ValueError("policy revision must be >= 1")
         self.provider_id = provider_id
+        self.tenant_id = tenant_id
+        self.owner_user_id = owner_user_id
         self.revision = revision
         self.allowlist = allowlist
         self._policies = dict(policies or {})
@@ -76,6 +83,8 @@ class PolicySet:
         if policy.provider_id != self.provider_id:
             # A policy record cannot be transplanted from another provider with the same tool name.
             return PolicyDecision(None, "provider_mismatch")
+        if policy.tenant_id != self.tenant_id or policy.owner_user_id != self.owner_user_id:
+            return PolicyDecision(None, "scope_mismatch")
         if not policy.approved_by.strip():
             return PolicyDecision(None, "unclassified")
         if not policy.enabled:
@@ -105,6 +114,8 @@ class PolicySet:
             raise McpError(ErrorCode.POLICY_DENIED, "tool_not_allowlisted")
         record = ToolPolicy(
             provider_id=self.provider_id,
+            tenant_id=self.tenant_id,
+            owner_user_id=self.owner_user_id,
             tool_name=descriptor.source_name,
             descriptor_revision=descriptor.revision,
             input_digest=digest(descriptor.input_schema),
@@ -119,6 +130,8 @@ class PolicySet:
         policies = {**self._policies, descriptor.source_name: record}
         return PolicySet(
             provider_id=self.provider_id,
+            tenant_id=self.tenant_id,
+            owner_user_id=self.owner_user_id,
             revision=self.revision + 1,
             allowlist=self.allowlist,
             policies=policies,
@@ -131,6 +144,8 @@ class PolicySet:
         policies = {name: p for name, p in self._policies.items() if name != tool_name}
         return PolicySet(
             provider_id=self.provider_id,
+            tenant_id=self.tenant_id,
+            owner_user_id=self.owner_user_id,
             revision=self.revision + 1,
             allowlist=self.allowlist,
             policies=policies,
@@ -140,8 +155,13 @@ class PolicySet:
     def with_allowlist(self, names: tuple[str, ...]) -> PolicySet:
         return PolicySet(
             provider_id=self.provider_id,
+            tenant_id=self.tenant_id,
+            owner_user_id=self.owner_user_id,
             revision=self.revision + 1,
             allowlist=frozenset(names),
             policies={k: v for k, v in self._policies.items() if k in names},
             revoked=self.revoked,
         )
+
+    def matches_scope(self, *, provider_id: str, tenant_id: str, owner_user_id: str) -> bool:
+        return self.provider_id == provider_id and self.tenant_id == tenant_id and self.owner_user_id == owner_user_id

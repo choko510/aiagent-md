@@ -10,7 +10,7 @@
     "docs/00-foundation/product-requirements.md": "7fbfe9ca8d43ab2696a04f048d34a7cd32a104a9",
     "docs/00-foundation/system-architecture.md": "9016bfc0d1506962307eec747e4d96ff9dbaeb37",
     "docs/00-foundation/domain-glossary.md": "7d4b478329679c24cde44f9a7edeac452ace99a0",
-    "docs/00-foundation/architecture-decisions.md": "513bd43eeb3b8d14249f940de91985d2d7c9f839",
+    "docs/00-foundation/architecture-decisions.md": "7438a7bf13d2e567ee1a314a36e050b1b8135911",
     "docs/01-contracts/core-domain-models.md": "64392b84db7bc09743ea4f1e61c2ad402238aaa3",
     "docs/01-contracts/event-envelope-and-stream.md": "ae788026d16ae2ae3cdae880b052af103bd38ab1",
     "docs/01-contracts/task-run-state-machines.md": "d9ca5b20f58c32f032506c21a2aad1550553bf4a",

@@ -3,8 +3,9 @@
 > Status: **HOST_VERIFIED for the local adapter slice; not PRODUCTION_VERIFIED**. Executed on Windows,
 > CPython 3.13, branch `feat/mcp-adapter-foundation`, base `53ac14c5` (2026-11-26). No external MCP service,
 > PostgreSQL, Docker, KVM, browser or production credential was used. The 2026-11-27 review-fix pass adds
-> regression coverage for P1-01..P1-09; real Sentinel/PostgreSQL authority and the Gateway integration path
-> remain unexecuted (P1-12).
+> regression coverage for P1-01..P1-09; the second-review Slice A2 pass adds invalidation-epoch/live-pin,
+> policy-scope, output-contract, deadline, JSON-recursion and bounded-SSE regression coverage. Real
+> Sentinel/PostgreSQL authority, durable state and the Gateway integration path remain unexecuted (P1-12).
 
 ## 1. Commands and result
 
@@ -13,7 +14,7 @@ From `backend`:
 ```powershell
 $env:PYTHONPATH='packages/mcp_adapter/src;packages/gateways/src;.'
 .venv\Scripts\python.exe -m pytest tests/mcp_adapter -q --no-header -p no:cacheprovider
-# 75 passed
+# 90 passed
 
 .venv\Scripts\python.exe -m ruff format --check packages/mcp_adapter/src packages/gateways/src/aiagent_gateways/mcp_executor.py tests/mcp_adapter
 # 29 files already formatted
@@ -41,16 +42,16 @@ escape hatch.
 | File | Tests | What is executed |
 |---|---:|---|
 | `test_schema_validation.py` | 8 | strict JSON, 2020-12 only, external refs, depth/property/regex caps, argument/output validation, description sanitization |
-| `test_registry.py` | 10 | CAS publish, stale generation, monotonic high-watermark after TTL, TTL, immutable/current-only run pin, expired-pin tombstone, revoke, explicit re-enable, schema/risk/policy mismatch denial |
-| `test_discovery.py` | 8 | multi-page opaque cursors, cursor loop, duplicate names, tool cap, malformed schema, list_changed invalidation, concurrent refresh |
-| `test_normalization.py` | 6 | text caps/control chars, binary hashing, resource links, `isError`, output schema mismatch, structured-content cap |
-| `test_egress.py` | 8 | absolute-form request, permit header, origin allowlist, denial proof, truncated/oversized response, oversized request, timeout classification |
-| `test_executor.py` | 17 | pinned ref/argument digest and input schema, mutation after prepare, endpoint/policy/credential/disable revision changes, current-send fence, list_changed pin invalidation, read failure vs write UNKNOWN, empty/truncated/isError writes, permit requirement, no auto-retry, no trusted receipt |
+| `test_registry.py` | 13 | CAS publish, stale generation, monotonic high-watermark after TTL, TTL, immutable/current-only run pin, invalidation epoch/current removal, stale-scan publish denial, live descriptor change denial, expired-pin tombstone, revoke, explicit re-enable, schema/risk/policy mismatch denial |
+| `test_discovery.py` | 10 | multi-page opaque cursors, cursor loop, duplicate names, tool cap, malformed schema, list_changed invalidation, concurrent refresh, provider/tenant/owner/policy-revision scope |
+| `test_normalization.py` | 8 | text caps/control chars, binary hashing, resource links, `isError`, empty text, output schema required/mismatch, structured-content cap |
+| `test_egress.py` | 10 | absolute-form request, permit header, origin allowlist, denial proof, duplicate security header, truncated/oversized response, oversized request, bounded SSE JSON, timeout classification |
+| `test_executor.py` | 20 | pinned ref/argument digest and input schema, mutation after prepare, endpoint/policy/credential/disable revision changes, current-send/open fence, list_changed pin invalidation, read failure vs write UNKNOWN, empty/whitespace/link-only/empty-object/truncated/isError writes, permit requirement, no auto-retry, no trusted receipt |
 | `test_sdk_protocol.py` | 5 | real initialize/list/call, credential header, stale credential refusal, admitted permit override, SDK session-loss classification |
-| `test_session_manager.py` | 5 | feature flag, disabled/revoked provider, missing credential, credential handoff, call-slot concurrency |
-| `test_policy.py` | 3 | provider-scoped policy record, named approver, allowlist/policy intersection |
-| `test_errors.py` | 4 | trusted pre-send denial vs post-send 401/403/429/5xx/redirect uncertainty, retryability |
-| **Total** | **75** | |
+| `test_session_manager.py` | 7 | feature flag, disabled/revoked provider, missing credential, credential handoff, post-semaphore open fence, expired overall deadline, call-slot concurrency |
+| `test_policy.py` | 4 | provider/tenant/owner-scoped policy record, named approver, allowlist/policy intersection |
+| `test_errors.py` | 5 | trusted pre-send denial vs post-send 401/403/429/5xx/redirect uncertainty, retryability, `-32601` call uncertainty |
+| **Total** | **90** | |
 
 ## 3. Canonical MCP-T coverage
 
@@ -66,8 +67,8 @@ change.
 | MCP-T04 cursor loop / duplicate / malformed schema | HOST_VERIFIED | `test_discovery` |
 | MCP-T05 malicious description/annotations | CODE_ONLY | sanitization and risk separation exist; no end-to-end malicious metadata test |
 | MCP-T06 two providers same server name | HOST_VERIFIED (unit) | `test_registry` uses admin provider id, not `serverInfo.name` |
-| MCP-T07 list_changed vs active run | HOST_VERIFIED (unit) | awaited pin invalidation + executor fence + `test_registry` pinned resolution; real SSE not exercised |
-| MCP-T08 lost notification / TTL stale | HOST_VERIFIED (unit) | `test_registry` TTL/pin, monotonic generation, expired-pin tombstone |
+| MCP-T07 list_changed vs active run | HOST_VERIFIED (unit) | awaited pin invalidation removes the current surface, bumps the epoch, tombstones pins; executor fence + `test_registry` live-descriptor check; real SSE not exercised |
+| MCP-T08 lost notification / TTL stale | HOST_VERIFIED (unit) | `test_registry` TTL/pin, monotonic generation, invalidation epoch, expired-pin tombstone |
 | MCP-T09 list_changed mid-list | HOST_VERIFIED (unit) | `test_discovery` generation invalidation |
 | MCP-T10 provider disabled/revoked mid-call | HOST_VERIFIED (unit) | `test_session_manager` + executor actual-send fence; real in-flight remote reconciliation not tested |
 | MCP-T11 404 read → bounded reconnect | CODE_ONLY | `_map_sdk_error` classifies session loss; no real 404 reconnect test |
@@ -86,7 +87,7 @@ change.
 | MCP-T24 2 tenants × 100 tools × 4 workers | UNEXECUTED | no load/benchmark environment |
 | MCP-T25 unsupported revision during upgrade | CODE_ONLY | protocol revision check exists; no rolling-upgrade fixture |
 
-## 4. Review-finding disposition (PR #124 review)
+## 4. Review-finding disposition (first PR #124 review)
 
 | Finding | Disposition | Evidence / remaining gap |
 |---|---|---|
@@ -103,12 +104,33 @@ change.
 | P1-11 raw wire/strict JSON | PARTIAL | strict JSON parser on egress response, structural caps and header validation; SDK still parses the JSON-RPC envelope, and real response fuzzing is absent. |
 | P1-12 Gateway admitted context | OPEN / BLOCKED | executor is not wired into `ToolGateway.submit`; dynamic tenant-scoped model surface and destination resolution remain unimplemented. |
 
+## 4.1 Second-review Slice A2 disposition
+
+Second review verdict: **REQUEST_CHANGES / IMPLEMENTED_PARTIAL / NOT MERGE_READY**. This pass fixes the
+locally actionable P1 items and adds failing-regression-first unit coverage; it does not claim the
+durable/Gateway/runtime work below is complete.
+
+| Finding | Disposition | Evidence / remaining gap |
+|---|---|---|
+| R2-P1-01 invalidation did not clear current/epoch | FIXED (unit, process-local) | `invalidate_pins` removes `_current`, bumps epoch, tombstones pins; stale scan publish is rejected; new Run must re-discover/re-pin. Epoch is not durable. |
+| R2-P1-02 old pin executed changed/deleted tool | FIXED (unit) | `resolve_pinned` requires the live current snapshot and the same descriptor/schema before returning; regression covers changed descriptor. |
+| R2-P1-03 policy scope/revision transplant | FIXED (unit) | `ToolPolicy` records bind provider/tenant/owner; discovery rejects scope/revision mismatch; executor prepare rechecks provider scope/revisions/endpoint. Real authority store absent. |
+| R2-P1-04 weak write confirmation | FIXED (unit) | output schema requires `structuredContent`; empty/whitespace text, link/binary-only and empty-object writes become UNKNOWN; output mismatch never CONFIRMED. |
+| R2-P1-05 `-32601`/cleanup/cancel classification | PARTIAL | `-32601` on a call is now uncertain; cleanup no longer replaces a success; cancellation/effect propagation is not fully exercised. |
+| R2-P1-06 real authority/single-use consumption | OPEN / BLOCKED | no real Sentinel/PostgreSQL authority; fake issuer only. |
+| R2-P1-07 semaphore wait outside deadline/config re-read | FIXED (unit); CPU bound PARTIAL | deadline now wraps the semaphore wait and session, live state is rechecked after the wait; synchronous CPU exhaustion is not hard-bounded. |
+| R2-P1-08 JSON recursion/SSE/header/content-type | PARTIAL | `RecursionError`, bounded SSE event JSON, duplicate security headers and non-JSON/SSE response rejection added; no real streaming SSE, and SDK envelope parsing remains. |
+| R2-P1-09 runtime record/capability/annotation isolation test | PARTIAL | policy tenant/owner record isolation test added; full runtime capability/annotation isolation test remains missing. |
+| R2-P1-10 CPU/schema bounds | PARTIAL | bounded subset and caps remain; no formal combinatorial/CPU proof. |
+| R2-P1-12 Gateway admitted context/dynamic surface | OPEN / BLOCKED | executor still not registered in `ToolGateway.submit`; no real Gateway ledger E2E. |
+
 ## 5. Not verified (must not be reported as Verified)
 
 - PostgreSQL persistence, CAS/RLS and migration `0029` (blocked on PR #122; no PostgreSQL available here); the generation high-watermark and pin tombstones are process-local.
 - Gateway registration/model-surface filtering and end-to-end `ToolGateway.submit → McpToolExecutor`.
-- Real remote HTTPS MCP provider, OAuth refresh/revocation, redirects, DNS rebinding. The current egress
-  path has no TLS termination/CONNECT; a trusted TLS-terminating connector is a prerequisite.
+- Real remote HTTPS MCP provider, OAuth refresh/revocation, redirects, DNS rebinding. The adapter does
+  not terminate TLS; a reviewed Sentinel/proxy TLS-terminating connector is an unexecuted prerequisite,
+  not proof that remote HTTPS is architecturally impossible.
 - Real `tools/list_changed` SSE delivery and notification-loss recovery.
 - Kubernetes/KVM isolation, compose deployment, load/cost/latency benchmarks.
 - Web UI, API router, Marketplace candidate flow, provider health projection.
@@ -116,8 +138,9 @@ change.
 
 ## 6. Full backend suite context
 
-The full backend suite was also run (`python -m pytest tests -q`): **344 passed, 395 skipped, 4 failed**.
-The four failures are environmental and unrelated to this slice:
+The full backend suite was also run with the CI-equivalent ignores at this revision
+(`pytest tests -q ... --ignore=tests/test_runtime_faults.py --ignore=tests/linux --ignore=tests/test_compose_isolation.py --ignore=tests/test_cell_e2e.py`):
+**360 passed, 311 skipped, 4 failed**. The four failures are environmental and unrelated to this slice:
 
 - three PostgreSQL migration tests (`tests/test_db_migrations.py`) fail because `PG`/`DATABASE_URL` is absent
   on this Windows host; no PostgreSQL/Docker is available;
@@ -125,4 +148,6 @@ The four failures are environmental and unrelated to this slice:
   uses POSIX `os.O_DIRECTORY`, which does not exist on Windows.
 
 These are not evidence of MCP adapter correctness, and they do not turn the PostgreSQL or sandbox gates into
-PASS. The adapter-specific 74-test result above is the executed evidence for this change.
+PASS. The adapter-specific 90-test result above is the executed evidence for this change. An earlier
+broader `pytest tests -q` run (without those ignores, at `c403324`) reported 344 passed / 395 skipped /
+4 failed; counts differ only because this run applies the CI ignores.

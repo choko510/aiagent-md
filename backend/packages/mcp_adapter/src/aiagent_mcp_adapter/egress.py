@@ -258,6 +258,9 @@ class ForwardProxyEgress:
                 "content-encoding",
                 "x-aiagent-egress",
                 "x-aiagent-egress-proof",
+                "content-type",
+                "mcp-session-id",
+                "mcp-protocol-version",
             ):
                 raise McpError(ErrorCode.INVALID_CONTENT_TYPE, "duplicate_security_header")
             lowered[key] = value
@@ -412,6 +415,62 @@ async def _read_body(
     return await reader.read_to_eof(max_bytes)
 
 
+def _validate_sse_body(body: bytes, *, max_bytes: int) -> None:
+    """Parse the buffered SSE stream enough to bound events and reject non-JSON data.
+
+    The SDK still parses the JSON-RPC envelope. This check runs before that parser and only accepts
+    what the adapter can safely hand to it: bounded events whose data is one strict JSON object.
+    """
+    if len(body) > max_bytes:
+        raise McpError(ErrorCode.BYTES_LIMIT_EXCEEDED, "sse_body_too_large", effect_uncertain=True)
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise McpError(ErrorCode.INVALID_JSONRPC, "sse_invalid_utf8", effect_uncertain=True) from exc
+    events = 0
+    data_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal events
+        if not data_lines:
+            return
+        events += 1
+        if events > 1000:
+            raise McpError(ErrorCode.BYTES_LIMIT_EXCEEDED, "sse_event_limit", effect_uncertain=True)
+        payload = "\n".join(data_lines)
+        try:
+            value = loads_strict(payload, max_bytes=max_bytes)
+        except McpError as exc:
+            raise McpError(
+                ErrorCode.INVALID_JSONRPC,
+                f"sse_{exc.detail}",
+                effect_uncertain=True,
+            ) from exc
+        if not isinstance(value, dict):
+            raise McpError(ErrorCode.INVALID_JSONRPC, "sse_non_object_data", effect_uncertain=True)
+        data_lines.clear()
+
+    for raw_line in text.splitlines():
+        if not raw_line:
+            flush()
+            continue
+        if raw_line.startswith(":"):
+            continue
+        field, sep, value = raw_line.partition(":")
+        if not sep:
+            raise McpError(ErrorCode.INVALID_JSONRPC, "sse_invalid_field", effect_uncertain=True)
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data_lines.append(value)
+        elif field in ("id", "event"):
+            if len(value) > 1024:
+                raise McpError(ErrorCode.BYTES_LIMIT_EXCEEDED, "sse_field_too_large", effect_uncertain=True)
+        elif field == "retry" and (not value.isdigit() or len(value) > 12):
+            raise McpError(ErrorCode.INVALID_JSONRPC, "sse_invalid_retry", effect_uncertain=True)
+    flush()
+
+
 def _proxy_denial_verified(permit: str, code: str, proof: str) -> bool:
     if not code or ":" not in proof:
         return False
@@ -490,6 +549,14 @@ class EgressHttpTransport(httpx2.AsyncBaseTransport):
                     f"response_{exc.detail}",
                     effect_uncertain=True,
                 ) from exc
+        elif result.body and response_content_type.startswith("text/event-stream"):
+            _validate_sse_body(result.body, max_bytes=self._max_bytes)
+        elif result.body:
+            raise McpError(
+                ErrorCode.INVALID_CONTENT_TYPE,
+                "unsupported_response_content_type",
+                effect_uncertain=True,
+            )
         response_headers = [
             (name, value)
             for name, value in result.headers

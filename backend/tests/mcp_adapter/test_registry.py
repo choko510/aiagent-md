@@ -7,7 +7,7 @@ from aiagent_mcp_adapter.contracts import utc_now
 from aiagent_mcp_adapter.errors import ErrorCode, McpError
 from aiagent_mcp_adapter.registry_snapshot import SnapshotKey, SnapshotStore, ref_from_entry
 
-from .helpers import entry, limits, snapshot
+from .helpers import descriptor, entry, limits, snapshot
 
 
 async def test_publish_is_cas_and_monotonic() -> None:
@@ -120,7 +120,10 @@ async def test_revoked_provider_requires_explicit_admin_reenable() -> None:
     with pytest.raises(McpError):
         await store.pin_run(first, run_id="run-after-revoke")
     await store.unrevoke_provider(key)
-    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    await store.publish(
+        snapshot(entry(generation=2), generation=2, invalidation_epoch=1),
+        expected_generation=1,
+    )
 
 
 async def test_generation_never_restarts_after_ttl_expiry() -> None:
@@ -132,7 +135,42 @@ async def test_generation_never_restarts_after_ttl_expiry() -> None:
     with pytest.raises(McpError) as err:
         await store.publish(snapshot(entry()), expected_generation=0)
     assert err.value.code is ErrorCode.BINDING_MISMATCH
-    await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    await store.publish(
+        snapshot(entry(generation=2), generation=2, invalidation_epoch=1),
+        expected_generation=1,
+    )
+
+
+async def test_invalidation_removes_current_surface_and_rejects_stale_scan() -> None:
+    store = SnapshotStore(limits())
+    key = SnapshotKey("tenant-a", "owner-a", "demo")
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    await store.pin_run(first, run_id="run-old")
+    assert await store.invalidate_pins(key) == 1
+    assert store.current(key) is None
+    with pytest.raises(McpError) as err:
+        await store.pin_run(first, run_id="run-new")
+    assert err.value.code is ErrorCode.SNAPSHOT_EXPIRED
+    with pytest.raises(McpError) as err:
+        await store.publish(snapshot(entry(generation=2), generation=2), expected_generation=1)
+    assert err.value.code is ErrorCode.BINDING_MISMATCH
+    fresh = snapshot(entry(generation=2), generation=2, invalidation_epoch=1)
+    await store.publish(fresh, expected_generation=1)
+    await store.pin_run(fresh, run_id="run-new")
+
+
+async def test_old_pin_is_denied_when_live_descriptor_changed() -> None:
+    store = SnapshotStore(limits())
+    first = snapshot(entry())
+    await store.publish(first, expected_generation=0)
+    ref = ref_from_entry(first.entries[0])
+    await store.pin_run(first, run_id="run-changed")
+    changed = entry(desc=descriptor("echo", description="Changed semantics."), generation=2)
+    await store.publish(snapshot(changed, generation=2), expected_generation=1)
+    with pytest.raises(McpError) as err:
+        store.resolve_pinned("run-changed", ref)
+    assert err.value.code is ErrorCode.STALE_TOOL_REF
 
 
 async def test_expired_pin_is_not_silently_re_pinned() -> None:

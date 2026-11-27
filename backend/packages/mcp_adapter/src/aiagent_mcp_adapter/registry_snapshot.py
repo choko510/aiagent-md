@@ -35,6 +35,7 @@ class RunPin:
     pinned_at: datetime
     expires_at: datetime
     endpoint_fingerprint: str = ""
+    invalidation_epoch: int = 0
     revoked: bool = False
 
 
@@ -46,6 +47,7 @@ class SnapshotStore:
     _pins: dict[str, RunPin] = field(default_factory=dict)
     _revoked_keys: set[SnapshotKey] = field(default_factory=set)
     _last_generation: dict[SnapshotKey, int] = field(default_factory=dict)
+    _invalidation_epoch: dict[SnapshotKey, int] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     history_depth: int = 4
 
@@ -58,6 +60,10 @@ class SnapshotStore:
                 raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked")
             _validate_snapshot(snapshot)
             current = self._live(key)
+            if snapshot.invalidation_epoch != self._invalidation_epoch.get(key, 0):
+                # The scan that produced this snapshot began before an invalidation. Publishing it
+                # would resurrect exactly the surface that list_changed/revocation fenced.
+                raise McpError(ErrorCode.BINDING_MISMATCH, "stale_scan_invalidation_epoch")
             last_generation = self._last_generation.get(key, 0)
             if current is None:
                 # Expiry, revocation and a fresh process must never restart the sequence at 1.
@@ -86,6 +92,7 @@ class SnapshotStore:
             return None
         if snapshot.is_expired(now):
             self._current.pop(key, None)
+            self._invalidation_epoch[key] = self._invalidation_epoch.get(key, 0) + 1
             return None
         return snapshot
 
@@ -121,6 +128,7 @@ class SnapshotStore:
             pinned_at=pinned_at,
             expires_at=pinned_at + timedelta(seconds=ttl_s or self.limits.snapshot_ttl_s),
             endpoint_fingerprint=snapshot.endpoint_fingerprint,
+            invalidation_epoch=snapshot.invalidation_epoch,
         )
         async with self._lock:
             existing = self._pins.get(run_id)
@@ -147,6 +155,7 @@ class SnapshotStore:
                 or current.generation != snapshot.generation
                 or current.surface_digest != snapshot.surface_digest
                 or current.endpoint_fingerprint != snapshot.endpoint_fingerprint
+                or current.invalidation_epoch != snapshot.invalidation_epoch
             ):
                 raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "run_pin_requires_current_snapshot")
             self._pins[run_id] = pin
@@ -175,12 +184,30 @@ class SnapshotStore:
             raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "pinned_snapshot_missing")
         if snapshot.is_expired(moment):
             raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "pinned_snapshot_expired")
-        return _entry_for(snapshot, ref)
+        # A pure same-descriptor refresh may keep an old pin executable. A deletion, descriptor
+        # change, policy/credential change or invalidation epoch change must not.
+        current = self._live(pin.key, now=moment)
+        if current is None:
+            raise McpError(ErrorCode.SNAPSHOT_EXPIRED, "current_snapshot_missing")
+        if current.invalidation_epoch != pin.invalidation_epoch:
+            raise McpError(ErrorCode.POLICY_DENIED, "pin_invalidated_epoch")
+        pinned_entry = _entry_for(snapshot, ref)
+        current_entry = _entry_for(current, ref)
+        if (
+            current_entry.tool_id != pinned_entry.tool_id
+            or current_entry.source_name != pinned_entry.source_name
+            or current_entry.descriptor_revision != pinned_entry.descriptor_revision
+            or current_entry.schema_digest() != pinned_entry.schema_digest()
+        ):
+            raise McpError(ErrorCode.STALE_TOOL_REF, "tool_removed_or_changed")
+        return pinned_entry
 
     async def invalidate_pins(self, key: SnapshotKey) -> int:
-        """Fence all active runs for one provider after list_changed or an admin revocation."""
+        """Fence active runs and the current surface. A new Run must re-discover and re-pin."""
         count = 0
         async with self._lock:
+            self._invalidation_epoch[key] = self._invalidation_epoch.get(key, 0) + 1
+            self._current.pop(key, None)
             for run_id, pin in list(self._pins.items()):
                 if pin.key == key and not pin.revoked:
                     self._pins[run_id] = RunPin(
@@ -193,10 +220,14 @@ class SnapshotStore:
                         pinned_at=pin.pinned_at,
                         expires_at=pin.expires_at,
                         endpoint_fingerprint=pin.endpoint_fingerprint,
+                        invalidation_epoch=pin.invalidation_epoch,
                         revoked=True,
                     )
                     count += 1
         return count
+
+    def invalidation_epoch(self, key: SnapshotKey) -> int:
+        return self._invalidation_epoch.get(key, 0)
 
     def pinned_endpoint_fingerprint(self, run_id: str, ref: ToolRef) -> str:
         pin = self._pins.get(run_id)
@@ -228,12 +259,14 @@ class SnapshotStore:
                     pinned_at=pin.pinned_at,
                     expires_at=pin.expires_at,
                     endpoint_fingerprint=pin.endpoint_fingerprint,
+                    invalidation_epoch=pin.invalidation_epoch,
                     revoked=True,
                 )
 
     async def revoke_provider(self, key: SnapshotKey) -> None:
         async with self._lock:
             self._revoked_keys.add(key)
+            self._invalidation_epoch[key] = self._invalidation_epoch.get(key, 0) + 1
             self._current.pop(key, None)
             for run_id, pin in list(self._pins.items()):
                 if pin.key == key:
@@ -246,6 +279,8 @@ class SnapshotStore:
                         credential_version=pin.credential_version,
                         pinned_at=pin.pinned_at,
                         expires_at=pin.expires_at,
+                        endpoint_fingerprint=pin.endpoint_fingerprint,
+                        invalidation_epoch=pin.invalidation_epoch,
                         revoked=True,
                     )
 
@@ -260,6 +295,7 @@ class SnapshotStore:
         for key, snapshot in list(self._current.items()):
             if snapshot.is_expired(moment):
                 self._current.pop(key, None)
+                self._invalidation_epoch[key] = self._invalidation_epoch.get(key, 0) + 1
                 removed += 1
         # Keep expired and revoked tombstones. Removing one would let a later prepare() re-pin
         # the same run identifier after TTL expiry. A separate retention job may prune them only

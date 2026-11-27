@@ -134,6 +134,17 @@ async def test_authenticated_proxy_denial_is_pre_send_but_spoofed_is_not() -> No
     assert err.value.code is ErrorCode.HTTP_FORBIDDEN
 
 
+async def test_duplicate_content_type_header_is_rejected() -> None:
+    with pytest.raises(McpError) as err:
+        await send(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"Content-Length: 2\r\n\r\n{}"
+        )
+    assert err.value.code is ErrorCode.INVALID_CONTENT_TYPE
+
+
 async def test_response_size_is_bounded() -> None:
     result, _ = await send(
         b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n1234567890",
@@ -183,6 +194,49 @@ async def test_httpx_transport_forces_requests_through_egress() -> None:
     assert len(egress.calls) == 1
     assert egress.calls[0].target.url == "https://mcp.example.com/mcp"
     assert egress.calls[0].body
+
+
+class SseEgress:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def send(self, request: EgressRequest, *, permit: str, timeout_s: float, max_bytes: int) -> EgressResponse:
+        return EgressResponse(
+            status=200,
+            headers=(("content-type", "text/event-stream"),),
+            body=self.body,
+        )
+
+
+async def test_sse_body_is_bounded_and_must_contain_json_objects() -> None:
+    async def permit_for(request: EgressRequest) -> str:
+        return "permit-9"
+
+    valid = SseEgress(b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n')
+    transport = EgressHttpTransport(
+        valid,
+        permit_for=permit_for,
+        allowed_origins=frozenset({"https://mcp.example.com:443"}),
+        max_bytes=1024,
+        timeout_s=2.0,
+    )
+    async with httpx2.AsyncClient(transport=transport, follow_redirects=False, trust_env=False) as client:
+        response = await client.post("https://mcp.example.com/mcp", json={"x": 1})
+    assert response.status_code == 200
+
+    invalid = SseEgress(b"data: not-json\n\n")
+    transport = EgressHttpTransport(
+        invalid,
+        permit_for=permit_for,
+        allowed_origins=frozenset({"https://mcp.example.com:443"}),
+        max_bytes=1024,
+        timeout_s=2.0,
+    )
+    async with httpx2.AsyncClient(transport=transport, follow_redirects=False, trust_env=False) as client:
+        with pytest.raises(McpError) as err:
+            await client.post("https://mcp.example.com/mcp", json={"x": 1})
+    assert err.value.code is ErrorCode.INVALID_JSONRPC
+    assert err.value.effect_uncertain is True
 
 
 async def test_httpx_transport_rejects_oversized_request_before_send() -> None:

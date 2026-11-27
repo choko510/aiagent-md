@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 from aiagent_mcp_adapter.errors import ErrorCode, McpError, classify_http_status
-from aiagent_mcp_adapter.sdk_transport import _control_purpose, _uncertain
+from aiagent_mcp_adapter.sdk_transport import _control_purpose, _map_sdk_error, _uncertain
+from mcp.shared.exceptions import MCPError
 
 
 def test_trusted_pre_send_denial_remains_pre_send() -> None:
@@ -25,6 +26,15 @@ def test_control_purposes_are_explicit_and_unexposed_methods_are_denied() -> Non
     with pytest.raises(McpError) as err:
         _control_purpose("resources/list")
     assert err.value.code is ErrorCode.CAPABILITY_MISSING
+
+
+def test_method_not_found_on_tools_call_is_uncertain_not_pre_send() -> None:
+    mapped = _map_sdk_error(MCPError(-32601, "method not found"), context="call")
+    assert mapped.code is ErrorCode.CAPABILITY_MISSING
+    assert mapped.effect_uncertain is True
+
+    listed = _map_sdk_error(MCPError(-32601, "method not found"), context="list")
+    assert listed.effect_uncertain is False
 
 
 def test_redirect_denial_is_uncertain_but_connect_failures_are_retryable() -> None:

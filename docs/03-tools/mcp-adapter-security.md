@@ -14,8 +14,10 @@
 3. **All egress through Sentinel.** The MCP SDK does not get a raw network transport. `EgressHttpTransport`
    sends an absolute-form request through `ForwardProxyEgress` with the Sentinel permit. The environment
    proxy is ignored; the adapter never opens a direct socket to the MCP origin. The existing forward-proxy
-   contract forbids `CONNECT` and this adapter does not terminate TLS, so a remote HTTPS provider needs a
-   reviewed TLS-terminating egress connector. Until then, this is a loopback/HTTP test slice only.
+   contract forbids `CONNECT` and this adapter itself does not terminate TLS. The Sentinel/proxy egress
+   path can terminate TLS with a reviewed connector; that connector and a real remote HTTPS MCP call are
+   not implemented or executed in this slice. Remote HTTPS is therefore an unexecuted gate, not an
+   architectural impossibility. Until it is exercised, this remains a loopback/HTTP test slice only.
    The admitted Gateway permit is handed into the transport and is accepted only for one exact
    `tools/call` POST whose tool name and canonical argument digest match the admitted binding. Initialize,
    notifications, list, GET stream and DELETE use separately issued purpose-scoped control permits, so the
@@ -45,9 +47,9 @@
 | Model supplies a malicious MCP URL | Provider endpoint is admin config; no endpoint field in call arguments | config tests / code review |
 | SSRF to loopback, link-local, metadata, private ranges | `parse_endpoint` and `parse_target` reject non-public addresses; loopback only under `AIAGENT_PROFILE=test` | unit tests; DNS rebinding at the proxy is delegated to existing egress |
 | Redirect to another host or plaintext | adapter does not follow redirects; every request needs a fresh permit and allowlisted origin | unit tests; real redirect chain not exercised |
-| HTTPS downgrade / no TLS to remote origin | existing egress forbids CONNECT; adapter needs a TLS-terminating trusted connector | **BLOCKED**; loopback HTTP only |
-| Cross-tenant tool or credential reuse | snapshot/entry/provider checks tenant, owner and provider; run pin checks generation | unit tests; no PostgreSQL RLS test yet |
-| Stale ToolRef after `list_changed` / TTL | pinned resolution rejects changed schema, risk, policy revision, credential version and endpoint; list_changed awaits invalidation of every pin for the provider; pins are current-snapshot-only and tombstoned after expiry/revoke | unit tests; real SSE notification not exercised and the store is process-local |
+| HTTPS downgrade / no TLS to remote origin | endpoint must be HTTPS; egress forbids CONNECT and does not follow redirects; Sentinel/proxy is the TLS termination point | **UNEXECUTED** for remote HTTPS; loopback HTTP only. Not an inherent TLS inability. |
+| Cross-tenant tool or credential reuse | snapshot/entry/provider checks tenant, owner and provider; `PolicySet`/record scope and provider policy revision are checked during discovery/prepare; run pin checks generation | unit tests; no PostgreSQL RLS test yet |
+| Stale ToolRef after `list_changed` / TTL | pinned resolution rejects changed schema, risk, policy revision, credential version and endpoint; invalidation removes the current surface, bumps an epoch and tombstones pins; a live current descriptor must still match the old pin | unit tests; real SSE notification not exercised and the store/epoch are process-local |
 | Malicious schema / regex / deep JSON | strict 2020-12 subset, no external `$ref`, depth/property/node/regex bounds, byte caps | unit tests |
 | Prompt injection in description/server instructions | descriptions sanitized and length-capped; instructions only digested, never promoted to system prompt | code review / unit tests |
 | Oversized or malformed result | response, text, block and SSE byte caps; binary hashed; invalid structured output rejected | unit tests |

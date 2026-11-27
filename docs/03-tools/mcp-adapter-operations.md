@@ -30,8 +30,9 @@ the SDK/egress behaviour must remain bounded.
 ## 2. Onboarding checklist (after the integration gates land)
 
 > **HTTPS prerequisite:** the existing forward-proxy contract forbids `CONNECT` and this adapter does not
-> terminate TLS. A reviewed TLS-terminating egress connector is required before configuring a remote HTTPS
-> MCP provider. The current tests are loopback HTTP only.
+> terminate TLS. The Sentinel/proxy egress path can terminate TLS through a reviewed connector; that
+> connector is not implemented or exercised in this slice. Remote HTTPS is an unexecuted gate, not a
+> permanent limitation. The current tests are loopback HTTP only.
 
 1. Security/owner approves the provider endpoint, tenant/owner scope and credential binding.
 2. Credential Broker stores the secret; the configuration stores only the binding ref and version.
@@ -88,7 +89,7 @@ implemented as stored state or API in this change.
 
 | Stage | Gate |
 |---|---|
-| Local tests | 75 adapter tests pass (this change) |
+| Local tests | 90 adapter tests pass (this change) |
 | Staging shadow | real provider, no write tools; verify TLS/auth/list/call/read normalization |
 | Staging writes | approval + ledger + UNKNOWN reconciliation; kill/restart test |
 | Multi-tenant | PostgreSQL RLS test, tenant-filtered model surface, cross-tenant denial test |

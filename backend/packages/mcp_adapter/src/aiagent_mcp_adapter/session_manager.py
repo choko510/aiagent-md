@@ -9,8 +9,9 @@ and call single-flight are enforced by their own locks instead.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 
 from .config import AdapterLimits, ProviderConfig, require_enabled
@@ -51,7 +52,9 @@ class SessionManager:
         effect_tool: str | None = None,
         effect_arguments_digest: str | None = None,
         before_effect_send: Callable[[], Awaitable[None]] | None = None,
+        before_open: Callable[[], Awaitable[None]] | None = None,
         expected_credential_version: int | None = None,
+        deadline_epoch_s: float | None = None,
     ) -> AsyncIterator[SdkSession]:
         require_enabled()
         if not provider.enabled:
@@ -72,22 +75,50 @@ class SessionManager:
             and credential.version != expected_credential_version
         ):
             raise McpError(ErrorCode.CREDENTIAL_STALE, "credential_version_mismatch")
-        async with self._semaphore:
-            self._active += 1
-            try:
-                async with self.transport.open(
-                    provider=provider,
-                    credential=credential,
-                    on_list_changed=on_list_changed,
-                    limits=self.limits,
-                    permit=permit,
-                    effect_tool=effect_tool,
-                    effect_arguments_digest=effect_arguments_digest,
-                    before_effect_send=before_effect_send,
-                ) as session:
+        remaining = None
+        if deadline_epoch_s is not None:
+            remaining = deadline_epoch_s - time.time()
+            if remaining <= 0:
+                raise McpError(ErrorCode.BUDGET_EXCEEDED, "call_deadline_exceeded")
+        try:
+            async with AsyncExitStack() as stack:
+                # The deadline covers the semaphore wait itself, not just the open after it.
+                if remaining is not None:
+                    await stack.enter_async_context(asyncio.timeout(remaining))
+                await stack.enter_async_context(self._semaphore)
+                # Re-check after the semaphore wait: a revoke or rotation may have happened while
+                # this operation was queued. The callback also checks current registry/provider state.
+                require_enabled()
+                if provider.provider_id in self._revoked or not provider.enabled:
+                    raise McpError(ErrorCode.POLICY_DENIED, "provider_revoked_or_disabled")
+                if deadline_epoch_s is not None and time.time() >= deadline_epoch_s:
+                    raise McpError(ErrorCode.BUDGET_EXCEEDED, "call_deadline_exceeded")
+                if before_open is not None:
+                    await before_open()
+                self._active += 1
+                try:
+                    session = await stack.enter_async_context(
+                        self.transport.open(
+                            provider=provider,
+                            credential=credential,
+                            on_list_changed=on_list_changed,
+                            limits=self.limits,
+                            permit=permit,
+                            effect_tool=effect_tool,
+                            effect_arguments_digest=effect_arguments_digest,
+                            before_effect_send=before_effect_send,
+                        )
+                    )
                     yield session
-            finally:
-                self._active -= 1
+                finally:
+                    self._active -= 1
+        except TimeoutError as exc:
+            # Once a session may be open, a deadline hit cannot prove whether an effect was sent.
+            raise McpError(
+                ErrorCode.BUDGET_EXCEEDED,
+                "call_deadline_exceeded",
+                effect_uncertain=True,
+            ) from exc
 
     @asynccontextmanager
     async def call_slot(self, provider_id: str) -> AsyncIterator[None]:

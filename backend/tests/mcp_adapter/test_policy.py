@@ -21,6 +21,28 @@ def test_policy_record_is_scoped_to_its_provider() -> None:
     assert decision.reason == "provider_mismatch"
 
 
+def test_policy_record_is_scoped_to_tenant_and_owner() -> None:
+    desc = descriptor()
+    approved = PolicySet(
+        provider_id="provider-a",
+        tenant_id="tenant-a",
+        owner_user_id="owner-a",
+        revision=1,
+        allowlist=frozenset({"echo"}),
+    ).approve(desc, risk_class="read", approval_required=False, actor="admin")
+    transplanted = PolicySet(
+        provider_id="provider-a",
+        tenant_id="tenant-b",
+        owner_user_id="owner-a",
+        revision=approved.revision,
+        allowlist=approved.allowlist,
+        policies=approved._policies,
+    )
+    decision = transplanted.decide(desc)
+    assert decision.policy is None
+    assert decision.reason == "scope_mismatch"
+
+
 def test_policy_requires_a_named_approver() -> None:
     desc = descriptor()
     approved = PolicySet(provider_id="provider-a", revision=1, allowlist=frozenset({"echo"})).approve(

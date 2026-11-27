@@ -36,6 +36,10 @@ class FakeManager:
         self.session_obj = session
         self.opens = 0
         self.permits: list[str | None] = []
+        self.revoked = False
+
+    def is_revoked(self, provider_id: str) -> bool:
+        return self.revoked
 
     @asynccontextmanager
     async def call_slot(self, provider_id):
@@ -52,14 +56,19 @@ class FakeManager:
         effect_tool=None,
         effect_arguments_digest=None,
         before_effect_send=None,
+        before_open=None,
         expected_credential_version=None,
+        deadline_epoch_s=None,
     ):
+        if before_open is not None:
+            await before_open()
         self.opens += 1
         self.permits.append(permit)
         self.effect_tool = effect_tool
         self.effect_arguments_digest = effect_arguments_digest
         self.before_effect_send = before_effect_send
         self.expected_credential_version = expected_credential_version
+        self.deadline_epoch_s = deadline_epoch_s
         self.on_list_changed = on_list_changed
         yield self.session_obj
 
@@ -191,6 +200,21 @@ async def test_arguments_mutated_after_prepare_are_rejected_before_session() -> 
 
 async def test_empty_write_result_is_unknown_not_confirmed() -> None:
     store, snap, executor, _, _ = build(risk_class="write_reversible", result={"content": []})
+    await prepare(executor, snap, {"text": "hello"})
+    with pytest.raises(ExecutorUnknown, match="EFFECT_UNCERTAIN"):
+        await executor.execute("eff-1", {"text": "hello"}, "permit-1")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"content": [{"type": "text", "text": "   "}]},
+        {"content": [{"type": "resource_link", "uri": "https://example.invalid/x"}]},
+        {"content": [], "structuredContent": {}},
+    ],
+)
+async def test_write_without_nonempty_proof_is_unknown(raw: dict) -> None:
+    store, snap, executor, _, _ = build(risk_class="write_reversible", result=raw)
     await prepare(executor, snap, {"text": "hello"})
     with pytest.raises(ExecutorUnknown, match="EFFECT_UNCERTAIN"):
         await executor.execute("eff-1", {"text": "hello"}, "permit-1")

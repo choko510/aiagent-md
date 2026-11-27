@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from aiagent_mcp_adapter.discovery import RefreshCoordinator, discover_tools
 from aiagent_mcp_adapter.errors import ErrorCode, McpError
+from aiagent_mcp_adapter.policy import PolicySet
 from aiagent_mcp_adapter.transport import GenerationCounter, ToolPage, parse_tool_page
 
 from .helpers import ECHO_SCHEMA, approved_policy, descriptor, limits, provider
@@ -50,7 +52,7 @@ async def test_paginated_discovery_publishes_only_approved_tools() -> None:
     policy = approved_policy(descriptor("echo"))
     policy = policy.with_allowlist(("echo", "other"))
     result = await discover_tools(
-        provider=provider(),
+        provider=provider(policy_revision=3),
         session=session,  # type: ignore[arg-type]
         policy=policy,
         generation=1,
@@ -61,6 +63,66 @@ async def test_paginated_discovery_publishes_only_approved_tools() -> None:
     assert result.pending[0].name == "other"
     assert result.pending[0].reason == "unclassified"
     assert session.calls == [None, "c1"]
+
+
+async def test_policy_must_match_provider_tenant_owner_and_revision() -> None:
+    session = FakeSession({None: page([raw_tool("echo")], None)})
+    base = approved_policy(descriptor("echo"))
+    foreign = PolicySet(
+        provider_id="demo",
+        tenant_id="tenant-b",
+        owner_user_id="owner-a",
+        revision=2,
+        allowlist=base.allowlist,
+        policies={"echo": base._policies["echo"]},
+    )
+    with pytest.raises(McpError) as err:
+        await discover_tools(
+            provider=provider(),
+            session=session,  # type: ignore[arg-type]
+            policy=foreign,
+            generation=1,
+            limits=limits(),
+            generation_marker=session.counter.value,
+        )
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "policy_scope_mismatch"
+
+    with pytest.raises(McpError) as err:
+        await discover_tools(
+            provider=provider(policy_revision=3),
+            session=session,  # type: ignore[arg-type]
+            policy=base,
+            generation=1,
+            limits=limits(),
+            generation_marker=session.counter.value,
+        )
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "policy_revision_mismatch"
+
+
+async def test_transplanted_policy_record_fails_closed() -> None:
+    session = FakeSession({None: page([raw_tool("echo")], None)})
+    base = approved_policy(descriptor("echo"))
+    transplanted = PolicySet(
+        provider_id=base.provider_id,
+        tenant_id=base.tenant_id,
+        owner_user_id=base.owner_user_id,
+        revision=base.revision,
+        allowlist=base.allowlist,
+        policies={"echo": replace(base._policies["echo"], tenant_id="tenant-b")},
+    )
+    with pytest.raises(McpError) as err:
+        await discover_tools(
+            provider=provider(),
+            session=session,  # type: ignore[arg-type]
+            policy=transplanted,
+            generation=1,
+            limits=limits(),
+            generation_marker=session.counter.value,
+        )
+    assert err.value.code is ErrorCode.POLICY_DENIED
+    assert err.value.detail == "policy_scope_mismatch"
 
 
 async def test_cursor_loop_is_rejected() -> None:

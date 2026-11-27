@@ -48,7 +48,7 @@ def test_tool_error_and_unsupported_blocks() -> None:
         entry=entry(),
         limits=limits(),
     )
-    assert result.status == "UNSUPPORTED"
+    assert result.status == "TOOL_ERROR"
 
     result = normalize_result(
         {"content": [{"type": "text", "text": "boom"}], "isError": True},
@@ -90,6 +90,41 @@ def test_output_schema_is_enforced_when_pinned() -> None:
             output_schema=out,
         )
     assert err.value.code is ErrorCode.OUTPUT_SCHEMA_MISMATCH
+
+
+def test_output_schema_requires_structured_content_not_just_text() -> None:
+    out = {"type": "object", "properties": {"receipt": {"type": "string"}}, "required": ["receipt"]}
+    desc = descriptor_from_tool(name="echo", description="Echo", input_schema=ECHO_SCHEMA, output_schema=out)
+    tool_entry = build_entry(
+        descriptor=desc,
+        provider_id="demo",
+        tenant_id="tenant-a",
+        owner_user_id="owner-a",
+        risk_class="read",
+        approval_required=False,
+        policy_revision=2,
+        credential_version=1,
+        generation=1,
+    )
+    with pytest.raises(McpError) as err:
+        normalize_result(
+            {"content": [{"type": "text", "text": "looks fine"}]},
+            entry=tool_entry,
+            limits=limits(),
+            output_schema=out,
+        )
+    assert err.value.code is ErrorCode.OUTPUT_SCHEMA_MISMATCH
+
+
+def test_empty_text_is_not_ok_evidence() -> None:
+    result = normalize_result(
+        {"content": [{"type": "text", "text": "  "}]},
+        entry=entry(),
+        limits=limits(),
+    )
+    assert result.status == "UNSUPPORTED"
+    assert result.text == ""
+    assert "empty_text_block" in result.notes
 
 
 def test_structured_content_is_bounded() -> None:

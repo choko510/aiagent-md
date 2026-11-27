@@ -340,12 +340,9 @@ class SdkStreamableHttpTransport:
             await _close_quietly(stack)
             raise
         else:
-            try:
-                await stack.aclose()
-            except McpError:
-                raise
-            except Exception as exc:
-                raise _map_transport_exception(exc, context="open") from exc
+            # Cleanup/DELETE failures happen after a response. They cannot change the effect
+            # outcome that the caller already received, so they must not turn it into FAILED.
+            await _close_quietly(stack)
 
 
 async def _close_quietly(stack: AsyncExitStack) -> None:
@@ -359,7 +356,11 @@ async def _close_quietly(stack: AsyncExitStack) -> None:
 def _map_sdk_error(error: SdkMcpError, *, context: str) -> McpError:
     code = getattr(error, "code", None)
     if code == -32601:
-        return McpError(ErrorCode.CAPABILITY_MISSING, "method_not_found")
+        return McpError(
+            ErrorCode.CAPABILITY_MISSING,
+            "method_not_found",
+            effect_uncertain=context == "call",
+        )
     if code == -32602:
         return McpError(
             ErrorCode.ARGUMENTS_INVALID if context == "call" else ErrorCode.INVALID_JSONRPC,
@@ -378,7 +379,11 @@ def _map_sdk_error(error: SdkMcpError, *, context: str) -> McpError:
         )
     if code in (-32603, -32000, -32001, -32002) or (isinstance(code, int) and -32099 <= code <= -32000):
         return McpError(ErrorCode.TOOL_ERROR, "server_error", effect_uncertain=True)
-    return McpError(ErrorCode.INVALID_JSONRPC, f"jsonrpc_error:{code}")
+    return McpError(
+        ErrorCode.INVALID_JSONRPC,
+        f"jsonrpc_error:{code}",
+        effect_uncertain=context == "call",
+    )
 
 
 def _map_transport_exception(exc: BaseException, *, context: str) -> McpError:

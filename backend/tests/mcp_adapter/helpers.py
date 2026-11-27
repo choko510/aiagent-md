@@ -88,6 +88,7 @@ def snapshot(*entries: ToolEntry, **overrides: Any):
         credential_version=first.credential_version,
         protocol_revision=overrides.pop("protocol_revision", "2025-11-25"),
         endpoint_fingerprint=overrides.pop("endpoint_fingerprint", provider().endpoint_fingerprint),
+        invalidation_epoch=overrides.pop("invalidation_epoch", 0),
         entries=list(entries),
         ttl_s=overrides.pop("ttl_s", 600.0),
         **overrides,
@@ -96,5 +97,11 @@ def snapshot(*entries: ToolEntry, **overrides: Any):
 
 def approved_policy(desc: ToolDescriptor | None = None, *, risk_class: str = "read") -> PolicySet:
     desc = desc or descriptor()
-    base = PolicySet(provider_id="demo", revision=1, allowlist=frozenset({desc.source_name}))
+    base = PolicySet(
+        provider_id="demo",
+        tenant_id="tenant-a",
+        owner_user_id="owner-a",
+        revision=1,
+        allowlist=frozenset({desc.source_name}),
+    )
     return base.approve(desc, risk_class=risk_class, approval_required=False, actor="admin")  # type: ignore[arg-type]
