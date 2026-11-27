@@ -44,12 +44,16 @@ def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
             if not selected:
                 raise SourceUnavailable("GitHub archive does not contain the requested Skill subdirectory")
             buffer = io.BytesIO()
+            total = 0
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as rewritten:
                 for info in selected:
                     relative = info.filename[len(prefix) :]
                     parts = relative.split("/")
                     if not relative or relative.startswith("/") or any(part in ("", ".", "..") for part in parts):
                         raise ArchiveRejected("GitHub archive contains an unsafe path")
+                    total += info.file_size
+                    if info.file_size > 2 * 1024 * 1024 or total > 8 * 1024 * 1024:
+                        raise ArchiveRejected("GitHub archive expands beyond the safe limit")
                     payload = original.read(info)
                     if len(payload) != info.file_size:
                         raise ArchiveRejected("GitHub archive entry size mismatch")
