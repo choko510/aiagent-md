@@ -140,6 +140,11 @@ impl LocalJournal {
                 revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)),
                 audit_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS local_control_initialized (
+                scope_hash TEXT PRIMARY KEY
+            );
+            INSERT OR IGNORE INTO local_control_initialized(scope_hash)
+                SELECT scope_hash FROM local_control;
         ",
         )
         .map_err(|e| e.to_string())?;
@@ -219,11 +224,17 @@ impl LocalJournal {
                 self.migrate_control_if_legacy(stopped, revoked, &sealed_audit, &record)?;
                 Ok(record)
             }
-            None => Ok(ControlRecord {
-                stopped: false,
-                revoked: false,
-                audit: default_audit,
-            }),
+            None => {
+                let initialized: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)", params![self.scope_hash], |r| r.get(0)).map_err(|e| e.to_string())?;
+                if initialized {
+                    return Err("MISSING_LOCAL_CONTROL".into());
+                }
+                Ok(ControlRecord {
+                    stopped: false,
+                    revoked: false,
+                    audit: default_audit,
+                })
+            }
         }
     }
 
@@ -342,8 +353,28 @@ impl LocalJournal {
             "local_control",
             audit_json.as_bytes(),
         )?;
-        let changed = self
+        let tx = self
             .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let initialized: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)",
+                params![self.scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control WHERE scope_hash=?1)",
+                params![self.scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if initialized && !exists {
+            return Err("MISSING_LOCAL_CONTROL".into());
+        }
+        let changed = tx
             .execute(
                 "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json)
                  VALUES(?1, ?2, ?3, ?4)
@@ -364,6 +395,12 @@ impl LocalJournal {
         if changed != 1 {
             return Err("control stop or revoke cannot be cleared by save".into());
         }
+        tx.execute(
+            "INSERT OR IGNORE INTO local_control_initialized(scope_hash) VALUES(?1)",
+            params![self.scope_hash],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         restrict_db_companions(&self.db_path)?;
         Ok(())
     }
@@ -912,6 +949,14 @@ mod tests {
             .conn
             .execute("DELETE FROM local_control", [])
             .unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        assert!(journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
         assert_eq!(
             journal
                 .begin("intent", "fingerprint", "1", "grant", "permit")
@@ -919,5 +964,15 @@ mod tests {
             "MISSING_LOCAL_CONTROL"
         );
         assert!(journal.state("intent").unwrap().is_none());
+        drop(journal);
+        let mut reopened = LocalJournal::open(&path, &scope).unwrap();
+        assert!(reopened.load_control(vec![]).is_err());
+        assert!(reopened
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
     }
 }
