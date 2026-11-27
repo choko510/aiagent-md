@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import total_ordering
 
-from .contracts import SkillDependency
+from .contracts import DependencyPin, SkillDependency
 from .digest import dependency_digest
 from .errors import DependencyError
 
@@ -31,6 +31,7 @@ class Version:
     minor: int
     patch: int
     prerelease: tuple[str, ...] = ()
+    build: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, value: str) -> Version:
@@ -38,16 +39,31 @@ class Version:
         if not match:
             raise DependencyError(f"invalid SemVer: {value[:40]}")
         pre = tuple(match.group(4).split(".")) if match.group(4) else ()
-        return cls(int(match.group(1)), int(match.group(2)), int(match.group(3)), pre)
+        build = tuple(match.group(5).split(".")) if match.group(5) else ()
+        return cls(int(match.group(1)), int(match.group(2)), int(match.group(3)), pre, build)
 
     def _key(self) -> tuple[int, int, int]:
         return (self.major, self.minor, self.patch)
+
+    def _precedence(self) -> tuple[object, ...]:
+        # SemVer build metadata is part of the immutable version string but does not affect precedence.
+        return (self._key(), self.prerelease)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._precedence() == other._precedence()
+
+    def __hash__(self) -> int:
+        return hash(self._precedence())
 
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, Version):
             return NotImplemented
         if self._key() != other._key():
             return self._key() < other._key()
+        if self.prerelease == other.prerelease:
+            return False
         if not self.prerelease:
             return False
         if not other.prerelease:
@@ -66,7 +82,8 @@ class Version:
 
     def __str__(self) -> str:
         suffix = "-" + ".".join(self.prerelease) if self.prerelease else ""
-        return f"{self.major}.{self.minor}.{self.patch}{suffix}"
+        build = "+" + ".".join(self.build) if self.build else ""
+        return f"{self.major}.{self.minor}.{self.patch}{suffix}{build}"
 
 
 def _partial(value: str) -> tuple[int, int, int]:
@@ -99,6 +116,8 @@ class VersionRange:
             return cls(((),))
         groups: list[tuple[tuple[str, Version], ...]] = []
         for alternative in raw.split("||"):
+            if not alternative.strip():
+                raise DependencyError("empty alternative in version constraint")
             tokens = [t for t in re.split(r"[\s,]+", alternative.strip()) if t]
             comparators: list[tuple[str, Version]] = []
             index = 0
@@ -140,19 +159,28 @@ class VersionRange:
                     continue
                 if token.endswith(".x") or token.endswith(".*"):
                     prefix = token[:-2].split(".")
-                    if len(prefix) == 1:
-                        comparators.append((">=", Version(int(prefix[0]), 0, 0)))
-                        comparators.append(("<", Version(int(prefix[0]) + 1, 0, 0)))
-                    elif len(prefix) == 2:
-                        major, minor = int(prefix[0]), int(prefix[1])
+                    try:
+                        numbers = [int(part) for part in prefix]
+                    except ValueError:
+                        raise DependencyError(f"invalid wildcard: {token[:40]}") from None
+                    if len(numbers) == 1:
+                        comparators.append((">=", Version(numbers[0], 0, 0)))
+                        comparators.append(("<", Version(numbers[0] + 1, 0, 0)))
+                    elif len(numbers) == 2:
+                        major, minor = numbers
                         comparators.append((">=", Version(major, minor, 0)))
                         comparators.append(("<", Version(major, minor + 1, 0)))
                     else:
                         raise DependencyError(f"invalid wildcard: {token[:40]}")
                     continue
-                if "-" in token and not token.startswith("-"):
-                    raise DependencyError(f"hyphen ranges are not supported: {token[:40]}")
-                comparators.append(("=", Version.parse(token)))
+                # An exact version may contain a prerelease suffix (for example 1.2.3-alpha).
+                try:
+                    exact = Version.parse(token)
+                except DependencyError:
+                    if "-" in token:
+                        raise DependencyError(f"hyphen ranges are not supported: {token[:40]}") from None
+                    raise
+                comparators.append(("=", exact))
             groups.append(tuple(comparators))
         return cls(tuple(groups))
 
@@ -164,6 +192,9 @@ class VersionRange:
 
     @staticmethod
     def _compare(version: Version, operator: str, target: Version) -> bool:
+        if operator == "=" and target.build:
+            # Build metadata is ignored for precedence, but an explicitly written build is an exact identity.
+            return version == target and version.build == target.build
         if operator == ">=":
             return version >= target
         if operator == "<=":
@@ -181,6 +212,7 @@ class DependencyResolution:
     order: tuple[str, ...]
     optional_missing: tuple[str, ...]
     digest: str
+    exact: tuple[DependencyPin, ...] = ()
 
 
 class DependencyResolver:
@@ -221,7 +253,9 @@ class DependencyResolver:
                         optional_missing.append(name)
                     return
                 raise DependencyError(f"missing required Skill dependency: {name}")
-            chosen = str(max(Version.parse(v) for v in versions))
+            # Preserve the exact catalog string, including build metadata. Lexical tie-break keeps equal-precedence
+            # build variants deterministic instead of letting input order decide.
+            chosen = max(versions, key=lambda value: (Version.parse(value), value))
             if len(pins) >= self.max_count:
                 raise DependencyError("Skill dependency count limit exceeded")
             pins[name] = chosen

@@ -29,7 +29,11 @@ def make_zip() -> bytes:
 
 def build_client(tmp_path: Path) -> tuple[TestClient, SkillRegistry]:
     store = InMemorySkillStore()
-    registry = SkillRegistry(store, quarantine=QuarantineStore(tmp_path / "q"))
+    registry = SkillRegistry(
+        store,
+        quarantine=QuarantineStore(tmp_path / "q"),
+        run_authorizer=lambda _tenant, _run, _owner: True,
+    )
     app = FastAPI()
     app.include_router(
         build_skills_router(

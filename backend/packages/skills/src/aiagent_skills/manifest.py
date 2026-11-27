@@ -276,6 +276,7 @@ def manifest_from_wire(data: object) -> SkillManifestV1:
             commit_sha=source_data.get("commitSha"),
             artifact_digest=source_data.get("artifactDigest"),
             catalog_key=source_data.get("catalogKey"),
+            subdir=source_data.get("subdir"),
         )
     except (KeyError, ValueError) as exc:
         raise ManifestInvalid("invalid source", problem=str(exc)[:100]) from None

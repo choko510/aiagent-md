@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Protocol
 
 from aiagent_domain.canonical import canonical_json, sha256_hex
@@ -13,6 +14,7 @@ from .approval import create_approval, verify_approval
 from .bundle import inspect_zip
 from .contracts import (
     CatalogEntry,
+    DependencyPin,
     InstallationState,
     OperationReceipt,
     ReleaseState,
@@ -36,6 +38,7 @@ from .errors import (
     SkillNotFound,
     SkillScopeViolation,
 )
+from .identity import assert_same_lineage
 from .lifecycle import (
     abort_update,
     begin_disable,
@@ -56,10 +59,13 @@ from .policy import validate_requested
 from .quarantine import QuarantineStore
 from .validation import assert_manifest_consistent, assert_release_installable, build_release
 
+RunAuthorizer = Callable[[str, str, str], bool]
+
 MAX_PAGE = 100
 
 
 class SkillStore(Protocol):
+    def atomic(self, tenant_id: str) -> AbstractContextManager[None]: ...
     def put_release(self, release: SkillRelease) -> None: ...
     def get_release(self, tenant_id: str, release_id: str) -> SkillRelease: ...
     def find_release_by_digest(self, tenant_id: str, digest: str) -> SkillRelease | None: ...
@@ -95,6 +101,7 @@ def _pin_identity(pin: RunSkillPin) -> tuple[object, ...]:
         pin.policy_revision,
         pin.capability_digest,
         pin.dependency_digest,
+        pin.dependency_snapshot_digest,
         pin.skill_surface_digest,
     )
 
@@ -110,6 +117,23 @@ class InMemorySkillStore:
         self._pins: dict[tuple[str, str, str], RunSkillPin] = {}
         self._audit: list[dict[str, Any]] = []
         self._lock = threading.RLock()
+
+    @contextmanager
+    def atomic(self, tenant_id: str) -> Iterator[None]:
+        """Mirror PostgreSQL rollback semantics so a failed operation leaves no partial in-memory state."""
+        snapshot = (
+            dict(self._releases),
+            dict(self._installations),
+            {key: list(value) for key, value in self._history.items()},
+            dict(self._receipts),
+            dict(self._pins),
+            list(self._audit),
+        )
+        try:
+            yield
+        except BaseException:
+            self._releases, self._installations, self._history, self._receipts, self._pins, self._audit = snapshot
+            raise
 
     def put_release(self, release: SkillRelease) -> None:
         if release.tenant_id is None:
@@ -231,9 +255,16 @@ class InMemorySkillStore:
 
 
 class SkillRegistry:
-    def __init__(self, store: SkillStore, *, quarantine: QuarantineStore | None = None) -> None:
+    def __init__(
+        self,
+        store: SkillStore,
+        *,
+        quarantine: QuarantineStore | None = None,
+        run_authorizer: RunAuthorizer | None = None,
+    ) -> None:
         self.store = store
         self.quarantine = quarantine
+        self.run_authorizer = run_authorizer
         self._lock = threading.RLock()
 
     def _receipt(
@@ -249,7 +280,7 @@ class SkillRegistry:
         if not request_id or len(request_id) > 128:
             raise SkillError("Idempotency-Key is required")
         payload_hash = sha256_hex(canonical_json(payload))
-        with self._lock:
+        with self._lock, self.store.atomic(tenant_id):
             existing = self.store.get_receipt(tenant_id, actor_user_id, request_id)
             if existing is not None:
                 if existing.action != action or existing.payload_sha256 != payload_hash:
@@ -307,7 +338,8 @@ class SkillRegistry:
             )
             for existing in self.store.list_releases(tenant_id):
                 if (
-                    existing.manifest.name == release.manifest.name
+                    existing.owner_user_id == owner_user_id
+                    and existing.manifest.name == release.manifest.name
                     and existing.manifest.version == release.manifest.version
                 ):
                     raise LifecycleConflict("this Skill version already exists and is immutable")
@@ -344,6 +376,11 @@ class SkillRegistry:
         policy_revision: str,
         expected_revision: int,
         now: str,
+        request_id: str,
+        installation_id: str | None = None,
+        target_release_id: str | None = None,
+        enable_after: bool | None = None,
+        reenable: bool | None = None,
     ) -> None:
         verify_approval(
             approval,
@@ -356,6 +393,11 @@ class SkillRegistry:
             policy_revision=policy_revision,
             expected_installation_revision=expected_revision,
             now=now,
+            request_id=request_id,
+            installation_id=installation_id,
+            target_release_id=target_release_id,
+            enable_after=enable_after,
+            reenable=reenable,
         )
 
     def install(
@@ -398,6 +440,7 @@ class SkillRegistry:
                 policy_revision=policy_revision,
                 expected_revision=0,
                 now=timestamp,
+                request_id=request_id,
             )
             installation = new_installation(
                 installation_id=uuid7(),
@@ -417,7 +460,14 @@ class SkillRegistry:
             actor_user_id=actor_user_id,
             request_id=request_id,
             action="install",
-            payload={"releaseId": release_id, "approvalId": approval.id, "policyRevision": policy_revision},
+            payload={
+                "releaseId": release_id,
+                "contentDigest": approval.content_digest,
+                "publisherId": approval.publisher_id,
+                "scanDigest": approval.scan_digest,
+                "policyRevision": policy_revision,
+                "capabilityDigest": capability_digest_value,
+            },
             operation=operation,
         )
 
@@ -443,6 +493,7 @@ class SkillRegistry:
             release = self.store.get_release(tenant_id, installation.release_id)
             if release.scan is not None:
                 assert_release_installable(release, release.scan)
+            self.resolve_dependencies(tenant_id, owner_user_id, release)
             self._approval(
                 approval=approval,
                 tenant_id=tenant_id,
@@ -454,6 +505,8 @@ class SkillRegistry:
                 policy_revision=policy_revision,
                 expected_revision=expected_revision,
                 now=timestamp,
+                request_id=request_id,
+                installation_id=installation_id,
             )
             updated = begin_enable(
                 installation,
@@ -474,8 +527,11 @@ class SkillRegistry:
             action="enable",
             payload={
                 "installationId": installation_id,
-                "approvalId": approval.id,
+                "contentDigest": approval.content_digest,
+                "scanDigest": approval.scan_digest,
                 "revision": expected_revision,
+                "policyRevision": policy_revision,
+                "capabilityDigest": capability_digest_value,
             },
             operation=operation,
         )
@@ -536,6 +592,7 @@ class SkillRegistry:
                 raise SkillScopeViolation("release belongs to another owner")
             if target.manifest.name != installation.skill_name:
                 raise LifecycleConflict("update target has a different Skill name")
+            assert_same_lineage(current.manifest.source, target.manifest.source, owner_user_id)
             if target.state is ReleaseState.REVOKED:
                 raise ReleaseRevoked("release is revoked")
             if target.scan is not None:
@@ -552,6 +609,10 @@ class SkillRegistry:
                 policy_revision=policy_revision,
                 expected_revision=expected_revision,
                 now=timestamp,
+                request_id=request_id,
+                installation_id=installation_id,
+                target_release_id=target_release_id,
+                enable_after=enable_after,
             )
             started = begin_update(
                 installation,
@@ -568,6 +629,7 @@ class SkillRegistry:
                     approved_release_digest=approval.content_digest,
                     policy_revision=policy_revision,
                     now=timestamp,
+                    suspended=installation.effective is InstallationState.SUSPENDED,
                 )
             except Exception:
                 self.store.put_installation(abort_update(started, now=timestamp, restore=installation.effective))
@@ -584,8 +646,11 @@ class SkillRegistry:
             payload={
                 "installationId": installation_id,
                 "targetReleaseId": target_release_id,
-                "approvalId": approval.id,
+                "contentDigest": approval.content_digest,
+                "scanDigest": approval.scan_digest,
                 "revision": expected_revision,
+                "policyRevision": policy_revision,
+                "capabilityDigest": capability_digest_value,
                 "enableAfter": enable_after,
             },
             operation=operation,
@@ -617,6 +682,8 @@ class SkillRegistry:
                 raise SkillScopeViolation("release belongs to another owner")
             if target.manifest.name != installation.skill_name:
                 raise LifecycleConflict("rollback target has a different Skill name")
+            current = self.store.get_release(tenant_id, installation.release_id)
+            assert_same_lineage(current.manifest.source, target.manifest.source, owner_user_id)
             if target.id == installation.release_id:
                 raise LifecycleConflict("installation already points at the rollback target")
             if target.scan is not None:
@@ -636,9 +703,20 @@ class SkillRegistry:
                 policy_revision=policy_revision,
                 expected_revision=expected_revision,
                 now=timestamp,
+                request_id=request_id,
+                installation_id=installation_id,
+                target_release_id=target_release_id,
+                reenable=reenable,
             )
             started = begin_rollback(installation, target, expected_revision=expected_revision, now=timestamp)
-            finished = finish_rollback(started, target, reenable=reenable, now=timestamp)
+            finished = finish_rollback(
+                started,
+                target,
+                reenable=reenable,
+                policy_revision=policy_revision,
+                now=timestamp,
+                suspended=installation.effective is InstallationState.SUSPENDED,
+            )
             self.store.put_installation(finished)
             return finished.id, target.id, {"installation": finished.to_wire()}
 
@@ -650,8 +728,12 @@ class SkillRegistry:
             payload={
                 "installationId": installation_id,
                 "targetReleaseId": target_release_id,
-                "approvalId": approval.id,
+                "contentDigest": approval.content_digest,
+                "scanDigest": approval.scan_digest,
                 "revision": expected_revision,
+                "policyRevision": policy_revision,
+                "capabilityDigest": capability_digest_value,
+                "reenable": reenable,
             },
             operation=operation,
         )
@@ -701,9 +783,14 @@ class SkillRegistry:
         def operation() -> tuple[str | None, str | None, dict[str, Any]]:
             installation = self.store.get_installation(tenant_id, installation_id)
             assert_owner(installation, owner_user_id)
-            self.store.revoke_release(tenant_id, installation.release_id, timestamp)
+            if installation.effective is InstallationState.REVOKED:
+                # Repeat revoke is a no-op receipt; do not CAS an unchanged row or bump the revision.
+                return installation.id, installation.release_id, {"installation": installation.to_wire()}
+            # Revoke the installation first: a concurrent pin then fails closed even if release revocation is
+            # still in flight. The enclosing transaction rolls both back if release revocation fails.
             updated = revoke_installation(installation, now=timestamp)
             self.store.put_installation(updated)
+            self.store.revoke_release(tenant_id, installation.release_id, timestamp)
             return updated.id, updated.release_id, {"installation": updated.to_wire()}
 
         return self._receipt(
@@ -732,13 +819,16 @@ class SkillRegistry:
     def resolve_dependencies(self, tenant_id: str, owner_user_id: str, release: SkillRelease) -> DependencyResolution:
         """Resolve required dependencies against enabled, non-revoked releases only."""
         enabled: dict[tuple[str, str], SkillRelease] = {}
+        enabled_installations: dict[tuple[str, str], SkillInstallation] = {}
         for installation in self.store.list_installations(tenant_id, owner_user_id):
             if installation.effective is not InstallationState.ENABLED:
                 continue
             dependency_release = self.store.get_release(tenant_id, installation.release_id)
             if dependency_release.state is ReleaseState.REVOKED:
                 continue
-            enabled[(dependency_release.manifest.name, dependency_release.manifest.version)] = dependency_release
+            key = (dependency_release.manifest.name, dependency_release.manifest.version)
+            enabled[key] = dependency_release
+            enabled_installations[key] = installation
         catalog: dict[str, list[str]] = {}
         for name, version in enabled:
             catalog.setdefault(name, []).append(version)
@@ -746,7 +836,25 @@ class SkillRegistry:
         def edges(name: str, version: str) -> tuple[SkillDependency, ...]:
             return enabled[(name, version)].manifest.dependencies
 
-        return DependencyResolver(catalog, edges).resolve(release.manifest.dependencies)
+        resolution = DependencyResolver(catalog, edges).resolve(release.manifest.dependencies)
+        exact = tuple(
+            DependencyPin(
+                skill_name=name,
+                release_id=enabled[(name, version)].id,
+                content_digest=enabled[(name, version)].content_digest,
+                installation_id=enabled_installations[(name, version)].id,
+                activation_generation=enabled_installations[(name, version)].activation_generation,
+                version=version,
+            )
+            for name, version in sorted(resolution.pins.items())
+        )
+        return DependencyResolution(
+            pins=resolution.pins,
+            order=resolution.order,
+            optional_missing=resolution.optional_missing,
+            digest=resolution.digest,
+            exact=exact,
+        )
 
     def pin_for_run(
         self,
@@ -759,7 +867,13 @@ class SkillRegistry:
         now: str | None = None,
     ) -> RunSkillPin:
         installation = self.store.get_installation(tenant_id, installation_id)
+        if self.run_authorizer is None:
+            raise SkillScopeViolation("run ownership cannot be verified; refusing an unowned run pin")
+        if not self.run_authorizer(tenant_id, run_id, installation.owner_user_id):
+            raise SkillScopeViolation("run does not belong to this tenant and owner")
         release = self.store.get_release(tenant_id, installation.release_id)
+        if installation.effective is InstallationState.REVOKED:
+            raise ReleaseRevoked("installation is revoked")
         catalog = self.catalog(tenant_id, installation.owner_user_id)
         if installation.skill_name not in {entry.name for entry in catalog.all_entries()}:
             raise SkillScopeViolation("Skill is not enabled")
@@ -777,6 +891,7 @@ class SkillRegistry:
             capability_digest=capability_digest_value,
             dependency_digest=dependency_digest_value,
             skill_surface_digest=catalog.surface_digest(),
+            dependencies=resolution.exact,
             now=now or utc_instant(),
         )
         self.store.put_pin(pin)
@@ -792,7 +907,16 @@ class SkillRegistry:
         max_bytes: int = 16 * 1024,
     ) -> SkillText:
         """Read one pinned body from quarantine; callers cannot substitute file bytes."""
-        release = self.store.get_release(tenant_id, self.store.get_installation(tenant_id, installation_id).release_id)
+        installation = self.store.get_installation(tenant_id, installation_id)
+        pin = self.store.get_pin(tenant_id, run_id, installation_id)
+        if pin is None:
+            raise SkillScopeViolation("run has no Skill pin")
+        if installation.effective is InstallationState.REVOKED:
+            raise ReleaseRevoked("installation is revoked")
+        # The pin names the exact release this Run started with. An update must not silently swap the body.
+        release = self.store.get_release(tenant_id, pin.release_id)
+        if release.state is ReleaseState.REVOKED:
+            raise ReleaseRevoked("release is revoked")
         if self.quarantine is None:
             raise QuarantineUnavailable("quarantine is not configured")
         bundle_digest_value = str(release.manifest.provenance.get("bundleDigest", ""))
@@ -806,6 +930,7 @@ class SkillRegistry:
             files=files,
             offset=offset,
             max_bytes=max_bytes,
+            pinned_release=release,
         )
 
     def load_body(
@@ -817,13 +942,16 @@ class SkillRegistry:
         files: dict[str, bytes],
         offset: int = 0,
         max_bytes: int = 16 * 1024,
+        pinned_release: SkillRelease | None = None,
     ) -> SkillText:
         installation = self.store.get_installation(tenant_id, installation_id)
-        release = self.store.get_release(tenant_id, installation.release_id)
+        release = pinned_release or self.store.get_release(tenant_id, installation.release_id)
         pin = self.store.get_pin(tenant_id, run_id, installation_id)
         if pin is None:
             raise SkillScopeViolation("run has no Skill pin")
-        verify_run_pin(pin, installation=installation, release=release)
+        if installation.effective is InstallationState.REVOKED or release.state is ReleaseState.REVOKED:
+            raise ReleaseRevoked("pinned Skill is revoked")
+        verify_run_pin(pin, installation=installation, release=release, snapshot=True)
         assert_manifest_consistent(release, files)
         backend = ImmutableSkillBackend(files)
         body = backend.read_bytes(release.manifest.entry)
@@ -855,6 +983,10 @@ def make_approval(
     expected_installation_revision: int,
     now: str | None = None,
     ttl_seconds: int = 3600,
+    installation_id: str | None = None,
+    target_release_id: str | None = None,
+    enable_after: bool = False,
+    reenable: bool = False,
 ) -> SkillApproval:
     return create_approval(
         approval_id=uuid7(),
@@ -869,6 +1001,10 @@ def make_approval(
         expected_installation_revision=expected_installation_revision,
         now=now or utc_instant(),
         ttl_seconds=ttl_seconds,
+        installation_id=installation_id,
+        target_release_id=target_release_id,
+        enable_after=enable_after,
+        reenable=reenable,
     )
 
 

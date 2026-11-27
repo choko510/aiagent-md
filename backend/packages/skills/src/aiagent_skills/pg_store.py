@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import psycopg
@@ -10,6 +13,7 @@ from aiagent_core.db import Database, Row
 from aiagent_domain.ids import utc_instant
 
 from .contracts import (
+    DependencyPin,
     DesiredState,
     InstallationState,
     OperationReceipt,
@@ -26,6 +30,28 @@ from .errors import IdempotencyKeyReused, InstallationConflict, LifecycleConflic
 from .manifest import manifest_from_wire
 
 
+def run_is_owned(db: Database, tenant_id: str, run_id: str, owner_user_id: str) -> bool:
+    """A pin may only be created for a run created by the same owner in the active tenant.
+
+    Runtime lease/fencing remains the runtime's authoritative check; this closes the public API hole where any
+    caller could name an arbitrary UUID and attach a Skill surface to another Run.
+    """
+    with db.tx(tenant_id) as conn:
+        row = conn.execute(
+            """SELECT 1 FROM agent.runs AS r
+               JOIN agent.tasks AS t ON t.tenant_id = r.tenant_id AND t.id = r.task_id
+               WHERE r.tenant_id=%s AND r.id=%s AND t.created_by_user_id=%s
+                 AND r.status_code NOT IN ('SUCCEEDED','PARTIAL','FAILED','CANCELLED','EXPIRED','BUDGET_EXHAUSTED')""",
+            (tenant_id, run_id, owner_user_id),
+        ).fetchone()
+    return row is not None
+
+
+_ACTIVE_CONNECTION: ContextVar[tuple[str, psycopg.Connection[Any]] | None] = ContextVar(
+    "skill_active_connection", default=None
+)
+
+
 def _instant(value: Any) -> str | None:
     if value is None:
         return None
@@ -36,11 +62,43 @@ class PostgresSkillStore:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    @contextmanager
+    def atomic(self, tenant_id: str) -> Iterator[None]:
+        """Run a read-modify-write and its receipt in one transaction, serialized per tenant.
+
+        The advisory lock makes idempotent retries race-safe: the second request waits, then observes the
+        committed receipt instead of applying the operation twice.
+        """
+        active = _ACTIVE_CONNECTION.get()
+        if active is not None:
+            if active[0] != tenant_id:
+                raise LifecycleConflict("nested Skill transaction changed tenant")
+            yield
+            return
+        with self._tx(tenant_id) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (tenant_id,))
+            token = _ACTIVE_CONNECTION.set((tenant_id, conn))
+            try:
+                yield
+            finally:
+                _ACTIVE_CONNECTION.reset(token)
+
+    @contextmanager
+    def _tx(self, tenant_id: str) -> Iterator[psycopg.Connection[Any]]:
+        active = _ACTIVE_CONNECTION.get()
+        if active is not None:
+            if active[0] != tenant_id:
+                raise LifecycleConflict("Skill access crossed tenant boundaries")
+            yield active[1]
+            return
+        with self.db.tx(tenant_id) as conn:
+            yield conn
+
     def put_release(self, release: SkillRelease) -> None:
         if release.tenant_id is None:
             raise LifecycleConflict("release must be tenant-scoped")
         try:
-            with self.db.tx(release.tenant_id) as conn:
+            with self._tx(release.tenant_id) as conn:
                 conn.execute(
                     """INSERT INTO agent.skill_releases
                        (id, tenant_id, owner_user_id, skill_name, version, content_digest, state, trust_level,
@@ -74,7 +132,7 @@ class PostgresSkillStore:
             raise LifecycleConflict("release already exists (immutable identity or digest)") from exc
 
     def get_release(self, tenant_id: str, release_id: str) -> SkillRelease:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 "SELECT * FROM agent.skill_releases WHERE tenant_id=%s AND id=%s", (tenant_id, release_id)
             ).fetchone()
@@ -83,7 +141,7 @@ class PostgresSkillStore:
         return self._release(row)
 
     def find_release_by_digest(self, tenant_id: str, digest: str) -> SkillRelease | None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 "SELECT * FROM agent.skill_releases WHERE tenant_id=%s AND content_digest=%s ORDER BY created_at DESC LIMIT 1",
                 (tenant_id, digest),
@@ -91,7 +149,7 @@ class PostgresSkillStore:
         return self._release(row) if row is not None else None
 
     def list_releases(self, tenant_id: str) -> tuple[SkillRelease, ...]:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             rows = conn.execute(
                 "SELECT * FROM agent.skill_releases WHERE tenant_id=%s ORDER BY created_at DESC LIMIT 200",
                 (tenant_id,),
@@ -99,7 +157,7 @@ class PostgresSkillStore:
         return tuple(self._release(row) for row in rows)
 
     def revoke_release(self, tenant_id: str, release_id: str, now: str) -> None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             cur = conn.execute(
                 "UPDATE agent.skill_releases SET state=%s, revoked_at=COALESCE(revoked_at, %s) WHERE tenant_id=%s AND id=%s",
                 (ReleaseState.REVOKED.value, now, tenant_id, release_id),
@@ -109,7 +167,7 @@ class PostgresSkillStore:
 
     def put_installation(self, installation: SkillInstallation) -> None:
         try:
-            with self.db.tx(installation.tenant_id) as conn:
+            with self._tx(installation.tenant_id) as conn:
                 cur = conn.execute(
                     """INSERT INTO agent.skill_installations
                        (id, tenant_id, owner_user_id, skill_name, release_id, desired, effective, record_version,
@@ -144,7 +202,7 @@ class PostgresSkillStore:
             raise InstallationConflict("Skill is already installed in this owner scope") from exc
 
     def get_installation(self, tenant_id: str, installation_id: str) -> SkillInstallation:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 "SELECT * FROM agent.skill_installations WHERE tenant_id=%s AND id=%s", (tenant_id, installation_id)
             ).fetchone()
@@ -153,7 +211,7 @@ class PostgresSkillStore:
         return self._installation(row)
 
     def find_installation_by_name(self, tenant_id: str, owner_user_id: str, name: str) -> SkillInstallation | None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 """SELECT * FROM agent.skill_installations
                    WHERE tenant_id=%s AND owner_user_id=%s AND skill_name=%s AND effective<>%s LIMIT 1""",
@@ -162,7 +220,7 @@ class PostgresSkillStore:
         return self._installation(row) if row is not None else None
 
     def list_installations(self, tenant_id: str, owner_user_id: str) -> tuple[SkillInstallation, ...]:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             rows = conn.execute(
                 "SELECT * FROM agent.skill_installations WHERE tenant_id=%s AND owner_user_id=%s ORDER BY created_at",
                 (tenant_id, owner_user_id),
@@ -170,7 +228,7 @@ class PostgresSkillStore:
         return tuple(self._installation(row) for row in rows)
 
     def add_history(self, tenant_id: str, installation_id: str, release_id: str) -> None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             conn.execute(
                 """INSERT INTO agent.skill_installation_history (tenant_id, installation_id, release_id)
                    VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
@@ -178,7 +236,7 @@ class PostgresSkillStore:
             )
 
     def list_history(self, tenant_id: str, installation_id: str) -> tuple[str, ...]:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             rows = conn.execute(
                 "SELECT release_id FROM agent.skill_installation_history WHERE tenant_id=%s AND installation_id=%s ORDER BY replaced_at",
                 (tenant_id, installation_id),
@@ -186,7 +244,7 @@ class PostgresSkillStore:
         return tuple(str(row["release_id"]) for row in rows)
 
     def get_receipt(self, tenant_id: str, actor_user_id: str, request_id: str) -> OperationReceipt | None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 "SELECT * FROM agent.skill_receipts WHERE tenant_id=%s AND actor_user_id=%s AND request_id=%s",
                 (tenant_id, actor_user_id, request_id),
@@ -194,7 +252,7 @@ class PostgresSkillStore:
         return self._receipt(row) if row is not None else None
 
     def put_receipt(self, receipt: OperationReceipt) -> None:
-        with self.db.tx(receipt.tenant_id) as conn:
+        with self._tx(receipt.tenant_id) as conn:
             cur = conn.execute(
                 """INSERT INTO agent.skill_receipts
                    (id, tenant_id, actor_user_id, request_id, payload_sha256, action, installation_id, release_id, result, created_at)
@@ -226,12 +284,13 @@ class PostgresSkillStore:
                     raise IdempotencyKeyReused("Idempotency-Key was reused with a different payload")
 
     def put_pin(self, pin: RunSkillPin) -> None:
-        with self.db.tx(pin.tenant_id) as conn:
+        with self._tx(pin.tenant_id) as conn:
             cur = conn.execute(
                 """INSERT INTO agent.skill_run_pins
                    (tenant_id, run_id, installation_id, release_id, content_digest, activation_generation,
-                    policy_revision, capability_digest, dependency_digest, skill_surface_digest, created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    policy_revision, capability_digest, dependency_digest, dependency_snapshot_digest,
+                    dependency_snapshot, skill_surface_digest, created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT DO NOTHING""",
                 (
                     pin.tenant_id,
                     pin.run_id,
@@ -242,6 +301,8 @@ class PostgresSkillStore:
                     pin.policy_revision,
                     pin.capability_digest,
                     pin.dependency_digest,
+                    pin.dependency_snapshot_digest,
+                    json.dumps([dependency.to_wire() for dependency in pin.dependencies]),
                     pin.skill_surface_digest,
                     pin.created_at,
                 ),
@@ -258,6 +319,7 @@ class PostgresSkillStore:
                     str(stored["policy_revision"]),
                     str(stored["capability_digest"]),
                     str(stored["dependency_digest"]),
+                    str(stored["dependency_snapshot_digest"]),
                     str(stored["skill_surface_digest"]),
                 ) != (
                     pin.release_id,
@@ -266,12 +328,13 @@ class PostgresSkillStore:
                     pin.policy_revision,
                     pin.capability_digest,
                     pin.dependency_digest,
+                    pin.dependency_snapshot_digest,
                     pin.skill_surface_digest,
                 ):
                     raise LifecycleConflict("run pin is immutable")
 
     def get_pin(self, tenant_id: str, run_id: str, installation_id: str) -> RunSkillPin | None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             row = conn.execute(
                 "SELECT * FROM agent.skill_run_pins WHERE tenant_id=%s AND run_id=%s AND installation_id=%s",
                 (tenant_id, run_id, installation_id),
@@ -290,6 +353,18 @@ class PostgresSkillStore:
             dependency_digest=str(row["dependency_digest"]),
             skill_surface_digest=str(row["skill_surface_digest"]),
             created_at=_instant(row["created_at"]) or "",
+            dependencies=tuple(
+                DependencyPin(
+                    skill_name=str(item["skillName"]),
+                    release_id=str(item["releaseId"]),
+                    content_digest=str(item["contentDigest"]),
+                    installation_id=str(item["installationId"]),
+                    activation_generation=int(item["activationGeneration"]),
+                    version=str(item["version"]),
+                )
+                for item in (row["dependency_snapshot"] or [])
+            ),
+            dependency_snapshot_digest=str(row["dependency_snapshot_digest"]),
         )
 
     def record_audit(
@@ -302,7 +377,7 @@ class PostgresSkillStore:
         release_id: str | None,
         detail: dict[str, Any],
     ) -> None:
-        with self.db.tx(tenant_id) as conn:
+        with self._tx(tenant_id) as conn:
             conn.execute(
                 """INSERT INTO agent.skill_audit_events
                    (tenant_id, actor_user_id, action, installation_id, release_id, detail)

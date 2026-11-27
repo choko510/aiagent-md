@@ -28,6 +28,37 @@ COMMIT_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
+def _rewrite_github_archive(archive: bytes, subdir: str | None) -> bytes:
+    """Strip GitHub's single zipball wrapper and optional subdirectory without executing anything."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as original:
+            infos = [info for info in original.infolist() if not info.is_dir()]
+            if not infos:
+                raise SourceUnavailable("GitHub archive is empty")
+            roots = {info.filename.split("/", 1)[0] for info in infos}
+            root = next(iter(roots)) if len(roots) == 1 else ""
+            prefix = f"{root}/" if root else ""
+            if subdir:
+                prefix += subdir.strip("/") + "/"
+            selected = [info for info in infos if info.filename.startswith(prefix)]
+            if not selected:
+                raise SourceUnavailable("GitHub archive does not contain the requested Skill subdirectory")
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as rewritten:
+                for info in selected:
+                    relative = info.filename[len(prefix) :]
+                    parts = relative.split("/")
+                    if not relative or relative.startswith("/") or any(part in ("", ".", "..") for part in parts):
+                        raise ArchiveRejected("GitHub archive contains an unsafe path")
+                    payload = original.read(info)
+                    if len(payload) != info.file_size:
+                        raise ArchiveRejected("GitHub archive entry size mismatch")
+                    rewritten.writestr(relative, payload)
+            return buffer.getvalue()
+    except zipfile.BadZipFile as exc:
+        raise ArchiveRejected("GitHub archive is not a valid zip") from exc
+
+
 class EgressPort(Protocol):
     """Implemented by the Sentinel-owned egress transport; adapters never open sockets directly."""
 
@@ -105,6 +136,7 @@ class GitHubResolver:
         )
         if len(archive) > max_archive_bytes:
             raise SourceUnavailable("GitHub archive exceeds the byte limit")
+        archive = _rewrite_github_archive(archive, locator.subdir)
         source = SkillSource(
             kind=SourceKind.GITHUB,
             origin_uri=f"https://github.com/{locator.owner}/{locator.repo}",
@@ -112,7 +144,11 @@ class GitHubResolver:
             publisher_handle=owner_login.casefold(),
             commit_sha=commit_sha,
             artifact_digest=sha256_bytes(archive),
-            catalog_key=f"github:{owner_login.casefold()}/{locator.repo.casefold()}",
+            catalog_key=(
+                f"github:{owner_login.casefold()}/{locator.repo.casefold()}"
+                + (f"#{locator.subdir}" if locator.subdir else "")
+            ),
+            subdir=locator.subdir,
         )
         return ResolvedSource(source=source, archive=archive, publisher_verified=True)
 
@@ -125,6 +161,7 @@ class ClawHubRelease:
     publisher_id: str
     publisher_handle: str
     commit_sha: str | None
+    slug: str | None = None
 
 
 def _required_string(mapping: Mapping[str, object], key: str, *, what: str) -> str:
@@ -153,7 +190,12 @@ def parse_clawhub_release(payload: Mapping[str, object]) -> ClawHubRelease:
     commit = payload.get("commitSha")
     if commit is not None and (not isinstance(commit, str) or not COMMIT_RE.match(commit)):
         raise OwnerNotVerifiable("ClawHub commit SHA is malformed")
-    return ClawHubRelease(version, digest, url, publisher_id, publisher_handle, commit)
+    slug = payload.get("slug")
+    if slug is not None and (
+        not isinstance(slug, str) or not re.match(r"\A[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z", slug)
+    ):
+        raise OwnerNotVerifiable("ClawHub slug is malformed")
+    return ClawHubRelease(version, digest, url, publisher_id, publisher_handle, commit, slug)
 
 
 def resolve_clawhub(
@@ -179,7 +221,11 @@ def resolve_clawhub(
         publisher_handle=release.publisher_handle,
         commit_sha=release.commit_sha,
         artifact_digest=release.artifact_sha256,
-        catalog_key=f"clawhub:{release.publisher_handle}",
+        catalog_key=(
+            f"clawhub:{release.publisher_handle}:{release.slug}"
+            if release.slug
+            else f"clawhub:{release.publisher_handle}"
+        ),
     )
     return ResolvedSource(source=source, archive=archive, publisher_verified=True)
 

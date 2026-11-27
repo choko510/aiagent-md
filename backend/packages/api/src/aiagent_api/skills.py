@@ -101,6 +101,10 @@ def _approval(
     expected_revision: int,
     policy_revision: str,
     ttl_seconds: int,
+    installation_id: str | None = None,
+    target_release_id: str | None = None,
+    enable_after: bool = False,
+    reenable: bool = False,
 ) -> SkillApproval:
     tenant_id, user_id = _ids(scope)
     return make_approval(
@@ -114,6 +118,10 @@ def _approval(
         request_id=request_id,
         expected_installation_revision=expected_revision,
         ttl_seconds=ttl_seconds,
+        installation_id=installation_id,
+        target_release_id=target_release_id,
+        enable_after=enable_after,
+        reenable=reenable,
     )
 
 
@@ -343,6 +351,7 @@ def build_skills_router(
             expected_revision=body.expected_revision,
             policy_revision=policy,
             ttl_seconds=body.ttl_seconds,
+            installation_id=installation_id,
         )
         try:
             receipt = registry.enable(
@@ -408,6 +417,9 @@ def build_skills_router(
             expected_revision=body.expected_revision,
             policy_revision=policy,
             ttl_seconds=body.ttl_seconds,
+            installation_id=installation_id,
+            target_release_id=target.id,
+            enable_after=body.enable_after,
         )
         try:
             receipt = registry.update(
@@ -451,6 +463,9 @@ def build_skills_router(
             expected_revision=body.expected_revision,
             policy_revision=policy,
             ttl_seconds=body.ttl_seconds,
+            installation_id=installation_id,
+            target_release_id=target.id,
+            reenable=body.reenable,
         )
         try:
             receipt = registry.rollback(

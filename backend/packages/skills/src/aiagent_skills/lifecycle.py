@@ -44,7 +44,7 @@ _INSTALLATION_EDGES: dict[InstallationState, frozenset[InstallationState]] = {
         }
     ),
     InstallationState.SUSPENDED: frozenset(
-        {InstallationState.ENABLED, InstallationState.REMOVING, InstallationState.REVOKED}
+        {InstallationState.ENABLING, InstallationState.ENABLED, InstallationState.REMOVING, InstallationState.REVOKED}
     ),
     InstallationState.UPDATING: frozenset(
         {
@@ -198,7 +198,11 @@ def begin_update(
         raise LifecycleConflict("update must keep the same Skill identity")
     if target.content_digest == current.content_digest:
         raise LifecycleConflict("target release is identical to the current release")
-    if installation.effective not in (InstallationState.ENABLED, InstallationState.INSTALLED_DISABLED):
+    if installation.effective not in (
+        InstallationState.ENABLED,
+        InstallationState.INSTALLED_DISABLED,
+        InstallationState.SUSPENDED,
+    ):
         raise LifecycleConflict("installation is not in a state that can be updated")
     return replace(
         installation,
@@ -216,10 +220,16 @@ def finish_update(
     approved_release_digest: str,
     policy_revision: str,
     now: str,
+    suspended: bool = False,
 ) -> SkillInstallation:
     if approved_release_digest != target.content_digest:
         raise LifecycleConflict("update approval does not bind the target release")
-    effective = InstallationState.ENABLED if enable else InstallationState.INSTALLED_DISABLED
+    if enable:
+        effective = InstallationState.ENABLED
+    elif suspended:
+        effective = InstallationState.SUSPENDED
+    else:
+        effective = InstallationState.INSTALLED_DISABLED
     assert_installation_transition(installation.effective, effective)
     return replace(
         installation,
@@ -240,8 +250,12 @@ def abort_update(
     restore: InstallationState = InstallationState.INSTALLED_DISABLED,
 ) -> SkillInstallation:
     """Restore the pre-update activation state; a failed update must not silently disable a live Skill."""
-    if restore not in (InstallationState.ENABLED, InstallationState.INSTALLED_DISABLED):
-        raise LifecycleConflict("failed update can only restore enabled or disabled state")
+    if restore not in (
+        InstallationState.ENABLED,
+        InstallationState.INSTALLED_DISABLED,
+        InstallationState.SUSPENDED,
+    ):
+        raise LifecycleConflict("failed update can only restore enabled, suspended or disabled state")
     assert_installation_transition(installation.effective, restore)
     return replace(
         installation,
@@ -283,9 +297,16 @@ def finish_rollback(
     target: SkillRelease,
     *,
     reenable: bool,
+    policy_revision: str,
     now: str,
+    suspended: bool = False,
 ) -> SkillInstallation:
-    effective = InstallationState.ENABLED if reenable else InstallationState.INSTALLED_DISABLED
+    if reenable:
+        effective = InstallationState.ENABLED
+    elif suspended:
+        effective = InstallationState.SUSPENDED
+    else:
+        effective = InstallationState.INSTALLED_DISABLED
     assert_installation_transition(installation.effective, effective)
     return replace(
         installation,
@@ -293,6 +314,7 @@ def finish_rollback(
         desired=DesiredState.ENABLED if reenable else DesiredState.DISABLED,
         effective=effective,
         activation_generation=installation.activation_generation + (1 if reenable else 0),
+        policy_revision=policy_revision,
         approved_release_digest=target.content_digest,
         updated_at=now,
     )
@@ -300,8 +322,9 @@ def finish_rollback(
 
 def begin_remove(installation: SkillInstallation, *, expected_revision: int, now: str) -> SkillInstallation:
     assert_expected_revision(installation, expected_revision)
-    if installation.effective is InstallationState.REMOVED:
-        raise LifecycleConflict("installation is already removed")
+    if installation.effective in (InstallationState.REMOVED, InstallationState.REVOKED):
+        raise LifecycleConflict("removed or revoked installations cannot be removed")
+    assert_installation_transition(installation.effective, InstallationState.REMOVING)
     return replace(
         installation,
         desired=DesiredState.DISABLED,

@@ -24,8 +24,9 @@ CREATE TABLE agent.skill_releases (
   validated_at timestamptz,
   revoked_at timestamptz,
   UNIQUE (tenant_id, id),
-  UNIQUE (tenant_id, content_digest),
-  UNIQUE (tenant_id, skill_name, version)
+  UNIQUE (tenant_id, id, owner_user_id),
+  UNIQUE (tenant_id, owner_user_id, content_digest),
+  UNIQUE (tenant_id, owner_user_id, skill_name, version)
 );
 CREATE INDEX skill_releases_tenant_name_idx ON agent.skill_releases (tenant_id, skill_name, created_at DESC);
 
@@ -46,7 +47,8 @@ CREATE TABLE agent.skill_installations (
   updated_at timestamptz NOT NULL,
   revoked_at timestamptz,
   UNIQUE (tenant_id, id),
-  FOREIGN KEY (tenant_id, release_id) REFERENCES agent.skill_releases (tenant_id, id)
+  FOREIGN KEY (tenant_id, release_id, owner_user_id)
+    REFERENCES agent.skill_releases (tenant_id, id, owner_user_id)
 );
 CREATE UNIQUE INDEX skill_installations_owner_name_uq
   ON agent.skill_installations (tenant_id, owner_user_id, skill_name)
@@ -86,11 +88,14 @@ CREATE TABLE agent.skill_run_pins (
   policy_revision text NOT NULL,
   capability_digest char(64) NOT NULL,
   dependency_digest char(64) NOT NULL,
+  dependency_snapshot_digest char(64) NOT NULL,
+  dependency_snapshot jsonb NOT NULL,
   skill_surface_digest char(64) NOT NULL,
   created_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, run_id, installation_id),
   FOREIGN KEY (tenant_id, installation_id) REFERENCES agent.skill_installations (tenant_id, id),
-  FOREIGN KEY (tenant_id, release_id) REFERENCES agent.skill_releases (tenant_id, id)
+  FOREIGN KEY (tenant_id, release_id) REFERENCES agent.skill_releases (tenant_id, id),
+  FOREIGN KEY (tenant_id, run_id) REFERENCES agent.runs (tenant_id, id)
 );
 
 CREATE TABLE agent.skill_audit_events (

@@ -46,7 +46,11 @@ def skill_md(name: str = "demo-skill", version: str = "1.0.0", extra: str = "") 
 def registry(tmp_path: Path) -> tuple[SkillRegistry, InMemorySkillStore, QuarantineStore]:
     store = InMemorySkillStore()
     quarantine = QuarantineStore(tmp_path / "quarantine")
-    return SkillRegistry(store, quarantine=quarantine), store, quarantine
+    return (
+        SkillRegistry(store, quarantine=quarantine, run_authorizer=lambda _tenant, _run, _owner: True),
+        store,
+        quarantine,
+    )
 
 
 def ingest(reg: SkillRegistry, archive: bytes, request_id: str | None = None) -> str:
@@ -106,6 +110,7 @@ def test_lifecycle_install_enable_pin_and_load(tmp_path: Path) -> None:
         policy_revision="policy:1",
         request_id="req-enable",
         expected_installation_revision=installation.record_version,
+        installation_id=installation.id,
     )
     reg.enable(
         tenant_id=TENANT,
@@ -304,6 +309,7 @@ def install_and_enable(reg: SkillRegistry, store: InMemorySkillStore, release_id
         policy_revision="policy:1",
         request_id=f"enable-{release_id}",
         expected_installation_revision=installation.record_version,
+        installation_id=installation.id,
     )
     reg.enable(
         tenant_id=TENANT,
@@ -337,6 +343,9 @@ def test_update_rollback_and_revoke(tmp_path: Path) -> None:
         policy_revision="policy:1",
         request_id="update-1",
         expected_installation_revision=installation.record_version,
+        installation_id=installation_id,
+        target_release_id=v2,
+        enable_after=True,
     )
     reg.update(
         tenant_id=TENANT,
@@ -366,6 +375,9 @@ def test_update_rollback_and_revoke(tmp_path: Path) -> None:
         policy_revision="policy:1",
         request_id="rollback-1",
         expected_installation_revision=updated.record_version,
+        installation_id=installation_id,
+        target_release_id=v1,
+        reenable=True,
     )
     reg.rollback(
         tenant_id=TENANT,
@@ -421,6 +433,9 @@ def test_update_cannot_change_skill_name(tmp_path: Path) -> None:
         policy_revision="policy:1",
         request_id="cross-name",
         expected_installation_revision=installation.record_version,
+        installation_id=installation_id,
+        target_release_id=other,
+        enable_after=True,
     )
     with pytest.raises(SkillError, match="different Skill name"):
         reg.update(
@@ -532,6 +547,9 @@ def test_rollback_to_current_release_is_rejected(tmp_path: Path) -> None:
         policy_revision="policy:1",
         request_id="rollback-current",
         expected_installation_revision=installation.record_version,
+        installation_id=installation_id,
+        target_release_id=release_id,
+        reenable=True,
     )
     with pytest.raises(SkillError):
         reg.rollback(

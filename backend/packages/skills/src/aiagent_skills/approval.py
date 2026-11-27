@@ -38,7 +38,12 @@ def approval_binding_digest(approval: SkillApproval) -> str:
                 "policyRevision": approval.policy_revision,
                 "scanDigest": approval.scan_digest,
                 "requestId": approval.request_id,
+                "installationId": approval.installation_id,
+                "targetReleaseId": approval.target_release_id,
+                "enableAfter": approval.enable_after,
+                "reenable": approval.reenable,
                 "expectedInstallationRevision": approval.expected_installation_revision,
+                "createdAt": approval.created_at,
                 "expiresAt": approval.expires_at,
             }
         )
@@ -59,6 +64,10 @@ def create_approval(
     expected_installation_revision: int,
     now: str,
     ttl_seconds: int = 3600,
+    installation_id: str | None = None,
+    target_release_id: str | None = None,
+    enable_after: bool = False,
+    reenable: bool = False,
 ) -> SkillApproval:
     if ttl_seconds <= 0 or ttl_seconds > MAX_APPROVAL_TTL_SECONDS:
         raise ApprovalInvalid("approval TTL must be between 1 second and 24 hours")
@@ -80,6 +89,10 @@ def create_approval(
         expected_installation_revision=expected_installation_revision,
         expires_at=expires.isoformat().replace("+00:00", "Z"),
         created_at=now,
+        installation_id=installation_id,
+        target_release_id=target_release_id,
+        enable_after=enable_after,
+        reenable=reenable,
     )
 
 
@@ -95,6 +108,11 @@ def verify_approval(
     policy_revision: str,
     expected_installation_revision: int,
     now: str,
+    request_id: str | None = None,
+    installation_id: str | None = None,
+    target_release_id: str | None = None,
+    enable_after: bool | None = None,
+    reenable: bool | None = None,
 ) -> None:
     checks = {
         "tenant": hmac.compare_digest(approval.tenant_id, tenant_id),
@@ -106,9 +124,26 @@ def verify_approval(
         "scan": hmac.compare_digest(approval.scan_digest, release.scan_digest),
         "capability": hmac.compare_digest(approval.capability_digest, capability_digest),
         "policy": hmac.compare_digest(approval.policy_revision, policy_revision),
+        "publisher": (
+            approval.publisher_id == release.manifest.publisher_id
+            if approval.publisher_id is None or release.manifest.publisher_id is None
+            else hmac.compare_digest(approval.publisher_id, release.manifest.publisher_id)
+        ),
         "revision": approval.expected_installation_revision == expected_installation_revision,
+        "request": request_id is None or approval.request_id == request_id,
+        "installation": installation_id is None or approval.installation_id == installation_id,
+        "target": target_release_id is None or approval.target_release_id == target_release_id,
+        "enableAfter": enable_after is None or approval.enable_after is enable_after,
+        "reenable": reenable is None or approval.reenable is reenable,
     }
     if not all(checks.values()):
-        raise ApprovalInvalid("approval does not bind the current release and policy")
-    if parse_instant(now) >= parse_instant(approval.expires_at):
+        raise ApprovalInvalid("approval does not bind the current release, request and policy")
+    created = parse_instant(approval.created_at)
+    expires = parse_instant(approval.expires_at)
+    current = parse_instant(now)
+    if created > current:
+        raise ApprovalInvalid("approval was issued in the future")
+    if expires <= created or expires - created > timedelta(seconds=MAX_APPROVAL_TTL_SECONDS):
+        raise ApprovalInvalid("approval expiry exceeds the maximum TTL")
+    if current >= expires:
         raise ApprovalExpired("review approval has expired")

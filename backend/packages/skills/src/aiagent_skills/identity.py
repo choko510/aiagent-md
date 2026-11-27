@@ -11,7 +11,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .contracts import SourceKind, TrustLevel
+from .contracts import SkillSource, SourceKind, TrustLevel
 from .digest import sha256_bytes
 from .errors import ManifestInvalid, NameCollision, ProtectedBuiltin
 
@@ -98,3 +98,21 @@ def trust_for_source(source: SourceKind) -> TrustLevel:
     if source is SourceKind.BUILTIN:
         return TrustLevel.BUILT_IN
     return TrustLevel.THIRD_PARTY_UNTRUSTED
+
+
+def lineage_key(source: SkillSource, owner_scope: str) -> str:
+    """Stable provenance identity, deliberately excluding version/commit/artifact digest.
+
+    An update may move a Skill to a new exact release, but it may not silently switch publisher, repository or
+    subdirectory. Uploads have no external publisher identity, so their lineage is the owner scope.
+    """
+    if source.kind in (SourceKind.GITHUB, SourceKind.CLAWHUB):
+        if not source.publisher_id or not source.catalog_key:
+            raise ManifestInvalid("external Skill source lacks a stable publisher/catalog identity")
+        return f"{source.kind.value}:{source.publisher_id.casefold()}:{source.catalog_key.casefold()}"
+    return f"{source.kind.value}:{owner_scope}"
+
+
+def assert_same_lineage(current: SkillSource, target: SkillSource, owner_scope: str) -> None:
+    if lineage_key(current, owner_scope) != lineage_key(target, owner_scope):
+        raise ManifestInvalid("update or rollback crosses the Skill's stable source lineage")

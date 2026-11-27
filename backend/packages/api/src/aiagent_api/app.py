@@ -511,7 +511,7 @@ def create_app(
 
     if skill_lifecycle_enabled():
         from aiagent_domain.tools import SKILLS_DIR
-        from aiagent_skills.pg_store import PostgresSkillStore
+        from aiagent_skills.pg_store import PostgresSkillStore, run_is_owned
         from aiagent_skills.quarantine import QuarantineStore
         from aiagent_skills.registry import SkillRegistry
 
@@ -524,6 +524,7 @@ def create_app(
             return SkillRegistry(
                 PostgresSkillStore(get_db()),
                 quarantine=QuarantineStore(root, forbidden_roots=(SKILLS_DIR,)),
+                run_authorizer=lambda tenant, run, owner: run_is_owned(get_db(), tenant, run, owner),
             )
 
         app.include_router(

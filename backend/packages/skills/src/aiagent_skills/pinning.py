@@ -7,8 +7,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
+from aiagent_domain.canonical import canonical_json
+
 from .contracts import (
     CatalogEntry,
+    DependencyPin,
     InstallationState,
     RunSkillPin,
     SkillInstallation,
@@ -32,6 +35,7 @@ def create_run_pin(
     dependency_digest: str,
     skill_surface_digest: str,
     now: str,
+    dependencies: tuple[DependencyPin, ...] = (),
 ) -> RunSkillPin:
     if installation.tenant_id != tenant_id or release.tenant_id not in (None, tenant_id):
         raise SkillScopeViolation("installation or release belongs to another tenant")
@@ -49,6 +53,10 @@ def create_run_pin(
         dependency_digest=dependency_digest,
         skill_surface_digest=skill_surface_digest,
         created_at=now,
+        dependencies=dependencies,
+        dependency_snapshot_digest=sha256_bytes(
+            canonical_json([dependency.to_wire() for dependency in dependencies]).encode("utf-8")
+        ),
     )
 
 
@@ -58,21 +66,27 @@ def verify_run_pin(
     installation: SkillInstallation,
     release: SkillRelease,
     revoked: bool = False,
+    snapshot: bool = False,
 ) -> None:
     if revoked or release.state.value == "REVOKED":
         raise ReleaseRevoked("pinned Skill release was revoked")
     checks = (
         pin.tenant_id == installation.tenant_id
         and pin.installation_id == installation.id
-        and pin.release_id == installation.release_id
         and pin.release_id == release.id
         and pin.content_digest == release.content_digest
-        and pin.activation_generation == installation.activation_generation
-        and pin.policy_revision == installation.policy_revision
     )
+    if not snapshot:
+        checks = checks and (
+            pin.release_id == installation.release_id
+            and pin.activation_generation == installation.activation_generation
+            and pin.policy_revision == installation.policy_revision
+        )
     if not checks:
         raise SkillScopeViolation("run pin no longer matches the installation")
-    if installation.effective is not InstallationState.ENABLED:
+    if installation.effective is InstallationState.REVOKED:
+        raise ReleaseRevoked("installation is revoked")
+    if not snapshot and installation.effective is not InstallationState.ENABLED:
         raise SkillScopeViolation("installation is not enabled")
 
 
@@ -112,16 +126,13 @@ class DisclosureSlice:
     truncated: bool
 
 
-def _decode_prefix(data: bytes, limit: int) -> tuple[str, int]:
-    if len(data) <= limit:
-        return data.decode("utf-8"), len(data)
-    cut = limit
-    while cut > max(0, limit - 4):
-        try:
-            return data[:cut].decode("utf-8"), cut
-        except UnicodeDecodeError:
-            cut -= 1
-    return data[:limit].decode("utf-8", errors="replace"), limit
+def _validated_text(body: bytes) -> str:
+    if len(body) > MAX_BODY_BYTES:
+        raise SkillScopeViolation("Skill body exceeds the maximum disclosure body size")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SkillScopeViolation("Skill body is not valid UTF-8") from None
 
 
 def disclose_text(
@@ -133,19 +144,37 @@ def disclose_text(
     offset: int = 0,
     max_bytes: int = MAX_DISCLOSURE_BYTES,
 ) -> SkillText:
-    if offset < 0 or offset > len(body) or max_bytes <= 0:
-        raise SkillScopeViolation("invalid disclosure offset or budget")
-    if offset == 0 and len(body) <= max_bytes:
-        text, _ = _decode_prefix(body, max_bytes)
-        return SkillText(skill_id, path, text, content_digest_value, None, False)
-    chunk = body[offset : offset + max_bytes]
-    text, consumed = _decode_prefix(chunk, len(chunk))
-    next_offset = offset + consumed
+    if offset < 0 or offset > len(body):
+        raise SkillScopeViolation("invalid disclosure offset")
+    if not 0 < max_bytes <= MAX_DISCLOSURE_BYTES:
+        raise SkillScopeViolation("disclosure budget must be between 1 byte and 16 KiB")
+    _validated_text(body)
+    try:
+        # A cursor inside a multi-byte code point is not a valid UTF-8 boundary.
+        body[:offset].decode("utf-8")
+    except UnicodeDecodeError:
+        raise SkillScopeViolation("disclosure offset is not a UTF-8 boundary") from None
+    if offset == len(body):
+        return SkillText(skill_id, path, "", content_digest_value, None, False)
+    remaining = body[offset:]
+    if len(remaining) <= max_bytes:
+        return SkillText(skill_id, path, remaining.decode("utf-8"), content_digest_value, None, False)
+    cut = max_bytes
+    while cut > 0:
+        try:
+            chunk = remaining[:cut].decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            # The complete body already decoded, so the only possible error here is a truncated code point.
+            cut -= 1
+    else:
+        raise SkillScopeViolation("disclosure budget cannot fit one UTF-8 character")
+    next_offset = offset + cut
     truncated = next_offset < len(body)
     return SkillText(
         skill_id=skill_id,
         path=path,
-        text=text,
+        text=chunk,
         content_digest=content_digest_value,
         next_offset=next_offset if truncated else None,
         truncated=truncated,
@@ -184,17 +213,7 @@ class EnabledSkillCatalog:
             haystack = f"{name} {release.manifest.description}".casefold()
             if token and token not in haystack:
                 continue
-            matches.append(
-                CatalogEntry(
-                    skill_id=release.id,
-                    name=name,
-                    description=release.manifest.description,
-                    version=release.manifest.version,
-                    compatibility=release.manifest.compatibility.harness_api,
-                    installation_id=installation.id,
-                    enabled=True,
-                )
-            )
+            matches.append(self._entry(name, installation, release))
             if len(matches) >= min(limit, 50):
                 break
         return tuple(matches)
@@ -206,11 +225,44 @@ class EnabledSkillCatalog:
             raise SkillNotFound("Skill is not enabled in this catalog") from None
 
     def surface_digest(self) -> str:
-        rows = [f"{name}|{release.id}|{release.content_digest}" for name, (_, release) in sorted(self._entries.items())]
+        rows = [
+            "|".join(
+                (
+                    name,
+                    release.id,
+                    release.content_digest,
+                    installation.id,
+                    str(installation.activation_generation),
+                    installation.policy_revision,
+                    str(release.manifest.version),
+                    ",".join(
+                        sorted(
+                            f"{dependency.skill_name}:{dependency.range}"
+                            for dependency in release.manifest.dependencies
+                        )
+                    ),
+                )
+            )
+            for name, (installation, release) in sorted(self._entries.items())
+        ]
         return sha256_bytes("\n".join(rows).encode("utf-8"))
 
+    @staticmethod
+    def _entry(name: str, installation: SkillInstallation, release: SkillRelease) -> CatalogEntry:
+        return CatalogEntry(
+            skill_id=release.id,
+            name=name,
+            description=release.manifest.description,
+            version=release.manifest.version,
+            compatibility=release.manifest.compatibility.harness_api,
+            installation_id=installation.id,
+            enabled=True,
+        )
+
     def all_entries(self) -> tuple[CatalogEntry, ...]:
-        return self.search("", limit=50)
+        return tuple(
+            self._entry(name, installation, release) for name, (installation, release) in sorted(self._entries.items())
+        )
 
 
 def assert_body_digest(release: SkillRelease, files: dict[str, bytes]) -> None:

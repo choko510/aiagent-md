@@ -97,6 +97,7 @@ class SkillSource:
     commit_sha: str | None = None
     artifact_digest: str | None = None
     catalog_key: str | None = None
+    subdir: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -107,6 +108,7 @@ class SkillSource:
             "commitSha": self.commit_sha,
             "artifactDigest": self.artifact_digest,
             "catalogKey": self.catalog_key,
+            "subdir": self.subdir,
         }
 
 
@@ -309,6 +311,10 @@ class SkillApproval:
     expected_installation_revision: int
     expires_at: str
     created_at: str
+    installation_id: str | None = None
+    target_release_id: str | None = None
+    enable_after: bool = False
+    reenable: bool = False
 
 
 @dataclass(frozen=True)
@@ -337,6 +343,28 @@ class OperationReceipt:
 
 
 @dataclass(frozen=True)
+class DependencyPin:
+    """Exact dependency installation snapshot captured when a Run first loads the Skill surface."""
+
+    skill_name: str
+    release_id: str
+    content_digest: str
+    installation_id: str
+    activation_generation: int
+    version: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "skillName": self.skill_name,
+            "releaseId": self.release_id,
+            "contentDigest": self.content_digest,
+            "installationId": self.installation_id,
+            "activationGeneration": self.activation_generation,
+            "version": self.version,
+        }
+
+
+@dataclass(frozen=True)
 class RunSkillPin:
     tenant_id: str
     run_id: str
@@ -349,6 +377,8 @@ class RunSkillPin:
     dependency_digest: str
     skill_surface_digest: str
     created_at: str
+    dependencies: tuple[DependencyPin, ...] = ()
+    dependency_snapshot_digest: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -360,6 +390,8 @@ class RunSkillPin:
             "policyRevision": self.policy_revision,
             "capabilityDigest": self.capability_digest,
             "dependencyDigest": self.dependency_digest,
+            "dependencySnapshotDigest": self.dependency_snapshot_digest,
+            "dependencies": [dependency.to_wire() for dependency in self.dependencies],
             "skillSurfaceDigest": self.skill_surface_digest,
         }
 
