@@ -11,7 +11,7 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P1-05 | OPEN | Authenticated effect history and cross-device semantic reservation required. |
 | P1-06 | OPEN | Verified authority and fresh delivery fencing not integrated. |
 | P1-07 | PARTIAL | Unauthenticated challenges no longer update identity restore state. Independent restore authority and barrier remain required; an old process can still act until a new proof succeeds. |
-| P1-08 | OPEN | Ancestor-safe root registration required. |
+| P1-08 | PARTIAL | Root components are opened one at a time without following links, tested with Windows junction and Linux symlink ancestors. Persistent approved volume/file identity, replacement/alias races and reopen policy remain open. |
 | P1-09 | OPEN | Single writer and safe recovery required. |
 | P2-01 | OPEN | Durable pairing lifecycle and safe key publication required. |
 | P2-02 | OPEN | Bounded connections, database resource controls and cleanup required. |

@@ -6,7 +6,6 @@ use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    fs::OpenOptions,
     path::{Component, Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -79,7 +78,7 @@ impl WorkspaceRoot {
         }
         let root = open_root(path)?;
         Ok(Self {
-            root: Dir::from_std_file(root),
+            root,
             nonce: crate::security::random_bytes().map_err(|_| "RANDOM_UNAVAILABLE")?,
             local_paths: HashMap::new(),
             generation: 0,
@@ -340,18 +339,14 @@ fn scan(
 }
 
 #[cfg(unix)]
-fn open_root(path: &Path) -> Result<std::fs::File, &'static str> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| "WORKSPACE_ROOT_UNAVAILABLE")
+fn open_root(path: &Path) -> Result<Dir, &'static str> {
+    let root = Dir::open_ambient_dir("/", cap_std::ambient_authority())
+        .map_err(|_| "WORKSPACE_ROOT_UNAVAILABLE")?;
+    walk_root(root, path)
 }
 
 #[cfg(windows)]
-fn open_root(path: &Path) -> Result<std::fs::File, &'static str> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+fn open_root(path: &Path) -> Result<Dir, &'static str> {
     use std::path::Prefix;
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return Err("INVALID_WORKSPACE_ROOT");
@@ -369,17 +364,25 @@ fn open_root(path: &Path) -> Result<std::fs::File, &'static str> {
     if !matches!(drive_type, 2 | 3) {
         return Err("NETWORK_ROOT_DENIED");
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .share_mode(3)
-        .custom_flags(0x0200_0000 | 0x0020_0000)
-        .open(path)
+    let drive_path = format!("{}:\\", drive as char);
+    let root = Dir::open_ambient_dir(&drive_path, cap_std::ambient_authority())
         .map_err(|_| "WORKSPACE_ROOT_UNAVAILABLE")?;
-    let meta = file.metadata().map_err(|_| "WORKSPACE_ROOT_UNAVAILABLE")?;
-    if !meta.is_dir() || meta.file_attributes() & 0x400 != 0 {
-        return Err("REPARSE_ROOT_DENIED");
+    walk_root(root, path)
+}
+
+fn walk_root(mut root: Dir, path: &Path) -> Result<Dir, &'static str> {
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => (),
+            Component::Normal(name) => {
+                root = root
+                    .open_dir_nofollow(name)
+                    .map_err(|_| "WORKSPACE_ROOT_UNAVAILABLE")?
+            }
+            _ => return Err("INVALID_WORKSPACE_ROOT"),
+        }
     }
-    Ok(file)
+    Ok(root)
 }
 
 #[cfg(test)]
@@ -461,6 +464,16 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
         let mut ws = WorkspaceRoot::open_selected(&root).unwrap();
         assert!(ws.discover().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_root_rejects_symlink_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir_all(real.join("project")).unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join("alias")).unwrap();
+        assert!(WorkspaceRoot::open_selected(&temp.path().join("alias/project")).is_err());
     }
 
     #[cfg(unix)]
@@ -682,6 +695,19 @@ mod tests {
         let result = ws.discover();
         junction::delete(&link).unwrap();
         assert!(result.is_err() || result.unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_root_rejects_junction_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir_all(real.join("project")).unwrap();
+        let link = temp.path().join("alias");
+        junction::create(&real, &link).unwrap();
+        let result = WorkspaceRoot::open_selected(&link.join("project"));
+        junction::delete(&link).unwrap();
+        assert!(result.is_err());
     }
 
     #[cfg(windows)]
