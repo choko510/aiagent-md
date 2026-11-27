@@ -40,7 +40,7 @@ def run_is_owned(db: Database, tenant_id: str, run_id: str, owner_user_id: str) 
         row = conn.execute(
             """SELECT 1 FROM agent.runs AS r
                JOIN agent.tasks AS t ON t.tenant_id = r.tenant_id AND t.id = r.task_id
-               WHERE r.tenant_id=%s AND r.id=%s AND t.created_by_user_id=%s
+               WHERE r.tenant_id=%s AND r.id=%s AND t.owner_user_id=%s
                  AND r.status_code NOT IN ('SUCCEEDED','PARTIAL','FAILED','CANCELLED','EXPIRED','BUDGET_EXHAUSTED')""",
             (tenant_id, run_id, owner_user_id),
         ).fetchone()
