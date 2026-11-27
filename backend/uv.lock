@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12, <3.14"
 
 [manifest]
@@ -17,6 +17,7 @@ members = [
     "aiagent-runtime",
     "aiagent-sandbox",
     "aiagent-sentinel",
+    "aiagent-skills",
 ]
 
 [[package]]
@@ -26,6 +27,7 @@ source = { editable = "packages/api" }
 dependencies = [
     { name = "aiagent-automation" },
     { name = "aiagent-core" },
+    { name = "aiagent-skills" },
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
@@ -34,6 +36,7 @@ dependencies = [
 requires-dist = [
     { name = "aiagent-automation", editable = "packages/automation" },
     { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-skills", editable = "packages/skills" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "uvicorn", specifier = ">=0.38" },
 ]
@@ -60,6 +63,7 @@ dependencies = [
     { name = "aiagent-runtime" },
     { name = "aiagent-sandbox" },
     { name = "aiagent-sentinel" },
+    { name = "aiagent-skills" },
 ]
 
 [package.dev-dependencies]
@@ -87,6 +91,7 @@ requires-dist = [
     { name = "aiagent-runtime", editable = "packages/runtime" },
     { name = "aiagent-sandbox", editable = "packages/sandbox" },
     { name = "aiagent-sentinel", editable = "packages/sentinel" },
+    { name = "aiagent-skills", editable = "packages/skills" },
 ]
 
 [package.metadata.requires-dev]
@@ -268,6 +273,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "aiagent-core", editable = "packages/core" }]
+
+[[package]]
+name = "aiagent-skills"
+version = "0.1.0"
+source = { editable = "packages/skills" }
+dependencies = [
+    { name = "aiagent-core" },
+    { name = "aiagent-domain" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiagent-core", editable = "packages/core" },
+    { name = "aiagent-domain", editable = "packages/domain" },
+    { name = "pyyaml", specifier = "==6.0.3" },
+]
 
 [[package]]
 name = "annotated-doc"

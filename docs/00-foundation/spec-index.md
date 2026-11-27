@@ -50,7 +50,7 @@
 | 05-05 | `docs/05-connectors/hotel-research.md` | CHAT_05 | Draft / documented (not Locked) |
 | 06-01 | `docs/06-memory-skills/memory-data-model.md` | CHAT_06 | Draft / documented (not Locked) |
 | 06-02 | `docs/06-memory-skills/memory-retrieval-and-update.md` | CHAT_06 | Draft / documented (not Locked) |
-| 06-03 | `docs/06-memory-skills/skill-lifecycle.md` | CHAT_06 | Draft / documented (not Locked) |
+| 06-03 | `docs/06-memory-skills/skill-lifecycle.md` | CHAT_06 | Draft / documented (not Locked); [implementation notes](../06-memory-skills/skill-lifecycle-implementation.md): PARTIAL (library/API unit-tested, runtime not wired) |
 | 06-04 | `docs/06-memory-skills/self-improving-skills.md` | CHAT_06 | Draft / documented (not Locked) |
 | 06-05 | `docs/06-memory-skills/plugins-recipes-and-hooks.md` | CHAT_06 | Draft / documented (not Locked) |
 | 07-01 | `docs/07-automation/scheduler-and-recurring-tasks.md` | CHAT_07 | Draft / documented (not Locked) |
@@ -139,7 +139,7 @@
 |---|---|---|---|
 | COMP-01 | `docs/08-interfaces/browser-live-observation.md` | CHAT_04/08/09/10/11 | Draft / PROVISIONAL |
 | COMP-02 | `docs/16-app-development/local-device-rust-client.md` | CHAT_00/01/02/03/04/05/08/09/10/11/16 | Draft / PROVISIONAL / NOT RUN |
-| COMP-03 | `docs/08-interfaces/extension-marketplace.md` | CHAT_01/03/06/08/09/10/11 | Draft / PROVISIONAL / NOT IMPLEMENTED |
+| COMP-03 | `docs/08-interfaces/extension-marketplace.md` | CHAT_01/03/06/08/09/10/11 | Draft / PROVISIONAL / PARTIAL (`feat/skill-lifecycle`: package + API, runtime/PG verification pending) |
 
 `COMP-01` は [`audit/muse/spec-provenance.json`](../../audit/muse/spec-provenance.json) の `companionSpecs` でも内容Hashを管理し、`validate_spec_migration.py` が存在・要求ID・TEST-ID・SC-23追跡を静的検証する。88件の正本モジュール数には加算しないが、監査対象外にはしない。
 
