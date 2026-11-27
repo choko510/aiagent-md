@@ -1,0 +1,14 @@
+DROP POLICY IF EXISTS mmi_job_gateway_read ON agent.mmi_parse_jobs;
+DROP POLICY IF EXISTS mmi_artifact_gateway_read ON agent.mmi_artifacts;
+DROP POLICY IF EXISTS mmi_job_ops_all ON agent.mmi_parse_jobs;
+DROP POLICY IF EXISTS mmi_artifact_ops_all ON agent.mmi_artifacts;
+DROP POLICY IF EXISTS mmi_chunk_ops_all ON agent.mmi_upload_chunks;
+DROP POLICY IF EXISTS mmi_upload_ops_all ON agent.mmi_upload_sessions;
+DROP POLICY IF EXISTS mmi_job_tenant ON agent.mmi_parse_jobs;
+DROP POLICY IF EXISTS mmi_artifact_tenant ON agent.mmi_artifacts;
+DROP POLICY IF EXISTS mmi_chunk_tenant ON agent.mmi_upload_chunks;
+DROP POLICY IF EXISTS mmi_upload_tenant ON agent.mmi_upload_sessions;
+DROP TABLE IF EXISTS agent.mmi_parse_jobs;
+DROP TABLE IF EXISTS agent.mmi_artifacts;
+DROP TABLE IF EXISTS agent.mmi_upload_chunks;
+DROP TABLE IF EXISTS agent.mmi_upload_sessions;

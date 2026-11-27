@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import ConsoleView from "./ConsoleView";
+import MultimodalView from "./MultimodalView";
 
 type Source = "all" | "mcp" | "clawhub";
 type Kind = "all" | "MCP" | "SKILL";
@@ -58,7 +59,7 @@ function safeSourceUrl(value: string) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"console" | "marketplace">("console");
+  const [tab, setTab] = useState<"console" | "marketplace" | "multimodal">("console");
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<Kind>("all");
@@ -218,16 +219,28 @@ export default function App() {
           <span>◈</span> Marketplace
         </button>
         <div className="nav-item muted" title="MKT-2で実装予定"><span>▤</span> 追加済み <small>準備中</small></div>
+        <div className="section-label second-label">文書</div>
+        <button
+          type="button"
+          className={tab === "multimodal" ? "nav-item active nav-btn" : "nav-item muted nav-btn"}
+          onClick={() => setTab("multimodal")}
+        >
+          <span>▧</span> Multimodal
+        </button>
         <div className="sidebar-bottom">Control Plane &amp; MKT-1</div>
       </aside>
 
       <main className="main">
         <header className="topbar">
           <span>
-            {tab === "console" ? "ワークスペース " : "拡張機能 "}
-            <span className="breadcrumb">/ {tab === "console" ? "Control Console" : "Marketplace"}</span>
+            {tab === "console" ? "ワークスペース " : tab === "marketplace" ? "拡張機能 " : "文書 "}
+            <span className="breadcrumb">
+              / {tab === "console" ? "Control Console" : tab === "marketplace" ? "Marketplace" : "Multimodal Ingestion"}
+            </span>
           </span>
-          <span className="preview-pill">{tab === "console" ? "Control Plane /v1" : "閲覧専用プレビュー"}</span>
+          <span className="preview-pill">
+            {tab === "console" ? "Control Plane /v1" : tab === "marketplace" ? "閲覧専用プレビュー" : "Quarantine → Verified"}
+          </span>
         </header>
         {tab === "console" ? (
           <div className="content">
@@ -235,6 +248,16 @@ export default function App() {
             <h1>エージェント実行・承認・セッション管理</h1>
             <p className="lead">タスク投入、オーナー承認、Browser Takeover、Campaign/Watch、Capability 状態を管理します。</p>
             <ConsoleView />
+          </div>
+        ) : tab === "multimodal" ? (
+          <div className="content">
+            <div className="eyebrow">SAFE MULTIMODAL INGESTION</div>
+            <h1>文書を、検証済みの根拠に。</h1>
+            <p className="lead">
+              アップロード、検疫、形式検出、独立検証、引用までを一つの流れで確認します。未検証の値は推測せず unknown
+              として残します。
+            </p>
+            <MultimodalView />
           </div>
         ) : (
         <div className="content">

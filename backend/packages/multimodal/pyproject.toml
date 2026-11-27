@@ -1,0 +1,22 @@
+[project]
+name = "aiagent-multimodal"
+version = "0.1.0"
+description = "Safe multimodal ingestion: bounded intake, isolated parsing, grounded locators"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pdfplumber>=0.11.10,<0.12"]
+image = ["Pillow>=12.2,<14"]
+xlsx = []
+office = []
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aiagent_multimodal = ["py.typed"]
