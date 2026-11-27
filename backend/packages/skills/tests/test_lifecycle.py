@@ -578,12 +578,15 @@ def test_required_dependency_must_be_enabled_and_is_pinned(tmp_path: Path) -> No
 
     with pytest.raises(SkillError):
         install_and_enable(reg, store, dependent)
-    install_and_enable(reg, store, base)
+    base_installation = install_and_enable(reg, store, base)
     dependent_installation = install_and_enable(reg, store, dependent)
 
     release = store.get_release(TENANT, dependent)
     resolution = reg.resolve_dependencies(TENANT, OWNER, release)
     assert resolution.pins == {"base-skill": "1.0.0"}
+    assert len(resolution.exact) == 1
+    assert resolution.exact[0].release_id == base
+    assert resolution.exact[0].installation_id == base_installation
     capability = capability_digest(validate_requested(release.manifest.requested_capabilities))
     pin = reg.pin_for_run(
         tenant_id=TENANT,
@@ -593,3 +596,5 @@ def test_required_dependency_must_be_enabled_and_is_pinned(tmp_path: Path) -> No
         dependency_digest_value=resolution.digest,
     )
     assert pin.dependency_digest == resolution.digest
+    assert pin.dependencies == resolution.exact
+    assert len(pin.dependency_snapshot_digest) == 64
