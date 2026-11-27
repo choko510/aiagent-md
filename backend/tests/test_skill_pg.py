@@ -119,6 +119,7 @@ def test_postgres_lifecycle_rls_and_least_privilege(
         policy_revision="policy:pg",
         request_id="pg-enable-1",
         expected_installation_revision=installation.record_version,
+        installation_id=installation.id,
     )
     registry.enable(
         tenant_id=tenant_id,
