@@ -147,7 +147,7 @@ This is the main reason the branch is `IMPLEMENTED_PARTIAL`, not `IMPLEMENTED`.
 Executed in this branch on Windows:
 
 ```text
-uv run pytest packages/skills/tests -q          # 24 passed
+uv run pytest packages/skills/tests -q          # 34 passed
 uv run pytest tests/test_skill_api.py -q        # 5 passed
 uv run pytest tests/test_skill_pg.py -q         # skipped locally: no PostgreSQL
 # CI integration: 1 passed (Python 3.12 and 3.13)
@@ -163,3 +163,30 @@ readiness.
 A deterministic disclosure-budget test (`test_disclosure_benchmark.py`) builds 40 Skills with 16,000-line bodies and
 asserts that the enabled-catalog surface is under 1% of the full body bytes, and that one disclosure slice stays within
 16 KiB. This is a byte-budget regression check, not a measurement of a particular model's tokenizer.
+
+## 8. Review hardening (2026-11-14)
+
+Commit `ca224d5` addresses the PR #125 review findings that can be closed without inventing a production review UI
+or Gateway integration:
+
+- Atomic lifecycle transactions: `_receipt` now runs the state mutation, receipt, and audit append in one PostgreSQL
+  transaction, serialized per tenant with an advisory lock. The in-memory store snapshots and restores on failure.
+- Run pins require a run authorizer. The API supplies `run_is_owned`, which checks tenant, task owner, and terminal run
+  status; the registry fails closed when no authorizer is configured.
+- Run pins capture the exact enabled dependency closure (release, content digest, installation, generation, version),
+  and enable re-resolves required dependencies before activation.
+- Pinned body loading uses the pin's release, so an update cannot swap the body under a running Run; revocation is
+  fenced on every pinned load.
+- Update/rollback require stable source lineage (publisher + catalog key, including GitHub subdirectory), not just the
+  same Skill name.
+- Suspended installations can be re-enabled and updated without silently becoming enabled; repeated revoke is a no-op
+  and rollback restores policy revision.
+- Approval binding includes publisher, request, installation, target release and enable/reenable effects; TTL is capped
+  at 24 hours and creation time is validated.
+- Release uniqueness is owner-scoped, and installation/release/pin foreign keys carry the owner where required.
+- UTF-8 disclosure slices never split a code point; SemVer build metadata and prerelease exact constraints are
+  preserved; GitHub zipball wrapper and subdirectory are normalized; the enabled catalog no longer truncates at 50.
+
+Still open / partial: independent persisted reviewer identity and one-time approval consumption (P1-01/P1-02), Gateway
+effective-capability evidence (P1-06), owner-aware RLS beyond application scoping (P1-11), signature verification,
+quarantine GC, API pagination, and live runtime wiring. These are not represented as fixed.
