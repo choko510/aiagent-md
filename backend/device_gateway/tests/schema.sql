@@ -34,7 +34,7 @@ CREATE TABLE device_gateway.device_identities (
 CREATE TABLE device_gateway.connection_challenges (
   tenant_id text NOT NULL,
   owner_id text NOT NULL,
-  identity_id uuid PRIMARY KEY,
+  identity_id uuid NOT NULL,
   nonce bytea NOT NULL CHECK (octet_length(nonce) = 32),
   channel_digest bytea NOT NULL CHECK (octet_length(channel_digest) = 32),
   generation bigint NOT NULL CHECK (generation > 0),
@@ -43,6 +43,7 @@ CREATE TABLE device_gateway.connection_challenges (
   restore_incarnation bigint NOT NULL CHECK (restore_incarnation >= 0),
   revocation_generation bigint NOT NULL CHECK (revocation_generation >= 0),
   used boolean NOT NULL DEFAULT false,
+  PRIMARY KEY (identity_id, channel_digest),
   FOREIGN KEY (tenant_id, owner_id, identity_id) REFERENCES device_gateway.device_identities (tenant_id, owner_id, id)
 );
 CREATE TABLE device_gateway.connection_sessions (

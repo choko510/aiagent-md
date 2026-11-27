@@ -136,20 +136,10 @@ class ConnectionService:
                 and identity["connection_generation"] < INT64_MAX
                 and identity["authority_incarnation"] <= self._restore
             ):
-                if identity["authority_incarnation"] < self._restore:
-                    conn.execute(
-                        "UPDATE device_gateway.device_identities SET authority_incarnation=%s WHERE id=%s",
-                        (self._restore, identity_id),
-                    )
-                    conn.execute(
-                        "UPDATE device_gateway.connection_sessions SET valid=false WHERE identity_id=%s", (identity_id,)
-                    )
-                    conn.execute(
-                        "UPDATE device_gateway.connection_challenges SET used=true WHERE identity_id=%s", (identity_id,)
-                    )
                 next_generation = identity["connection_generation"] + 1
                 pending = conn.execute(
-                    "SELECT * FROM device_gateway.connection_challenges WHERE identity_id=%s FOR UPDATE", (identity_id,)
+                    "SELECT * FROM device_gateway.connection_challenges WHERE identity_id=%s AND channel_digest=%s FOR UPDATE",
+                    (identity_id, channel._digest),
                 ).fetchone()
                 if pending is not None and pending["issued_ms"] > now:
                     # Do not resurrect a challenge after a wall-clock rollback.
@@ -171,12 +161,22 @@ class ConnectionService:
                         pending["expires_ms"],
                     )
                 else:
+                    conn.execute(
+                        "DELETE FROM device_gateway.connection_challenges WHERE identity_id=%s AND expires_ms<=%s",
+                        (identity_id, now),
+                    )
+                    count = conn.execute(
+                        "SELECT count(*) AS n FROM device_gateway.connection_challenges WHERE identity_id=%s",
+                        (identity_id,),
+                    ).fetchone()["n"]
+                    if pending is None and count >= 64:
+                        raise ConnectionRejected()
                     nonce = secrets.token_bytes(32)
                     conn.execute(
                         "INSERT INTO device_gateway.connection_challenges "
                         "(tenant_id, owner_id, identity_id, nonce, channel_digest, generation, issued_ms, expires_ms, "
                         "restore_incarnation, revocation_generation, used) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false) "
-                        "ON CONFLICT(identity_id) DO UPDATE SET nonce=excluded.nonce, generation=excluded.generation, "
+                        "ON CONFLICT(identity_id, channel_digest) DO UPDATE SET nonce=excluded.nonce, generation=excluded.generation, "
                         "channel_digest=excluded.channel_digest, "
                         "issued_ms=excluded.issued_ms, expires_ms=excluded.expires_ms, "
                         "restore_incarnation=excluded.restore_incarnation, "
@@ -210,7 +210,8 @@ class ConnectionService:
                 (identity_id, tenant_hint, owner_hint),
             ).fetchone()
             challenge = conn.execute(
-                "SELECT * FROM device_gateway.connection_challenges WHERE identity_id=%s FOR UPDATE", (identity_id,)
+                "SELECT * FROM device_gateway.connection_challenges WHERE identity_id=%s AND channel_digest=%s FOR UPDATE",
+                (identity_id, channel._digest),
             ).fetchone()
             now = self._pairing._now(conn)
             if (
@@ -218,7 +219,7 @@ class ConnectionService:
                 and channel._active(tenant_hint, owner_hint, identity_id)
                 and challenge is not None
                 and not identity["revoked"]
-                and identity["authority_incarnation"] == self._restore
+                and identity["authority_incarnation"] <= self._restore
                 and not challenge["used"]
                 and challenge["issued_ms"] <= now
                 and challenge["expires_ms"] > now
@@ -248,11 +249,11 @@ class ConnectionService:
                 else:
                     token = secrets.token_bytes(32)
                     conn.execute(
-                        "UPDATE device_gateway.connection_challenges SET used=true WHERE identity_id=%s", (identity_id,)
+                        "DELETE FROM device_gateway.connection_challenges WHERE identity_id=%s", (identity_id,)
                     )
                     conn.execute(
-                        "UPDATE device_gateway.device_identities SET connection_generation=%s WHERE id=%s",
-                        (challenge["generation"], identity_id),
+                        "UPDATE device_gateway.device_identities SET connection_generation=%s, authority_incarnation=%s WHERE id=%s",
+                        (challenge["generation"], self._restore, identity_id),
                     )
                     conn.execute(
                         "INSERT INTO device_gateway.connection_sessions "
@@ -413,7 +414,7 @@ class ConnectionService:
                 (identity_id, channel._digest),
             )
             conn.execute(
-                "UPDATE device_gateway.connection_challenges SET used=true WHERE identity_id=%s AND channel_digest=%s",
+                "DELETE FROM device_gateway.connection_challenges WHERE identity_id=%s AND channel_digest=%s",
                 (identity_id, channel._digest),
             )
 

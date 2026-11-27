@@ -130,7 +130,7 @@ def service() -> Iterator[PairingService]:
             )
         )
         conn.execute("GRANT USAGE ON SCHEMA device_gateway TO ldc_pairing_test")
-        conn.execute("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA device_gateway TO ldc_pairing_test")
+        conn.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA device_gateway TO ldc_pairing_test")
     app_dsn = make_conninfo(admin_dsn, user="ldc_pairing_test", password=role_password)
     try:
         yield PairingService(app_dsn, "https://gateway.example", bytes(range(32)))
@@ -499,10 +499,11 @@ def test_new_generation_expires_and_rejects_old_restore_incarnation(service: Pai
         )
     next_challenge = restarted.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     assert next_challenge.generation == session.generation + 1
-    with pytest.raises(ConnectionRejected):
-        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
-    with pytest.raises(ConnectionRejected):
-        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
+    # A new unauthenticated challenge cannot fence the prior process. Until an
+    # independent restore barrier exists, the old session remains a known gap.
+    gateway._heartbeat_unchecked_for_tests(
+        owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
+    )
     with pytest.raises(ConnectionRejected):
         restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, signature)
     next_signature = key.sign(
@@ -517,6 +518,8 @@ def test_new_generation_expires_and_rejects_old_restore_incarnation(service: Pai
         )
     )
     next_session = restarted.authenticate(owner.tenant_id, owner.user_id, identity_id, channel, next_signature)
+    with pytest.raises(ConnectionRejected):
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, channel)
     with pytest.raises(ConnectionRejected):
         restarted._heartbeat_unchecked_for_tests(
             owner.tenant_id, owner.user_id, identity_id, channel, session.generation, session.token
@@ -690,6 +693,8 @@ def test_challenge_replay_on_new_channel_and_disconnect_are_rejected(service: Pa
     )
     second = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, new)
     assert first.nonce != second.nonce
+    # A different, unauthenticated channel cannot replace the first challenge.
+    assert first == gateway.challenge(owner.tenant_id, owner.user_id, identity_id, old)
     with pytest.raises(ConnectionRejected):
         gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, new, signature)
     fresh_sig = key.sign(
@@ -698,6 +703,9 @@ def test_challenge_replay_on_new_channel_and_disconnect_are_rejected(service: Pa
         )
     )
     session = gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, new, fresh_sig)
+    # The winning proof fences another valid proof for the same generation.
+    with pytest.raises(ConnectionRejected):
+        gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, old, signature)
     gateway.disconnect(owner.tenant_id, owner.user_id, identity_id, new)
     with pytest.raises(ConnectionRejected):
         gateway._heartbeat_unchecked_for_tests(
@@ -769,6 +777,32 @@ def test_channel_cannot_switch_owner_or_identity(service: PairingService) -> Non
     gateway._heartbeat_unchecked_for_tests(
         alice.tenant_id, alice.user_id, alice_id, channel, session.generation, session.token
     )
+
+
+def test_challenge_flood_does_not_replace_existing_proof(service: PairingService) -> None:
+    owner = make_scope()
+    identity_id, key, public, digest = registered_device(service, owner)
+    gateway, legitimate = ConnectionService(service, 1), ConnectionChannel()
+    first = gateway.challenge(owner.tenant_id, owner.user_id, identity_id, legitimate)
+    for _ in range(63):
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, ConnectionChannel())
+    with pytest.raises(ConnectionRejected):
+        gateway.challenge(owner.tenant_id, owner.user_id, identity_id, ConnectionChannel())
+    signature = key.sign(
+        connection_proof_bytes(
+            digest, public, first.nonce, first.channel_digest, first.generation, first.issued_ms, first.expires_ms
+        )
+    )
+    gateway.authenticate(owner.tenant_id, owner.user_id, identity_id, legitimate, signature)
+    with service._connect() as conn, conn.transaction():
+        service._scope(conn, owner.tenant_id, owner.user_id)
+        assert (
+            conn.execute(
+                "SELECT count(*) AS n FROM device_gateway.connection_challenges WHERE identity_id=%s", (identity_id,)
+            ).fetchone()["n"]
+            == 0
+        )
+    gateway.challenge(owner.tenant_id, owner.user_id, identity_id, ConnectionChannel())
 
 
 def test_concurrent_channel_binding_has_one_owner(service: PairingService) -> None:
