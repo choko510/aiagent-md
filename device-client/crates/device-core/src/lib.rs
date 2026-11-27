@@ -8,6 +8,7 @@ pub mod identity;
 pub mod journal;
 pub mod mock;
 pub mod pairing;
+pub mod pairing_session;
 pub mod protocol;
 pub mod security;
 pub mod session;

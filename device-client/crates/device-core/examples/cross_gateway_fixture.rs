@@ -10,6 +10,7 @@ fn main() {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use aiagent_device_core::{
         identity::{IdentityBinding, IdentityStore},
+        pairing_session::{PairingBootstrap, PairingSession},
         session::DeviceSession,
     };
     use aiagent_device_transport::ServerVerifiedSocket;
@@ -56,21 +57,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(created);
     let mut roots = RootCertStore::empty();
     roots.add(CertificateDer::from(std::fs::read(field(&v, "certDer")?)?))?;
-    let socket = ServerVerifiedSocket::connect_with_test_ca(field(&v, "url")?, roots)
+    let socket = ServerVerifiedSocket::connect_with_test_ca(field(&v, "pairUrl")?, roots.clone())
         .await
         .map_err(|_| "TLS_FAILED")?;
-    let signature = identity.sign_pairing_challenge(
-        &socket,
+    let bootstrap = PairingBootstrap::new(
         bytes(field(&v, "pairingIdHex")?)?,
         bytes(field(&v, "nonceHex")?)?,
         field(&v, "issuedMs")?.parse()?,
         field(&v, "expiresMs")?.parse()?,
-    )?;
+        bytes(field(&v, "tokenHex")?)?,
+    )
+    .map_err(|_| "INVALID_BOOTSTRAP")?;
+    let pair = PairingSession::attach(socket, identity, bootstrap)
+        .await
+        .map_err(|_| "PAIR_ATTACH_FAILED")?;
     println!(
         "{}",
-        json!({"kind":"PROOF", "public":aiagent_device_core::protocol::hex_digest(&identity.public_key()),
-        "binding":aiagent_device_core::protocol::hex_digest(&identity.binding_digest()),
-        "signature":aiagent_device_core::protocol::hex_digest(&signature)})
+        json!({"kind":"CODE", "code":pair.verification_code()})
     );
     io::stdout().flush()?;
     line.clear();
@@ -78,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if line.trim() != "CONTINUE" {
         return Err("FIXTURE_STOPPED".into());
     }
+    let identity = pair.finish().await.map_err(|_| "PAIR_FINISH_FAILED")?;
+    let socket = ServerVerifiedSocket::connect_with_test_ca(field(&v, "url")?, roots)
+        .await
+        .map_err(|_| "TLS_FAILED")?;
     let mut session = DeviceSession::connect(socket, identity)
         .await
         .map_err(|_| "CONNECT_FAILED")?;

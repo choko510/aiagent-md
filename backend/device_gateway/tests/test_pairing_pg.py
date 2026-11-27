@@ -62,9 +62,7 @@ def test_rust_and_python_share_pairing_proof_vector() -> None:
 def test_rust_and_python_share_signed_authority_vector() -> None:
     from nacl.signing import SigningKey
 
-    vector = json.loads(
-        (Path(__file__).resolve().parents[3] / "device-client/fixtures/authority-v1.json").read_text()
-    )
+    vector = json.loads((Path(__file__).resolve().parents[3] / "device-client/fixtures/authority-v1.json").read_text())
     key = SigningKey(bytes.fromhex(vector["testSeedHex"]))
     assert bytes(key.verify_key).hex() == vector["publicKeyHex"]
     for name in ("grant", "permit"):
@@ -889,7 +887,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.load_cert_chain(cert_path, key_path)
     client_tls = ssl.create_default_context(cafile=str(cert_path))
-    gateway = DeviceWss(ConnectionService(service, 1))
+    gateway = DeviceWss(ConnectionService(service, 1), pairing=service)
 
     async def exercise() -> None:
         with pytest.raises(ValueError):
@@ -899,6 +897,68 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
         async with gateway.listen("127.0.0.1", 0, server_tls, development_only=True) as server:
             port = server.sockets[0].getsockname()[1]
             url = f"wss://localhost:{port}/v1/device/connect"
+            pairing_url = f"wss://localhost:{port}/v1/device/pair"
+            ticket = await asyncio.to_thread(service.begin, owner)
+            pair_key = Ed25519PrivateKey.generate()
+            pair_public = pair_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            pair_digest = bytes([42]) * 32
+            attach = {
+                "version": "1.0",
+                "kind": "ATTACH",
+                "tenantId": owner.tenant_id,
+                "ownerId": owner.user_id,
+                "pairingId": str(ticket.pairing_id),
+                "token": ticket.token.hex(),
+                "publicKey": pair_public.hex(),
+                "bindingDigest": pair_digest.hex(),
+                "signature": pair_key.sign(
+                    pairing_proof_bytes(
+                        ticket.pairing_id, pair_digest, pair_public, ticket.nonce, ticket.issued_ms, ticket.expires_ms
+                    )
+                ).hex(),
+            }
+            async with connect(pairing_url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(attach))
+                code = decode_frame(await socket.recv(), "CODE", pairing=True)
+                assert code["bindingDigest"] == pair_digest.hex()
+                assert code["publicKeySha256"] == hashlib.sha256(pair_public).hexdigest()
+                await asyncio.to_thread(
+                    service.approve, owner, ticket.pairing_id, code["code"], code["publicKeySha256"], pair_digest
+                )
+                await socket.send(json.dumps({"version": "1.0", "kind": "CONSUME"}))
+                paired = decode_frame(await socket.recv(), "PAIRED", pairing=True)
+                assert (paired["identityId"], paired["deviceId"]) == (str(ticket.identity_id), str(ticket.device_id))
+            async with connect(pairing_url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(attach))
+                with pytest.raises(ConnectionClosed):
+                    await socket.recv()
+            unapproved = await asyncio.to_thread(service.begin, owner)
+            attach.update(
+                {
+                    "pairingId": str(unapproved.pairing_id),
+                    "token": unapproved.token.hex(),
+                    "signature": pair_key.sign(
+                        pairing_proof_bytes(
+                            unapproved.pairing_id,
+                            pair_digest,
+                            pair_public,
+                            unapproved.nonce,
+                            unapproved.issued_ms,
+                            unapproved.expires_ms,
+                        )
+                    ).hex(),
+                }
+            )
+            async with connect(pairing_url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
+                await socket.send(json.dumps(attach))
+                decode_frame(await socket.recv(), "CODE", pairing=True)
+                await socket.send(json.dumps({"version": "1.0", "kind": "CONSUME"}))
+                with pytest.raises(ConnectionClosed):
+                    await socket.recv()
+            with pytest.raises(PairingRejected):
+                await asyncio.to_thread(
+                    service.consume, owner.tenant_id, owner.user_id, unapproved.pairing_id, unapproved.token
+                )
             with pytest.raises(ssl.SSLCertVerificationError):
                 async with connect(f"wss://127.0.0.1:{port}/v1/device/connect", ssl=client_tls, proxy=None):
                     pass
@@ -1016,7 +1076,7 @@ def test_windows_rust_dpapi_client_to_python_gateway(service: PairingService, tm
     server_tls.load_cert_chain(cert_pem, key_path)
 
     async def exercise() -> None:
-        gateway = DeviceWss(ConnectionService(service, 1))
+        gateway = DeviceWss(ConnectionService(service, 1), pairing=service)
         async with gateway.listen("127.0.0.1", 0, server_tls, development_only=True) as server:
             port = server.sockets[0].getsockname()[1]
             origin = f"https://localhost:{port}"
@@ -1034,34 +1094,28 @@ def test_windows_rust_dpapi_client_to_python_gateway(service: PairingService, tm
                     "device": str(ticket.device_id),
                     "origin": origin,
                     "url": f"wss://localhost:{port}/v1/device/connect",
+                    "pairUrl": f"wss://localhost:{port}/v1/device/pair",
                     "certDer": str(cert_der),
                     "root": str(root),
                     "pairingIdHex": ticket.pairing_id.hex,
                     "nonceHex": ticket.nonce.hex(),
+                    "tokenHex": ticket.token.hex(),
                     "issuedMs": str(ticket.issued_ms),
                     "expiresMs": str(ticket.expires_ms),
                 }
                 proc.stdin.write((json.dumps(config) + "\n").encode())
                 await proc.stdin.drain()
-                proof = json.loads(await asyncio.wait_for(proc.stdout.readline(), 20))
-                assert proof["kind"] == "PROOF"
-                public, binding, signature = (bytes.fromhex(proof[k]) for k in ("public", "binding", "signature"))
-                code = await asyncio.to_thread(
-                    scoped.attach,
-                    owner.tenant_id,
-                    owner.user_id,
-                    ticket.pairing_id,
-                    ticket.token,
-                    public,
-                    binding,
-                    signature,
-                )
+                code = json.loads(await asyncio.wait_for(proc.stdout.readline(), 20))
+                assert code["kind"] == "CODE"
+                pending = await asyncio.to_thread(scoped.inspect, owner, ticket.pairing_id)
                 await asyncio.to_thread(
-                    scoped.approve, owner, ticket.pairing_id, code.code, code.public_key_sha256, binding
+                    scoped.approve,
+                    owner,
+                    ticket.pairing_id,
+                    code["code"],
+                    pending.public_key_sha256,
+                    pending.binding_digest,
                 )
-                assert await asyncio.to_thread(
-                    scoped.consume, owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token
-                ) == (ticket.identity_id, ticket.device_id)
                 proc.stdin.write(b"CONTINUE\n")
                 await proc.stdin.drain()
                 assert json.loads(await asyncio.wait_for(proc.stdout.readline(), 20)) == {"kind": "OK"}

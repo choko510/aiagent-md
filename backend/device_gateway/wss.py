@@ -15,7 +15,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from .connections import ConnectionChannel, ConnectionRejected, ConnectionService
-from .pairing import PairingRejected
+from .pairing import PairingRejected, PairingService
 
 MAX_BYTES = 8192
 SCHEMA = json.loads(
@@ -25,6 +25,13 @@ SCHEMA = json.loads(
 )
 Draft202012Validator.check_schema(SCHEMA)
 VALIDATOR = Draft202012Validator(SCHEMA)
+PAIRING_SCHEMA = json.loads(
+    (Path(__file__).resolve().parents[2] / "device-client/contracts/device-pairing-v1.schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+Draft202012Validator.check_schema(PAIRING_SCHEMA)
+PAIRING_VALIDATOR = Draft202012Validator(PAIRING_SCHEMA)
 _LOGGER = logging.getLogger("aiagent.device-wss")
 _LOGGER.setLevel(logging.WARNING)
 
@@ -46,14 +53,15 @@ def _invalid_constant(_: str) -> None:
     raise InvalidFrame()
 
 
-def decode_frame(raw: str | bytes, expected: str) -> dict[str, Any]:
+def decode_frame(raw: str | bytes, expected: str, *, pairing: bool = False) -> dict[str, Any]:
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_BYTES:
         raise InvalidFrame()
     try:
         data = json.loads(raw, object_pairs_hook=_unique, parse_constant=_invalid_constant)
     except (ValueError, RecursionError) as exc:
         raise InvalidFrame() from exc
-    if not isinstance(data, dict) or data.get("kind") != expected or not VALIDATOR.is_valid(data):
+    validator = PAIRING_VALIDATOR if pairing else VALIDATOR
+    if not isinstance(data, dict) or data.get("kind") != expected or not validator.is_valid(data):
         raise InvalidFrame()
     if any(isinstance(value, str) and any(ord(ch) < 32 or ord(ch) == 127 for ch in value) for value in data.values()):
         raise InvalidFrame()
@@ -75,8 +83,46 @@ async def _send(socket: ServerConnection, payload: dict[str, Any]) -> None:
 
 
 class DeviceWss:
-    def __init__(self, service: ConnectionService) -> None:
+    def __init__(self, service: ConnectionService, pairing: PairingService | None = None) -> None:
         self._service = service
+        self._pairing = pairing
+
+    async def _pair(self, socket: ServerConnection) -> None:
+        if self._pairing is None:
+            raise InvalidFrame()
+        frame = decode_frame(await asyncio.wait_for(socket.recv(), timeout=15), "ATTACH", pairing=True)
+        tenant, owner = frame["tenantId"], frame["ownerId"]
+        request_id = uuid.UUID(frame["pairingId"])
+        token = bytes.fromhex(frame["token"])
+        code = await asyncio.to_thread(
+            self._pairing.attach,
+            tenant,
+            owner,
+            request_id,
+            token,
+            bytes.fromhex(frame["publicKey"]),
+            bytes.fromhex(frame["bindingDigest"]),
+            bytes.fromhex(frame["signature"]),
+        )
+        del frame
+        response = {
+            "version": "1.0",
+            "kind": "CODE",
+            "code": code.code,
+            "publicKeySha256": code.public_key_sha256,
+            "bindingDigest": code.binding_digest.hex(),
+        }
+        if not PAIRING_VALIDATOR.is_valid(response):
+            raise InvalidFrame()
+        await asyncio.wait_for(socket.send(json.dumps(response, separators=(",", ":"))), timeout=15)
+        # The authenticated owner must approve separately; the socket cannot do so.
+        decode_frame(await asyncio.wait_for(socket.recv(), timeout=120), "CONSUME", pairing=True)
+        identity_id, device_id = await asyncio.to_thread(self._pairing.consume, tenant, owner, request_id, token)
+        response = {"version": "1.0", "kind": "PAIRED", "identityId": str(identity_id), "deviceId": str(device_id)}
+        if not PAIRING_VALIDATOR.is_valid(response):
+            raise InvalidFrame()
+        await asyncio.wait_for(socket.send(json.dumps(response, separators=(",", ":"))), timeout=15)
+        await socket.close(code=1000)
 
     async def handler(self, socket: ServerConnection) -> None:
         channel = ConnectionChannel()
@@ -87,8 +133,12 @@ class DeviceWss:
                 socket.transport.get_extra_info("ssl_object") is None
                 or socket.subprotocol != "aiagent-device.v1"
                 or socket.request is None
-                or socket.request.path != "/v1/device/connect"
             ):
+                raise InvalidFrame()
+            if socket.request.path == "/v1/device/pair":
+                await self._pair(socket)
+                return
+            if socket.request.path != "/v1/device/connect":
                 raise InvalidFrame()
             hello = await _read(socket, "HELLO")
             tenant, owner, identity = hello["tenantId"], hello["ownerId"], uuid.UUID(hello["identityId"])

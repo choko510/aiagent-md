@@ -152,6 +152,14 @@ impl DeviceIdentity {
             &self.binding.device_identity_id,
         )
     }
+    pub(crate) fn pairing_scope(&self) -> (&str, &str, &str, &str) {
+        (
+            &self.binding.tenant_id,
+            &self.binding.owner_user_id,
+            &self.binding.device_identity_id,
+            &self.binding.device_id,
+        )
+    }
     pub fn public_key(&self) -> [u8; 32] {
         self.key.verifying_key().to_bytes()
     }
