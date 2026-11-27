@@ -89,7 +89,7 @@
 - PR #122（Autonomous Development / Phase 7）が `0029` を主張している。
 - 本ブランチは仕様の連番規約に従い `0029_multimodal_ingestion` を追加した。
 - **merge順序により片方の番号を振り直す必要がある。** 本PRでは勝手にrenumberせず、衝突をここに記録する。
-- `aiagent_core.migrate.APP_SCHEMA_VERSION` を `29` へ更新し、既存のmigrationテスト13件も通した。
+- `aiagent_core.migrate.APP_SCHEMA_VERSION` を `29` へ更新し、既存のmigrationテスト12件も通した。
 - 本ブランチのDBテストは、このリポジトリの作業ツリーで `0029` まで適用した専用DBで実行した。
 
 ### 3.2 nested archive を拒否
@@ -125,15 +125,15 @@ $env:PYTHONPATH='packages/multimodal/src'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_multimodal_core.py tests/test_multimodal_service.py tests/test_multimodal_pg.py tests/test_multimodal_api.py
 ```
 
-結果: `core 35 passed`、`service 12 passed`、`PostgreSQL 4 passed`、`HTTP 2 passed / 1 skipped`、`migration 13 passed`（各グループを順に実行）。
+結果: `core 35 passed`、`service 13 passed`、`PostgreSQL 4 passed`、`HTTP 3 passed`、`migration 12 passed`（各グループを順に実行）。
 
 内訳:
 
 - core 35: detection、archive/XML gates、CSV/XLSX/DOCX/PPTX、PDF preflight + native text（pdfplumber導入時）、image container、正規化、verification、contract、worker Document非信頼、OCR非anchor、XLSX cached formulaのestimated維持、bbox限定PDF検証、normalized非replay/不一致、スラッシュ日付replay、同時chunk publish非上書き、金額の境界・通貨競合・桁上限、contextのformula状態投影、formula errorの明示unknown
-- service 12: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復、DB append失敗時の未確定chunk回収、質問entityと行の結合
+- service 13: upload→parse→retrieve→ask、digest mismatch、revoke、stale/expired lease、chunk replay/conflict、完了再試行時のstaging保持、executor未設定のfail closed、commit後admission失敗からの修復、DB append失敗時の未確定chunk回収、質問entityと行の結合、期限切れrequest deadlineの非parse
 - PostgreSQL 4: RLS/owner isolation、lease CAS、chunk replay/conflict、期限切れlease再claimとrevoke fence、latest document
-- HTTP 2（+1 skip）: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞、256KiB bodyを読む前のproduction gate
-- migration 13: `0029` までの連番・schema version・既存テスト
+- HTTP 3: 実 `TestClient(create_app(...))` でchunk upload、parse、citation、answer、他owner 403、production全閉塞、256KiB bodyを読む前のproduction gate
+- migration 12: `0029` までの連番・schema version・既存テスト
 
 ### 4.2 静的検査
 
@@ -196,6 +196,7 @@ R2-01〜R2-12とR3-01〜R3-08を再監査し、次のコード変更と回帰試
 - R2-07（一部）: 既存のrevoke時job無効化・blob削除・GET/citation拒否を維持。HTTPリクエスト中のrevokeとの厳密な直列化は未解消。
 - R2-08（一部）: `/jobs/{id}/run`に加え、complete/get/revoke/start/get/cancel/retrieve/answer/citationsの同期service呼出しを`asyncio.to_thread`へ退避した。スレッド実行の強制停止、実cgroup/CPU/RSS/FD上限は未解消。
 - R2-09〜R2-12: 未解消。決定的extractive回答はAgent Runtime/Gateway経由ではなく、保持期限切れの物理削除、UIのcitation再照合は限定的。
+- R2-10（一部）: requestの`deadline_at`がparse開始時に経過していれば、生バイトをparseせず`PARSE_TIMEOUT`でjobを失敗させる回帰試験を追加。idempotency/cache/latestの分離は未解消。
 - R3-02（一部）: 金額の字句境界を厳格化し、桁数上限とquantize失敗を明示的に拒否した。`1,23`や`2026/11/270`のような不正な区切り・日付を候補にしない回帰試験を追加。
 - R3-03（一部）: `ContextChunk`に`valueState`/`flags`/`observations`を追加し、XLSXのestimated/formula/cached errorをcontextへ投影する。formula errorの空セルは`FORMULA_CACHED_ERROR`の明示unknown候補にした。Context consumerの全てがこの状態を保持する保証は未検証。
 - R3-04（一部）: 上記R2-04のDB append失敗時rollbackを追加。DB/FS間の予約順序・期限・孤児回収は未解消。

@@ -35,6 +35,16 @@ def _plus(seconds: int) -> str:
     return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
+def _deadline_elapsed(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        return True
+    return parsed <= datetime.now(UTC)
+
+
 def safe_display_name(raw: str) -> str:
     name = unicodedata.normalize("NFKC", raw or "upload").replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(ch for ch in name if ch.isprintable() and ch not in "\x00\r\n")
@@ -296,6 +306,8 @@ class MultimodalService:
         try:
             raw = self.blobs.read(artifact.storage_key, artifact.content_sha256, artifact.byte_length)
             request = MmiRequestV1.from_dict(job.request)
+            if _deadline_elapsed(request.deadline_at):
+                raise MmiError("PARSE_TIMEOUT", "request deadline elapsed before parsing")
             detection = self.pipeline.detect(
                 raw,
                 file_name=artifact.original_filename,

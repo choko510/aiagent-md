@@ -196,6 +196,18 @@ def test_complete_retry_after_db_failure_keeps_staging(
     assert calls == 2
 
 
+def test_expired_request_deadline_is_not_parsed(service: MultimodalService) -> None:
+    principal = _principal()
+    artifact_id = _upload(service, principal)
+    request = dataclasses.replace(_request(artifact_id), deadline_at="2000-01-01T00:00:00Z")
+    job = service.start_parse(principal, artifact_id, request=request, idempotency_key="deadline")
+    with pytest.raises(MmiError) as expired:
+        service.run_job(principal, job.id)
+    assert expired.value.code == "PARSE_TIMEOUT"
+    stored = service.store.get_job(principal, job.id)
+    assert stored is not None and stored.status == "failed" and stored.error_code == "PARSE_TIMEOUT"
+
+
 def test_revoke_clears_jobs_and_derived_access(service: MultimodalService) -> None:
     principal = _principal()
     artifact_id = _upload(service, principal)
