@@ -161,6 +161,7 @@ def attach(service: PairingService, scope: Scope, bootstrap: object):
 def test_pairing_binds_owner_proof_and_single_consumption(service: PairingService) -> None:
     owner = make_scope()
     ticket = service.begin(owner)
+    assert service.status(owner, ticket.pairing_id).state == "WAITING_DEVICE"
     assert (ticket.tenant_id, ticket.owner_user_id, ticket.revocation_generation) == (owner.tenant_id, owner.user_id, 0)
     assert ticket.token.hex() not in repr(ticket)
     with pytest.raises(PairingRejected):
@@ -170,6 +171,7 @@ def test_pairing_binds_owner_proof_and_single_consumption(service: PairingServic
     with pytest.raises(PairingRejected):
         service.attach(owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token, public, bytes(32), bytes(64))
     code, key, public, digest, proof = attach(service, owner, ticket)
+    assert service.status(owner, ticket.pairing_id).state == "WAITING_APPROVAL"
     assert code.code not in repr(code)
     pending = service.inspect(owner, ticket.pairing_id)
     assert pending.public_key_sha256 == code.public_key_sha256
@@ -179,12 +181,15 @@ def test_pairing_binds_owner_proof_and_single_consumption(service: PairingServic
         service.attach(owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token, public, digest, key.sign(proof))
     for other in (Scope(owner.tenant_id, str(uuid.uuid4())), make_scope()):
         with pytest.raises(PairingRejected):
+            service.status(other, ticket.pairing_id)
+        with pytest.raises(PairingRejected):
             service.inspect(other, ticket.pairing_id)
         with pytest.raises(PairingRejected):
             service.approve(other, ticket.pairing_id, code.code, code.public_key_sha256, digest)
     with pytest.raises(PairingRejected):
         service.approve(owner, ticket.pairing_id, code.code, code.public_key_sha256, b"z" * 32)
     service.approve(owner, ticket.pairing_id, code.code, code.public_key_sha256, digest)
+    assert service.status(owner, ticket.pairing_id).state == "APPROVED"
     with pytest.raises(PairingRejected):
         service.approve(owner, ticket.pairing_id, code.code, code.public_key_sha256, digest)
 
@@ -199,6 +204,11 @@ def test_pairing_binds_owner_proof_and_single_consumption(service: PairingServic
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(lambda _: attempt(), range(2))) == [False, True]
+
+    status = service.status(owner, ticket.pairing_id)
+    assert (status.state, status.identity_id, status.device_id) == ("CONSUMED", ticket.identity_id, ticket.device_id)
+    assert (status.public_key_sha256, status.binding_digest) == (hashlib.sha256(public).hexdigest(), digest)
+    assert ticket.token.hex() not in repr(status) and code.code not in repr(status)
 
     with service._connect() as conn, conn.transaction():
         role = conn.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user").fetchone()
@@ -261,6 +271,7 @@ def test_expiry_and_cross_tenant_requests_are_rejected(service: PairingService) 
         conn.execute(
             "UPDATE device_gateway.pairing_requests SET expires_ms=issued_ms WHERE id=%s", (ticket.pairing_id,)
         )
+    assert service.status(owner, ticket.pairing_id).state == "EXPIRED"
     with pytest.raises(PairingRejected):
         attach(service, owner, ticket)
     ticket = service.begin(owner)

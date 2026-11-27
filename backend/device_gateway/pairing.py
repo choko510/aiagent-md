@@ -69,6 +69,17 @@ class PendingPairing:
     expires_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class PairingStatus:
+    """Owner-scoped reconciliation evidence; never contains a bootstrap token or code."""
+
+    state: str
+    identity_id: uuid.UUID
+    device_id: uuid.UUID
+    public_key_sha256: str | None
+    binding_digest: bytes | None
+
+
 def pairing_proof_bytes(
     pairing_id: uuid.UUID, binding_digest: bytes, public_key: bytes, nonce: bytes, issued_ms: int, expires_ms: int
 ) -> bytes:
@@ -315,6 +326,33 @@ class PairingService:
                 hashlib.sha256(row["public_key"]).hexdigest(),
                 row["binding_digest"],
                 row["expires_ms"],
+            )
+
+    def status(self, scope: AuthenticatedScope, request_id: uuid.UUID) -> PairingStatus:
+        """Reconcile an uncertain response using independently authenticated owner scope.
+
+        An expired pending request is not reported as approved. A consumed result is
+        historical evidence, not a live session or authorization to operate a device.
+        """
+        with self._connect() as conn, conn.transaction():
+            self._scope(conn, scope.tenant_id, scope.user_id)
+            row = conn.execute(
+                "SELECT * FROM device_gateway.pairing_requests WHERE id=%s AND tenant_id=%s AND owner_id=%s",
+                (request_id, scope.tenant_id, scope.user_id),
+            ).fetchone()
+            now = self._now(conn)
+            if row is None or now < row["issued_ms"]:
+                raise PairingRejected()
+            state = row["state"]
+            if state != "CONSUMED" and now >= row["expires_ms"]:
+                state = "EXPIRED"
+            public_key = row["public_key"]
+            return PairingStatus(
+                state,
+                row["identity_id"],
+                row["device_id"],
+                hashlib.sha256(public_key).hexdigest() if public_key is not None else None,
+                row["binding_digest"],
             )
 
     def consume(
