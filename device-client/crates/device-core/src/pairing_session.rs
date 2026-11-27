@@ -4,7 +4,10 @@ use crate::{identity::DeviceIdentity, protocol::hex_digest, session::FlatFrame};
 use aiagent_device_transport::ServerVerifiedSocket;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use zeroize::Zeroizing;
 
 const SCHEMA: &str = include_str!("../../../contracts/device-pairing-v1.schema.json");
@@ -83,6 +86,27 @@ pub struct PairingSession {
     socket: ServerVerifiedSocket,
     identity: DeviceIdentity,
     code: Zeroizing<String>,
+    expires_ms: u64,
+    last_wall_ms: u64,
+    deadline: Instant,
+}
+fn now_ms() -> Result<u64, PairingError> {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PairingError::Invalid)?
+            .as_millis(),
+    )
+    .map_err(|_| PairingError::Invalid)
+}
+fn still_valid(
+    now: u64,
+    previous: u64,
+    expires: u64,
+    monotonic_now: Instant,
+    deadline: Instant,
+) -> bool {
+    now >= previous && now < expires && monotonic_now < deadline
 }
 impl PairingSession {
     pub async fn attach(
@@ -132,10 +156,20 @@ impl PairingSession {
         let Some(Value::String(code)) = frame.remove("code") else {
             return Err(PairingError::Invalid);
         };
+        let now = now_ms()?;
+        if now < bootstrap.issued_ms || now >= bootstrap.expires_ms {
+            return Err(PairingError::Invalid);
+        }
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(bootstrap.expires_ms - now))
+            .ok_or(PairingError::Invalid)?;
         Ok(Self {
             socket,
             identity,
             code: Zeroizing::new(code),
+            expires_ms: bootstrap.expires_ms,
+            last_wall_ms: now,
+            deadline,
         })
     }
     /// Display locally to the user for separately authenticated owner approval.
@@ -144,6 +178,16 @@ impl PairingSession {
     }
     /// Call only after owner approval. A lost reply is ambiguous; do not retry blindly.
     pub async fn finish(mut self) -> Result<DeviceIdentity, PairingError> {
+        let now = now_ms()?;
+        if !still_valid(
+            now,
+            self.last_wall_ms,
+            self.expires_ms,
+            Instant::now(),
+            self.deadline,
+        ) {
+            return Err(PairingError::Invalid);
+        }
         let raw = json!({"version":"1.0", "kind":"CONSUME"}).to_string();
         self.socket
             .send_text(&raw)
@@ -163,5 +207,20 @@ impl PairingSession {
         }
         self.socket.close().await;
         Ok(self.identity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_expiry_and_clock_rollback_before_consumption() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(still_valid(101, 100, 200, now, deadline));
+        assert!(!still_valid(99, 100, 200, now, deadline));
+        assert!(!still_valid(200, 100, 200, now, deadline));
+        assert!(!still_valid(101, 100, 200, deadline, deadline));
     }
 }
