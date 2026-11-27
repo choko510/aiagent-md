@@ -9,11 +9,12 @@ from pathlib import Path
 import psycopg
 import pytest
 from aiagent_core import admin
+from aiagent_core.commands import Scope, submit_task
 from aiagent_core.db import Database
 from aiagent_skills.contracts import InstallationState, ReleaseState
 from aiagent_skills.digest import capability_digest, dependency_digest
 from aiagent_skills.errors import SkillNotFound
-from aiagent_skills.pg_store import PostgresSkillStore
+from aiagent_skills.pg_store import PostgresSkillStore, run_is_owned
 from aiagent_skills.policy import validate_requested
 from aiagent_skills.quarantine import QuarantineStore
 from aiagent_skills.registry import SkillRegistry, make_approval
@@ -49,7 +50,16 @@ def test_postgres_lifecycle_rls_and_least_privilege(
     owner_id = memory_tenant["userId"]
     store = PostgresSkillStore(memory_dbs["api"])
     quarantine = QuarantineStore(tmp_path / "quarantine")
-    registry = SkillRegistry(store, quarantine=quarantine)
+    seeded = submit_task(
+        memory_dbs["api"],
+        Scope(tenant_id, owner_id, memory_tenant["workspaceId"]),
+        "seed a run for the Skill pin test",
+    )
+    registry = SkillRegistry(
+        store,
+        quarantine=quarantine,
+        run_authorizer=lambda tenant, run, owner: run_is_owned(memory_dbs["api"], tenant, run, owner),
+    )
     name = f"pg-skill-{tenant_id[-8:]}"
 
     archive = make_zip(name, "1.0.0")
@@ -137,7 +147,7 @@ def test_postgres_lifecycle_rls_and_least_privilege(
 
     pin = registry.pin_for_run(
         tenant_id=tenant_id,
-        run_id="018f0000-0000-7000-8000-0000000000bb",
+        run_id=seeded["runId"],
         installation_id=installation.id,
         capability_digest_value=capability,
         dependency_digest_value=dependency_digest({}),
