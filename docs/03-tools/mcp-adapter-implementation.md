@@ -165,7 +165,7 @@ refusal through the adapter transport. They do not contact an external service.
 
 ## 8. Test evidence
 
-`74` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
+`75` adapter tests pass locally (Python 3.13, Windows). Detailed mapping is in
 `docs/11-qa/mcp-adapter-verification.md`. This is local execution evidence only; it is not a production
 verification or a remote-provider certification.
 

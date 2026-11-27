@@ -420,4 +420,8 @@ def _control_purpose(rpc_method: str) -> str:
         return "mcp_notification"
     if rpc_method == "tools/list":
         return "mcp_list"
-    return "mcp_control"
+    if rpc_method == "ping":
+        return "mcp_ping"
+    # The adapter does not expose resources/prompts/logging or other methods. Do not hand them a
+    # generic control permit that could be replayed across purposes.
+    raise McpError(ErrorCode.CAPABILITY_MISSING, "unsupported_rpc_method")

@@ -13,7 +13,7 @@ From `backend`:
 ```powershell
 $env:PYTHONPATH='packages/mcp_adapter/src;packages/gateways/src;.'
 .venv\Scripts\python.exe -m pytest tests/mcp_adapter -q --no-header -p no:cacheprovider
-# 74 passed
+# 75 passed
 
 .venv\Scripts\python.exe -m ruff format --check packages/mcp_adapter/src packages/gateways/src/aiagent_gateways/mcp_executor.py tests/mcp_adapter
 # 29 files already formatted
@@ -49,8 +49,8 @@ escape hatch.
 | `test_sdk_protocol.py` | 5 | real initialize/list/call, credential header, stale credential refusal, admitted permit override, SDK session-loss classification |
 | `test_session_manager.py` | 5 | feature flag, disabled/revoked provider, missing credential, credential handoff, call-slot concurrency |
 | `test_policy.py` | 3 | provider-scoped policy record, named approver, allowlist/policy intersection |
-| `test_errors.py` | 3 | trusted pre-send denial vs post-send 401/403/429/5xx/redirect uncertainty, retryability |
-| **Total** | **74** | |
+| `test_errors.py` | 4 | trusted pre-send denial vs post-send 401/403/429/5xx/redirect uncertainty, retryability |
+| **Total** | **75** | |
 
 ## 3. Canonical MCP-T coverage
 

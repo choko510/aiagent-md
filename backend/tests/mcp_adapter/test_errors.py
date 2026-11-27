@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import pytest
 from aiagent_mcp_adapter.errors import ErrorCode, McpError, classify_http_status
-from aiagent_mcp_adapter.sdk_transport import _uncertain
+from aiagent_mcp_adapter.sdk_transport import _control_purpose, _uncertain
 
 
 def test_trusted_pre_send_denial_remains_pre_send() -> None:
@@ -14,6 +15,16 @@ def test_post_send_origin_denial_is_not_treated_as_pre_send() -> None:
         error = classify_http_status(status)
         assert error.effect_uncertain is True
         assert _uncertain(error).effect_uncertain is True
+
+
+def test_control_purposes_are_explicit_and_unexposed_methods_are_denied() -> None:
+    assert _control_purpose("initialize") == "mcp_initialize"
+    assert _control_purpose("notifications/initialized") == "mcp_notification"
+    assert _control_purpose("tools/list") == "mcp_list"
+    assert _control_purpose("ping") == "mcp_ping"
+    with pytest.raises(McpError) as err:
+        _control_purpose("resources/list")
+    assert err.value.code is ErrorCode.CAPABILITY_MISSING
 
 
 def test_redirect_denial_is_uncertain_but_connect_failures_are_retryable() -> None:
