@@ -19,3 +19,5 @@ pub use pairing::{make_start_permit, CloudPairingConfig, LocalAdapters, TlsAuthe
 pub use protocol::{
     ActionRequest, CloudGrant, Epoch, Fence, Operation, Scope, StartPermit, Target,
 };
+#[cfg(all(feature = "simulator-recovery", not(debug_assertions)))]
+compile_error!("simulator-recovery must not be enabled in release builds");

@@ -267,6 +267,7 @@ impl LocalJournal {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "simulator-recovery"))]
     pub fn owner_confirm_clear_legacy_stop(
         &mut self,
         confirmation_phrase: &str,

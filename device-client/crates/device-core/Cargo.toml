@@ -7,6 +7,7 @@ description = "Fail-closed local device simulation; not a production gateway"
 
 [features]
 integration-fixture = ["aiagent-device-transport/test-ca"]
+simulator-recovery = []
 
 [[example]]
 name = "cross_gateway_fixture"

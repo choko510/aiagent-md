@@ -74,6 +74,9 @@ jobs:
           $output = cargo check -p aiagent-device-core --release --features integration-fixture --locked 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0 -or $output -notmatch 'test-ca must not be enabled in release builds') { throw 'Expected release test-CA compile guard was not observed' }
           $LASTEXITCODE = 0
+          $output = cargo check -p aiagent-device-core --release --features simulator-recovery --locked 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch 'simulator-recovery must not be enabled in release builds') { throw 'Expected simulator recovery compile guard was not observed' }
+          $LASTEXITCODE = 0
       - name: Preserve Windows integration result
         if: always()
         uses: actions/upload-artifact@v4
