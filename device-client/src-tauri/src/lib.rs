@@ -250,7 +250,7 @@ fn stop_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, Str
     if !state.stopped {
         state.stopped = true;
         if let Some(agent) = state.agent.as_mut() {
-            agent.stop();
+            agent.stop()?;
         }
         state.audit.push("LOCAL_STOP: 新規操作を停止".into());
     }
@@ -267,7 +267,7 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
         state.revoked = true;
         state.phase = ConnectionPhase::Revoked;
         if let Some(agent) = state.agent.as_mut() {
-            agent.revoke();
+            agent.revoke()?;
         }
         state
             .audit
@@ -523,7 +523,7 @@ mod tests {
         );
         state.stopped = true;
         if let Some(a) = state.agent.as_mut() {
-            a.stop();
+            a.stop().unwrap();
         }
         assert_eq!(
             state.execute_admitted_action(&req, &grant, None, 100),

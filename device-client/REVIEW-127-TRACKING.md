@@ -7,7 +7,7 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P1-01 | PARTIAL | Test-schema challenges are channel-scoped; a 64-row limit and expiry cleanup are implemented. A valid existing proof survives a flood; fair admission under saturation and production migration remain open. |
 | P1-02 | OPEN | Server-verifiable pairing transcript and generated contract required. |
 | P1-03 | PARTIAL | `begin`, `load_control` and `save_control` reject a deleted control row when its initialization marker remains; marker and record creation share a transaction. Simultaneous marker deletion, old snapshots, DB/key deletion and independent rollback fencing remain unresolved; this is not a production enrollment authority. |
-| P1-04 | OPEN | Core persistence and delivery fencing required. |
+| P1-04 | PARTIAL | Simulator Core stop, revoke and unpair latch immediately and persist through the journal; direct reopen is tested. Persistence-failure recovery, process ownership and final delivery fencing remain required. |
 | P1-05 | OPEN | Authenticated effect history and cross-device semantic reservation required. |
 | P1-06 | OPEN | Verified authority and fresh delivery fencing not integrated. |
 | P1-07 | PARTIAL | Unauthenticated challenges no longer update identity restore state. Independent restore authority and barrier remain required; an old process can still act until a new proof succeeds. |

@@ -172,13 +172,20 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             revoked: false,
         }
     }
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<(), String> {
         self.stopped = true;
+        let mut control = self.journal.load_control(vec![])?;
+        control.stopped = true;
+        self.journal.save_control(&control)
     }
-    pub fn revoke(&mut self) {
+    pub fn revoke(&mut self) -> Result<(), String> {
         self.revoked = true;
         self.stopped = true;
         self.phase = ConnectionPhase::Revoked;
+        let mut control = self.journal.load_control(vec![])?;
+        control.stopped = true;
+        control.revoked = true;
+        self.journal.save_control(&control)
     }
     pub fn phase(&self) -> ConnectionPhase {
         self.phase
@@ -188,11 +195,15 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             self.phase = ConnectionPhase::PairedOffline;
         }
     }
-    pub fn unpair(&mut self) {
+    pub fn unpair(&mut self) -> Result<(), String> {
         if !self.revoked {
             self.stopped = true;
             self.phase = ConnectionPhase::Unpaired;
+            let mut control = self.journal.load_control(vec![])?;
+            control.stopped = true;
+            self.journal.save_control(&control)?;
         }
+        Ok(())
     }
     pub fn mark_stale(&mut self) {
         if !self.revoked && self.phase != ConnectionPhase::Unpaired {

@@ -112,6 +112,24 @@ fn persisted_stop_from_another_process_blocks_stale_agent() {
     assert_eq!(agent.adapters.calls, 0);
     assert!(agent.effect("intent-stop").unwrap().is_none());
 }
+
+#[test]
+fn core_stop_and_revoke_persist_without_ui() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut agent = new_agent(&path, "A");
+    agent.stop().unwrap();
+    drop(agent);
+    let journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    assert!(journal.load_control(vec![]).unwrap().stopped);
+    drop(journal);
+    let mut agent = new_agent(&path, "A");
+    agent.revoke().unwrap();
+    drop(agent);
+    let journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    let record = journal.load_control(vec![]).unwrap();
+    assert!(record.stopped && record.revoked);
+}
 #[test]
 fn canonical_epochs_are_decimal_strings_not_numbers() {
     assert_eq!(
@@ -263,12 +281,12 @@ fn stop_and_revoke_refuse_new_actions() {
     let mut a = new_agent(&path, "A");
     let r = request("A", "one", Operation::DesktopClick);
     let g = mock_grant(&r, "nonce", 200);
-    a.stop();
+    a.stop().unwrap();
     assert_eq!(
         a.execute(&r, &g, 100),
         Decision::Denied("LOCAL_STOP_OR_REVOKED")
     );
-    a.revoke();
+    a.revoke().unwrap();
     assert_eq!(
         a.execute(&r, &g, 100),
         Decision::Denied("LOCAL_STOP_OR_REVOKED")
@@ -481,7 +499,7 @@ fn target_and_policy_validation_reject_whitespace_and_non_origin_urls() {
 fn unpaired_agent_cannot_execute_or_reconnect() {
     let dir = tempdir().unwrap();
     let mut agent = new_agent(&dir.path().join("journal.db"), "A");
-    agent.unpair();
+    agent.unpair().unwrap();
     assert_eq!(
         agent.phase(),
         aiagent_device_core::ConnectionPhase::Unpaired
