@@ -39,6 +39,39 @@ jobs:
           cargo clippy -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - name: Start isolated Windows PostgreSQL fixture
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Service -Name 'postgresql-x64-14' -StartupType Manual
+          Start-Service -Name 'postgresql-x64-14'
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\createdb.exe" -h 127.0.0.1 -U postgres device_gateway_test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows DPAPI to Python TLS and PostgreSQL
+        working-directory: .
+        env:
+          AIAGENT_DEVICE_TEST_ADMIN_DSN: postgresql://postgres:root@127.0.0.1:5432/device_gateway_test
+          AIAGENT_RUST_TEST_CLIENT: ${{ github.workspace }}\device-client\target\debug\examples\cross_gateway_fixture.exe
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber
+          Write-Output "HEAD: $env:GITHUB_SHA"
+          uv run --isolated --no-project --python 3.13 --with-requirements backend/device_gateway/requirements-test.lock python -m pytest -c backend/device_gateway/tests/pytest.ini backend/device_gateway/tests/test_pairing_pg.py::test_windows_rust_dpapi_client_to_python_gateway -q --junitxml=windows-device-e2e.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content -Raw windows-device-e2e.xml
+          $suite = $report.testsuites.testsuite
+          if ([int]$suite.tests -ne 1 -or [int]$suite.skipped -ne 0 -or [int]$suite.failures -ne 0 -or [int]$suite.errors -ne 0) { throw 'Windows cross-process test did not pass exactly once' }
+      - name: Release builds must reject test CA
+        run: |
+          $output = cargo check -p aiagent-device-core --release --features integration-fixture --locked 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch 'test-ca must not be enabled in release builds') { throw 'Expected release test-CA compile guard was not observed' }
+          $LASTEXITCODE = 0
   linux-core:
     runs-on: ubuntu-latest
     timeout-minutes: 30
