@@ -109,6 +109,37 @@ def pairing_proof_bytes(
     )
 
 
+def pairing_proof_v2(
+    pairing_id: uuid.UUID,
+    binding_digest: bytes,
+    public_key: bytes,
+    nonce: bytes,
+    issued_ms: int,
+    expires_ms: int,
+    tenant: str,
+    owner: str,
+    identity: str,
+    device: str,
+    origin: str,
+    revocation_generation: int,
+) -> bytes:
+    """Bind server-verifiable bootstrap fields; the opaque local digest is not SID attestation."""
+    legacy = pairing_proof_bytes(pairing_id, binding_digest, public_key, nonce, issued_ms, expires_ms)
+    if type(revocation_generation) is not int or not 0 <= revocation_generation < 2**63:
+        raise PairingRejected()
+    parts = (tenant, owner, identity, device, origin)
+    if any(not isinstance(part, str) or not part or len(part.encode("utf-8")) > 512 for part in parts):
+        raise PairingRejected()
+    transcript = bytearray(b"aiagent-device-pairing-proof-candidate-v2")
+    transcript.extend(legacy[len(DOMAIN) :])
+    for part in parts:
+        encoded = part.encode("utf-8")
+        transcript.extend(len(encoded).to_bytes(8, "big"))
+        transcript.extend(encoded)
+    transcript.extend(revocation_generation.to_bytes(8, "big"))
+    return bytes(transcript)
+
+
 class PairingService:
     def __init__(self, dsn: str, server_origin: str, code_key: bytes) -> None:
         origin = urlsplit(server_origin)
@@ -249,8 +280,19 @@ class PairingService:
                 try:
                     if not valid or not isinstance(signature, bytes) or len(signature) != 64:
                         raise PairingRejected()
-                    payload = pairing_proof_bytes(
-                        request_id, binding_digest, public_key, row["nonce"], row["issued_ms"], row["expires_ms"]
+                    payload = pairing_proof_v2(
+                        request_id,
+                        binding_digest,
+                        public_key,
+                        row["nonce"],
+                        row["issued_ms"],
+                        row["expires_ms"],
+                        row["tenant_id"],
+                        row["owner_id"],
+                        str(row["identity_id"]),
+                        str(row["device_id"]),
+                        row["origin"],
+                        0,
                     )
                     if not crypto_core_ed25519_is_valid_point(public_key):
                         raise PairingRejected()

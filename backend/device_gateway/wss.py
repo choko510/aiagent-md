@@ -26,7 +26,7 @@ SCHEMA = json.loads(
 Draft202012Validator.check_schema(SCHEMA)
 VALIDATOR = Draft202012Validator(SCHEMA)
 PAIRING_SCHEMA = json.loads(
-    (Path(__file__).resolve().parents[2] / "device-client/contracts/device-pairing-v1.schema.json").read_text(
+    (Path(__file__).resolve().parents[2] / "device-client/contracts/device-pairing-v2.schema.json").read_text(
         encoding="utf-8"
     )
 )
@@ -111,7 +111,7 @@ class DeviceWss:
         )
         del frame
         response = {
-            "version": "1.0",
+            "version": "2.0",
             "kind": "CODE",
             "code": code.code,
             "publicKeySha256": code.public_key_sha256,
@@ -123,7 +123,7 @@ class DeviceWss:
         # The authenticated owner must approve separately; the socket cannot do so.
         decode_frame(await asyncio.wait_for(socket.recv(), timeout=120), "CONSUME", pairing=True)
         identity_id, device_id = await asyncio.to_thread(self._pairing.consume, tenant, owner, request_id, token)
-        response = {"version": "1.0", "kind": "PAIRED", "identityId": str(identity_id), "deviceId": str(device_id)}
+        response = {"version": "2.0", "kind": "PAIRED", "identityId": str(identity_id), "deviceId": str(device_id)}
         if not PAIRING_VALIDATOR.is_valid(response):
             raise InvalidFrame()
         await asyncio.wait_for(socket.send(json.dumps(response, separators=(",", ":"))), timeout=15)

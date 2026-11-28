@@ -241,13 +241,24 @@ impl DeviceIdentity {
         {
             return Err("INVALID_CHALLENGE");
         }
-        let mut message = b"aiagent-device-pairing-proof-candidate-v1".to_vec();
+        let mut message = b"aiagent-device-pairing-proof-candidate-v2".to_vec();
         message.extend_from_slice(&pairing_id);
         message.extend_from_slice(&self.binding_digest());
         message.extend_from_slice(&self.public_key());
         message.extend_from_slice(&nonce);
         message.extend_from_slice(&issued.to_be_bytes());
         message.extend_from_slice(&expires.to_be_bytes());
+        for part in [
+            &self.binding.tenant_id,
+            &self.binding.owner_user_id,
+            &self.binding.device_identity_id,
+            &self.binding.device_id,
+            &self.binding.server_origin,
+        ] {
+            message.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            message.extend_from_slice(part.as_bytes());
+        }
+        message.extend_from_slice(&self.binding.revocation_generation.to_be_bytes());
         Ok(self.key.sign(&message).to_bytes())
     }
 
@@ -640,7 +651,7 @@ mod tests {
     #[test]
     fn pairing_proof_matches_shared_public_test_vector() {
         let vector: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/pairing-proof-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../../../fixtures/pairing-proof-v2.json")).unwrap();
         let identity = DeviceIdentity {
             binding: binding("alice"),
             key: SigningKey::from_bytes(&[7; 32]),

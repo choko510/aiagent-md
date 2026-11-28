@@ -1,0 +1,16 @@
+{
+  "description": "Public deterministic test vector; no production key or credential",
+  "pairingIdHex": "01010101010101010101010101010101",
+  "bindingDigestHex": "232ecdc74e3223b2abdf794c411eea2538b9e938e477d2bb24da581a4ae1b3ba",
+  "publicKeyHex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "nonceHex": "0909090909090909090909090909090909090909090909090909090909090909",
+  "issuedMs": "1000",
+  "expiresMs": "61000",
+  "signatureHex": "b699030da38ef03eb6a744f69a36f81ea740d9f65e52cbdfc79aeeb9b6fc1455bf0f6d07e1672edae2635a4164d77e3a30e4065b60d60a8366328b414b3eda05",
+  "tenantId": "tenant",
+  "ownerUserId": "alice",
+  "identityId": "identity",
+  "deviceId": "device",
+  "serverOrigin": "https://example.com",
+  "revocationGeneration": "3"
+}

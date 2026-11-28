@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/choko510/aiagent-md/device-client/contracts/device-pairing-v1.schema.json",
-  "title": "Device pairing wire candidate v1",
+  "$id": "https://github.com/choko510/aiagent-md/device-client/contracts/device-pairing-v2.schema.json",
+  "title": "Device pairing wire candidate v2",
   "description": "Development-only draft; no authorization of device actions.",
   "oneOf": [
     {
@@ -9,7 +9,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.0"
+          "const": "2.0"
         },
         "kind": {
           "const": "ATTACH"
@@ -60,7 +60,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.0"
+          "const": "2.0"
         },
         "kind": {
           "const": "CODE"
@@ -91,7 +91,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.0"
+          "const": "2.0"
         },
         "kind": {
           "const": "CONSUME"
@@ -107,7 +107,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.0"
+          "const": "2.0"
         },
         "kind": {
           "const": "PAIRED"

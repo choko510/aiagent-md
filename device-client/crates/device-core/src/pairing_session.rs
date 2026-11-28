@@ -10,7 +10,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA: &str = include_str!("../../../contracts/device-pairing-v1.schema.json");
+const SCHEMA: &str = include_str!("../../../contracts/device-pairing-v2.schema.json");
 static VALIDATOR: OnceLock<Result<jsonschema::Validator, ()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +136,7 @@ impl PairingSession {
             return Err(PairingError::Invalid);
         }
         let token = Zeroizing::new(hex_digest(bootstrap.token.as_ref()));
-        let raw = Zeroizing::new(format!("{{\"version\":\"1.0\",\"kind\":\"ATTACH\",\"tenantId\":{},\"ownerId\":{},\"pairingId\":\"{}\",\"token\":\"{}\",\"publicKey\":\"{}\",\"bindingDigest\":\"{}\",\"signature\":\"{}\"}}", serde_json::to_string(tenant).map_err(|_| PairingError::Invalid)?, serde_json::to_string(owner).map_err(|_| PairingError::Invalid)?, uuid_string(bootstrap.pairing_id), *token, hex_digest(&identity.public_key()), hex_digest(&identity.binding_digest()), hex_digest(&signature)));
+        let raw = Zeroizing::new(format!("{{\"version\":\"2.0\",\"kind\":\"ATTACH\",\"tenantId\":{},\"ownerId\":{},\"pairingId\":\"{}\",\"token\":\"{}\",\"publicKey\":\"{}\",\"bindingDigest\":\"{}\",\"signature\":\"{}\"}}", serde_json::to_string(tenant).map_err(|_| PairingError::Invalid)?, serde_json::to_string(owner).map_err(|_| PairingError::Invalid)?, uuid_string(bootstrap.pairing_id), *token, hex_digest(&identity.public_key()), hex_digest(&identity.binding_digest()), hex_digest(&signature)));
         socket
             .send_text(&raw)
             .await
@@ -190,7 +190,7 @@ impl PairingSession {
         ) {
             return Err(PairingError::Invalid);
         }
-        let raw = json!({"version":"1.0", "kind":"CONSUME"}).to_string();
+        let raw = json!({"version":"2.0", "kind":"CONSUME"}).to_string();
         self.socket
             .send_text(&raw)
             .await
@@ -280,7 +280,7 @@ mod tests {
             let mut socket = accept_hdr_async(tls, protocol).await.unwrap();
             let attach = socket.next().await.unwrap().unwrap().into_text().unwrap();
             decode(&attach, "ATTACH").unwrap();
-            socket.send(Message::Text(json!({"version":"1.0", "kind":"CODE", "code":"12345678", "publicKeySha256":key_hash, "bindingDigest":digest}).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({"version":"2.0", "kind":"CODE", "code":"12345678", "publicKeySha256":key_hash, "bindingDigest":digest}).to_string().into())).await.unwrap();
             let consume = socket.next().await.unwrap().unwrap().into_text().unwrap();
             decode(&consume, "CONSUME").unwrap();
             // Simulate a committed registration whose response was lost.
