@@ -15,7 +15,7 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P1-09 | PARTIAL | Opening another instance no longer rewrites STARTED; non-owner views project it as UNKNOWN and only the originating journal instance can finish. Persistent writer lease, process-death proof, authenticated reconciliation and multi-process fault tests remain required. |
 | P2-01 | OPEN | Durable pairing lifecycle and safe key publication required. |
 | P2-02 | PARTIAL | Development listener rejects excess established connections without queueing; database connection, lock and statement waits have timeouts. TLS socket and PostgreSQL contention tests pass. Handshake-level admission, a pool, tenant/IP quotas, cancellation reconciliation and scheduled cleanup remain required. |
-| P2-03 | OPEN | Handle-based journal storage and per-identity key required. |
+| P2-03 | PARTIAL | Existing key reads reject symlinks, hardlinks, non-files, large files and unsafe ACLs; Windows and Linux tests pass. Parent-path and ACL TOCTOU, SQLite/WAL handles, secure Unix storage and per-identity key remain unresolved. |
 | P2-04 | OPEN | Handle-based identity store and atomic publication required. |
 | P2-05 | OPEN | Session actor and operator trust provisioning required. |
 | P2-06 | OPEN | Handle lifecycle, Unicode and I/O deadline required. |

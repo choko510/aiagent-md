@@ -6,6 +6,32 @@ use aiagent_device_core::{
 };
 use tempfile::tempdir;
 
+#[test]
+fn hardlinked_journal_key_is_rejected_without_changing_target() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("journal.db");
+    drop(LocalJournal::open(&db, &scope("A")).unwrap());
+    let key = aiagent_device_core::security::key_file_path(&db);
+    let original = std::fs::read(&key).unwrap();
+    let other = dir.path().join("hardlink");
+    std::fs::hard_link(&key, &other).unwrap();
+    assert!(LocalJournal::open(&db, &scope("A")).is_err());
+    assert_eq!(std::fs::read(&other).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_journal_key_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("journal.db");
+    drop(LocalJournal::open(&db, &scope("A")).unwrap());
+    let key = aiagent_device_core::security::key_file_path(&db);
+    let other = dir.path().join("original-key");
+    std::fs::rename(&key, &other).unwrap();
+    std::os::unix::fs::symlink(&other, &key).unwrap();
+    assert!(LocalJournal::open(&db, &scope("A")).is_err());
+}
+
 fn scope(owner: &str) -> Scope {
     Scope {
         os_user: "sid-1".into(),

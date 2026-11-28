@@ -4,7 +4,9 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -116,8 +118,7 @@ pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
         if !db_path.exists() {
             return Err("journal database missing for existing key".into());
         }
-        restrict_path_owner_only(&key_path, false)?;
-        let raw = fs::read(&key_path).map_err(|e| e.to_string())?;
+        let raw = read_existing_journal_key(&key_path)?;
         return unprotect_key_blob(&raw);
     }
     // Never replace a lost key for an existing journal: doing so can conceal
@@ -134,12 +135,46 @@ pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
         }
         Err(e) if key_path.exists() => {
             let _ = e;
-            restrict_path_owner_only(&key_path, false)?;
-            let raw = fs::read(&key_path).map_err(|err| err.to_string())?;
+            let raw = read_existing_journal_key(&key_path)?;
             unprotect_key_blob(&raw)
         }
         Err(e) => Err(e),
     }
+}
+
+fn read_existing_journal_key(path: &Path) -> Result<Vec<u8>, String> {
+    use cap_fs_ext::{FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
+    use std::io::Read;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or("invalid journal key path")?;
+    let dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|e| e.to_string())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = dir.open_with(name, &options).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let links = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| meta.nlink()))
+        .map_err(|_| "key link count unavailable")?;
+    if !meta.is_file() || links != 1 || meta.len() > 4096 || !verify_owner_only_acl(path)? {
+        return Err("unsafe journal key file".into());
+    }
+    let mut raw = Vec::new();
+    (&mut file)
+        .take(4097)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    if raw.len() > 4096 {
+        return Err("journal key file too large".into());
+    }
+    Ok(raw)
 }
 
 fn write_new_restricted_file(path: &Path, data: &[u8]) -> Result<(), String> {
