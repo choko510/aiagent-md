@@ -20,4 +20,4 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P2-05 | OPEN | Session actor and operator trust provisioning required. |
 | P2-06 | OPEN | Handle lifecycle, Unicode and I/O deadline required. |
 | P2-07 | PARTIAL | UI no longer labels simulated state as mTLS or enables real I/O, and reports persistence only after a successful write. The Tauri legacy recovery command now rejects all requests. Authenticated IPC, distinct live capabilities, removal or isolation of the internal simulator recovery method and native owner confirmation remain required. |
-| P2-08 | OPEN | Windows cross-language test is not a CI gate. |
+| P2-08 | PARTIAL | Windows DPAPI-to-Python/PostgreSQL TLS test is required and passed at `827609f` in Actions run 46112299393; skip is rejected and release test-CA compilation is rejected. Artifact retention and pinned Rust were added afterward and await CI; dependency/license audit policy remains to integrate. |

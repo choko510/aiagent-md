@@ -23,7 +23,7 @@ jobs:
         working-directory: device-client
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Ensure Rust source formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
@@ -72,6 +72,13 @@ jobs:
           $output = cargo check -p aiagent-device-core --release --features integration-fixture --locked 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0 -or $output -notmatch 'test-ca must not be enabled in release builds') { throw 'Expected release test-CA compile guard was not observed' }
           $LASTEXITCODE = 0
+      - name: Preserve Windows integration result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-device-e2e-${{ github.sha }}
+          path: windows-device-e2e.xml
+          if-no-files-found: warn
   linux-core:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -80,7 +87,7 @@ jobs:
         working-directory: device-client
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - name: Core and real TLS/WSS tests
