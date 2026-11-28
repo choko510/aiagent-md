@@ -232,7 +232,14 @@ impl LocalJournal {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        if existing.is_none() && history.1 == 0 {
+        let previously_initialized: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)",
+                params![scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if existing.is_none() && history.1 == 0 && !previously_initialized {
             let sealed = seal_payload(&master_key, &scope_hash, "effect_integrity", &history.0)?;
             tx.execute(
                 "INSERT OR IGNORE INTO effect_integrity(scope_hash,sealed_digest) VALUES(?1,?2)",
@@ -1176,6 +1183,33 @@ mod tests {
             .conn
             .execute("DELETE FROM effect_integrity", [])
             .unwrap();
+        drop(journal);
+        assert!(LocalJournal::open(&path, &scope).is_err());
+    }
+
+    #[test]
+    fn deleted_guard_and_history_do_not_reinitialize_existing_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .unwrap();
+        journal.conn.execute_batch("DELETE FROM effects; DELETE FROM used_grants; DELETE FROM used_permits; DELETE FROM effect_integrity;").unwrap();
         drop(journal);
         assert!(LocalJournal::open(&path, &scope).is_err());
     }
