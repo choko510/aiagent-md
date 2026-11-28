@@ -277,6 +277,7 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
     Ok(state.snapshot())
 }
 
+#[cfg(test)]
 impl UiState {
     fn recover_legacy_stop_internal(&mut self, confirmation: &str) -> Result<(), String> {
         self.control_persisted = false;
@@ -300,12 +301,10 @@ impl UiState {
 
 #[tauri::command]
 fn recover_legacy_stop(
-    state: tauri::State<'_, Mutex<UiState>>,
-    confirmation: String,
+    _state: tauri::State<'_, Mutex<UiState>>,
+    _confirmation: String,
 ) -> Result<UiSnapshot, String> {
-    let mut state = state.lock().map_err(|_| "STATE_LOCKED")?;
-    state.recover_legacy_stop_internal(&confirmation)?;
-    Ok(state.snapshot())
+    Err("OWNER_AUTHENTICATED_RECOVERY_UNAVAILABLE".into())
 }
 
 #[tauri::command]

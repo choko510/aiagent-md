@@ -19,5 +19,5 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P2-04 | OPEN | Handle-based identity store and atomic publication required. |
 | P2-05 | OPEN | Session actor and operator trust provisioning required. |
 | P2-06 | OPEN | Handle lifecycle, Unicode and I/O deadline required. |
-| P2-07 | PARTIAL | UI no longer labels simulated state as mTLS or enables real I/O, and reports persistence only after a successful write. Authenticated IPC, distinct live capabilities, legacy command separation and native owner confirmation remain required. |
+| P2-07 | PARTIAL | UI no longer labels simulated state as mTLS or enables real I/O, and reports persistence only after a successful write. The Tauri legacy recovery command now rejects all requests. Authenticated IPC, distinct live capabilities, removal or isolation of the internal simulator recovery method and native owner confirmation remain required. |
 | P2-08 | OPEN | Windows cross-language test is not a CI gate. |
