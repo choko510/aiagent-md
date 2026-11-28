@@ -953,7 +953,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.load_cert_chain(cert_path, key_path)
     client_tls = ssl.create_default_context(cafile=str(cert_path))
-    gateway = DeviceWss(ConnectionService(service, 1), pairing=service)
+    gateway = DeviceWss(ConnectionService(service, 1), pairing=service, max_connections=2)
 
     async def exercise() -> None:
         with pytest.raises(ValueError):
@@ -964,6 +964,23 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
             port = server.sockets[0].getsockname()[1]
             url = f"wss://localhost:{port}/v1/device/connect"
             pairing_url = f"wss://localhost:{port}/v1/device/pair"
+            async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as first:
+                async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as second:
+                    for _ in range(100):
+                        if gateway._slots.locked():
+                            break
+                        await asyncio.sleep(0.01)
+                    assert gateway._slots.locked()
+                    async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as overflow:
+                        with pytest.raises(ConnectionClosed):
+                            await overflow.recv()
+                    await first.close()
+                    await second.close()
+            for _ in range(100):
+                if gateway._slots._value == 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert gateway._slots._value == 2
             ticket = await asyncio.to_thread(service.begin, owner)
             pair_key = Ed25519PrivateKey.generate()
             pair_public = pair_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)

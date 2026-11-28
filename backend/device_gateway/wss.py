@@ -83,9 +83,14 @@ async def _send(socket: ServerConnection, payload: dict[str, Any]) -> None:
 
 
 class DeviceWss:
-    def __init__(self, service: ConnectionService, pairing: PairingService | None = None) -> None:
+    def __init__(
+        self, service: ConnectionService, pairing: PairingService | None = None, *, max_connections: int = 32
+    ) -> None:
+        if type(max_connections) is not int or not 1 <= max_connections <= 256:
+            raise ValueError("invalid connection limit")
         self._service = service
         self._pairing = pairing
+        self._slots = asyncio.Semaphore(max_connections)
 
     async def _pair(self, socket: ServerConnection) -> None:
         if self._pairing is None:
@@ -125,6 +130,18 @@ class DeviceWss:
         await socket.close(code=1000)
 
     async def handler(self, socket: ServerConnection) -> None:
+        # No await between the availability check and acquire: positive permits
+        # are acquired immediately in this event loop, without a waiter queue.
+        if self._slots.locked():
+            await socket.close(code=1013)
+            return
+        await self._slots.acquire()
+        try:
+            await self._handle(socket)
+        finally:
+            self._slots.release()
+
+    async def _handle(self, socket: ServerConnection) -> None:
         channel = ConnectionChannel()
         tenant = owner = None
         identity = None
