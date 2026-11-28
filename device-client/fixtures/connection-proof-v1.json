@@ -1,0 +1,10 @@
+{
+  "description": "Public deterministic test vector; no production key or credential",
+  "bindingDigestHex": "232ecdc74e3223b2abdf794c411eea2538b9e938e477d2bb24da581a4ae1b3ba",
+  "publicKeyHex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "nonceHex": "0909090909090909090909090909090909090909090909090909090909090909",
+  "generation": "4",
+  "issuedMs": "1000",
+  "expiresMs": "31000",
+  "signatureHex": "ce9d886a3b5b3cbd0cc99a8b86f7dcb3c1ab1a42431e80645377b0880e17cd41f4e41e8f1802373e15a1d2d3d7e99a882e00833d16315f0cf5d4c2b0c994cb0c"
+}

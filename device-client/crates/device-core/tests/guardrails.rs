@@ -6,6 +6,32 @@ use aiagent_device_core::{
 };
 use tempfile::tempdir;
 
+#[test]
+fn hardlinked_journal_key_is_rejected_without_changing_target() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("journal.db");
+    drop(LocalJournal::open(&db, &scope("A")).unwrap());
+    let key = aiagent_device_core::security::key_file_path(&db);
+    let original = std::fs::read(&key).unwrap();
+    let other = dir.path().join("hardlink");
+    std::fs::hard_link(&key, &other).unwrap();
+    assert!(LocalJournal::open(&db, &scope("A")).is_err());
+    assert_eq!(std::fs::read(&other).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_journal_key_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("journal.db");
+    drop(LocalJournal::open(&db, &scope("A")).unwrap());
+    let key = aiagent_device_core::security::key_file_path(&db);
+    let other = dir.path().join("original-key");
+    std::fs::rename(&key, &other).unwrap();
+    std::os::unix::fs::symlink(&other, &key).unwrap();
+    assert!(LocalJournal::open(&db, &scope("A")).is_err());
+}
+
 fn scope(owner: &str) -> Scope {
     Scope {
         os_user: "sid-1".into(),
@@ -63,14 +89,76 @@ fn policy() -> LocalPolicy {
     p
 }
 fn new_agent(path: &std::path::Path, owner: &str) -> Agent<MockChannel, MockAdapters> {
+    let mut journal = LocalJournal::open(path, &scope(owner)).unwrap();
+    // Simulator fixtures explicitly provision control before mock execution.
+    if journal
+        .load_control(vec!["MISSING_FIXTURE_CONTROL".into()])
+        .unwrap()
+        .audit
+        == ["MISSING_FIXTURE_CONTROL"]
+    {
+        journal
+            .save_control(&aiagent_device_core::ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec!["SIMULATOR_FIXTURE".into()],
+            })
+            .unwrap();
+    }
     Agent::new(
         scope(owner),
         fence(),
         MockChannel::online_mock(),
         MockAdapters::default(),
         policy(),
-        LocalJournal::open(path, &scope(owner)).unwrap(),
+        journal,
     )
+}
+
+#[test]
+fn persisted_stop_from_another_process_blocks_stale_agent() {
+    use aiagent_device_core::ControlRecord;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut agent = new_agent(&path, "A");
+    let mut other = LocalJournal::open(&path, &scope("A")).unwrap();
+    other
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: false,
+            audit: vec![],
+        })
+        .unwrap();
+    let req = request("A", "intent-stop", Operation::DesktopClick);
+    let grant = mock_grant(&req, "grant-stop", 200);
+    assert_eq!(
+        agent.execute(&req, &grant, 100),
+        Decision::Denied("LOCAL_STOP_OR_REVOKED")
+    );
+    assert_eq!(agent.adapters.calls, 0);
+    assert!(agent.effect("intent-stop").unwrap().is_none());
+}
+
+#[test]
+fn core_stop_and_revoke_persist_without_ui() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut agent = new_agent(&path, "A");
+    agent.stop().unwrap();
+    drop(agent);
+    let journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    assert!(journal.load_control(vec![]).unwrap().stopped);
+    drop(journal);
+    let mut agent = new_agent(&path, "A");
+    assert!(agent.stopped());
+    agent.revoke().unwrap();
+    drop(agent);
+    let journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    let record = journal.load_control(vec![]).unwrap();
+    assert!(record.stopped && record.revoked);
+    drop(journal);
+    let agent = new_agent(&path, "A");
+    assert!(agent.stopped() && agent.revoked());
 }
 #[test]
 fn canonical_epochs_are_decimal_strings_not_numbers() {
@@ -175,6 +263,13 @@ fn restarted_started_is_unknown_and_never_auto_retried() {
     let r = request("A", "one", Operation::DesktopClick);
     {
         let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+        journal
+            .save_control(&aiagent_device_core::ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec!["SIMULATOR_FIXTURE".into()],
+            })
+            .unwrap();
         assert_eq!(
             journal
                 .begin(
@@ -216,12 +311,12 @@ fn stop_and_revoke_refuse_new_actions() {
     let mut a = new_agent(&path, "A");
     let r = request("A", "one", Operation::DesktopClick);
     let g = mock_grant(&r, "nonce", 200);
-    a.stop();
+    a.stop().unwrap();
     assert_eq!(
         a.execute(&r, &g, 100),
         Decision::Denied("LOCAL_STOP_OR_REVOKED")
     );
-    a.revoke();
+    a.revoke().unwrap();
     assert_eq!(
         a.execute(&r, &g, 100),
         Decision::Denied("LOCAL_STOP_OR_REVOKED")
@@ -434,7 +529,7 @@ fn target_and_policy_validation_reject_whitespace_and_non_origin_urls() {
 fn unpaired_agent_cannot_execute_or_reconnect() {
     let dir = tempdir().unwrap();
     let mut agent = new_agent(&dir.path().join("journal.db"), "A");
-    agent.unpair();
+    agent.unpair().unwrap();
     assert_eq!(
         agent.phase(),
         aiagent_device_core::ConnectionPhase::Unpaired
@@ -502,7 +597,9 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
 
     let key = load_or_create_journal_key(&path).unwrap();
     let sealed = seal_payload(&key, &scope("A").namespace(), "local_control", b"[\"ok\"]").unwrap();
+    assert!(sealed.starts_with("enc:v2:"));
     assert!(open_payload(&key, &scope("B").namespace(), "local_control", &sealed).is_err());
+    assert!(open_payload(&key, &scope("A").namespace(), "different_label", &sealed).is_err());
     let mut tampered = sealed.clone();
     let last = tampered.pop().unwrap();
     tampered.push(if last == '0' { '1' } else { '0' });
@@ -517,54 +614,90 @@ fn journal_control_payload_is_encrypted_tamper_checked_and_acl_restricted() {
 }
 
 #[test]
+fn missing_key_for_existing_journal_does_not_generate_a_replacement() {
+    use aiagent_device_core::security::key_file_path;
+    use aiagent_device_core::ControlRecord;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    journal
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: true,
+            audit: vec![],
+        })
+        .unwrap();
+    drop(journal);
+    let key_path = key_file_path(&path);
+    std::fs::remove_file(&key_path).unwrap();
+    assert!(LocalJournal::open(&path, &scope("A")).is_err());
+    assert!(!key_path.exists());
+}
+
+#[test]
+fn missing_database_for_existing_key_does_not_reset_control() {
+    use aiagent_device_core::{security::key_file_path, ControlRecord};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let mut journal = LocalJournal::open(&path, &scope("A")).unwrap();
+    journal
+        .save_control(&ControlRecord {
+            stopped: true,
+            revoked: true,
+            audit: vec![],
+        })
+        .unwrap();
+    drop(journal);
+    std::fs::remove_file(&path).unwrap();
+    assert!(key_file_path(&path).exists());
+    assert!(LocalJournal::open(&path, &scope("A")).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
 fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
-    use aiagent_device_core::agent::AuthenticatedChannelPort;
+    use aiagent_device_core::agent::{
+        AndroidAdapterPort, AuthenticatedChannelPort, BuildAdapterPort, ChromeAdapterPort,
+        CuaAdapterPort, Delivery,
+    };
     use aiagent_device_core::mock::mock_grant;
     use aiagent_device_core::{
         make_start_permit, CloudPairingConfig, LocalAdapters, TlsAuthenticatedChannel,
     };
 
-    let bad_http = CloudPairingConfig {
-        endpoint: "http://insecure.local/ws".into(),
-        ca_pin_sha256: "a".repeat(64),
-        client_cert_present: true,
-        tls_handshake_verified: true,
-    };
-    assert!(bad_http.validate().is_err());
-
-    let no_mtls = CloudPairingConfig {
-        endpoint: "wss://control.aiagent.example/ws".into(),
-        ca_pin_sha256: "a".repeat(64),
-        client_cert_present: false,
-        tls_handshake_verified: true,
-    };
-    assert!(no_mtls.validate().is_err());
-
-    let mut ch = TlsAuthenticatedChannel::unpaired();
-    assert!(!ch.online());
-    let valid_cfg = CloudPairingConfig {
+    let cfg = CloudPairingConfig {
         endpoint: "wss://control.aiagent.example/ws".into(),
         ca_pin_sha256: "b".repeat(64),
         client_cert_present: true,
         tls_handshake_verified: true,
     };
-    ch.pair(valid_cfg).unwrap();
-    assert!(ch.online());
+    let mut invalid = cfg.clone();
+    invalid.endpoint = "http://insecure.local/ws".into();
+    assert!(invalid.validate().is_err());
+    invalid = cfg.clone();
+    invalid.client_cert_present = false;
+    assert!(invalid.validate().is_err());
+    let mut ch = TlsAuthenticatedChannel::unpaired();
+    assert_eq!(
+        ch.pair(cfg.clone()),
+        Err("AUTHENTICATED_TRANSPORT_UNAVAILABLE")
+    );
+    // Even direct field assignment and a fabricated permit cannot create authority.
+    ch.config = Some(cfg);
+    let req = request("A", "d1", Operation::DesktopClick);
+    let grant = mock_grant(&req, "g1", 200);
+    ch.active_permit = Some(make_start_permit(&req, &grant, "p1", 200));
+    assert!(!ch.online());
+    assert!(ch.authorize_start(&req, &grant, 100).is_none());
 
     let dir = tempdir().unwrap();
-    let ws = dir.path().join("demo-ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let adapters = LocalAdapters {
+    std::fs::create_dir(dir.path().join("demo-ws")).unwrap();
+    let mut adapters = LocalAdapters {
         build_root: Some(dir.path().to_path_buf()),
         adb_probe_enabled: true,
-        chrome_native_host_connected: false,
-        desktop_accessibility_ready: false,
+        chrome_native_host_connected: true,
+        desktop_accessibility_ready: true,
         executed_count: 0,
-    };
-    let pol = LocalPolicy {
-        allow_mock_build: true,
-        allow_mock_android: true,
-        ..Default::default()
     };
     let build_req = ActionRequest::new(
         scope("A"),
@@ -577,21 +710,35 @@ fn mtls_pairing_and_local_adapters_fail_closed_without_verified_hosts() {
         },
         b"cargo test".to_vec(),
     );
-    let build_grant = mock_grant(&build_req, "g1", 200);
-    ch.active_permit = Some(make_start_permit(&build_req, &build_grant, "p1", 200));
-
-    let j = LocalJournal::open(&dir.path().join("j.db"), &scope("A")).unwrap();
-    let mut agent = Agent::new(scope("A"), fence(), ch, adapters, pol, j);
-    assert_eq!(
-        agent.execute(&build_req, &build_grant, 100),
-        Decision::LocalCompleted
+    let android_req = ActionRequest::new(
+        scope("A"),
+        fence(),
+        "a1".into(),
+        Epoch(7),
+        Operation::AndroidInstall,
+        Target::Android {
+            serial: "device-1".into(),
+            package_id: "example.app".into(),
+        },
+        vec![],
     );
-    assert_eq!(agent.adapters.executed_count, 1);
-
-    // Without live OS UIA / Chrome extension / ADB serial attached, execution fails closed.
-    let desktop_req = request("A", "d1", Operation::DesktopClick);
-    agent.policy.desktop_apps.insert("mock.notepad".into());
-    let dg = mock_grant(&desktop_req, "g2", 200);
-    agent.channel.active_permit = Some(make_start_permit(&desktop_req, &dg, "p2", 200));
-    assert_eq!(agent.execute(&desktop_req, &dg, 100), Decision::Failed);
+    let browser_req = ActionRequest::new(
+        scope("A"),
+        fence(),
+        "c1".into(),
+        Epoch(7),
+        Operation::BrowserClick,
+        Target::Browser {
+            origin: "https://example.com".into(),
+            profile_id: "profile-1".into(),
+            tab_id: "tab-1".into(),
+            document_generation: "doc-1".into(),
+        },
+        vec![],
+    );
+    assert_eq!(adapters.desktop(&req), Delivery::Failed);
+    assert_eq!(adapters.chrome(&browser_req), Delivery::Failed);
+    assert_eq!(adapters.build(&build_req), Delivery::Failed);
+    assert_eq!(adapters.android(&android_req), Delivery::Failed);
+    assert_eq!(adapters.executed_count, 0);
 }

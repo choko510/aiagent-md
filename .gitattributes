@@ -4,3 +4,4 @@ contracts/** text eol=lf
 web/** text eol=lf
 deploy/** text eol=lf
 *.sql text eol=lf
+device-client/ci/*.sh text eol=lf

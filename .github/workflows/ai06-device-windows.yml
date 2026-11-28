@@ -3,11 +3,13 @@ on:
   pull_request:
     paths:
       - 'device-client/**'
+      - 'backend/device_gateway/**'
       - '.github/workflows/ai06-device-windows.yml'
   push:
     branches: [main]
     paths:
       - 'device-client/**'
+      - 'backend/device_gateway/**'
       - '.github/workflows/ai06-device-windows.yml'
   workflow_dispatch:
 permissions:
@@ -21,12 +23,108 @@ jobs:
         working-directory: device-client
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
       - name: Ensure Rust source formatting
         run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Core and Desktop unit/Mock tests
         run: cargo test --workspace --locked
       - name: Windows Tauri static compile
         run: cargo check --workspace --locked
       - name: Windows Tauri executable build (no installer or signing)
         run: cargo build -p aiagent-device-desktop --locked
+      - name: Build and lint the debug-only Windows integration fixture
+        run: |
+          cargo clippy -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p aiagent-device-core --example cross_gateway_fixture --features integration-fixture --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - name: Start isolated Windows PostgreSQL fixture
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Service -Name 'postgresql-x64-14' -StartupType Manual
+          Start-Service -Name 'postgresql-x64-14'
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\createdb.exe" -h 127.0.0.1 -U postgres device_gateway_test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows DPAPI to Python TLS and PostgreSQL
+        working-directory: .
+        env:
+          AIAGENT_DEVICE_TEST_ADMIN_DSN: postgresql://postgres:root@127.0.0.1:5432/device_gateway_test
+          AIAGENT_RUST_TEST_CLIENT: ${{ github.workspace }}\device-client\target\debug\examples\cross_gateway_fixture.exe
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber
+          Write-Output "HEAD: $env:GITHUB_SHA"
+          uv run --isolated --no-project --python 3.13 --with-requirements backend/device_gateway/requirements-test.lock python -m pytest -c backend/device_gateway/tests/pytest.ini backend/device_gateway/tests/test_pairing_pg.py::test_windows_rust_dpapi_client_to_python_gateway -q --junitxml=windows-device-e2e.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content -Raw windows-device-e2e.xml
+          $suite = $report.testsuites.testsuite
+          if ([int]$suite.tests -ne 1 -or [int]$suite.skipped -ne 0 -or [int]$suite.failures -ne 0 -or [int]$suite.errors -ne 0) { throw 'Windows cross-process test did not pass exactly once' }
+      - name: Release builds must reject test CA
+        run: |
+          $output = cargo check -p aiagent-device-core --release --features integration-fixture --locked 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch 'test-ca must not be enabled in release builds') { throw 'Expected release test-CA compile guard was not observed' }
+          $LASTEXITCODE = 0
+          $output = cargo check -p aiagent-device-core --release --features simulator-recovery --locked 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch 'simulator-recovery must not be enabled in release builds') { throw 'Expected simulator recovery compile guard was not observed' }
+          $LASTEXITCODE = 0
+      - name: Preserve Windows integration result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-device-e2e-${{ github.sha }}
+          path: windows-device-e2e.xml
+          if-no-files-found: warn
+  linux-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: device-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - name: Core and real TLS/WSS tests
+        run: bash ci/verify.sh
+  gateway-pairing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: device-test-only
+          POSTGRES_DB: device_gateway_test
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AIAGENT_DEVICE_TEST_ADMIN_DSN: postgresql://postgres:device-test-only@127.0.0.1:5432/device_gateway_test
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.3'}
+      - name: Pairing transactions and tenant/owner RLS (test schema)
+        run: >-
+          uv run --isolated --no-project --python 3.13
+          --with-requirements backend/device_gateway/requirements-test.lock
+          python -m pytest -c backend/device_gateway/tests/pytest.ini backend/device_gateway/tests -q
+      - name: Gateway lint
+        run: uv run --isolated --no-project --python 3.13 --with ruff==0.17.4 ruff check backend/device_gateway
+      - name: Gateway type check
+        run: >-
+          uv run --isolated --no-project --python 3.13 --with mypy==2.4.1
+          --with-requirements backend/device_gateway/requirements-test.lock
+          python -m mypy --strict --follow-imports=skip --ignore-missing-imports
+          backend/device_gateway/pairing.py backend/device_gateway/connections.py backend/device_gateway/wss.py

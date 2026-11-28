@@ -155,7 +155,16 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
         policy: LocalPolicy,
         journal: LocalJournal,
     ) -> Self {
-        let phase = if channel.online() {
+        // A reopened simulator must honor durable Stop/Revoke; corrupted control
+        // can never be interpreted as permission to start.
+        let control = journal.load_control(vec![]);
+        let stopped = control
+            .as_ref()
+            .map_or(true, |record| record.stopped || record.revoked);
+        let revoked = control.as_ref().is_ok_and(|record| record.revoked);
+        let phase = if revoked {
+            ConnectionPhase::Revoked
+        } else if channel.online() {
             ConnectionPhase::OnlineMock
         } else {
             ConnectionPhase::PairedOffline
@@ -168,17 +177,24 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             policy,
             journal,
             phase,
-            stopped: false,
-            revoked: false,
+            stopped,
+            revoked,
         }
     }
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<(), String> {
         self.stopped = true;
+        let mut control = self.journal.load_control(vec![])?;
+        control.stopped = true;
+        self.journal.save_control(&control)
     }
-    pub fn revoke(&mut self) {
+    pub fn revoke(&mut self) -> Result<(), String> {
         self.revoked = true;
         self.stopped = true;
         self.phase = ConnectionPhase::Revoked;
+        let mut control = self.journal.load_control(vec![])?;
+        control.stopped = true;
+        control.revoked = true;
+        self.journal.save_control(&control)
     }
     pub fn phase(&self) -> ConnectionPhase {
         self.phase
@@ -188,11 +204,15 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             self.phase = ConnectionPhase::PairedOffline;
         }
     }
-    pub fn unpair(&mut self) {
+    pub fn unpair(&mut self) -> Result<(), String> {
         if !self.revoked {
             self.stopped = true;
             self.phase = ConnectionPhase::Unpaired;
+            let mut control = self.journal.load_control(vec![])?;
+            control.stopped = true;
+            self.journal.save_control(&control)?;
         }
+        Ok(())
     }
     pub fn mark_stale(&mut self) {
         if !self.revoked && self.phase != ConnectionPhase::Unpaired {
@@ -307,6 +327,9 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             Ok(BeginResult::IntentConflict) => return Decision::IntentConflict,
             Ok(BeginResult::GrantReused) => return Decision::GrantReused,
             Ok(BeginResult::PermitReused) => return Decision::PermitReused,
+            Err(error) if error == "LOCAL_STOP_OR_REVOKED" => {
+                return Decision::Denied("LOCAL_STOP_OR_REVOKED");
+            }
             Err(_) => return Decision::StorageError,
             Ok(BeginResult::StartedNew) => {}
         }

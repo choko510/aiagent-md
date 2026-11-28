@@ -1,9 +1,19 @@
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
+use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
-const ENC_PREFIX: &str = "enc:v1:";
+const LEGACY_PREFIX: &str = "enc:v1:";
+const AEAD_PREFIX: &str = "enc:v2:";
+#[cfg(windows)]
 const KEY_ENTROPY: &[u8] = b"aiagent-device-journal-key-v1";
 
 pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
@@ -70,6 +80,21 @@ pub fn verify_owner_only_acl(path: &Path) -> Result<bool, String> {
     windows_acl::verify_owner_only(path)
 }
 
+#[cfg(windows)]
+pub(crate) fn current_user_sid() -> Result<String, String> {
+    windows_acl::current_user_sid_string()
+}
+
+#[cfg(windows)]
+pub(crate) fn protect_identity_key(data: &[u8], binding: &[u8]) -> Result<Vec<u8>, String> {
+    windows_dpapi::protect(data, binding)
+}
+
+#[cfg(windows)]
+pub(crate) fn unprotect_identity_key(data: &[u8], binding: &[u8]) -> Result<Vec<u8>, String> {
+    windows_dpapi::unprotect(data, binding)
+}
+
 #[cfg(unix)]
 pub fn verify_owner_only_acl(path: &Path) -> Result<bool, String> {
     use std::os::unix::fs::PermissionsExt;
@@ -90,9 +115,16 @@ pub fn key_file_path(db_path: &Path) -> PathBuf {
 pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
     let key_path = key_file_path(db_path);
     if key_path.exists() {
-        restrict_path_owner_only(&key_path, false)?;
-        let raw = fs::read(&key_path).map_err(|e| e.to_string())?;
+        if !db_path.exists() {
+            return Err("journal database missing for existing key".into());
+        }
+        let raw = read_existing_journal_key(&key_path)?;
         return unprotect_key_blob(&raw);
+    }
+    // Never replace a lost key for an existing journal: doing so can conceal
+    // existing control state and make its encrypted records unrecoverable.
+    if db_path.exists() {
+        return Err("journal key missing for existing database".into());
     }
     let key: [u8; 32] = random_bytes()?;
     let protected = protect_key_blob(&key)?;
@@ -103,12 +135,46 @@ pub fn load_or_create_journal_key(db_path: &Path) -> Result<[u8; 32], String> {
         }
         Err(e) if key_path.exists() => {
             let _ = e;
-            restrict_path_owner_only(&key_path, false)?;
-            let raw = fs::read(&key_path).map_err(|err| err.to_string())?;
+            let raw = read_existing_journal_key(&key_path)?;
             unprotect_key_blob(&raw)
         }
         Err(e) => Err(e),
     }
+}
+
+fn read_existing_journal_key(path: &Path) -> Result<Vec<u8>, String> {
+    use cap_fs_ext::{FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
+    use std::io::Read;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or("invalid journal key path")?;
+    let dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|e| e.to_string())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = dir.open_with(name, &options).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let links = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| meta.nlink()))
+        .map_err(|_| "key link count unavailable")?;
+    if !meta.is_file() || links != 1 || meta.len() > 4096 || !verify_owner_only_acl(path)? {
+        return Err("unsafe journal key file".into());
+    }
+    let mut raw = Vec::new();
+    (&mut file)
+        .take(4097)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    if raw.len() > 4096 {
+        return Err("journal key file too large".into());
+    }
+    Ok(raw)
 }
 
 fn write_new_restricted_file(path: &Path, data: &[u8]) -> Result<(), String> {
@@ -201,7 +267,8 @@ fn build_aad(scope_hash: &str, label: &str, nonce: &[u8; 16], ciphertext: &[u8])
     msg
 }
 
-pub fn seal_payload(
+#[cfg(test)]
+pub(crate) fn seal_legacy_payload(
     master_key: &[u8; 32],
     scope_hash: &str,
     label: &str,
@@ -214,21 +281,21 @@ pub fn seal_payload(
     let aad = build_aad(scope_hash, label, &nonce, &ciphertext);
     let tag = hmac_sha256(&mac_key, &aad);
     Ok(format!(
-        "{ENC_PREFIX}{}:{}:{}",
+        "{LEGACY_PREFIX}{}:{}:{}",
         encode_hex(&nonce),
         encode_hex(&tag),
         encode_hex(&ciphertext)
     ))
 }
 
-pub fn open_payload(
+fn open_legacy_payload(
     master_key: &[u8; 32],
     scope_hash: &str,
     label: &str,
     encoded: &str,
 ) -> Result<Vec<u8>, String> {
     let rest = encoded
-        .strip_prefix(ENC_PREFIX)
+        .strip_prefix(LEGACY_PREFIX)
         .ok_or_else(|| "unencrypted or unsupported journal payload".to_string())?;
     let mut parts = rest.splitn(3, ':');
     let nonce_hex = parts.next().ok_or("missing journal nonce")?;
@@ -256,6 +323,88 @@ pub fn open_payload(
         return Err("journal integrity check failed".into());
     }
     Ok(ctr_xor(&enc_key, &nonce, &ciphertext))
+}
+
+/// Encrypt new records with a scope-bound key and a random 192-bit XChaCha nonce.
+/// The legacy construction is read only and exists solely for migration.
+pub fn seal_payload(
+    master_key: &[u8; 32],
+    scope_hash: &str,
+    label: &str,
+    plaintext: &[u8],
+) -> Result<String, String> {
+    let aad = aead_context(scope_hash, label)?;
+    let key = Zeroizing::new(aead_key(master_key, &aad)?);
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let nonce: [u8; 24] = random_bytes()?;
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "journal encryption failed")?;
+    Ok(format!(
+        "{AEAD_PREFIX}{}:{}",
+        encode_hex(&nonce),
+        encode_hex(&ciphertext)
+    ))
+}
+
+pub fn open_payload(
+    master_key: &[u8; 32],
+    scope_hash: &str,
+    label: &str,
+    encoded: &str,
+) -> Result<Vec<u8>, String> {
+    if encoded.starts_with(LEGACY_PREFIX) {
+        return open_legacy_payload(master_key, scope_hash, label, encoded);
+    }
+    let rest = encoded
+        .strip_prefix(AEAD_PREFIX)
+        .ok_or_else(|| "unencrypted or unsupported journal payload".to_string())?;
+    let (nonce_hex, ciphertext_hex) = rest.split_once(':').ok_or("invalid journal payload")?;
+    let nonce = decode_hex(nonce_hex)?;
+    if nonce.len() != 24 {
+        return Err("invalid journal nonce length".into());
+    }
+    let ciphertext = decode_hex(ciphertext_hex)?;
+    let aad = aead_context(scope_hash, label)?;
+    let key = Zeroizing::new(aead_key(master_key, &aad)?);
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "journal integrity check failed".into())
+}
+
+pub(crate) fn is_legacy_payload(encoded: &str) -> bool {
+    encoded.starts_with(LEGACY_PREFIX)
+}
+
+fn aead_context(scope_hash: &str, label: &str) -> Result<Vec<u8>, String> {
+    let mut context = b"aiagent-journal-control-v2".to_vec();
+    for part in [scope_hash, label] {
+        let len = u32::try_from(part.len()).map_err(|_| "journal context too long")?;
+        context.extend_from_slice(&len.to_be_bytes());
+        context.extend_from_slice(part.as_bytes());
+    }
+    Ok(context)
+}
+
+fn aead_key(master_key: &[u8; 32], context: &[u8]) -> Result<[u8; 32], String> {
+    let hk = Hkdf::<Sha256>::new(Some(b"aiagent-journal-aead-v2"), master_key);
+    let mut key = [0; 32];
+    hk.expand(context, &mut key)
+        .map_err(|_| "journal key derivation failed")?;
+    Ok(key)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -294,6 +443,7 @@ fn hex_nibble(b: u8) -> Result<u8, String> {
 #[cfg(windows)]
 mod windows_dpapi {
     use core::ffi::c_void;
+    use zeroize::Zeroize;
 
     #[repr(C)]
     struct CryptDataBlob {
@@ -360,6 +510,13 @@ mod windows_dpapi {
                 std::io::Error::last_os_error()
             ));
         }
+        if out_blob.pb_data.is_null() {
+            return if out_blob.cb_data == 0 {
+                Ok(Vec::new())
+            } else {
+                Err("DPAPI returned invalid output".into())
+            };
+        }
         let slice =
             unsafe { core::slice::from_raw_parts(out_blob.pb_data, out_blob.cb_data as usize) };
         let result = slice.to_vec();
@@ -399,9 +556,17 @@ mod windows_dpapi {
                 std::io::Error::last_os_error()
             ));
         }
+        if out_blob.pb_data.is_null() {
+            return if out_blob.cb_data == 0 {
+                Ok(Vec::new())
+            } else {
+                Err("DPAPI returned invalid output".into())
+            };
+        }
         let slice =
-            unsafe { core::slice::from_raw_parts(out_blob.pb_data, out_blob.cb_data as usize) };
+            unsafe { core::slice::from_raw_parts_mut(out_blob.pb_data, out_blob.cb_data as usize) };
         let result = slice.to_vec();
+        slice.zeroize();
         unsafe {
             LocalFree(out_blob.pb_data.cast());
         }
@@ -515,6 +680,7 @@ mod windows_acl {
     const TOKEN_USER: u32 = 1;
     const SDDL_REVISION_1: u32 = 1;
     const SE_FILE_OBJECT: u32 = 1;
+    const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
     const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
     const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
     const SE_DACL_PROTECTED: u16 = 0x1000;
@@ -590,7 +756,7 @@ mod windows_acl {
         f(user.sid.cast_const())
     }
 
-    fn current_user_sid_string() -> Result<String, String> {
+    pub(super) fn current_user_sid_string() -> Result<String, String> {
         with_current_user_sid(|sid| {
             let mut sid_w: *mut u16 = core::ptr::null_mut();
             if unsafe { ConvertSidToStringSidW(sid, &mut sid_w) } == 0 {
@@ -617,6 +783,7 @@ mod windows_acl {
 
     pub fn restrict_owner_only(path: &Path, is_dir: bool) -> Result<(), String> {
         let sid = current_user_sid_string()?;
+        let owner_sid = current_user_sid_bytes()?;
         let sddl = if is_dir {
             format!("D:P(A;OICI;FA;;;{sid})")
         } else {
@@ -655,8 +822,10 @@ mod windows_acl {
             SetNamedSecurityInfoW(
                 path_w.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                core::ptr::null_mut(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                owner_sid.as_ptr() as *mut c_void,
                 core::ptr::null_mut(),
                 dacl,
                 core::ptr::null_mut(),
@@ -672,12 +841,13 @@ mod windows_acl {
         let user_sid = current_user_sid_bytes()?;
         let path_w = wide(path.as_os_str());
         let mut sd: *mut c_void = core::ptr::null_mut();
+        let mut owner: *mut c_void = core::ptr::null_mut();
         let rc = unsafe {
             GetNamedSecurityInfoW(
                 path_w.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                core::ptr::null_mut(),
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
@@ -688,6 +858,9 @@ mod windows_acl {
             return Err(format!("GetNamedSecurityInfoW failed: error {rc}"));
         }
         let _sd_guard = LocalGuard(sd);
+        if owner.is_null() || unsafe { EqualSid(owner, user_sid.as_ptr().cast()) } == 0 {
+            return Ok(false);
+        }
 
         let mut control: u16 = 0;
         let mut revision: u32 = 0;

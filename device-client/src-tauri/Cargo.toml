@@ -14,5 +14,8 @@ tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 aiagent-device-core = { path = "../crates/device-core" }
 
+[dev-dependencies]
+aiagent-device-core = { path = "../crates/device-core", features = ["simulator-recovery"] }
+
 [build-dependencies]
 tauri-build = { version = "2" }

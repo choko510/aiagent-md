@@ -1,15 +1,19 @@
 use crate::protocol::Scope;
 use crate::security::{
-    load_or_create_journal_key, open_payload, restrict_path_owner_only, seal_payload,
+    is_legacy_payload, load_or_create_journal_key, open_payload, restrict_path_owner_only,
+    seal_payload,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use zeroize::Zeroize;
 
 /// STARTED is durable before mock adapter execution. It is UNKNOWN after recovery.
-/// Sensitive local_control payloads (`audit_json`) are sealed with HMAC-SHA256 + SHA256-CTR
-/// keyed by a DPAPI-protected (Windows) or 0o600 (Unix) keyfile, and journal files enforce owner-only OS ACLs.
+/// The control envelope uses versioned AEAD. Legacy ciphertext is read only for migration.
+/// This simulator is not a production key store or an authenticated whole-database journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectState {
     Started,
@@ -65,6 +69,13 @@ pub struct LocalJournal {
     scope_hash: String,
     master_key: [u8; 32],
     db_path: PathBuf,
+    started_here: HashSet<String>,
+}
+
+impl Drop for LocalJournal {
+    fn drop(&mut self) {
+        self.master_key.zeroize();
+    }
 }
 
 fn companion_path(db_path: &Path, suffix: &str) -> PathBuf {
@@ -77,6 +88,69 @@ fn restrict_db_companions(db_path: &Path) -> Result<(), String> {
     restrict_path_owner_only(db_path, false)?;
     restrict_path_owner_only(&companion_path(db_path, "-wal"), false)?;
     restrict_path_owner_only(&companion_path(db_path, "-shm"), false)?;
+    Ok(())
+}
+
+// This detects partial edits and deletion while the authenticated guard survives.
+// It cannot detect a complete rollback or deletion of guard and all history.
+fn effect_digest(conn: &Connection, scope: &str) -> Result<([u8; 32], usize), String> {
+    let mut hash = Sha256::new();
+    hash.update(b"aiagent-device-effect-set-v1");
+    let mut count = 0usize;
+    for (tag, sql, columns) in [
+        (b'E', "SELECT intent_id,args_hash,attempt_fence,permit_nonce,state FROM effects WHERE scope_hash=?1 ORDER BY intent_id", 5),
+        (b'G', "SELECT grant_nonce,intent_id FROM used_grants WHERE scope_hash=?1 ORDER BY grant_nonce", 2),
+        (b'P', "SELECT permit_nonce,intent_id FROM used_permits WHERE scope_hash=?1 ORDER BY permit_nonce", 2),
+    ] {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![scope]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            count += 1;
+            if count > 300_000 { return Err("EFFECT_HISTORY_LIMIT".into()); }
+            hash.update([tag]);
+            for index in 0..columns {
+                let value: String = row.get(index).map_err(|e| e.to_string())?;
+                if value.len() > 4096 { return Err("INVALID_EFFECT_HISTORY".into()); }
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+        }
+    }
+    Ok((hash.finalize().into(), count))
+}
+
+fn verify_effect_integrity(conn: &Connection, key: &[u8; 32], scope: &str) -> Result<(), String> {
+    let sealed: String = conn
+        .query_row(
+            "SELECT sealed_digest FROM effect_integrity WHERE scope_hash=?1",
+            params![scope],
+            |r| r.get(0),
+        )
+        .map_err(|_| "MISSING_EFFECT_INTEGRITY")?;
+    let authenticated = open_payload(key, scope, "effect_integrity", &sealed)?;
+    if authenticated.as_slice() != effect_digest(conn, scope)?.0 {
+        return Err("EFFECT_INTEGRITY_MISMATCH".into());
+    }
+    Ok(())
+}
+
+fn update_effect_integrity(conn: &Connection, key: &[u8; 32], scope: &str) -> Result<(), String> {
+    let sealed = seal_payload(
+        key,
+        scope,
+        "effect_integrity",
+        &effect_digest(conn, scope)?.0,
+    )?;
+    if conn
+        .execute(
+            "UPDATE effect_integrity SET sealed_digest=?1 WHERE scope_hash=?2",
+            params![sealed, scope],
+        )
+        .map_err(|e| e.to_string())?
+        != 1
+    {
+        return Err("MISSING_EFFECT_INTEGRITY".into());
+    }
     Ok(())
 }
 
@@ -94,7 +168,7 @@ impl LocalJournal {
             restrict_path_owner_only(parent, true)?;
         }
         let master_key = load_or_create_journal_key(path)?;
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let mut conn = Connection::open(path).map_err(|e| e.to_string())?;
         restrict_path_owner_only(path, false)?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| e.to_string())?;
@@ -132,21 +206,55 @@ impl LocalJournal {
                 revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)),
                 audit_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS local_control_initialized (
+                scope_hash TEXT PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS effect_integrity (
+                scope_hash TEXT PRIMARY KEY,
+                sealed_digest TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO local_control_initialized(scope_hash)
+                SELECT scope_hash FROM local_control;
         ",
         )
         .map_err(|e| e.to_string())?;
         let scope_hash = scope.namespace();
-        // A process that vanished after STARTED might have delivered an effect.
-        conn.execute(
-            "UPDATE effects SET state='UNKNOWN' WHERE scope_hash=?1 AND state='STARTED'",
-            params![scope_hash],
-        )
-        .map_err(|e| e.to_string())?;
+        // Existing unsealed history cannot be silently promoted to trusted.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let history = effect_digest(&tx, &scope_hash)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT sealed_digest FROM effect_integrity WHERE scope_hash=?1",
+                params![scope_hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let previously_initialized: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)",
+                params![scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if existing.is_none() && history.1 == 0 && !previously_initialized {
+            let sealed = seal_payload(&master_key, &scope_hash, "effect_integrity", &history.0)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO effect_integrity(scope_hash,sealed_digest) VALUES(?1,?2)",
+                params![scope_hash, sealed],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        verify_effect_integrity(&tx, &master_key, &scope_hash)?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(Self {
             conn,
             scope_hash,
             master_key,
             db_path: path.to_path_buf(),
+            started_here: HashSet::new(),
         })
     }
 
@@ -178,11 +286,16 @@ impl LocalJournal {
                     {
                         return Err("tampered local_control flags or unsupported version".into());
                     }
-                    return Ok(ControlRecord {
+                    let record = ControlRecord {
                         stopped: envelope.stopped,
                         revoked: envelope.revoked,
                         audit: envelope.audit,
-                    });
+                    };
+                    self.migrate_control_if_legacy(stopped, revoked, &sealed_audit, &record)?;
+                    return Ok(record);
+                }
+                if !is_legacy_payload(&sealed_audit) {
+                    return Err("invalid control envelope".into());
                 }
                 // Legacy v1 rows sealed only `Vec<String>` audit entries; plaintext stopped/revoked columns
                 // were not HMAC-covered. Migrate without bricking the client, NEVER trusting plaintext stopped=0.
@@ -198,20 +311,61 @@ impl LocalJournal {
                 {
                     legacy_audit.push(Self::LEGACY_MIGRATED_MARKER.into());
                 }
-                Ok(ControlRecord {
+                let record = ControlRecord {
                     stopped: true,
                     revoked: effective_revoked,
                     audit: legacy_audit,
+                };
+                self.migrate_control_if_legacy(stopped, revoked, &sealed_audit, &record)?;
+                Ok(record)
+            }
+            None => {
+                let initialized: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)", params![self.scope_hash], |r| r.get(0)).map_err(|e| e.to_string())?;
+                if initialized {
+                    return Err("MISSING_LOCAL_CONTROL".into());
+                }
+                Ok(ControlRecord {
+                    stopped: false,
+                    revoked: false,
+                    audit: default_audit,
                 })
             }
-            None => Ok(ControlRecord {
-                stopped: false,
-                revoked: false,
-                audit: default_audit,
-            }),
         }
     }
 
+    // The conditional update commits both flags and the authenticated payload atomically.
+    // Concurrent changes must be re-read, never overwritten.
+    fn migrate_control_if_legacy(
+        &self,
+        stopped: i64,
+        revoked: i64,
+        original: &str,
+        record: &ControlRecord,
+    ) -> Result<(), String> {
+        if !is_legacy_payload(original) {
+            return Ok(());
+        }
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: record.stopped,
+            revoked: record.revoked,
+            audit: record.audit.clone(),
+        };
+        let json = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        let sealed = seal_payload(&self.master_key, &self.scope_hash, "local_control", &json)?;
+        let changed = self.conn.execute(
+            "UPDATE local_control SET stopped=?1, revoked=?2, audit_json=?3 WHERE scope_hash=?4 AND stopped=?5 AND revoked=?6 AND audit_json=?7",
+            params![i64::from(record.stopped), i64::from(record.revoked), sealed,
+                    self.scope_hash, stopped, revoked, original],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("journal migration concurrent modification".into());
+        }
+        restrict_db_companions(&self.db_path)?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "simulator-recovery"))]
     pub fn owner_confirm_clear_legacy_stop(
         &mut self,
         confirmation_phrase: &str,
@@ -223,12 +377,61 @@ impl LocalJournal {
         if rec.revoked {
             return Err("CANNOT_RECOVER_REVOKED_DEVICE".into());
         }
-        if !rec.audit.iter().any(|e| e == Self::LEGACY_MIGRATED_MARKER) {
+        let legacy = rec
+            .audit
+            .iter()
+            .rposition(|e| e == Self::LEGACY_MIGRATED_MARKER);
+        let recovered = rec
+            .audit
+            .iter()
+            .rposition(|e| e == "OWNER_CONFIRMED_LEGACY_STOP_RESET");
+        if legacy.is_none() || recovered.is_some_and(|position| Some(position) > legacy) {
             return Err("NOT_A_LEGACY_MIGRATED_STOP".into());
+        }
+        // Bind the explicit recovery to the exact authenticated row just read.
+        let (stopped, revoked, original): (i64, i64, String) = self
+            .conn
+            .query_row(
+                "SELECT stopped, revoked, audit_json FROM local_control WHERE scope_hash=?1",
+                params![self.scope_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let raw = open_payload(
+            &self.master_key,
+            &self.scope_hash,
+            "local_control",
+            &original,
+        )?;
+        let current: SealedControlPayload =
+            serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        if current.v != 2
+            || stopped != 1
+            || revoked != 0
+            || !current.stopped
+            || current.revoked
+            || current.audit != rec.audit
+        {
+            return Err("journal recovery concurrent modification".into());
         }
         rec.stopped = false;
         rec.audit.push("OWNER_CONFIRMED_LEGACY_STOP_RESET".into());
-        self.save_control(&rec)?;
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: false,
+            revoked: false,
+            audit: rec.audit.clone(),
+        };
+        let json = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        let sealed = seal_payload(&self.master_key, &self.scope_hash, "local_control", &json)?;
+        let changed = self.conn.execute(
+            "UPDATE local_control SET stopped=0, audit_json=?1 WHERE scope_hash=?2 AND stopped=1 AND revoked=0 AND audit_json=?3",
+            params![sealed, self.scope_hash, original],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("journal recovery concurrent modification".into());
+        }
+        restrict_db_companions(&self.db_path)?;
         Ok(rec)
     }
 
@@ -246,14 +449,37 @@ impl LocalJournal {
             "local_control",
             audit_json.as_bytes(),
         )?;
-        self.conn
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let initialized: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control_initialized WHERE scope_hash=?1)",
+                params![self.scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_control WHERE scope_hash=?1)",
+                params![self.scope_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if initialized && !exists {
+            return Err("MISSING_LOCAL_CONTROL".into());
+        }
+        let changed = tx
             .execute(
                 "INSERT INTO local_control(scope_hash, stopped, revoked, audit_json)
                  VALUES(?1, ?2, ?3, ?4)
                  ON CONFLICT(scope_hash) DO UPDATE SET
                    stopped=excluded.stopped,
                    revoked=excluded.revoked,
-                   audit_json=excluded.audit_json",
+                   audit_json=excluded.audit_json
+                 WHERE local_control.stopped <= excluded.stopped
+                   AND local_control.revoked <= excluded.revoked",
                 params![
                     self.scope_hash,
                     i64::from(record.stopped),
@@ -262,12 +488,25 @@ impl LocalJournal {
                 ],
             )
             .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("control stop or revoke cannot be cleared by save".into());
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO local_control_initialized(scope_hash) VALUES(?1)",
+            params![self.scope_hash],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         restrict_db_companions(&self.db_path)?;
         Ok(())
     }
     pub fn state(&self, intent_id: &str) -> Result<Option<EffectState>, String> {
-        let raw: Option<String> = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let raw: Option<String> = tx
             .query_row(
                 "SELECT state FROM effects WHERE scope_hash=?1 AND intent_id=?2",
                 params![self.scope_hash, intent_id],
@@ -275,7 +514,16 @@ impl LocalJournal {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        raw.map(|s| EffectState::from_db(&s)).transpose()
+        raw.map(|s| {
+            EffectState::from_db(&s).map(|state| {
+                if state == EffectState::Started && !self.started_here.contains(intent_id) {
+                    EffectState::Unknown
+                } else {
+                    state
+                }
+            })
+        })
+        .transpose()
     }
     pub fn precheck(
         &self,
@@ -284,8 +532,12 @@ impl LocalJournal {
         attempt_fence: &str,
         grant_nonce: &str,
     ) -> Result<Option<BeginResult>, String> {
-        let previous: Option<(String, String, String)> = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let previous: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT args_hash, attempt_fence, state FROM effects WHERE scope_hash=?1 AND intent_id=?2",
                 params![self.scope_hash, intent_id],
@@ -299,8 +551,7 @@ impl LocalJournal {
             }
             return Ok(Some(BeginResult::Replay(EffectState::from_db(&state)?)));
         }
-        let grant_used: bool = self
-            .conn
+        let grant_used: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM used_grants WHERE scope_hash=?1 AND grant_nonce=?2)",
                 params![self.scope_hash, grant_nonce],
@@ -324,6 +575,36 @@ impl LocalJournal {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        // Stop/revoke and STARTED share the SQLite writer lock. Check the
+        // authenticated record inside this transaction rather than relying on
+        // an Agent's potentially stale in-memory copy.
+        let control: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT stopped, revoked, audit_json FROM local_control WHERE scope_hash=?1",
+                params![self.scope_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        {
+            let (stopped, revoked, sealed) = control.ok_or("MISSING_LOCAL_CONTROL")?;
+            if is_legacy_payload(&sealed) {
+                return Err("LEGACY_CONTROL_REQUIRES_MIGRATION".into());
+            }
+            let raw = open_payload(&self.master_key, &self.scope_hash, "local_control", &sealed)?;
+            let payload: SealedControlPayload =
+                serde_json::from_slice(&raw).map_err(|_| "invalid control envelope")?;
+            if payload.v != 2
+                || payload.stopped != (stopped != 0)
+                || payload.revoked != (revoked != 0)
+            {
+                return Err("tampered local_control flags or unsupported version".into());
+            }
+            if payload.stopped || payload.revoked {
+                return Err("LOCAL_STOP_OR_REVOKED".into());
+            }
+        }
         let previous: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT args_hash, attempt_fence, state FROM effects WHERE scope_hash=?1 AND intent_id=?2",
@@ -380,20 +661,33 @@ impl LocalJournal {
             ],
         )
         .map_err(|e| e.to_string())?;
+        update_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
         tx.commit().map_err(|e| e.to_string())?;
+        self.started_here.insert(intent_id.to_owned());
         Ok(BeginResult::StartedNew)
     }
     pub fn finish(&mut self, intent_id: &str, outcome: EffectState) -> Result<(), String> {
         if outcome == EffectState::Started {
             return Err("cannot reenter STARTED".into());
         }
-        let n = self.conn.execute(
+        if !self.started_here.contains(intent_id) {
+            return Err("effect not owned by this journal instance".into());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let n = tx.execute(
             "UPDATE effects SET state=?3 WHERE scope_hash=?1 AND intent_id=?2 AND state='STARTED'",
             params![self.scope_hash, intent_id, outcome.as_db()],
         ).map_err(|e| e.to_string())?;
         if n != 1 {
             return Err("not an active STARTED effect".into());
         }
+        update_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        self.started_here.remove(intent_id);
         Ok(())
     }
 }
@@ -455,7 +749,7 @@ mod tests {
             serde_json::to_string(&vec!["LOCAL_STOP: legacy entry".to_string()]).unwrap();
         let (scope_hash, legacy_sealed) = {
             let j = LocalJournal::open(&db_path, &scope).unwrap();
-            let sealed = seal_payload(
+            let sealed = crate::security::seal_legacy_payload(
                 &j.master_key,
                 &j.scope_hash,
                 "local_control",
@@ -474,6 +768,13 @@ mod tests {
             .unwrap();
         }
         let mut reopened = LocalJournal::open(&db_path, &scope).unwrap();
+        assert_eq!(
+            reopened
+                .begin("legacy-intent", "hash", "1", "grant", "permit")
+                .unwrap_err(),
+            "LEGACY_CONTROL_REQUIRES_MIGRATION"
+        );
+        assert!(reopened.state("legacy-intent").unwrap().is_none());
         let migrated = reopened.load_control(vec![]).unwrap();
         assert!(
             migrated.stopped,
@@ -484,6 +785,16 @@ mod tests {
             .audit
             .iter()
             .any(|e| e == LocalJournal::LEGACY_MIGRATED_MARKER));
+        let (stopped, revoked, sealed): (i64, i64, String) = reopened
+            .conn
+            .query_row(
+                "SELECT stopped, revoked, audit_json FROM local_control WHERE scope_hash=?1",
+                params![reopened.scope_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((stopped, revoked), (1, 0));
+        assert!(sealed.starts_with("enc:v2:"));
 
         // Wrong owner confirmation phrase fails closed
         assert_eq!(
@@ -504,6 +815,18 @@ mod tests {
             .audit
             .iter()
             .any(|e| e == "OWNER_CONFIRMED_LEGACY_STOP_RESET"));
+        reopened
+            .save_control(&ControlRecord {
+                stopped: true,
+                ..reloaded
+            })
+            .unwrap();
+        assert_eq!(
+            reopened
+                .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
+                .unwrap_err(),
+            "NOT_A_LEGACY_MIGRATED_STOP"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -527,7 +850,7 @@ mod tests {
             serde_json::to_string(&vec!["LOCAL_REVOKE: device revoked".to_string()]).unwrap();
         let (scope_hash, legacy_sealed) = {
             let j = LocalJournal::open(&db_path, &scope).unwrap();
-            let sealed = seal_payload(
+            let sealed = crate::security::seal_legacy_payload(
                 &j.master_key,
                 &j.scope_hash,
                 "local_control",
@@ -549,6 +872,15 @@ mod tests {
         let migrated = reopened.load_control(vec![]).unwrap();
         assert!(migrated.stopped);
         assert!(migrated.revoked);
+        let sealed: String = reopened
+            .conn
+            .query_row(
+                "SELECT audit_json FROM local_control WHERE scope_hash=?1",
+                params![reopened.scope_hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sealed.starts_with("enc:v2:"));
         assert_eq!(
             reopened
                 .owner_confirm_clear_legacy_stop(LocalJournal::OWNER_RECOVERY_PHRASE)
@@ -556,5 +888,408 @@ mod tests {
             "CANNOT_RECOVER_REVOKED_DEVICE"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn interrupted_or_corrupt_legacy_migration_never_clears_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let journal = LocalJournal::open(&path, &scope).unwrap();
+        let envelope = SealedControlPayload {
+            v: 2,
+            stopped: true,
+            revoked: true,
+            audit: vec!["revoke".into()],
+        };
+        let original = crate::security::seal_legacy_payload(
+            &journal.master_key,
+            &journal.scope_hash,
+            "local_control",
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        journal
+            .conn
+            .execute(
+                "INSERT INTO local_control VALUES(?1,1,1,?2)",
+                params![journal.scope_hash, original],
+            )
+            .unwrap();
+        journal.conn.execute_batch(
+            "CREATE TRIGGER fail_migration BEFORE UPDATE ON local_control BEGIN SELECT RAISE(ABORT,'injected'); END;"
+        ).unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        let unchanged: String = journal
+            .conn
+            .query_row("SELECT audit_json FROM local_control", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(unchanged, original);
+        journal
+            .conn
+            .execute_batch("DROP TRIGGER fail_migration")
+            .unwrap();
+        let mut tampered = original.clone();
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == '0' { '1' } else { '0' });
+        journal
+            .conn
+            .execute("UPDATE local_control SET audit_json=?1", params![tampered])
+            .unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        journal
+            .conn
+            .execute("UPDATE local_control SET audit_json=?1", params![original])
+            .unwrap();
+        drop(journal);
+        let reopened = LocalJournal::open(&path, &scope).unwrap();
+        let restored = reopened.load_control(vec![]).unwrap();
+        assert!(restored.stopped && restored.revoked);
+        let migrated: String = reopened
+            .conn
+            .query_row("SELECT audit_json FROM local_control", [], |row| row.get(0))
+            .unwrap();
+        assert!(migrated.starts_with("enc:v2:"));
+    }
+
+    #[test]
+    fn stale_writer_cannot_clear_stop_or_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut first = LocalJournal::open(&path, &scope).unwrap();
+        let mut stale = LocalJournal::open(&path, &scope).unwrap();
+        first
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec!["revoke".into()],
+            })
+            .unwrap();
+        assert!(stale
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
+        let record = stale.load_control(vec![]).unwrap();
+        assert!(record.stopped && record.revoked);
+    }
+
+    #[test]
+    fn persisted_stop_blocks_a_previously_open_journal_before_consumption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut first = LocalJournal::open(&path, &scope).unwrap();
+        let mut stale = LocalJournal::open(&path, &scope).unwrap();
+        first
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: false,
+                audit: vec!["STOP".into()],
+            })
+            .unwrap();
+        assert_eq!(
+            stale
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap_err(),
+            "LOCAL_STOP_OR_REVOKED"
+        );
+        assert!(stale.state("intent").unwrap().is_none());
+        let count: i64 = stale
+            .conn
+            .query_row("SELECT count(*) FROM used_permits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn another_open_does_not_rewrite_a_live_started_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut writer = LocalJournal::open(&path, &scope).unwrap();
+        writer
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            writer
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap(),
+            BeginResult::StartedNew
+        );
+        let mut reader = LocalJournal::open(&path, &scope).unwrap();
+        assert_eq!(reader.state("intent").unwrap(), Some(EffectState::Unknown));
+        assert!(reader
+            .finish("intent", EffectState::CompletedLocal)
+            .is_err());
+        assert_eq!(writer.state("intent").unwrap(), Some(EffectState::Started));
+        writer
+            .finish("intent", EffectState::CompletedLocal)
+            .unwrap();
+        assert_eq!(
+            reader.state("intent").unwrap(),
+            Some(EffectState::CompletedLocal)
+        );
+    }
+
+    #[test]
+    fn tampered_effect_and_deleted_nonce_block_read_and_admission() {
+        for sql in [
+            "UPDATE effects SET state='COMPLETED_LOCAL'",
+            "DELETE FROM used_grants",
+            "DELETE FROM used_permits",
+            "DELETE FROM effects",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.db");
+            let scope = Scope {
+                os_user: "u".into(),
+                tenant_id: "t".into(),
+                owner_user_id: "o".into(),
+                device_identity_id: "i".into(),
+                device_id: "d".into(),
+            };
+            let mut journal = LocalJournal::open(&path, &scope).unwrap();
+            journal
+                .save_control(&ControlRecord {
+                    stopped: false,
+                    revoked: false,
+                    audit: vec![],
+                })
+                .unwrap();
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap();
+            journal.conn.execute(sql, []).unwrap();
+            assert!(journal.state("intent").is_err(), "{sql}");
+            assert!(
+                journal
+                    .precheck("other", "fingerprint", "1", "other-grant")
+                    .is_err(),
+                "{sql}"
+            );
+            assert!(
+                journal
+                    .begin("other", "fingerprint", "1", "other-grant", "other-permit")
+                    .is_err(),
+                "{sql}"
+            );
+            assert!(
+                journal
+                    .finish("intent", EffectState::CompletedLocal)
+                    .is_err(),
+                "{sql}"
+            );
+            drop(journal);
+            assert!(LocalJournal::open(&path, &scope).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn integrity_guard_update_failure_rolls_back_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal.conn.execute_batch("CREATE TRIGGER reject_guard BEFORE UPDATE ON effect_integrity BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+        assert!(journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .is_err());
+        assert_eq!(journal.state("intent").unwrap(), None);
+        let count: i64 = journal
+            .conn
+            .query_row("SELECT count(*) FROM used_grants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        journal
+            .conn
+            .execute_batch("DROP TRIGGER reject_guard")
+            .unwrap();
+        assert_eq!(
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap(),
+            BeginResult::StartedNew
+        );
+    }
+
+    #[test]
+    fn existing_unsealed_effects_are_not_silently_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .unwrap();
+        journal
+            .conn
+            .execute("DELETE FROM effect_integrity", [])
+            .unwrap();
+        drop(journal);
+        assert!(LocalJournal::open(&path, &scope).is_err());
+    }
+
+    #[test]
+    fn deleted_guard_and_history_do_not_reinitialize_existing_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .unwrap();
+        journal.conn.execute_batch("DELETE FROM effects; DELETE FROM used_grants; DELETE FROM used_permits; DELETE FROM effect_integrity;").unwrap();
+        drop(journal);
+        assert!(LocalJournal::open(&path, &scope).is_err());
+    }
+
+    #[test]
+    fn corrupted_control_blocks_journal_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .conn
+            .execute("UPDATE local_control SET stopped=0, revoked=0", [])
+            .unwrap();
+        assert!(journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .is_err());
+        assert!(journal.state("intent").unwrap().is_none());
+    }
+
+    #[test]
+    fn deleted_control_blocks_start_even_for_existing_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: true,
+                revoked: true,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .conn
+            .execute("DELETE FROM local_control", [])
+            .unwrap();
+        assert!(journal.load_control(vec![]).is_err());
+        assert!(journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
+        assert_eq!(
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap_err(),
+            "MISSING_LOCAL_CONTROL"
+        );
+        assert!(journal.state("intent").unwrap().is_none());
+        drop(journal);
+        let mut reopened = LocalJournal::open(&path, &scope).unwrap();
+        assert!(reopened.load_control(vec![]).is_err());
+        assert!(reopened
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![]
+            })
+            .is_err());
     }
 }
