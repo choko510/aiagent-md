@@ -1110,6 +1110,77 @@ mod tests {
     }
 
     #[test]
+    fn integrity_guard_update_failure_rolls_back_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal.conn.execute_batch("CREATE TRIGGER reject_guard BEFORE UPDATE ON effect_integrity BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+        assert!(journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .is_err());
+        assert_eq!(journal.state("intent").unwrap(), None);
+        let count: i64 = journal
+            .conn
+            .query_row("SELECT count(*) FROM used_grants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        journal
+            .conn
+            .execute_batch("DROP TRIGGER reject_guard")
+            .unwrap();
+        assert_eq!(
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap(),
+            BeginResult::StartedNew
+        );
+    }
+
+    #[test]
+    fn existing_unsealed_effects_are_not_silently_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut journal = LocalJournal::open(&path, &scope).unwrap();
+        journal
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        journal
+            .begin("intent", "fingerprint", "1", "grant", "permit")
+            .unwrap();
+        journal
+            .conn
+            .execute("DELETE FROM effect_integrity", [])
+            .unwrap();
+        drop(journal);
+        assert!(LocalJournal::open(&path, &scope).is_err());
+    }
+
+    #[test]
     fn corrupted_control_blocks_journal_start() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
