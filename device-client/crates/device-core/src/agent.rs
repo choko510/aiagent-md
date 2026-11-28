@@ -155,7 +155,16 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
         policy: LocalPolicy,
         journal: LocalJournal,
     ) -> Self {
-        let phase = if channel.online() {
+        // A reopened simulator must honor durable Stop/Revoke; corrupted control
+        // can never be interpreted as permission to start.
+        let control = journal.load_control(vec![]);
+        let stopped = control
+            .as_ref()
+            .map_or(true, |record| record.stopped || record.revoked);
+        let revoked = control.as_ref().is_ok_and(|record| record.revoked);
+        let phase = if revoked {
+            ConnectionPhase::Revoked
+        } else if channel.online() {
             ConnectionPhase::OnlineMock
         } else {
             ConnectionPhase::PairedOffline
@@ -168,8 +177,8 @@ impl<C: AuthenticatedChannelPort, A: AdapterPorts> Agent<C, A> {
             policy,
             journal,
             phase,
-            stopped: false,
-            revoked: false,
+            stopped,
+            revoked,
         }
     }
     pub fn stop(&mut self) -> Result<(), String> {

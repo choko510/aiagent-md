@@ -248,6 +248,7 @@ fn snapshot(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, Strin
 fn stop_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, String> {
     let mut state = state.lock().map_err(|_| "STATE_LOCKED")?;
     if !state.stopped {
+        state.control_persisted = false;
         state.stopped = true;
         if let Some(agent) = state.agent.as_mut() {
             agent.stop()?;
@@ -263,6 +264,7 @@ fn stop_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, Str
 fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, String> {
     let mut state = state.lock().map_err(|_| "STATE_LOCKED")?;
     if !state.revoked {
+        state.control_persisted = false;
         state.stopped = true;
         state.revoked = true;
         state.phase = ConnectionPhase::Revoked;

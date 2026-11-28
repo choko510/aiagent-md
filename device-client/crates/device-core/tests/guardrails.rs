@@ -124,11 +124,15 @@ fn core_stop_and_revoke_persist_without_ui() {
     assert!(journal.load_control(vec![]).unwrap().stopped);
     drop(journal);
     let mut agent = new_agent(&path, "A");
+    assert!(agent.stopped());
     agent.revoke().unwrap();
     drop(agent);
     let journal = LocalJournal::open(&path, &scope("A")).unwrap();
     let record = journal.load_control(vec![]).unwrap();
     assert!(record.stopped && record.revoked);
+    drop(journal);
+    let agent = new_agent(&path, "A");
+    assert!(agent.stopped() && agent.revoked());
 }
 #[test]
 fn canonical_epochs_are_decimal_strings_not_numbers() {
