@@ -4,6 +4,7 @@ use crate::security::{
     seal_payload,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -90,6 +91,69 @@ fn restrict_db_companions(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// This detects partial edits and deletion while the authenticated guard survives.
+// It cannot detect a complete rollback or deletion of guard and all history.
+fn effect_digest(conn: &Connection, scope: &str) -> Result<([u8; 32], usize), String> {
+    let mut hash = Sha256::new();
+    hash.update(b"aiagent-device-effect-set-v1");
+    let mut count = 0usize;
+    for (tag, sql, columns) in [
+        (b'E', "SELECT intent_id,args_hash,attempt_fence,permit_nonce,state FROM effects WHERE scope_hash=?1 ORDER BY intent_id", 5),
+        (b'G', "SELECT grant_nonce,intent_id FROM used_grants WHERE scope_hash=?1 ORDER BY grant_nonce", 2),
+        (b'P', "SELECT permit_nonce,intent_id FROM used_permits WHERE scope_hash=?1 ORDER BY permit_nonce", 2),
+    ] {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![scope]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            count += 1;
+            if count > 300_000 { return Err("EFFECT_HISTORY_LIMIT".into()); }
+            hash.update([tag]);
+            for index in 0..columns {
+                let value: String = row.get(index).map_err(|e| e.to_string())?;
+                if value.len() > 4096 { return Err("INVALID_EFFECT_HISTORY".into()); }
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+        }
+    }
+    Ok((hash.finalize().into(), count))
+}
+
+fn verify_effect_integrity(conn: &Connection, key: &[u8; 32], scope: &str) -> Result<(), String> {
+    let sealed: String = conn
+        .query_row(
+            "SELECT sealed_digest FROM effect_integrity WHERE scope_hash=?1",
+            params![scope],
+            |r| r.get(0),
+        )
+        .map_err(|_| "MISSING_EFFECT_INTEGRITY")?;
+    let authenticated = open_payload(key, scope, "effect_integrity", &sealed)?;
+    if authenticated.as_slice() != effect_digest(conn, scope)?.0 {
+        return Err("EFFECT_INTEGRITY_MISMATCH".into());
+    }
+    Ok(())
+}
+
+fn update_effect_integrity(conn: &Connection, key: &[u8; 32], scope: &str) -> Result<(), String> {
+    let sealed = seal_payload(
+        key,
+        scope,
+        "effect_integrity",
+        &effect_digest(conn, scope)?.0,
+    )?;
+    if conn
+        .execute(
+            "UPDATE effect_integrity SET sealed_digest=?1 WHERE scope_hash=?2",
+            params![sealed, scope],
+        )
+        .map_err(|e| e.to_string())?
+        != 1
+    {
+        return Err("MISSING_EFFECT_INTEGRITY".into());
+    }
+    Ok(())
+}
+
 impl LocalJournal {
     /// Local device journal with owner-only ACLs and authenticated at-rest encryption for control audit logs.
     pub fn open(path: &Path, scope: &Scope) -> Result<Self, String> {
@@ -104,7 +168,7 @@ impl LocalJournal {
             restrict_path_owner_only(parent, true)?;
         }
         let master_key = load_or_create_journal_key(path)?;
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let mut conn = Connection::open(path).map_err(|e| e.to_string())?;
         restrict_path_owner_only(path, false)?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| e.to_string())?;
@@ -145,12 +209,39 @@ impl LocalJournal {
             CREATE TABLE IF NOT EXISTS local_control_initialized (
                 scope_hash TEXT PRIMARY KEY
             );
+            CREATE TABLE IF NOT EXISTS effect_integrity (
+                scope_hash TEXT PRIMARY KEY,
+                sealed_digest TEXT NOT NULL
+            );
             INSERT OR IGNORE INTO local_control_initialized(scope_hash)
                 SELECT scope_hash FROM local_control;
         ",
         )
         .map_err(|e| e.to_string())?;
         let scope_hash = scope.namespace();
+        // Existing unsealed history cannot be silently promoted to trusted.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let history = effect_digest(&tx, &scope_hash)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT sealed_digest FROM effect_integrity WHERE scope_hash=?1",
+                params![scope_hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if existing.is_none() && history.1 == 0 {
+            let sealed = seal_payload(&master_key, &scope_hash, "effect_integrity", &history.0)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO effect_integrity(scope_hash,sealed_digest) VALUES(?1,?2)",
+                params![scope_hash, sealed],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        verify_effect_integrity(&tx, &master_key, &scope_hash)?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(Self {
             conn,
             scope_hash,
@@ -403,8 +494,12 @@ impl LocalJournal {
         Ok(())
     }
     pub fn state(&self, intent_id: &str) -> Result<Option<EffectState>, String> {
-        let raw: Option<String> = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let raw: Option<String> = tx
             .query_row(
                 "SELECT state FROM effects WHERE scope_hash=?1 AND intent_id=?2",
                 params![self.scope_hash, intent_id],
@@ -430,8 +525,12 @@ impl LocalJournal {
         attempt_fence: &str,
         grant_nonce: &str,
     ) -> Result<Option<BeginResult>, String> {
-        let previous: Option<(String, String, String)> = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let previous: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT args_hash, attempt_fence, state FROM effects WHERE scope_hash=?1 AND intent_id=?2",
                 params![self.scope_hash, intent_id],
@@ -445,8 +544,7 @@ impl LocalJournal {
             }
             return Ok(Some(BeginResult::Replay(EffectState::from_db(&state)?)));
         }
-        let grant_used: bool = self
-            .conn
+        let grant_used: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM used_grants WHERE scope_hash=?1 AND grant_nonce=?2)",
                 params![self.scope_hash, grant_nonce],
@@ -470,6 +568,7 @@ impl LocalJournal {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
         // Stop/revoke and STARTED share the SQLite writer lock. Check the
         // authenticated record inside this transaction rather than relying on
         // an Agent's potentially stale in-memory copy.
@@ -555,6 +654,7 @@ impl LocalJournal {
             ],
         )
         .map_err(|e| e.to_string())?;
+        update_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
         tx.commit().map_err(|e| e.to_string())?;
         self.started_here.insert(intent_id.to_owned());
         Ok(BeginResult::StartedNew)
@@ -566,13 +666,20 @@ impl LocalJournal {
         if !self.started_here.contains(intent_id) {
             return Err("effect not owned by this journal instance".into());
         }
-        let n = self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        verify_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        let n = tx.execute(
             "UPDATE effects SET state=?3 WHERE scope_hash=?1 AND intent_id=?2 AND state='STARTED'",
             params![self.scope_hash, intent_id, outcome.as_db()],
         ).map_err(|e| e.to_string())?;
         if n != 1 {
             return Err("not an active STARTED effect".into());
         }
+        update_effect_integrity(&tx, &self.master_key, &self.scope_hash)?;
+        tx.commit().map_err(|e| e.to_string())?;
         self.started_here.remove(intent_id);
         Ok(())
     }
@@ -947,6 +1054,59 @@ mod tests {
             reader.state("intent").unwrap(),
             Some(EffectState::CompletedLocal)
         );
+    }
+
+    #[test]
+    fn tampered_effect_and_deleted_nonce_block_read_and_admission() {
+        for sql in [
+            "UPDATE effects SET state='COMPLETED_LOCAL'",
+            "DELETE FROM used_grants",
+            "DELETE FROM used_permits",
+            "DELETE FROM effects",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.db");
+            let scope = Scope {
+                os_user: "u".into(),
+                tenant_id: "t".into(),
+                owner_user_id: "o".into(),
+                device_identity_id: "i".into(),
+                device_id: "d".into(),
+            };
+            let mut journal = LocalJournal::open(&path, &scope).unwrap();
+            journal
+                .save_control(&ControlRecord {
+                    stopped: false,
+                    revoked: false,
+                    audit: vec![],
+                })
+                .unwrap();
+            journal
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap();
+            journal.conn.execute(sql, []).unwrap();
+            assert!(journal.state("intent").is_err(), "{sql}");
+            assert!(
+                journal
+                    .precheck("other", "fingerprint", "1", "other-grant")
+                    .is_err(),
+                "{sql}"
+            );
+            assert!(
+                journal
+                    .begin("other", "fingerprint", "1", "other-grant", "other-permit")
+                    .is_err(),
+                "{sql}"
+            );
+            assert!(
+                journal
+                    .finish("intent", EffectState::CompletedLocal)
+                    .is_err(),
+                "{sql}"
+            );
+            drop(journal);
+            assert!(LocalJournal::open(&path, &scope).is_err(), "{sql}");
+        }
     }
 
     #[test]
