@@ -12,7 +12,7 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P1-06 | OPEN | Verified authority and fresh delivery fencing not integrated. |
 | P1-07 | PARTIAL | Unauthenticated challenges no longer update identity restore state. Independent restore authority and barrier remain required; an old process can still act until a new proof succeeds. |
 | P1-08 | PARTIAL | Root components are opened one at a time without following links, tested with Windows junction and Linux symlink ancestors. Persistent approved volume/file identity, replacement/alias races and reopen policy remain open. |
-| P1-09 | OPEN | Single writer and safe recovery required. |
+| P1-09 | PARTIAL | Opening another instance no longer rewrites STARTED; non-owner views project it as UNKNOWN and only the originating journal instance can finish. Persistent writer lease, process-death proof, authenticated reconciliation and multi-process fault tests remain required. |
 | P2-01 | OPEN | Durable pairing lifecycle and safe key publication required. |
 | P2-02 | PARTIAL | Development listener rejects excess established connections without queueing; database connection, lock and statement waits have timeouts. TLS socket and PostgreSQL contention tests pass. Handshake-level admission, a pool, tenant/IP quotas, cancellation reconciliation and scheduled cleanup remain required. |
 | P2-03 | OPEN | Handle-based journal storage and per-identity key required. |

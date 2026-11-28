@@ -4,6 +4,7 @@ use crate::security::{
     seal_payload,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,6 +68,7 @@ pub struct LocalJournal {
     scope_hash: String,
     master_key: [u8; 32],
     db_path: PathBuf,
+    started_here: HashSet<String>,
 }
 
 impl Drop for LocalJournal {
@@ -149,17 +151,12 @@ impl LocalJournal {
         )
         .map_err(|e| e.to_string())?;
         let scope_hash = scope.namespace();
-        // A process that vanished after STARTED might have delivered an effect.
-        conn.execute(
-            "UPDATE effects SET state='UNKNOWN' WHERE scope_hash=?1 AND state='STARTED'",
-            params![scope_hash],
-        )
-        .map_err(|e| e.to_string())?;
         Ok(Self {
             conn,
             scope_hash,
             master_key,
             db_path: path.to_path_buf(),
+            started_here: HashSet::new(),
         })
     }
 
@@ -414,7 +411,16 @@ impl LocalJournal {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        raw.map(|s| EffectState::from_db(&s)).transpose()
+        raw.map(|s| {
+            EffectState::from_db(&s).map(|state| {
+                if state == EffectState::Started && !self.started_here.contains(intent_id) {
+                    EffectState::Unknown
+                } else {
+                    state
+                }
+            })
+        })
+        .transpose()
     }
     pub fn precheck(
         &self,
@@ -549,11 +555,15 @@ impl LocalJournal {
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        self.started_here.insert(intent_id.to_owned());
         Ok(BeginResult::StartedNew)
     }
     pub fn finish(&mut self, intent_id: &str, outcome: EffectState) -> Result<(), String> {
         if outcome == EffectState::Started {
             return Err("cannot reenter STARTED".into());
+        }
+        if !self.started_here.contains(intent_id) {
+            return Err("effect not owned by this journal instance".into());
         }
         let n = self.conn.execute(
             "UPDATE effects SET state=?3 WHERE scope_hash=?1 AND intent_id=?2 AND state='STARTED'",
@@ -562,6 +572,7 @@ impl LocalJournal {
         if n != 1 {
             return Err("not an active STARTED effect".into());
         }
+        self.started_here.remove(intent_id);
         Ok(())
     }
 }
@@ -895,6 +906,46 @@ mod tests {
             .query_row("SELECT count(*) FROM used_permits", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn another_open_does_not_rewrite_a_live_started_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let scope = Scope {
+            os_user: "u".into(),
+            tenant_id: "t".into(),
+            owner_user_id: "o".into(),
+            device_identity_id: "i".into(),
+            device_id: "d".into(),
+        };
+        let mut writer = LocalJournal::open(&path, &scope).unwrap();
+        writer
+            .save_control(&ControlRecord {
+                stopped: false,
+                revoked: false,
+                audit: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            writer
+                .begin("intent", "fingerprint", "1", "grant", "permit")
+                .unwrap(),
+            BeginResult::StartedNew
+        );
+        let mut reader = LocalJournal::open(&path, &scope).unwrap();
+        assert_eq!(reader.state("intent").unwrap(), Some(EffectState::Unknown));
+        assert!(reader
+            .finish("intent", EffectState::CompletedLocal)
+            .is_err());
+        assert_eq!(writer.state("intent").unwrap(), Some(EffectState::Started));
+        writer
+            .finish("intent", EffectState::CompletedLocal)
+            .unwrap();
+        assert_eq!(
+            reader.state("intent").unwrap(),
+            Some(EffectState::CompletedLocal)
+        );
     }
 
     #[test]
