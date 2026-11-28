@@ -24,7 +24,13 @@ from backend.device_gateway.connections import (
     ConnectionService,
     connection_proof_bytes,
 )
-from backend.device_gateway.pairing import PairingRejected, PairingService, pairing_proof_bytes, pairing_proof_v2
+from backend.device_gateway.pairing import (
+    PairingRejected,
+    PairingService,
+    pairing_proof_bytes,
+    pairing_proof_v2,
+    server_binding_digest,
+)
 from backend.device_gateway.wss import DeviceWss, InvalidFrame, decode_frame
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -82,6 +88,39 @@ def test_rust_and_python_share_pairing_v2_vector() -> None:
     )
 
 
+def test_recomputed_binding_matches_rust_vector() -> None:
+    vector = json.loads(
+        (Path(__file__).resolve().parents[3] / "device-client/fixtures/pairing-proof-v3.json").read_text()
+    )
+    digest = server_binding_digest(
+        bytes.fromhex(vector["localCommitmentHex"]),
+        vector["tenantId"],
+        vector["ownerUserId"],
+        vector["identityId"],
+        vector["deviceId"],
+        vector["serverOrigin"],
+        int(vector["revocationGeneration"]),
+    )
+    assert digest.hex() == vector["bindingDigestHex"]
+    proof = pairing_proof_v2(
+        uuid.UUID(hex=vector["pairingIdHex"]),
+        digest,
+        bytes.fromhex(vector["publicKeyHex"]),
+        bytes.fromhex(vector["nonceHex"]),
+        int(vector["issuedMs"]),
+        int(vector["expiresMs"]),
+        vector["tenantId"],
+        vector["ownerUserId"],
+        vector["identityId"],
+        vector["deviceId"],
+        vector["serverOrigin"],
+        int(vector["revocationGeneration"]),
+    )
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(vector["publicKeyHex"])).verify(
+        bytes.fromhex(vector["signatureHex"]), proof
+    )
+
+
 def test_pairing_rejects_mismatched_server_transcript(service: PairingService) -> None:
     owner = make_scope()
     key = Ed25519PrivateKey.generate()
@@ -96,16 +135,44 @@ def test_pairing_rejects_mismatched_server_transcript(service: PairingService) -
             ticket.server_origin,
             ticket.revocation_generation,
         ]
+        commitment = bytes([7]) * 32
+        digest = server_binding_digest(commitment, *fields)
         fields[index] = 1 if index == 5 else str(fields[index]) + "x"
         signature = key.sign(
             pairing_proof_v2(
-                ticket.pairing_id, bytes(32), public, ticket.nonce, ticket.issued_ms, ticket.expires_ms, *fields
+                ticket.pairing_id, digest, public, ticket.nonce, ticket.issued_ms, ticket.expires_ms, *fields
             )
         )
         with pytest.raises(PairingRejected):
             service.attach(
-                owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token, public, bytes(32), signature
+                owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token, public, digest, signature, commitment
             )
+
+
+def test_pairing_rejects_correctly_signed_arbitrary_digest(service: PairingService) -> None:
+    owner = make_scope()
+    ticket = service.begin(owner)
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    commitment, digest = bytes([7]) * 32, bytes([8]) * 32
+    proof = pairing_proof_v2(
+        ticket.pairing_id,
+        digest,
+        public,
+        ticket.nonce,
+        ticket.issued_ms,
+        ticket.expires_ms,
+        ticket.tenant_id,
+        ticket.owner_user_id,
+        str(ticket.identity_id),
+        str(ticket.device_id),
+        ticket.server_origin,
+        ticket.revocation_generation,
+    )
+    with pytest.raises(PairingRejected):
+        service.attach(
+            owner.tenant_id, owner.user_id, ticket.pairing_id, ticket.token, public, digest, key.sign(proof), commitment
+        )
 
 
 def test_rust_and_python_share_signed_authority_vector() -> None:
@@ -218,7 +285,16 @@ def test_pairing_lock_wait_is_bounded(service: PairingService) -> None:
 def attach(service: PairingService, scope: Scope, bootstrap: object):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    digest = bytes(range(32))
+    commitment = bytes(range(32))
+    digest = server_binding_digest(
+        commitment,
+        bootstrap.tenant_id,
+        bootstrap.owner_user_id,
+        str(bootstrap.identity_id),
+        str(bootstrap.device_id),
+        bootstrap.server_origin,
+        bootstrap.revocation_generation,
+    )
     proof = pairing_proof_v2(
         bootstrap.pairing_id,
         digest,
@@ -234,7 +310,14 @@ def attach(service: PairingService, scope: Scope, bootstrap: object):
         bootstrap.revocation_generation,
     )
     code = service.attach(
-        scope.tenant_id, scope.user_id, bootstrap.pairing_id, bootstrap.token, public, digest, key.sign(proof)
+        scope.tenant_id,
+        scope.user_id,
+        bootstrap.pairing_id,
+        bootstrap.token,
+        public,
+        digest,
+        key.sign(proof),
+        commitment,
     )
     return code, key, public, digest, proof
 
@@ -960,11 +1043,13 @@ def test_signed_heartbeat_sequence_is_atomic_and_replay_safe(service: PairingSer
 def test_wss_frame_validation_rejects_duplicates_and_unknown_versions() -> None:
     with pytest.raises(InvalidFrame):
         decode_frame('{"version":"1.0","kind":"CONSUME"}', "CONSUME", pairing=True)
+    with pytest.raises(InvalidFrame):
+        decode_frame('{"version":"2.0","kind":"CONSUME"}', "CONSUME", pairing=True)
     for raw in (
-        '{"version":"1.1","version":"1.1","kind":"PROOF","signature":"' + "00" * 64 + '"}',
+        '{"version":"1.2","version":"1.2","kind":"PROOF","signature":"' + "00" * 64 + '"}',
         '{"version":"1.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
         '{"version":"2.0","kind":"PROOF","signature":"' + "00" * 64 + '"}',
-        '{"version":"1.1","kind":"PROOF","signature":"' + "00" * 64 + '","extra":1}',
+        '{"version":"1.2","kind":"PROOF","signature":"' + "00" * 64 + '","extra":1}',
     ):
         with pytest.raises(InvalidFrame):
             decode_frame(raw, "PROOF")
@@ -973,7 +1058,7 @@ def test_wss_frame_validation_rejects_duplicates_and_unknown_versions() -> None:
             decode_frame(
                 json.dumps(
                     {
-                        "version": "1.1",
+                        "version": "1.2",
                         "kind": "HEARTBEAT",
                         "generation": "1",
                         "sequence": sequence,
@@ -985,7 +1070,7 @@ def test_wss_frame_validation_rejects_duplicates_and_unknown_versions() -> None:
     with pytest.raises(InvalidFrame):
         decode_frame(b"{}", "PROOF")
     with pytest.raises(InvalidFrame):
-        decode_frame('{"version":"1.1","kind":"ACTION_OFFER"}', "HEARTBEAT")
+        decode_frame('{"version":"1.2","kind":"ACTION_OFFER"}', "HEARTBEAT")
 
 
 def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingService, tmp_path: Path) -> None:
@@ -1046,9 +1131,18 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
             ticket = await asyncio.to_thread(service.begin, owner)
             pair_key = Ed25519PrivateKey.generate()
             pair_public = pair_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-            pair_digest = bytes([42]) * 32
+            commitment = bytes([42]) * 32
+            pair_digest = server_binding_digest(
+                commitment,
+                ticket.tenant_id,
+                ticket.owner_user_id,
+                str(ticket.identity_id),
+                str(ticket.device_id),
+                ticket.server_origin,
+                ticket.revocation_generation,
+            )
             attach = {
-                "version": "2.0",
+                "version": "3.0",
                 "kind": "ATTACH",
                 "tenantId": owner.tenant_id,
                 "ownerId": owner.user_id,
@@ -1056,6 +1150,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 "token": ticket.token.hex(),
                 "publicKey": pair_public.hex(),
                 "bindingDigest": pair_digest.hex(),
+                "localCommitment": commitment.hex(),
                 "signature": pair_key.sign(
                     pairing_proof_v2(
                         ticket.pairing_id,
@@ -1081,7 +1176,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 await asyncio.to_thread(
                     service.approve, owner, ticket.pairing_id, code["code"], code["publicKeySha256"], pair_digest
                 )
-                await socket.send(json.dumps({"version": "2.0", "kind": "CONSUME"}))
+                await socket.send(json.dumps({"version": "3.0", "kind": "CONSUME"}))
                 paired = decode_frame(await socket.recv(), "PAIRED", pairing=True)
                 assert (paired["identityId"], paired["deviceId"]) == (str(ticket.identity_id), str(ticket.device_id))
             async with connect(pairing_url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
@@ -1089,10 +1184,20 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 with pytest.raises(ConnectionClosed):
                     await socket.recv()
             unapproved = await asyncio.to_thread(service.begin, owner)
+            pair_digest = server_binding_digest(
+                commitment,
+                unapproved.tenant_id,
+                unapproved.owner_user_id,
+                str(unapproved.identity_id),
+                str(unapproved.device_id),
+                unapproved.server_origin,
+                unapproved.revocation_generation,
+            )
             attach.update(
                 {
                     "pairingId": str(unapproved.pairing_id),
                     "token": unapproved.token.hex(),
+                    "bindingDigest": pair_digest.hex(),
                     "signature": pair_key.sign(
                         pairing_proof_v2(
                             unapproved.pairing_id,
@@ -1114,7 +1219,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
             async with connect(pairing_url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
                 await socket.send(json.dumps(attach))
                 decode_frame(await socket.recv(), "CODE", pairing=True)
-                await socket.send(json.dumps({"version": "2.0", "kind": "CONSUME"}))
+                await socket.send(json.dumps({"version": "3.0", "kind": "CONSUME"}))
                 with pytest.raises(ConnectionClosed):
                     await socket.recv()
             with pytest.raises(PairingRejected):
@@ -1128,7 +1233,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                 async with connect(url, ssl=ssl.create_default_context(), proxy=None):
                     pass
             hello = {
-                "version": "1.1",
+                "version": "1.2",
                 "kind": "HELLO",
                 "tenantId": owner.tenant_id,
                 "ownerId": owner.user_id,
@@ -1147,10 +1252,10 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                     int(challenge["expiresMs"]),
                 )
                 signature = key.sign(payload).hex()
-                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": signature}))
+                await socket.send(json.dumps({"version": "1.2", "kind": "PROOF", "signature": signature}))
                 accepted = decode_frame(await socket.recv(), "ACCEPTED")
                 heartbeat = {
-                    "version": "1.1",
+                    "version": "1.2",
                     "kind": "HEARTBEAT",
                     "generation": accepted["generation"],
                     "sequence": "1",
@@ -1171,7 +1276,7 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
             async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
                 await socket.send(json.dumps(hello))
                 decode_frame(await socket.recv(), "CHALLENGE")
-                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": signature}))
+                await socket.send(json.dumps({"version": "1.2", "kind": "PROOF", "signature": signature}))
                 with pytest.raises(ConnectionClosed):
                     await socket.recv()
             async with connect(url, ssl=client_tls, subprotocols=["aiagent-device.v1"], proxy=None) as socket:
@@ -1186,12 +1291,12 @@ def test_real_tls_websocket_challenge_heartbeat_and_replay(service: PairingServi
                     int(challenge["issuedMs"]),
                     int(challenge["expiresMs"]),
                 )
-                await socket.send(json.dumps({"version": "1.1", "kind": "PROOF", "signature": key.sign(payload).hex()}))
+                await socket.send(json.dumps({"version": "1.2", "kind": "PROOF", "signature": key.sign(payload).hex()}))
                 accepted = decode_frame(await socket.recv(), "ACCEPTED")
                 await socket.send(
                     json.dumps(
                         {
-                            "version": "1.1",
+                            "version": "1.2",
                             "kind": "HEARTBEAT",
                             "generation": accepted["generation"],
                             "sequence": "1",

@@ -164,10 +164,30 @@ impl DeviceIdentity {
         self.key.verifying_key().to_bytes()
     }
 
-    /// Opaque local binding digest; the server must separately authenticate the
-    /// tenant and owner and obtain explicit confirmation of this key.
+    /// A key-derived pseudonym; this does not attest that the OS user is genuine.
+    pub fn local_user_commitment(&self) -> [u8; 32] {
+        let mut input = b"aiagent-device-local-user-commitment-v1".to_vec();
+        input.extend_from_slice(&self.binding.digest());
+        Sha256::digest(self.key.sign(&input).to_bytes()).into()
+    }
+
+    /// Recomputable from server-known scope and the client-asserted commitment.
     pub fn binding_digest(&self) -> [u8; 32] {
-        self.binding.digest()
+        let mut hash = Sha256::new();
+        hash.update(b"aiagent-device-server-binding-v1");
+        hash.update(self.local_user_commitment());
+        for part in [
+            &self.binding.tenant_id,
+            &self.binding.owner_user_id,
+            &self.binding.device_identity_id,
+            &self.binding.device_id,
+            &self.binding.server_origin,
+        ] {
+            hash.update((part.len() as u64).to_be_bytes());
+            hash.update(part.as_bytes());
+        }
+        hash.update(self.binding.revocation_generation.to_be_bytes());
+        hash.finalize().into()
     }
 
     pub(crate) fn sign_heartbeat(
@@ -314,7 +334,7 @@ impl DeviceIdentity {
             return Err("INVALID_CHALLENGE");
         }
         let mut message = b"aiagent-device-connect-proof-candidate-v2".to_vec();
-        message.extend_from_slice(&self.binding.digest());
+        message.extend_from_slice(&self.binding_digest());
         message.extend_from_slice(&self.public_key());
         message.extend_from_slice(&nonce);
         message.extend_from_slice(&channel_digest);
@@ -347,7 +367,7 @@ impl DeviceIdentity {
             return Err("INVALID_CHALLENGE");
         }
         let mut message = b"aiagent-device-connect-proof-candidate-v1".to_vec();
-        message.extend_from_slice(&self.binding.digest());
+        message.extend_from_slice(&self.binding_digest());
         message.extend_from_slice(&self.public_key());
         message.extend_from_slice(&nonce);
         message.extend_from_slice(&generation.to_be_bytes());
@@ -570,16 +590,18 @@ mod tests {
             key: SigningKey::from_bytes(&[7; 32]),
         };
         let sig = identity.sign_at([9; 32], 4, 1_000, 31_000, 2_000).unwrap();
-        let vector: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/connection-proof-v1.json"))
-                .unwrap();
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/connection-proof-v1-binding-v2.json"
+        ))
+        .unwrap();
         assert_eq!(
             crate::protocol::hex_digest(&sig),
             vector["signatureHex"].as_str().unwrap()
         );
-        let v2: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/connection-proof-v2.json"))
-                .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/connection-proof-v2-binding-v2.json"
+        ))
+        .unwrap();
         let bound = identity
             .sign_bound_at([9; 32], [8; 32], 4, 1_000, 31_000, 2_000)
             .unwrap();
@@ -591,7 +613,7 @@ mod tests {
             .sign_bound_at([9; 32], [0; 32], 4, 1_000, 31_000, 2_000)
             .is_err());
         let mut message = b"aiagent-device-connect-proof-candidate-v1".to_vec();
-        message.extend_from_slice(&identity.binding.digest());
+        message.extend_from_slice(&identity.binding_digest());
         message.extend_from_slice(&identity.public_key());
         message.extend_from_slice(&[9; 32]);
         message.extend_from_slice(&4u64.to_be_bytes());
@@ -651,7 +673,7 @@ mod tests {
     #[test]
     fn pairing_proof_matches_shared_public_test_vector() {
         let vector: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/pairing-proof-v2.json")).unwrap();
+            serde_json::from_str(include_str!("../../../fixtures/pairing-proof-v3.json")).unwrap();
         let identity = DeviceIdentity {
             binding: binding("alice"),
             key: SigningKey::from_bytes(&[7; 32]),
@@ -662,6 +684,10 @@ mod tests {
         assert_eq!(
             crate::protocol::hex_digest(&identity.binding_digest()),
             vector["bindingDigestHex"].as_str().unwrap()
+        );
+        assert_eq!(
+            crate::protocol::hex_digest(&identity.local_user_commitment()),
+            vector["localCommitmentHex"].as_str().unwrap()
         );
         assert_eq!(
             crate::protocol::hex_digest(&identity.public_key()),

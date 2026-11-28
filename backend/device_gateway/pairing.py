@@ -140,6 +140,24 @@ def pairing_proof_v2(
     return bytes(transcript)
 
 
+def server_binding_digest(
+    commitment: bytes, tenant: str, owner: str, identity: str, device: str, origin: str, generation: int
+) -> bytes:
+    if not isinstance(commitment, bytes) or len(commitment) != 32 or commitment == bytes(32):
+        raise PairingRejected()
+    if type(generation) is not int or not 0 <= generation < 2**63:
+        raise PairingRejected()
+    digest = hashlib.sha256(b"aiagent-device-server-binding-v1" + commitment)
+    for part in (tenant, owner, identity, device, origin):
+        if not isinstance(part, str) or not part or len(part.encode("utf-8")) > 512:
+            raise PairingRejected()
+        encoded = part.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    digest.update(generation.to_bytes(8, "big"))
+    return digest.digest()
+
+
 class PairingService:
     def __init__(self, dsn: str, server_origin: str, code_key: bytes) -> None:
         origin = urlsplit(server_origin)
@@ -262,6 +280,7 @@ class PairingService:
         public_key: bytes,
         binding_digest: bytes,
         signature: bytes,
+        local_commitment: bytes = b"",
     ) -> DeviceCode:
         accepted: DeviceCode | None = None
         with self._connect() as conn, conn.transaction():
@@ -279,6 +298,17 @@ class PairingService:
                 )
                 try:
                     if not valid or not isinstance(signature, bytes) or len(signature) != 64:
+                        raise PairingRejected()
+                    expected_binding = server_binding_digest(
+                        local_commitment,
+                        row["tenant_id"],
+                        row["owner_id"],
+                        str(row["identity_id"]),
+                        str(row["device_id"]),
+                        row["origin"],
+                        0,
+                    )
+                    if not hmac.compare_digest(binding_digest, expected_binding):
                         raise PairingRejected()
                     payload = pairing_proof_v2(
                         request_id,

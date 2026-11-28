@@ -9,7 +9,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "HELLO"
@@ -40,7 +40,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "PROOF"
@@ -61,7 +61,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "HEARTBEAT"
@@ -92,7 +92,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "CHALLENGE"
@@ -133,7 +133,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "ACCEPTED"
@@ -159,7 +159,7 @@
       "additionalProperties": false,
       "properties": {
         "version": {
-          "const": "1.1"
+          "const": "1.2"
         },
         "kind": {
           "const": "HEARTBEAT_ACK"
