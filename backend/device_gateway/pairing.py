@@ -155,12 +155,14 @@ class PairingService:
         self._code_key = code_key
 
     def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(self._dsn, autocommit=True, row_factory=dict_row)
+        return psycopg.connect(self._dsn, autocommit=True, row_factory=dict_row, connect_timeout=5)
 
     @staticmethod
     def _scope(conn: psycopg.Connection, tenant: str, owner: str) -> None:
         if not tenant or len(tenant) > 256 or not owner or len(owner) > 256:
             raise PairingRejected()
+        conn.execute("SELECT set_config('lock_timeout', '2s', true)")
+        conn.execute("SELECT set_config('statement_timeout', '5s', true)")
         conn.execute("SELECT set_config('aiagent.tenant_id', %s, true)", (tenant,))
         conn.execute("SELECT set_config('aiagent.owner_id', %s, true)", (owner,))
 

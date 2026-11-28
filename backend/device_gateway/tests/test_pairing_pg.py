@@ -145,6 +145,27 @@ def make_scope() -> Scope:
     return Scope(str(uuid.uuid4()), str(uuid.uuid4()))
 
 
+def test_pairing_lock_wait_is_bounded(service: PairingService) -> None:
+    owner = make_scope()
+    ticket = service.begin(owner)
+    with service._connect() as conn, conn.transaction():
+        service._scope(conn, owner.tenant_id, owner.user_id)
+        conn.execute("SELECT id FROM device_gateway.pairing_requests WHERE id=%s FOR UPDATE", (ticket.pairing_id,))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            task = pool.submit(
+                service.attach,
+                owner.tenant_id,
+                owner.user_id,
+                ticket.pairing_id,
+                bytes(32),
+                bytes(32),
+                bytes(32),
+                bytes(64),
+            )
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                task.result(timeout=8)
+
+
 def attach(service: PairingService, scope: Scope, bootstrap: object):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)

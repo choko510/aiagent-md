@@ -14,7 +14,7 @@ Review baseline: `2fdcc32ad42b7439e2300b986bebfeb55b468d55`. Status is based on 
 | P1-08 | PARTIAL | Root components are opened one at a time without following links, tested with Windows junction and Linux symlink ancestors. Persistent approved volume/file identity, replacement/alias races and reopen policy remain open. |
 | P1-09 | OPEN | Single writer and safe recovery required. |
 | P2-01 | OPEN | Durable pairing lifecycle and safe key publication required. |
-| P2-02 | OPEN | Bounded connections, database resource controls and cleanup required. |
+| P2-02 | PARTIAL | Database connections, lock waits and statements have timeouts; a PostgreSQL lock contention test verifies rejection. Bounded connection admission, a pool, cancellation reconciliation and scheduled cleanup remain required. |
 | P2-03 | OPEN | Handle-based journal storage and per-identity key required. |
 | P2-04 | OPEN | Handle-based identity store and atomic publication required. |
 | P2-05 | OPEN | Session actor and operator trust provisioning required. |
