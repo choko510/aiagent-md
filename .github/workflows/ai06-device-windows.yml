@@ -24,6 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
       - name: Ensure Rust source formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
