@@ -36,6 +36,7 @@ struct UiState {
     revoked: bool,
     audit: Vec<String>,
     init_error: Option<String>,
+    control_persisted: bool,
 }
 
 fn default_audit() -> Vec<String> {
@@ -103,6 +104,7 @@ impl UiState {
                 revoked: rec.revoked,
                 audit: rec.audit,
                 init_error: None,
+                control_persisted: false,
             },
             Err(err) => {
                 // Fail closed if persisted journal cannot be opened: lock down local UI controls.
@@ -118,6 +120,7 @@ impl UiState {
                     revoked: false,
                     audit: vec![format!("JOURNAL_UNAVAILABLE: fail-closed ({err})")],
                     init_error: Some(err),
+                    control_persisted: false,
                 }
             }
         }
@@ -183,6 +186,7 @@ impl UiState {
     }
 
     fn persist_control(&mut self) -> Result<(), String> {
+        self.control_persisted = false;
         let Some(journal) = self.journal.as_mut() else {
             return Err("JOURNAL_UNAVAILABLE".into());
         };
@@ -190,7 +194,9 @@ impl UiState {
             stopped: self.stopped,
             revoked: self.revoked,
             audit: self.audit.clone(),
-        })
+        })?;
+        self.control_persisted = true;
+        Ok(())
     }
 
     fn capabilities(&self) -> Vec<&'static str> {
@@ -210,17 +216,13 @@ impl UiState {
             .as_ref()
             .is_some_and(|a| !a.stopped() && !a.revoked());
         UiSnapshot {
-            mode: if paired {
-                "MTLS_PAIRED"
-            } else {
-                "LOCAL_MOCK_ONLY"
-            },
+            mode: "LOCAL_MOCK_ONLY",
             connection: if self.revoked {
                 "REVOKED"
             } else if self.init_error.is_some() {
                 "JOURNAL_UNAVAILABLE"
             } else if paired {
-                "CONNECTED_PAIRED"
+                "ONLINE_MOCK"
             } else {
                 "UNPAIRED_OFFLINE"
             },
@@ -229,10 +231,10 @@ impl UiState {
             pending_action: "なし",
             revoked: self.revoked,
             stopped: self.stopped,
-            persisted: self.journal.is_some(),
+            persisted: self.control_persisted,
             audit: self.audit.clone(),
-            cloud_authorized: paired,
-            real_device_io_enabled: paired,
+            cloud_authorized: false,
+            real_device_io_enabled: false,
         }
     }
 }
@@ -277,6 +279,7 @@ fn revoke_local(state: tauri::State<'_, Mutex<UiState>>) -> Result<UiSnapshot, S
 
 impl UiState {
     fn recover_legacy_stop_internal(&mut self, confirmation: &str) -> Result<(), String> {
+        self.control_persisted = false;
         if self.init_error.is_some() {
             return Err("JOURNAL_UNAVAILABLE".into());
         }
@@ -290,6 +293,7 @@ impl UiState {
         self.stopped = rec.stopped;
         self.revoked = rec.revoked;
         self.audit = rec.audit;
+        self.control_persisted = true;
         Ok(())
     }
 }
@@ -403,7 +407,20 @@ mod tests {
         assert!(!s.real_device_io_enabled);
         assert_eq!(s.connection, "UNPAIRED_OFFLINE");
         assert_eq!(s.phase, "UNPAIRED");
-        assert!(s.persisted);
+        assert!(!s.persisted);
+    }
+
+    #[test]
+    fn persistence_status_tracks_last_write_attempt() {
+        let dir = TempDir::new();
+        let mut state = UiState::open_in(&dir.path().join("journal.db"));
+        state.persist_control().unwrap();
+        assert!(state.snapshot().persisted);
+        state.journal = None;
+        assert!(state.persist_control().is_err());
+        let snapshot = state.snapshot();
+        assert!(!snapshot.persisted);
+        assert!(!snapshot.cloud_authorized && !snapshot.real_device_io_enabled);
     }
 
     #[test]
